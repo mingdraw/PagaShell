@@ -44,7 +44,7 @@ def check_binary(path, platform, arch):
                 raise ValueError(f'Unexpected PE architecture: {path}')
         else:
             expected = 'x86_64' if arch == 'amd64' else 'arm64'
-            subprocess.run(['lipo', '-verify_arch', expected, str(path)], check=True)
+            subprocess.run(['lipo', str(path), '-verify_arch', expected], check=True)
 
 
 def package(platform, arch, version):

@@ -35,7 +35,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang cmake nasm
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
@@ -76,7 +76,7 @@ jobs:
         run: |
           choco install nasm --yes --no-progress
           Add-Content $env:GITHUB_PATH 'C:\Program Files\NASM'
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
