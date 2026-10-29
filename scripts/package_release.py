@@ -18,7 +18,11 @@ ROOT = Path(__file__).resolve().parent.parent
 def check_version(tag):
     if not re.fullmatch(r'v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?', tag):
         raise ValueError(f'Invalid release tag: {tag}')
-    match = re.search(r'^version:\s*(\S+)', (ROOT / 'pubspec.yaml').read_text(), re.M)
+    match = re.search(
+        r'^version:\s*(\S+)',
+        (ROOT / 'pubspec.yaml').read_text(encoding='utf-8'),
+        re.M,
+    )
     if match is None or match[1].split('+')[0] != tag[1:]:
         raise ValueError('Release tag does not match pubspec.yaml version')
 

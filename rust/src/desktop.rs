@@ -637,7 +637,7 @@ async fn run(
                 ActiveStageOutput::PointerBitmap(pointer) => {
                     let mut rgba = pointer.bitmap_data.clone();
                     // Flutter's rgba8888 images use premultiplied alpha.
-                    for pixel in rgba.chunks_exact_mut(4) {
+                    for pixel in rgba.as_chunks_mut::<4>().0 {
                         let alpha = u16::from(pixel[3]);
                         for channel in &mut pixel[..3] {
                             *channel = ((u16::from(*channel) * alpha + 127) / 255) as u8;
@@ -811,7 +811,7 @@ mod tests {
         let updates = client.drain_output();
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].data.len(), 64 * 64 * 4);
-        for pixel in updates[0].data.chunks_exact(4) {
+        for pixel in updates[0].data.as_chunks::<4>().0 {
             for (actual, expected) in pixel.iter().zip([64, 128, 192, 255]) {
                 assert!(actual.abs_diff(expected) <= 8, "unexpected pixel {pixel:?}");
             }

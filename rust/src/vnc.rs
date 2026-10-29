@@ -63,7 +63,7 @@ impl Framebuffer {
         self.width = width;
         self.height = height;
         self.pixels = vec![0; count * 4];
-        for pixel in self.pixels.chunks_exact_mut(4) {
+        for pixel in self.pixels.as_chunks_mut::<4>().0 {
             pixel[3] = 255;
         }
         self.damage = Some(Rect {
@@ -118,7 +118,7 @@ impl Framebuffer {
             self.pixels[offset..offset + stride]
                 .copy_from_slice(&pixels[row * stride..(row + 1) * stride]);
             // RFB carries RGB padding, not alpha.
-            for pixel in self.pixels[offset..offset + stride].chunks_exact_mut(4) {
+            for pixel in self.pixels[offset..offset + stride].as_chunks_mut::<4>().0 {
                 pixel[3] = 255;
             }
         }

@@ -119,7 +119,7 @@ impl FrameEncoder {
         };
         let mut rgba = if complete {
             let mut rgba = image.data().to_vec();
-            for pixel in rgba.chunks_exact_mut(4) {
+            for pixel in rgba.as_chunks_mut::<4>().0 {
                 pixel[3] = 255;
             }
             rgba
@@ -160,7 +160,7 @@ impl FrameEncoder {
                 target[4..row_bytes + 4].copy_from_slice(&image.data()[input..input + row_bytes]);
                 target[row_bytes + 4..].copy_from_slice(&image.data()[right..right + 4]);
                 // Normalize only copied rows while they are still cache-hot.
-                for pixel in target.chunks_exact_mut(4) {
+                for pixel in target.as_chunks_mut::<4>().0 {
                     pixel[3] = 255;
                 }
             }
@@ -258,7 +258,9 @@ mod tests {
                     + usize::from(tile.source_x))
                     * 4;
                 assert!(frame.rgba[start..start + usize::from(tile.width) * 4]
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .all(|p| p[3] == 255));
             }
         }
