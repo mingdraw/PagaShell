@@ -40,8 +40,13 @@ def check_binary(path, platform, arch):
             binary.seek(struct.unpack_from('<I', header, 60)[0])
             pe = binary.read(6)
             expected = 0x8664 if arch == 'amd64' else 0xAA64
-            if pe[:4] != b'PE\0\0' or struct.unpack_from('<H', pe, 4)[0] != expected:
-                raise ValueError(f'Unexpected PE architecture: {path}')
+            if pe[:4] != b'PE\0\0':
+                raise ValueError(f'Invalid PE signature: {path}')
+            machine = struct.unpack_from('<H', pe, 4)[0]
+            if machine != expected:
+                raise ValueError(
+                    f'Unexpected PE architecture 0x{machine:04X}, expected 0x{expected:04X}: {path}'
+                )
         else:
             expected = 'x86_64' if arch == 'amd64' else 'arm64'
             subprocess.run(['lipo', str(path), '-verify_arch', expected], check=True)

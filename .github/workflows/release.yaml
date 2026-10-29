@@ -122,7 +122,37 @@ jobs:
           $crt = Get-ChildItem "$vs\VC\Redist\MSVC\*\$arch\Microsoft.VC*.CRT" -Directory |
             Sort-Object FullName -Descending | Select-Object -First 1
           if (-not $crt) { throw "Visual C++ runtime for $arch was not found" }
-          Copy-Item "$($crt.FullName)\*.dll" "build\windows\$arch\runner\Release\" -Force
+          $destination = "build\windows\$arch\runner\Release"
+          $expectedMachine = if ($arch -eq 'x64') { 0x8664 } else { 0xAA64 }
+          $runtimes = @(Get-ChildItem "$($crt.FullName)\*.dll")
+          foreach ($dll in $runtimes) {
+            $bytes = [System.IO.File]::ReadAllBytes($dll.FullName)
+            $peOffset = [BitConverter]::ToInt32($bytes, 60)
+            $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+            # The ARM64 redist also includes an Arm64EC-only vcruntime140_1.dll.
+            if ($machine -ne $expectedMachine) {
+              Write-Output "Skip $($dll.Name): PE machine $('{0:X4}' -f $machine)"
+              continue
+            }
+            Copy-Item $dll.FullName "$destination\" -Force
+          }
+          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Host$arch\$arch\dumpbin.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $dumpbin) { throw 'dumpbin was not found' }
+          foreach ($binary in Get-ChildItem "$destination\*.exe", "$destination\*.dll") {
+            $dependencies = & $dumpbin.FullName /dependents $binary.FullName
+            if ($LASTEXITCODE -ne 0) { throw "Cannot inspect $($binary.Name)" }
+            foreach ($line in $dependencies) {
+              if ($line -match '^\s+(\S+\.dll)\s*$') {
+                $dependency = $Matches[1]
+                if ($runtimes.Name -contains $dependency) {
+                  if (-not (Test-Path "$destination\$dependency")) {
+                    throw "$($binary.Name) requires missing CRT $dependency"
+                  }
+                }
+              }
+            }
+          }
       - name: Build macOS
         if: runner.os == 'macOS'
         env:
