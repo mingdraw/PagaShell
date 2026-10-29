@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=PagaShell
+Comment=Operate remote services over SSH and SFTP
+Comment[zh_CN]=通过 SSH 和 SFTP 管理远端服务
+Exec=@BINARY_NAME@
+Icon=@APPLICATION_ID@
+Terminal=false
+Categories=Development;Network;RemoteAccess;
+Keywords=SSH;SFTP;Terminal;Server;
+StartupNotify=true
+StartupWMClass=@APPLICATION_ID@

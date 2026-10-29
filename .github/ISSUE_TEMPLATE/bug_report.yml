@@ -1,0 +1,33 @@
+name: Bug 报告
+description: 报告一个问题
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: PagaShell 版本
+      placeholder: v0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统
+      options:
+        - Windows
+        - macOS
+        - Linux
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 问题描述与复现步骤
+      description: 发生了什么？期望的行为是什么？如何复现？
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志 / 截图
+      description: 注意不要粘贴包含密码、私钥或服务器地址等敏感信息的内容

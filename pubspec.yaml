@@ -1,0 +1,50 @@
+name: pagashell
+description: "An open-source, local-first SSH/SFTP/RDP desktop client with an optional AI Agent, built with Flutter."
+repository: https://github.com/mingdraw/PagaShell
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.13.0
+  flutter: '>=3.47.0'
+
+dependencies:
+  cryptography: ^2.9.0
+  desktop_drop: ^0.8.4
+  drift: ^2.35.3
+  drift_flutter: ^0.3.1
+  file_selector: ^1.0.3
+  flutter:
+    sdk: flutter
+  flutter_rust_bridge: 2.13.0
+  flutter_secure_storage: ^11.2.0
+  get: ^4.7.3
+  markdown: ^7.3.1
+  path: ^1.9.1
+  path_provider: ^2.1.6
+  rust_lib_pagashell:
+    path: rust_builder
+  shadcn_flutter: ^0.0.55
+  win32: ^6.4.0
+  window_manager: ^0.5.2
+  xterm: ^4.0.0
+
+dev_dependencies:
+  build_runner: ^2.17.1
+  drift_dev: ^2.35.2
+  flutter_lints: ^6.0.0
+  flutter_test:
+    sdk: flutter
+  integration_test:
+    sdk: flutter
+
+flutter:
+  # 内置终端字体：FiraCode Nerd Font Mono（OFL 许可，见 assets/fonts/LICENSE）。
+  # 自带 powerline / devicons 等 Nerd Font 图标字形，SSH 下 starship、
+  # oh-my-zsh 主题等不再显示方框，且三平台渲染一致，无需用户自装字体。
+  fonts:
+    - family: FiraCode Nerd Font Mono
+      fonts:
+        - asset: assets/fonts/FiraCodeNerdFontMono-Regular.ttf
+        - asset: assets/fonts/FiraCodeNerdFontMono-Bold.ttf
+          weight: 700

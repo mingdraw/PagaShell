@@ -1,0 +1,203 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to build and publish
+        required: true
+        default: v0.1.0
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  FLUTTER_VERSION: '3.47.8'
+  PUB_HOSTED_URL: https://pub.dev
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }} ${{ matrix.arch }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            platform: linux
+            arch: amd64
+          - runner: ubuntu-22.04-arm
+            platform: linux
+            arch: arm64
+          - runner: macos-15-intel
+            platform: macos
+            arch: amd64
+            xcode_arch: x86_64
+          - runner: macos-15
+            platform: macos
+            arch: arm64
+            xcode_arch: arm64
+          - runner: windows-2022
+            platform: windows
+            arch: amd64
+          - runner: windows-11-arm
+            platform: windows
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libsecret-1-dev liblzma-dev nasm
+      - name: Install macOS build dependencies
+        if: runner.os == 'macOS'
+        run: brew install nasm
+      - name: Install Windows build dependencies
+        if: runner.os == 'Windows' && matrix.arch == 'amd64'
+        run: |
+          choco install nasm --yes --no-progress
+          Add-Content $env:GITHUB_PATH 'C:\Program Files\NASM'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: release-${{ matrix.platform }}-${{ matrix.arch }}
+      # Bootstrap the pinned SDK on each native host, including Windows ARM64.
+      # Flutter selects the Windows target using the Dart executable's ABI.
+      - name: Set up Flutter on Linux and macOS
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          git clone --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+      - name: Set up Flutter on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch $env:FLUTTER_VERSION https://github.com/flutter/flutter.git "$env:RUNNER_TEMP\flutter"
+          if ($LASTEXITCODE -ne 0) { throw 'Flutter checkout failed' }
+          Add-Content $env:GITHUB_PATH "$env:RUNNER_TEMP\flutter\bin"
+      - run: flutter --version
+      - run: flutter pub get
+      - name: Validate version
+        shell: bash
+        run: python scripts/package_release.py --check-version "$RELEASE_TAG"
+      - name: Analyze and test
+        if: matrix.platform == 'linux' && matrix.arch == 'amd64'
+        run: |
+          flutter analyze
+          flutter test
+          cargo fmt --manifest-path rust/Cargo.toml --check
+          cargo clippy --manifest-path rust/Cargo.toml --locked --all-targets -- -D warnings
+          cargo test --manifest-path rust/Cargo.toml --locked
+      - name: Build Linux
+        if: runner.os == 'Linux'
+        run: flutter build linux --release
+      - name: Build Windows
+        if: runner.os == 'Windows'
+        run: flutter build windows --release
+      - name: Include Visual C++ runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          PACKAGE_ARCH: ${{ matrix.arch }}
+        run: |
+          $arch = if ($env:PACKAGE_ARCH -eq 'amd64') { 'x64' } else { 'arm64' }
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products '*' -property installationPath
+          if (-not $vs) { throw 'Visual Studio installation was not found' }
+          $crt = Get-ChildItem "$vs\VC\Redist\MSVC\*\$arch\Microsoft.VC*.CRT" -Directory |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $crt) { throw "Visual C++ runtime for $arch was not found" }
+          Copy-Item "$($crt.FullName)\*.dll" "build\windows\$arch\runner\Release\" -Force
+      - name: Build macOS
+        if: runner.os == 'macOS'
+        env:
+          XCODE_ARCH: ${{ matrix.xcode_arch }}
+        run: |
+          flutter build macos --release --config-only
+          xcodebuild -workspace macos/Runner.xcworkspace -scheme Runner \
+            -configuration Release -derivedDataPath build/macos \
+            -destination 'generic/platform=macOS' \
+            ARCHS="$XCODE_ARCH" ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO
+          codesign --force --deep --sign - --timestamp=none \
+            --entitlements macos/Runner/Release.entitlements \
+            build/macos/Build/Products/Release/pagashell.app
+          codesign --verify --deep --strict build/macos/Build/Products/Release/pagashell.app
+      - name: Package and verify architecture
+        env:
+          PACKAGE_PLATFORM: ${{ matrix.platform }}
+          PACKAGE_ARCH: ${{ matrix.arch }}
+        run: python scripts/package_release.py --platform "$PACKAGE_PLATFORM" --arch "$PACKAGE_ARCH" --version "$RELEASE_TAG"
+        shell: bash
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pagashell-${{ matrix.platform }}-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pagashell-*
+          path: dist
+          merge-multiple: true
+      - name: Check packages and generate checksums
+        run: |
+          python - <<'PY'
+          import hashlib
+          import os
+          from pathlib import Path
+
+          root = Path('dist')
+          tag = os.environ['RELEASE_TAG']
+          expected = {
+              f'pagashell_{tag}_{platform}_{arch}.{extension}'
+              for platform, extension in [('linux', 'tar.gz'), ('macos', 'dmg'), ('windows', 'zip')]
+              for arch in ['amd64', 'arm64']
+          }
+          actual = {path.name for path in root.iterdir() if path.is_file()}
+          if actual != expected:
+              raise SystemExit(f'Unexpected release packages: {actual ^ expected}')
+          lines = [f'{hashlib.sha256((root / name).read_bytes()).hexdigest()}  {name}\n' for name in sorted(expected)]
+          (root / 'checksums.txt').write_text(''.join(lines), encoding='utf-8')
+          PY
+          (cd dist && sha256sum --check checksums.txt)
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_TAG }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          body: |
+            Windows, macOS and Linux packages for amd64 (x86_64) and arm64 (AArch64).
+
+            - Windows: extract the complete ZIP and run `pagashell.exe`.
+            - macOS: open the DMG and drag PagaShell to Applications. The app is ad hoc signed and is not Apple notarized.
+            - Linux: extract the tar.gz and run `pagashell`. GTK 3 and libsecret are required.
+            - Verify downloads with `checksums.txt`. Windows packages are not code signed.
+          files: |
+            dist/*.tar.gz
+            dist/*.dmg
+            dist/*.zip
+            dist/checksums.txt

@@ -1,0 +1,54 @@
+[package]
+name = "rust_lib_pagashell"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+anyhow = "1.0.104"
+flutter_rust_bridge = "=2.13.0"
+russh = "0.62.4"
+russh-sftp = "2.3.0"
+tokio = { version = "1.53.1", features = ["full"] }
+tracing = "0.1"
+# The crates.io connector pins pre-release crypto conflicting with russh.
+# Pin upstream crypto compatibility and Windows Progressive SRL decoding fixes.
+ironrdp = { git = "https://github.com/Devolutions/IronRDP", rev = "1f69e124e6bf85608efce3495c12eaf5f6b5a95d", features = ["connector", "session", "graphics", "dvc", "svc", "displaycontrol"] }
+ironrdp-tokio = { git = "https://github.com/Devolutions/IronRDP", rev = "1f69e124e6bf85608efce3495c12eaf5f6b5a95d" }
+ironrdp-egfx = { git = "https://github.com/Devolutions/IronRDP", rev = "1f69e124e6bf85608efce3495c12eaf5f6b5a95d", features = ["openh264-bundled"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+sha2 = "0.10"
+x509-cert = "0.2"
+rustls-native-certs = "0.8.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+vnc-rs = "0.6.0"
+
+[dev-dependencies]
+openh264 = "0.9.9"
+rcgen = "0.14"
+tokio = { version = "1.53.1", features = ["test-util"] }
+
+# Keep CPU bitmap/video decoders usable during Flutter Debug sessions too.
+[profile.dev.package.rust_lib_pagashell]
+opt-level = 2
+
+[profile.dev.package.ironrdp-graphics]
+opt-level = 3
+
+[profile.dev.package.ironrdp-session]
+opt-level = 3
+
+[profile.dev.package.ironrdp-egfx]
+opt-level = 3
+
+[profile.dev.package.openh264]
+opt-level = 3
+
+[profile.dev.package.openh264-sys2]
+opt-level = 3
+
+[profile.dev.package.yuv]
+opt-level = 3
