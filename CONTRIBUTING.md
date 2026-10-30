@@ -59,4 +59,4 @@ flutter_rust_bridge_codegen generate
 
 ## 报告问题
 
-- Bug / 功能建议请走 [Issues](../../issues)，安全漏洞请按 [SECURITY.md](SECURITY.md) 私下报告
+- Bug / 功能建议请走 [Issues](../../issues)

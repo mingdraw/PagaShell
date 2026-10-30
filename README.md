@@ -61,7 +61,7 @@ SSH、SFTP、RDP 和 VNC 会话可以分别打开标签。主机、凭据和网�
 
 ## 反馈与贡献
 
-问题和建议请提交到 [Issues](https://github.com/mingdraw/PagaShell/issues)。参与开发请阅读 [贡献指南](CONTRIBUTING.md)，安全问题请按 [安全政策](SECURITY.md) 联系。
+问题和建议请提交到 [Issues](https://github.com/mingdraw/PagaShell/issues)。参与开发请阅读 [贡献指南](CONTRIBUTING.md)。
 
 ## 许可证
 

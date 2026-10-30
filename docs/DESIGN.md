@@ -332,7 +332,7 @@ PagaShell/
 - **CI（GitHub Actions）**：
   - `ci.yaml`：push/PR 触发 → `flutter analyze` + `flutter test` + 三平台矩阵 `flutter build`
   - `release.yaml`：打 tag 触发 → 构建产物（Windows: zip；macOS: dmg；Linux: AppImage/tar.gz）→ 自动挂 GitHub Release。暂不上架任何应用商店（Store/winget/Flathub 等后续再议）
-- **社区文件**：README（中英）、CONTRIBUTING.md、CODE_OF_CONDUCT.md、SECURITY.md（漏洞私下报告渠道）、issue/PR 模板
+- **社区文件**：README（中英）、CONTRIBUTING.md、CODE_OF_CONDUCT.md、issue/PR 模板
 - **质量**：`very_good_analysis` lint 规则；domain/application 层单测覆盖；SSH 层用 Docker 起 openssh-server 跑集成测试
 
 ---
