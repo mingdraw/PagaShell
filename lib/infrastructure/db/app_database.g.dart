@@ -877,6 +877,18 @@ class $HostsTable extends Hosts with TableInfo<$HostsTable, HostRow> {
     requiredDuringInsert: false,
     defaultValue: const Constant('[]'),
   );
+  static const VerificationMeta _proxyConfigJsonMeta = const VerificationMeta(
+    'proxyConfigJson',
+  );
+  @override
+  late final GeneratedColumn<String> proxyConfigJson = GeneratedColumn<String>(
+    'proxy_config_json',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    defaultValue: const Constant('{}'),
+  );
   @override
   List<GeneratedColumn> get $columns => [
     isGateway,
@@ -897,6 +909,7 @@ class $HostsTable extends Hosts with TableInfo<$HostsTable, HostRow> {
     colorValue,
     sortOrder,
     forwardPortsJson,
+    proxyConfigJson,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -1033,6 +1046,15 @@ class $HostsTable extends Hosts with TableInfo<$HostsTable, HostRow> {
         ),
       );
     }
+    if (data.containsKey('proxy_config_json')) {
+      context.handle(
+        _proxyConfigJsonMeta,
+        proxyConfigJson.isAcceptableOrUnknown(
+          data['proxy_config_json']!,
+          _proxyConfigJsonMeta,
+        ),
+      );
+    }
     return context;
   }
 
@@ -1114,6 +1136,10 @@ class $HostsTable extends Hosts with TableInfo<$HostsTable, HostRow> {
         DriftSqlType.string,
         data['${effectivePrefix}forward_ports_json'],
       )!,
+      proxyConfigJson: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}proxy_config_json'],
+      )!,
     );
   }
 
@@ -1142,6 +1168,7 @@ class HostRow extends DataClass implements Insertable<HostRow> {
   final int? colorValue;
   final int sortOrder;
   final String forwardPortsJson;
+  final String proxyConfigJson;
   const HostRow({
     required this.isGateway,
     this.gatewayId,
@@ -1161,6 +1188,7 @@ class HostRow extends DataClass implements Insertable<HostRow> {
     this.colorValue,
     required this.sortOrder,
     required this.forwardPortsJson,
+    required this.proxyConfigJson,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -1191,6 +1219,7 @@ class HostRow extends DataClass implements Insertable<HostRow> {
     }
     map['sort_order'] = Variable<int>(sortOrder);
     map['forward_ports_json'] = Variable<String>(forwardPortsJson);
+    map['proxy_config_json'] = Variable<String>(proxyConfigJson);
     return map;
   }
 
@@ -1222,6 +1251,7 @@ class HostRow extends DataClass implements Insertable<HostRow> {
           : Value(colorValue),
       sortOrder: Value(sortOrder),
       forwardPortsJson: Value(forwardPortsJson),
+      proxyConfigJson: Value(proxyConfigJson),
     );
   }
 
@@ -1251,6 +1281,7 @@ class HostRow extends DataClass implements Insertable<HostRow> {
       colorValue: serializer.fromJson<int?>(json['colorValue']),
       sortOrder: serializer.fromJson<int>(json['sortOrder']),
       forwardPortsJson: serializer.fromJson<String>(json['forwardPortsJson']),
+      proxyConfigJson: serializer.fromJson<String>(json['proxyConfigJson']),
     );
   }
   @override
@@ -1275,6 +1306,7 @@ class HostRow extends DataClass implements Insertable<HostRow> {
       'colorValue': serializer.toJson<int?>(colorValue),
       'sortOrder': serializer.toJson<int>(sortOrder),
       'forwardPortsJson': serializer.toJson<String>(forwardPortsJson),
+      'proxyConfigJson': serializer.toJson<String>(proxyConfigJson),
     };
   }
 
@@ -1297,6 +1329,7 @@ class HostRow extends DataClass implements Insertable<HostRow> {
     Value<int?> colorValue = const Value.absent(),
     int? sortOrder,
     String? forwardPortsJson,
+    String? proxyConfigJson,
   }) => HostRow(
     isGateway: isGateway ?? this.isGateway,
     gatewayId: gatewayId.present ? gatewayId.value : this.gatewayId,
@@ -1316,6 +1349,7 @@ class HostRow extends DataClass implements Insertable<HostRow> {
     colorValue: colorValue.present ? colorValue.value : this.colorValue,
     sortOrder: sortOrder ?? this.sortOrder,
     forwardPortsJson: forwardPortsJson ?? this.forwardPortsJson,
+    proxyConfigJson: proxyConfigJson ?? this.proxyConfigJson,
   );
   HostRow copyWithCompanion(HostsCompanion data) {
     return HostRow(
@@ -1349,6 +1383,9 @@ class HostRow extends DataClass implements Insertable<HostRow> {
       forwardPortsJson: data.forwardPortsJson.present
           ? data.forwardPortsJson.value
           : this.forwardPortsJson,
+      proxyConfigJson: data.proxyConfigJson.present
+          ? data.proxyConfigJson.value
+          : this.proxyConfigJson,
     );
   }
 
@@ -1372,7 +1409,8 @@ class HostRow extends DataClass implements Insertable<HostRow> {
           ..write('identityId: $identityId, ')
           ..write('colorValue: $colorValue, ')
           ..write('sortOrder: $sortOrder, ')
-          ..write('forwardPortsJson: $forwardPortsJson')
+          ..write('forwardPortsJson: $forwardPortsJson, ')
+          ..write('proxyConfigJson: $proxyConfigJson')
           ..write(')'))
         .toString();
   }
@@ -1397,6 +1435,7 @@ class HostRow extends DataClass implements Insertable<HostRow> {
     colorValue,
     sortOrder,
     forwardPortsJson,
+    proxyConfigJson,
   );
   @override
   bool operator ==(Object other) =>
@@ -1419,7 +1458,8 @@ class HostRow extends DataClass implements Insertable<HostRow> {
           other.identityId == this.identityId &&
           other.colorValue == this.colorValue &&
           other.sortOrder == this.sortOrder &&
-          other.forwardPortsJson == this.forwardPortsJson);
+          other.forwardPortsJson == this.forwardPortsJson &&
+          other.proxyConfigJson == this.proxyConfigJson);
 }
 
 class HostsCompanion extends UpdateCompanion<HostRow> {
@@ -1441,6 +1481,7 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
   final Value<int?> colorValue;
   final Value<int> sortOrder;
   final Value<String> forwardPortsJson;
+  final Value<String> proxyConfigJson;
   final Value<int> rowid;
   const HostsCompanion({
     this.isGateway = const Value.absent(),
@@ -1461,6 +1502,7 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
     this.colorValue = const Value.absent(),
     this.sortOrder = const Value.absent(),
     this.forwardPortsJson = const Value.absent(),
+    this.proxyConfigJson = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   HostsCompanion.insert({
@@ -1482,6 +1524,7 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
     this.colorValue = const Value.absent(),
     this.sortOrder = const Value.absent(),
     this.forwardPortsJson = const Value.absent(),
+    this.proxyConfigJson = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : id = Value(id),
        name = Value(name),
@@ -1505,6 +1548,7 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
     Expression<int>? colorValue,
     Expression<int>? sortOrder,
     Expression<String>? forwardPortsJson,
+    Expression<String>? proxyConfigJson,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -1527,6 +1571,7 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
       if (colorValue != null) 'color_value': colorValue,
       if (sortOrder != null) 'sort_order': sortOrder,
       if (forwardPortsJson != null) 'forward_ports_json': forwardPortsJson,
+      if (proxyConfigJson != null) 'proxy_config_json': proxyConfigJson,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -1550,6 +1595,7 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
     Value<int?>? colorValue,
     Value<int>? sortOrder,
     Value<String>? forwardPortsJson,
+    Value<String>? proxyConfigJson,
     Value<int>? rowid,
   }) {
     return HostsCompanion(
@@ -1572,6 +1618,7 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
       colorValue: colorValue ?? this.colorValue,
       sortOrder: sortOrder ?? this.sortOrder,
       forwardPortsJson: forwardPortsJson ?? this.forwardPortsJson,
+      proxyConfigJson: proxyConfigJson ?? this.proxyConfigJson,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -1635,6 +1682,9 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
     if (forwardPortsJson.present) {
       map['forward_ports_json'] = Variable<String>(forwardPortsJson.value);
     }
+    if (proxyConfigJson.present) {
+      map['proxy_config_json'] = Variable<String>(proxyConfigJson.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -1662,6 +1712,7 @@ class HostsCompanion extends UpdateCompanion<HostRow> {
           ..write('colorValue: $colorValue, ')
           ..write('sortOrder: $sortOrder, ')
           ..write('forwardPortsJson: $forwardPortsJson, ')
+          ..write('proxyConfigJson: $proxyConfigJson, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -3197,6 +3248,7 @@ typedef $$HostsTableCreateCompanionBuilder = HostsCompanion Function({
   Value<int?> colorValue,
   Value<int> sortOrder,
   Value<String> forwardPortsJson,
+  Value<String> proxyConfigJson,
   Value<int> rowid,
 });
 typedef $$HostsTableUpdateCompanionBuilder = HostsCompanion Function({
@@ -3218,6 +3270,7 @@ typedef $$HostsTableUpdateCompanionBuilder = HostsCompanion Function({
   Value<int?> colorValue,
   Value<int> sortOrder,
   Value<String> forwardPortsJson,
+  Value<String> proxyConfigJson,
   Value<int> rowid,
 });
 
@@ -3316,6 +3369,11 @@ class $$HostsTableFilterComposer extends Composer<_$AppDatabase, $HostsTable> {
 
   ColumnFilters<String> get forwardPortsJson => $composableBuilder(
     column: $table.forwardPortsJson,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get proxyConfigJson => $composableBuilder(
+    column: $table.proxyConfigJson,
     builder: (column) => ColumnFilters(column),
   );
 }
@@ -3418,6 +3476,11 @@ class $$HostsTableOrderingComposer
     column: $table.forwardPortsJson,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<String> get proxyConfigJson => $composableBuilder(
+    column: $table.proxyConfigJson,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $$HostsTableAnnotationComposer
@@ -3494,6 +3557,11 @@ class $$HostsTableAnnotationComposer
     column: $table.forwardPortsJson,
     builder: (column) => column,
   );
+
+  GeneratedColumn<String> get proxyConfigJson => $composableBuilder(
+    column: $table.proxyConfigJson,
+    builder: (column) => column,
+  );
 }
 
 class $$HostsTableTableManager
@@ -3542,6 +3610,7 @@ class $$HostsTableTableManager
                 Value<int?> colorValue = const Value.absent(),
                 Value<int> sortOrder = const Value.absent(),
                 Value<String> forwardPortsJson = const Value.absent(),
+                Value<String> proxyConfigJson = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => HostsCompanion(
                 isGateway: isGateway,
@@ -3562,6 +3631,7 @@ class $$HostsTableTableManager
                 colorValue: colorValue,
                 sortOrder: sortOrder,
                 forwardPortsJson: forwardPortsJson,
+                proxyConfigJson: proxyConfigJson,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -3584,6 +3654,7 @@ class $$HostsTableTableManager
                 Value<int?> colorValue = const Value.absent(),
                 Value<int> sortOrder = const Value.absent(),
                 Value<String> forwardPortsJson = const Value.absent(),
+                Value<String> proxyConfigJson = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => HostsCompanion.insert(
                 isGateway: isGateway,
@@ -3604,6 +3675,7 @@ class $$HostsTableTableManager
                 colorValue: colorValue,
                 sortOrder: sortOrder,
                 forwardPortsJson: forwardPortsJson,
+                proxyConfigJson: proxyConfigJson,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0

@@ -19,6 +19,7 @@ import '../../navigation/app_notice.dart';
 import '../../terminal/batch_command_dialog.dart';
 import '../../theme/app_theme.dart';
 import '../agent_sidebar_scope.dart';
+import '../session_close_confirmation.dart';
 import 'window_controls.dart';
 
 /// 会话标签与内容容器；内容的生命周期由工作区管理。
@@ -248,6 +249,7 @@ class _SessionTabPaneState extends State<SessionTabPane> {
                             SessionKind.terminal => '终端'.tr,
                             SessionKind.fileTransfer => '文件传输'.tr,
                             SessionKind.portForward => '端口转发'.tr,
+                            SessionKind.dynamicProxy => '动态代理'.tr,
                             SessionKind.remoteDesktop => '远程桌面'.tr,
                           }}',
                         ),
@@ -326,11 +328,21 @@ class _SessionTabPaneState extends State<SessionTabPane> {
                             ('close-all', '关闭全部标签'.tr),
                           ],
                           (action) => unawaited(switch (action) {
-                            'close-current' => controller.close(session.id),
-                            'close-others' => controller.closeOthers(
-                              session.id,
+                            'close-current' => requestSessionTabClose(
+                              controller,
+                              [session.id],
                             ),
-                            'close-all' => controller.closeAll(),
+                            'close-others' => requestSessionTabClose(
+                              controller,
+                              controller.sessions
+                                  .where((s) => s.id != session.id)
+                                  .map((s) => s.id),
+                              keepSessionId: session.id,
+                            ),
+                            'close-all' => requestSessionTabClose(
+                              controller,
+                              controller.sessions.map((s) => s.id),
+                            ),
                             _ => Future<void>.value(),
                           }),
                         ),
@@ -378,6 +390,7 @@ class _SessionTab extends StatelessWidget {
           switch (session.kind) {
             SessionKind.fileTransfer => shadcn.LucideIcons.folderOpen,
             SessionKind.portForward => shadcn.LucideIcons.arrowLeftRight,
+            SessionKind.dynamicProxy => shadcn.LucideIcons.network,
             SessionKind.terminal => shadcn.LucideIcons.terminal,
             SessionKind.remoteDesktop => shadcn.LucideIcons.monitor,
           },
@@ -385,9 +398,13 @@ class _SessionTab extends StatelessWidget {
           color: _statusColor,
         ),
         trailing: AppIconButton(
+          key: ValueKey('session-tab-close-${session.id}'),
           semanticLabel: '关闭标签'.tr,
           density: shadcn.ButtonDensity.compact,
-          onPressed: () => Get.find<SessionController>().close(session.id),
+          onPressed: () => requestSessionTabClose(
+            Get.find<SessionController>(),
+            [session.id],
+          ),
           icon: const Icon(shadcn.LucideIcons.x, size: 12),
         ),
         child: ConstrainedBox(

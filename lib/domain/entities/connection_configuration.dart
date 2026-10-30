@@ -7,6 +7,7 @@ import 'folder.dart';
 import 'forward_port.dart';
 import 'host.dart';
 import 'identity.dart';
+import 'proxy_config.dart';
 
 class ConfigurationException implements Exception {
   const ConfigurationException(this.message);
@@ -39,7 +40,7 @@ class ConnectionConfiguration {
   final Map<String, String> hostSecrets;
 
   Map<String, Object?> toJson() => {
-    'version': 2,
+    'version': 4,
     'serviceFolders': serviceFolders.map(_folderJson).toList(),
     'services': services.map(_hostJson).toList(),
     'gatewayFolders': gatewayFolders.map(_folderJson).toList(),
@@ -64,12 +65,23 @@ class ConnectionConfiguration {
   factory ConnectionConfiguration.fromJson(Map<String, dynamic> json) {
     try {
       final legacy = json['version'] == 1;
-      if (!legacy && json['version'] != 2) throw const FormatException();
+      final oldForwards = legacy || json['version'] == 2;
+      if (!oldForwards && json['version'] != 3 && json['version'] != 4) {
+        throw const FormatException();
+      }
       var result = ConnectionConfiguration(
         serviceFolders: _list(json, 'serviceFolders', _folder),
-        services: _list(json, 'services', _host),
+        services: _list(
+          json,
+          'services',
+          (v) => _host(v, discardForwards: oldForwards),
+        ),
         gatewayFolders: _list(json, 'gatewayFolders', _folder),
-        gateways: _list(json, 'gateways', _host),
+        gateways: _list(
+          json,
+          'gateways',
+          (v) => _host(v, discardForwards: oldForwards),
+        ),
         identityFolders: _list(json, 'identityFolders', _folder),
         identities: _list(
           json,
@@ -195,6 +207,7 @@ class ConnectionConfiguration {
           throw const FormatException();
         }
         ForwardPort.validateAll(host.forwardPorts);
+        host.proxyConfig.validate();
         if (host.identityId != null &&
             identities.firstWhere((i) => i.id == host.identityId).serviceType !=
                 host.serviceType) {
@@ -203,7 +216,8 @@ class ConnectionConfiguration {
       }
       for (final host in services) {
         serviceTree.prepareHost(host);
-        if (host.gatewayType != GatewayType.ssh ||
+        if (host.forwardPorts.isNotEmpty ||
+            host.gatewayType != GatewayType.ssh ||
             (host.gatewayId != null && !gatewayIds.contains(host.gatewayId))) {
           throw const FormatException();
         }
@@ -310,8 +324,12 @@ class ConnectionConfiguration {
     'colorValue': value.colorValue,
     'sortOrder': value.sortOrder,
     'forwardPorts': value.forwardPorts.map((v) => v.toJson()).toList(),
+    'proxyConfig': value.proxyConfig.toJson(),
   };
-  static Host _host(Map<String, dynamic> json) => Host(
+  static Host _host(
+    Map<String, dynamic> json, {
+    bool discardForwards = false,
+  }) => Host(
     id: _text(json, 'id'),
     name: _text(json, 'name'),
     hostname: _text(json, 'hostname'),
@@ -329,6 +347,11 @@ class ConnectionConfiguration {
     pageServerFingerprint: _text(json, 'pageServerFingerprint'),
     colorValue: json['colorValue'] as int?,
     sortOrder: json['sortOrder'] as int,
-    forwardPorts: _list(json, 'forwardPorts', ForwardPort.fromJson),
+    forwardPorts: discardForwards
+        ? const []
+        : _list(json, 'forwardPorts', ForwardPort.fromJson),
+    proxyConfig: ProxyConfig.fromJson(
+      json['proxyConfig'] as Map<String, dynamic>? ?? {},
+    ),
   );
 }

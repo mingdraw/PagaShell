@@ -4,6 +4,7 @@ import 'package:drift/drift.dart';
 
 import '../../domain/entities/forward_port.dart';
 import '../../domain/entities/host.dart';
+import '../../domain/entities/proxy_config.dart';
 import '../../domain/repositories/host_repository.dart';
 import 'app_database.dart';
 
@@ -50,6 +51,9 @@ class DriftHostRepository implements HostRepository {
         (value) => ForwardPort.fromJson(value as Map<String, dynamic>),
       ),
     ),
+    proxyConfig: ProxyConfig.fromJson(
+      jsonDecode(row.proxyConfigJson) as Map<String, dynamic>,
+    ),
   );
 
   @override
@@ -63,6 +67,7 @@ class DriftHostRepository implements HostRepository {
   @override
   Future<void> upsert(Host host) => _db.transaction(() async {
     ForwardPort.validateAll(host.forwardPorts);
+    host.proxyConfig.validate();
     if (gateways && host.isDesktop) throw StateError('网关支持 SSH 或 Page 类型');
     if (gateways && host.gatewayId != null) {
       throw ArgumentError('网关不能引用其他网关');
@@ -106,6 +111,7 @@ class DriftHostRepository implements HostRepository {
             forwardPortsJson: Value(
               jsonEncode(host.forwardPorts.map((p) => p.toJson()).toList()),
             ),
+            proxyConfigJson: Value(jsonEncode(host.proxyConfig.toJson())),
           ),
         );
   });

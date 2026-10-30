@@ -1184,7 +1184,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('传输进度区高度固定，可折叠展开且清理仅影响本标签', (tester) async {
+  testWidgets('传输进度区默认高度稳定，可折叠展开且清理仅影响本标签', (tester) async {
     await pumpPanel(tester);
     final progress = find.byKey(const ValueKey('sftp-transfer-progress'));
     for (final label in ['展开传输进度', '清除已完成']) {
@@ -1226,14 +1226,14 @@ void main() {
     expect(find.text('传输进度 · 20 项 · 0 项进行中'), findsOneWidget);
     await tester.tap(findAppIconButton('展开传输进度'));
     await tester.pumpAndSettle();
-    expect(tester.getSize(progress).height, 144);
+    expect(tester.getSize(progress).height, 240);
     await tester.tap(findAppIconButton('折叠传输进度'));
     await tester.pumpAndSettle();
     expect(tester.getSize(progress).height, 36);
     expect(find.byKey(const ValueKey('sftp-transfer-list')), findsNothing);
     await tester.tap(findAppIconButton('展开传输进度'));
     await tester.pumpAndSettle();
-    expect(tester.getSize(progress).height, 144);
+    expect(tester.getSize(progress).height, 240);
     final clear = findAppIconButton('清除已完成');
     expect(find.text('清除已完成'), findsNothing);
     expect(
@@ -1256,8 +1256,140 @@ void main() {
     await tester.tap(clear);
     await tester.pumpAndSettle();
     expect(controller.tasks, [foreign]);
-    expect(tester.getSize(progress).height, 144);
+    expect(tester.getSize(progress).height, 240);
     expect(find.text('暂无传输任务'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('上下拖动分隔线实时调整进度区，折叠展开保留高度与文件选择', (tester) async {
+    final engine = await pumpPanel(tester);
+    await selectFile(tester, 'local', 'upload.txt');
+    final selection = selectedPaths('local');
+    final progress = find.byKey(const ValueKey('sftp-transfer-progress'));
+    final handle = find.byKey(const ValueKey('sftp-transfer-resize-handle'));
+    await tester.tap(findAppIconButton('展开传输进度'));
+    await tester.pumpAndSettle();
+    final initialHeight = tester.getSize(progress).height;
+    final fileHeight = tester.getSize(pane('local')).height;
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer(location: Offset.zero);
+    final start = tester.getCenter(handle);
+    await mouse.moveTo(start);
+    await tester.pump();
+    expect(
+      tester.binding.mouseTracker.debugDeviceActiveCursor(1),
+      SystemMouseCursors.resizeRow,
+    );
+    await mouse.down(start);
+    await mouse.moveTo(start - const Offset(0, 60));
+    await tester.pump();
+    expect(tester.getSize(progress).height, closeTo(initialHeight + 60, 0.1));
+    await mouse.moveTo(start - const Offset(0, 100));
+    await tester.pump();
+    expect(tester.getSize(progress).height, closeTo(initialHeight + 100, 0.1));
+    expect(
+      tester.getSize(pane('local')).height,
+      closeTo(fileHeight - 100, 0.1),
+    );
+    expect(
+      tester.getSize(pane('remote')).height,
+      closeTo(fileHeight - 100, 0.1),
+    );
+    await mouse.up();
+    await mouse.removePointer();
+    await tester.pumpAndSettle();
+    await tester.tap(findAppIconButton('折叠传输进度'));
+    await tester.pumpAndSettle();
+    expect(
+      tester.getSize(progress).height,
+      AppTheme.transferProgressCollapsedHeight,
+    );
+    await tester.tap(findAppIconButton('展开传输进度'));
+    await tester.pumpAndSettle();
+    expect(tester.getSize(progress).height, closeTo(initialHeight + 100, 0.1));
+    await tester.drag(handle, const Offset(0, 40));
+    await tester.pumpAndSettle();
+    expect(tester.getSize(progress).height, closeTo(initialHeight + 60, 0.1));
+    expect(selectedPaths('local'), selection);
+    expect(engine.uploads, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('仅展开时支持拖动，折叠不可拖动，窗口缩小时保留文件列表空间', (tester) async {
+    tester.view.physicalSize = const Size(1200, 700);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await pumpPanel(tester);
+    final progress = find.byKey(const ValueKey('sftp-transfer-progress'));
+    final handle = find.byKey(const ValueKey('sftp-transfer-resize-handle'));
+    expect(handle, findsNothing);
+    final collapsedBoundary =
+        tester.getTopLeft(progress) + const Offset(400, 1);
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer(location: collapsedBoundary);
+    await tester.pump();
+    expect(
+      tester.binding.mouseTracker.debugDeviceActiveCursor(1),
+      isNot(SystemMouseCursors.resizeRow),
+    );
+    await tester.dragFrom(collapsedBoundary, const Offset(0, -124));
+    await tester.pumpAndSettle();
+    expect(
+      tester.getSize(progress).height,
+      AppTheme.transferProgressCollapsedHeight,
+    );
+    expect(findAppIconButton('展开传输进度'), findsOneWidget);
+    expect(handle, findsNothing);
+    await mouse.removePointer();
+    await tester.tap(findAppIconButton('展开传输进度'));
+    await tester.pumpAndSettle();
+    await tester.drag(handle, const Offset(0, -16));
+    await tester.pumpAndSettle();
+    expect(tester.getSize(progress).height, 256);
+    expect(findAppIconButton('折叠传输进度'), findsOneWidget);
+    await tester.drag(handle, const Offset(0, -1000));
+    await tester.pumpAndSettle();
+    final maxHeight =
+        tester.getSize(find.byType(SftpPanel)).height -
+        AppTheme.fileBrowserMinHeight;
+    expect(tester.getSize(progress).height, maxHeight);
+    expect(tester.getSize(pane('local')).height, AppTheme.fileBrowserMinHeight);
+    expect(
+      tester.getSize(pane('remote')).height,
+      AppTheme.fileBrowserMinHeight,
+    );
+    tester.view.physicalSize = const Size(1200, 260);
+    await tester.pumpAndSettle();
+    expect(tester.getSize(progress).height, 80);
+    expect(tester.getSize(pane('local')).height, AppTheme.fileBrowserMinHeight);
+    expect(tester.takeException(), isNull);
+    tester.view.physicalSize = const Size(1200, 700);
+    await tester.pumpAndSettle();
+    expect(tester.getSize(progress).height, maxHeight);
+    await tester.drag(
+      handle,
+      Offset(0, maxHeight - AppTheme.transferProgressMinHeight + 10),
+    );
+    await tester.pumpAndSettle();
+    expect(tester.getSize(progress).height, AppTheme.transferProgressMinHeight);
+    await tester.drag(handle, const Offset(0, 200));
+    await tester.pumpAndSettle();
+    expect(
+      tester.getSize(progress).height,
+      AppTheme.transferProgressCollapsedHeight,
+    );
+    expect(findAppIconButton('展开传输进度'), findsOneWidget);
+    expect(handle, findsNothing);
+    await tester.dragFrom(
+      tester.getTopLeft(progress) + const Offset(400, 1),
+      const Offset(0, -100),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      tester.getSize(progress).height,
+      AppTheme.transferProgressCollapsedHeight,
+    );
     expect(tester.takeException(), isNull);
   });
 

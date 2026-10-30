@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_selector/file_selector.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
@@ -561,104 +563,112 @@ class _SftpPanelState extends State<SftpPanel> {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Expanded(
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Expanded(
-                child: Obx(
-                  () => FileBrowserPane(
-                    sessionId: widget.session.id,
-                    side: FileBrowserSide.local,
-                    cwd: _local.cwd.value.isEmpty
-                        ? _local.files.homeDirectory
-                        : _local.cwd.value,
-                    loading: _local.loading.value,
-                    error: _local.error.value,
-                    entries: [
-                      for (final entry in _local.visibleEntries)
-                        FileBrowserEntry(
-                          name: entry.name,
-                          path: entry.path,
-                          isDir: entry.isDir,
-                          size: entry.size,
-                          modified: entry.modified,
-                        ),
-                    ],
-                    onNavigate: _navigateLocalDirectory,
-                    onRefresh: () => _navigateLocalDirectory(
-                      _local.cwd.value.isEmpty
+    return LayoutBuilder(
+      builder: (context, constraints) => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Expanded(
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Expanded(
+                  child: Obx(
+                    () => FileBrowserPane(
+                      sessionId: widget.session.id,
+                      side: FileBrowserSide.local,
+                      cwd: _local.cwd.value.isEmpty
                           ? _local.files.homeDirectory
                           : _local.cwd.value,
-                    ),
-                    onBrowse: _chooseLocalDirectory,
-                    onAuthorize: _local.permissionDeniedPath.value == null
-                        ? null
-                        : () => _authorizeLocalDirectory(
-                            _local,
-                            _local.permissionDeniedPath.value!,
-                            _local.navigationRevision,
+                      loading: _local.loading.value,
+                      error: _local.error.value,
+                      entries: [
+                        for (final entry in _local.visibleEntries)
+                          FileBrowserEntry(
+                            name: entry.name,
+                            path: entry.path,
+                            isDir: entry.isDir,
+                            size: entry.size,
+                            modified: entry.modified,
                           ),
-                    onOpen: (entry) => _navigateLocalDirectory(entry.path),
-                    onTransfer: (entries) => _transferFiles(
-                      entries,
-                      FileBrowserSide.local,
-                      _browser.cwd.value,
+                      ],
+                      onNavigate: _navigateLocalDirectory,
+                      onRefresh: () => _navigateLocalDirectory(
+                        _local.cwd.value.isEmpty
+                            ? _local.files.homeDirectory
+                            : _local.cwd.value,
+                      ),
+                      onBrowse: _chooseLocalDirectory,
+                      onAuthorize: _local.permissionDeniedPath.value == null
+                          ? null
+                          : () => _authorizeLocalDirectory(
+                              _local,
+                              _local.permissionDeniedPath.value!,
+                              _local.navigationRevision,
+                            ),
+                      onOpen: (entry) => _navigateLocalDirectory(entry.path),
+                      onTransfer: (entries) => _transferFiles(
+                        entries,
+                        FileBrowserSide.local,
+                        _browser.cwd.value,
+                      ),
+                      onDrop: _dropFiles,
+                      onRename: (entry) => _rename(entry, local: true),
+                      onDelete: (entry) => _delete(entry, local: true),
+                      showHidden: _local.showHidden.value,
+                      onShowHiddenChanged: (value) =>
+                          _local.showHidden.value = value,
                     ),
-                    onDrop: _dropFiles,
-                    onRename: (entry) => _rename(entry, local: true),
-                    onDelete: (entry) => _delete(entry, local: true),
-                    showHidden: _local.showHidden.value,
-                    onShowHiddenChanged: (value) =>
-                        _local.showHidden.value = value,
                   ),
                 ),
-              ),
-              Container(width: 1, color: AppTheme.border(context)),
-              Expanded(
-                child: Obx(
-                  () => FileBrowserPane(
-                    sessionId: widget.session.id,
-                    side: FileBrowserSide.remote,
-                    active: widget.active,
-                    cwd: _browser.cwd.value,
-                    loading: _browser.loading.value,
-                    error: _browser.error.value,
-                    entries: [
-                      for (final entry in _browser.entries)
-                        FileBrowserEntry(
-                          name: entry.name,
-                          path: _browser.pathOf(entry.name),
-                          isDir: entry.isDir,
-                          size: entry.size,
-                          modified: entry.modified,
-                        ),
-                    ],
-                    onNavigate: _browser.navigate,
-                    onRefresh: _browser.refreshDirectory,
-                    onMkdir: _mkdir,
-                    onUpload: _upload,
-                    onOpen: (entry) => _browser.enter(entry.name),
-                    onTransfer: (entries) => _transferFiles(
-                      entries,
-                      FileBrowserSide.remote,
-                      _local.cwd.value,
+                Container(width: 1, color: AppTheme.border(context)),
+                Expanded(
+                  child: Obx(
+                    () => FileBrowserPane(
+                      sessionId: widget.session.id,
+                      side: FileBrowserSide.remote,
+                      active: widget.active,
+                      cwd: _browser.cwd.value,
+                      loading: _browser.loading.value,
+                      error: _browser.error.value,
+                      entries: [
+                        for (final entry in _browser.entries)
+                          FileBrowserEntry(
+                            name: entry.name,
+                            path: _browser.pathOf(entry.name),
+                            isDir: entry.isDir,
+                            size: entry.size,
+                            modified: entry.modified,
+                          ),
+                      ],
+                      onNavigate: _browser.navigate,
+                      onRefresh: _browser.refreshDirectory,
+                      onMkdir: _mkdir,
+                      onUpload: _upload,
+                      onOpen: (entry) => _browser.enter(entry.name),
+                      onTransfer: (entries) => _transferFiles(
+                        entries,
+                        FileBrowserSide.remote,
+                        _local.cwd.value,
+                      ),
+                      onDrop: _dropFiles,
+                      onExternalDrop: _uploadExternal,
+                      onRename: _rename,
+                      onDelete: _delete,
                     ),
-                    onDrop: _dropFiles,
-                    onExternalDrop: _uploadExternal,
-                    onRename: _rename,
-                    onDelete: _delete,
                   ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
-        ),
-        _TransferStrip(sessionId: widget.session.id),
-      ],
+          _TransferStrip(
+            sessionId: widget.session.id,
+            maxHeight: math.max(
+              AppTheme.transferProgressCollapsedHeight,
+              constraints.maxHeight - AppTheme.fileBrowserMinHeight,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -727,9 +737,10 @@ class _FileConflictDialogState extends State<_FileConflictDialog> {
 
 /// 本会话的传输任务条，默认折叠。
 class _TransferStrip extends StatefulWidget {
-  const _TransferStrip({required this.sessionId});
+  const _TransferStrip({required this.sessionId, required this.maxHeight});
 
   final String sessionId;
+  final double maxHeight;
 
   @override
   State<_TransferStrip> createState() => _TransferStripState();
@@ -737,110 +748,225 @@ class _TransferStrip extends StatefulWidget {
 
 class _TransferStripState extends State<_TransferStrip> {
   bool _expanded = false;
+  double _expandedHeight = AppTheme.transferProgressDefaultHeight;
+  bool _hovering = false;
+  bool _resizing = false;
+  double? _resizeStartY;
+  double? _resizeStartHeight;
 
   @override
   void didUpdateWidget(_TransferStrip oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.sessionId != widget.sessionId) _expanded = false;
+    if (oldWidget.sessionId != widget.sessionId) {
+      _expanded = false;
+      _expandedHeight = AppTheme.transferProgressDefaultHeight;
+      _hovering = false;
+      _resizing = false;
+      _resizeStartY = null;
+      _resizeStartHeight = null;
+    }
+  }
+
+  void _resize(DragUpdateDetails details) {
+    final startY = _resizeStartY;
+    final startHeight = _resizeStartHeight;
+    if (!_expanded || startY == null || startHeight == null) return;
+    // 用全局位移计算，避免分隔线本身移动时累加出跳动。
+    final height = startHeight - (details.globalPosition.dy - startY);
+    setState(() {
+      if (height <= AppTheme.transferProgressCollapsedHeight) {
+        _expanded = false;
+        _hovering = false;
+        _resizing = false;
+        _resizeStartY = null;
+        _resizeStartHeight = null;
+      } else {
+        _expanded = true;
+        _expandedHeight = height.clamp(
+          math.min(AppTheme.transferProgressMinHeight, widget.maxHeight),
+          widget.maxHeight,
+        );
+      }
+    });
+  }
+
+  void _endResize() {
+    if (!_resizing) return;
+    setState(() {
+      _resizing = false;
+      _resizeStartY = null;
+      _resizeStartHeight = null;
+    });
   }
 
   @override
   Widget build(BuildContext context) {
     final controller = Get.find<TransferController>();
     final colors = shadcn.Theme.of(context).colorScheme;
+    final height = _expanded
+        ? _expandedHeight
+              .clamp(
+                math.min(AppTheme.transferProgressMinHeight, widget.maxHeight),
+                widget.maxHeight,
+              )
+              .toDouble()
+        : AppTheme.transferProgressCollapsedHeight;
     return Obx(() {
       final tasks = controller.tasksOf(widget.sessionId);
       final running = tasks
           .where((task) => task.status.value == TransferStatus.running)
           .length;
-      return Container(
+      return SizedBox(
         key: const ValueKey('sftp-transfer-progress'),
-        height: _expanded ? 144 : 36,
-        decoration: BoxDecoration(
-          border: Border(top: BorderSide(color: AppTheme.border(context))),
-        ),
-        child: Column(
+        height: height,
+        child: Stack(
           children: [
-            SizedBox(
-              height: 35,
-              child: Row(
+            Positioned.fill(
+              top: 1,
+              child: Column(
                 children: [
-                  AppIconButton.text(
-                    semanticLabel: (_expanded ? '折叠传输进度' : '展开传输进度').tr,
-                    icon: Icon(
-                      _expanded
-                          ? shadcn.LucideIcons.chevronDown
-                          : shadcn.LucideIcons.chevronUp,
-                      size: 15,
-                    ),
-                    onPressed: () => setState(() => _expanded = !_expanded),
-                  ),
-                  Expanded(
+                  SizedBox(
+                    height: AppTheme.transferProgressCollapsedHeight - 1,
                     child: Row(
                       children: [
-                        Text(
-                          '传输进度 · @count 项 · @running 项进行中'.trParams({
-                            'count': '${tasks.length}',
-                            'running': '$running',
+                        AppIconButton.text(
+                          semanticLabel: (_expanded ? '折叠传输进度' : '展开传输进度').tr,
+                          icon: Icon(
+                            _expanded
+                                ? shadcn.LucideIcons.chevronDown
+                                : shadcn.LucideIcons.chevronUp,
+                            size: 15,
+                          ),
+                          onPressed: () => setState(() {
+                            _expanded = !_expanded;
+                            if (!_expanded) {
+                              _hovering = false;
+                              _resizing = false;
+                              _resizeStartY = null;
+                              _resizeStartHeight = null;
+                            }
                           }),
-                          style: TextStyle(
-                            fontSize: 11,
-                            color: colors.mutedForeground,
+                        ),
+                        Expanded(
+                          child: Row(
+                            children: [
+                              Text(
+                                '传输进度 · @count 项 · @running 项进行中'.trParams({
+                                  'count': '${tasks.length}',
+                                  'running': '$running',
+                                }),
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: colors.mutedForeground,
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              Flexible(
+                                child: Text(
+                                  '总速率 @speed'.trParams({
+                                    'speed': formatTransferRate(
+                                      controller.totalBytesPerSecond(
+                                        widget.sessionId,
+                                      ),
+                                    ),
+                                  }),
+                                  key: const ValueKey(
+                                    'sftp-total-transfer-rate',
+                                  ),
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: colors.mutedForeground,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        AppIconButton.text(
+                          semanticLabel: '清除已完成'.tr,
+                          icon: const Icon(shadcn.LucideIcons.listX, size: 15),
+                          onPressed: () => controller.clearFinished(
+                            sessionId: widget.sessionId,
                           ),
                         ),
                         const SizedBox(width: 12),
-                        Flexible(
-                          child: Text(
-                            '总速率 @speed'.trParams({
-                              'speed': formatTransferRate(
-                                controller.totalBytesPerSecond(
-                                  widget.sessionId,
-                                ),
-                              ),
-                            }),
-                            key: const ValueKey('sftp-total-transfer-rate'),
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontSize: 11,
-                              color: colors.mutedForeground,
-                            ),
-                          ),
-                        ),
                       ],
                     ),
                   ),
-                  AppIconButton.text(
-                    semanticLabel: '清除已完成'.tr,
-                    icon: const Icon(shadcn.LucideIcons.listX, size: 15),
-                    onPressed: () =>
-                        controller.clearFinished(sessionId: widget.sessionId),
-                  ),
-                  const SizedBox(width: 12),
+                  if (_expanded)
+                    Expanded(
+                      child: tasks.isEmpty
+                          ? Center(
+                              child: Text(
+                                '暂无传输任务'.tr,
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: colors.mutedForeground,
+                                ),
+                              ),
+                            )
+                          : ListView.builder(
+                              key: const ValueKey('sftp-transfer-list'),
+                              padding: EdgeInsets.zero,
+                              itemCount: tasks.length,
+                              itemBuilder: (_, index) => SizedBox(
+                                key: ValueKey(
+                                  'sftp-transfer-row-${tasks[index].id}',
+                                ),
+                                height: 30,
+                                child: _TransferRow(task: tasks[index]),
+                              ),
+                            ),
+                    ),
                 ],
               ),
             ),
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              height: 1,
+              child: ColoredBox(color: AppTheme.border(context)),
+            ),
             if (_expanded)
-              Expanded(
-                child: tasks.isEmpty
-                    ? Center(
-                        child: Text(
-                          '暂无传输任务'.tr,
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: colors.mutedForeground,
+              Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                height: AppTheme.transferProgressResizeHeight,
+                child: MouseRegion(
+                  cursor: SystemMouseCursors.resizeRow,
+                  onEnter: (_) => setState(() => _hovering = true),
+                  onExit: (_) => setState(() => _hovering = false),
+                  child: GestureDetector(
+                    key: const ValueKey('sftp-transfer-resize-handle'),
+                    behavior: HitTestBehavior.opaque,
+                    dragStartBehavior: DragStartBehavior.down,
+                    onVerticalDragStart: (details) {
+                      _resizeStartY = details.globalPosition.dy;
+                      _resizeStartHeight = height;
+                      setState(() => _resizing = true);
+                    },
+                    onVerticalDragUpdate: _resize,
+                    onVerticalDragEnd: (_) => _endResize(),
+                    onVerticalDragCancel: _endResize,
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: _hovering || _resizing
+                            ? colors.primary.withValues(alpha: 0.12)
+                            : null,
+                        border: Border(
+                          top: BorderSide(
+                            color: _hovering || _resizing
+                                ? colors.primary
+                                : AppTheme.border(context),
                           ),
                         ),
-                      )
-                    : ListView.builder(
-                        key: const ValueKey('sftp-transfer-list'),
-                        padding: EdgeInsets.zero,
-                        itemCount: tasks.length,
-                        itemBuilder: (_, index) => SizedBox(
-                          key: ValueKey('sftp-transfer-row-${tasks[index].id}'),
-                          height: 30,
-                          child: _TransferRow(task: tasks[index]),
-                        ),
                       ),
+                    ),
+                  ),
+                ),
               ),
           ],
         ),

@@ -137,6 +137,9 @@ void main() {
     await old.customStatement(
       'ALTER TABLE identities DROP COLUMN service_type',
     );
+    await old.customStatement(
+      'ALTER TABLE hosts DROP COLUMN proxy_config_json',
+    );
     await old.customStatement('PRAGMA user_version = 1');
     await old.close();
 

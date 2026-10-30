@@ -2,7 +2,8 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:path/path.dart' as path;
-import 'package:path_provider/path_provider.dart';
+
+import '../storage/application_directories.dart';
 
 /// 只接受加密后的数据；读、改、写在同一事务内完成。
 abstract interface class EncryptedVaultStorage {
@@ -17,7 +18,7 @@ abstract interface class VaultTransaction {
 /// 应用支持目录内的保险库，进程内排队、进程间文件锁，替换时不覆盖半成品。
 class FileEncryptedVaultStorage implements EncryptedVaultStorage {
   FileEncryptedVaultStorage({Future<Directory> Function()? directory})
-    : _directory = directory ?? getApplicationSupportDirectory;
+    : _directory = directory ?? ApplicationDirectories.vault;
 
   final Future<Directory> Function() _directory;
   static const filename = 'credentials.vault';

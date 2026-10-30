@@ -74,6 +74,7 @@ void main() {
       'ALTER TABLE hosts DROP COLUMN page_server_fingerprint',
     );
     await db.customStatement('ALTER TABLE identities DROP COLUMN service_type');
+    await db.customStatement('ALTER TABLE hosts DROP COLUMN proxy_config_json');
     await db.customStatement('PRAGMA user_version = 9');
     await db.close();
     final reopened = AppDatabase.forTesting(NativeDatabase(file));

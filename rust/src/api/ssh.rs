@@ -702,6 +702,92 @@ pub struct PortForwardEvent {
     pub local_port: Option<u16>,
 }
 
+#[derive(Clone)]
+enum ForwardTransport {
+    Ssh(Arc<Mutex<Handle<PinningHandler>>>),
+    Page(crate::api::page::PageGateway),
+}
+
+impl ForwardTransport {
+    fn is_closed(&self) -> bool {
+        if let Self::Ssh(handle) = self {
+            if let Ok(guard) = handle.try_lock() {
+                return guard.is_closed();
+            }
+        }
+        false
+    }
+}
+
+struct PageForwardEntry {
+    gateway: crate::api::page::PageGateway,
+    forwards: Option<(watch::Sender<bool>, JoinHandle<()>)>,
+}
+
+static PAGE_FORWARD_SESSIONS: LazyLock<Mutex<HashMap<u32, PageForwardEntry>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// 创建 Page 网关转发句柄。每次接受本地连接时独立鉴权并连接目标 TCP。
+pub async fn page_forward_create(gateway: crate::api::page::PageGateway) -> Result<u32> {
+    crate::page::validate_gateway(&gateway)?;
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    PAGE_FORWARD_SESSIONS.lock().await.insert(
+        id,
+        PageForwardEntry {
+            gateway,
+            forwards: None,
+        },
+    );
+    Ok(id)
+}
+
+pub async fn page_start_port_forwards(
+    session_id: u32,
+    ports: Vec<ForwardPortSpec>,
+    output: StreamSink<PortForwardEvent>,
+) -> Result<()> {
+    start_page_port_forwards(session_id, ports, move |event| output.add(event).is_ok()).await
+}
+
+async fn start_page_port_forwards(
+    session_id: u32,
+    ports: Vec<ForwardPortSpec>,
+    emit: impl Fn(PortForwardEvent) -> bool + Send + Sync + 'static,
+) -> Result<()> {
+    let bound = bind_forward_ports(ports).await?;
+    let mut sessions = PAGE_FORWARD_SESSIONS.lock().await;
+    let entry = sessions.get_mut(&session_id).context("端口转发已断开")?;
+    if entry.forwards.is_some() {
+        return Err(anyhow!("端口转发已启动"));
+    }
+    entry.forwards = Some(spawn_port_forwards(
+        bound,
+        ForwardTransport::Page(entry.gateway.clone()),
+        emit,
+    ));
+    Ok(())
+}
+
+/// 释放 Page 转发的监听、已接受连接和正在建立的目标通道。
+pub async fn page_forward_disconnect(session_id: u32) -> Result<()> {
+    let entry = PAGE_FORWARD_SESSIONS.lock().await.remove(&session_id);
+    if let Some(PageForwardEntry {
+        forwards: Some((cancel, mut task)),
+        ..
+    }) = entry
+    {
+        let _ = cancel.send(true);
+        if tokio::time::timeout(Duration::from_secs(2), &mut task)
+            .await
+            .is_err()
+        {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+    Ok(())
+}
+
 /// 一条专用 SSH 会话上的多端口转发。任一 bind 失败时不保留部分监听。
 pub async fn ssh_start_port_forwards(
     session_id: u32,
@@ -716,6 +802,25 @@ async fn start_port_forwards(
     ports: Vec<ForwardPortSpec>,
     emit: impl Fn(PortForwardEvent) -> bool + Send + Sync + 'static,
 ) -> Result<()> {
+    let bound = bind_forward_ports(ports).await?;
+    let mut sessions = SESSIONS.lock().await;
+    let entry = sessions
+        .get_mut(&session_id)
+        .ok_or_else(|| anyhow!("会话已关闭"))?;
+    if entry.forwards.is_some() {
+        return Err(anyhow!("端口转发已启动"));
+    }
+    entry.forwards = Some(spawn_port_forwards(
+        bound,
+        ForwardTransport::Ssh(entry.handle.clone()),
+        emit,
+    ));
+    Ok(())
+}
+
+async fn bind_forward_ports(
+    ports: Vec<ForwardPortSpec>,
+) -> Result<Vec<(TcpListener, ForwardPortSpec)>> {
     let mut seen = HashSet::new();
     if ports.is_empty() {
         return Err(anyhow!("请配置至少一组端口映射"));
@@ -733,24 +838,24 @@ async fn start_port_forwards(
             .map_err(|_| anyhow!("无法监听本地端口 {}，请检查端口占用或权限", port.local_port))?;
         bound.push((listener, port));
     }
-    let mut sessions = SESSIONS.lock().await;
-    let entry = sessions
-        .get_mut(&session_id)
-        .ok_or_else(|| anyhow!("会话已关闭"))?;
-    if entry.forwards.is_some() {
-        return Err(anyhow!("端口转发已启动"));
-    }
-    let handle = entry.handle.clone();
+    Ok(bound)
+}
+
+fn spawn_port_forwards(
+    bound: Vec<(TcpListener, ForwardPortSpec)>,
+    transport: ForwardTransport,
+    emit: impl Fn(PortForwardEvent) -> bool + Send + Sync + 'static,
+) -> (watch::Sender<bool>, JoinHandle<()>) {
     let (cancel, mut cancelled) = watch::channel(false);
     let stop = cancel.clone();
     let emit = Arc::new(emit);
     let task = tokio::spawn(async move {
         let mut listeners = JoinSet::new();
         for (listener, port) in bound {
-            let handle = handle.clone();
+            let transport = transport.clone();
             let emit = emit.clone();
             let cancelled = cancelled.clone();
-            listeners.spawn(forward_listener(listener, port, handle, cancelled, emit));
+            listeners.spawn(forward_listener(listener, port, transport, cancelled, emit));
         }
         if emit(PortForwardEvent {
             kind: "ready".into(),
@@ -762,10 +867,7 @@ async fn start_port_forwards(
                     _ = cancelled.changed() => break,
                     _ = listeners.join_next() => break,
                     _ = tick.tick() => {
-                        // 不等待某个正在打开远端通道的任务持有的锁。
-                        if let Ok(guard) = handle.try_lock() {
-                            if guard.is_closed() { break; }
-                        }
+                        if transport.is_closed() { break; }
                     }
                 }
             }
@@ -777,14 +879,13 @@ async fn start_port_forwards(
             local_port: None,
         });
     });
-    entry.forwards = Some((cancel, task));
-    Ok(())
+    (cancel, task)
 }
 
 async fn forward_listener(
     listener: TcpListener,
     port: ForwardPortSpec,
-    handle: Arc<Mutex<Handle<PinningHandler>>>,
+    transport: ForwardTransport,
     mut cancelled: watch::Receiver<bool>,
     emit: Arc<impl Fn(PortForwardEvent) -> bool + Send + Sync + 'static>,
 ) {
@@ -795,20 +896,30 @@ async fn forward_listener(
             _ = connections.join_next(), if !connections.is_empty() => {},
             accepted = listener.accept() => {
                 let Ok((mut socket, peer)) = accepted else { break; };
-                let handle = handle.clone();
+                let transport = transport.clone();
                 let port = port.clone();
                 let emit = emit.clone();
                 let mut cancelled = cancelled.clone();
                 connections.spawn(async move {
                     let connection = async {
-                        let channel = tokio::time::timeout(Duration::from_secs(10), async {
-                            handle.lock().await.channel_open_direct_tcpip(
-                                port.target_host, u32::from(port.target_port),
-                                peer.ip().to_string(), u32::from(peer.port()),
-                            ).await
-                        }).await.map_err(|_| anyhow!("目标端口连接超时"))??;
-                        let mut stream = channel.into_stream();
-                        tokio::io::copy_bidirectional(&mut socket, &mut stream).await?;
+                        match transport {
+                            ForwardTransport::Ssh(handle) => {
+                                let channel = tokio::time::timeout(Duration::from_secs(10), async {
+                                    handle.lock().await.channel_open_direct_tcpip(
+                                        port.target_host, u32::from(port.target_port),
+                                        peer.ip().to_string(), u32::from(peer.port()),
+                                    ).await
+                                }).await.map_err(|_| anyhow!("目标端口连接超时"))??;
+                                let mut stream = channel.into_stream();
+                                tokio::io::copy_bidirectional(&mut socket, &mut stream).await?;
+                            }
+                            ForwardTransport::Page(gateway) => {
+                                let mut stream = tokio::time::timeout(Duration::from_secs(20),
+                                    crate::page::connect(gateway, &port.target_host, port.target_port))
+                                    .await.context("Page 目标连接超时")??;
+                                tokio::io::copy_bidirectional(&mut socket, &mut stream).await?;
+                            }
+                        }
                         Ok::<(), anyhow::Error>(())
                     };
                     tokio::select! {
@@ -1450,6 +1561,71 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
     }
 
     #[tokio::test]
+    async fn dynamic_proxy_uses_authenticated_ssh_gateway_without_target_ssh() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpStream;
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let target_port = listener.local_addr().unwrap().port();
+        let echo = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let (mut reader, mut writer) = socket.split();
+            tokio::io::copy(&mut reader, &mut writer).await.unwrap();
+        });
+        let (gateway_port, mut requests, shutdown) = forwarding_service(true).await;
+        let key = ssh_handshake("127.0.0.1".into(), gateway_port)
+            .await
+            .unwrap();
+        assert_eq!(
+            key.fingerprint,
+            test_key(41)
+                .public_key()
+                .fingerprint(HashAlg::Sha256)
+                .to_string()
+        );
+        let gateway_id = ssh_authenticate(
+            key.session_id,
+            key.fingerprint,
+            "gateway-user".into(),
+            "test-only".into(),
+        )
+        .await
+        .unwrap();
+        let port = free_forward_port().await;
+        let proxy = crate::proxy::start(
+            &serde_json::json!({"mode":"rule",
+            "httpPort":port, "httpsPort":port,
+            "rules":[{"type":"domainSuffix", "value":"internal.test"}]})
+            .to_string(),
+            Some(gateway_id),
+            None,
+        )
+        .await
+        .unwrap();
+        let mut client = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        client.write_all(format!("CONNECT db.internal.test:{target_port} HTTP/1.1\r\nHost: db.internal.test\r\n\r\n").as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        while !response.ends_with(b"\r\n\r\n") {
+            response.push(client.read_u8().await.unwrap());
+        }
+        assert!(response.starts_with(b"HTTP/1.1 200"));
+        assert_eq!(
+            requests.recv().await.unwrap(),
+            ("db.internal.test".into(), target_port.into())
+        );
+        client
+            .write_all(b"raw TLS bytes, no SSH login")
+            .await
+            .unwrap();
+        let mut returned = [0; 27];
+        client.read_exact(&mut returned).await.unwrap();
+        assert_eq!(&returned, b"raw TLS bytes, no SSH login");
+        proxy.stop().await;
+        ssh_disconnect(gateway_id).await.unwrap();
+        let _ = shutdown.send(());
+        echo.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn multiple_local_ports_forward_through_gateway_and_stop_releases_everything() {
         let echo = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let target_port = echo.local_addr().unwrap().port();
@@ -1462,24 +1638,26 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
                 });
             }
         });
-        let (service_port, mut requests, _shutdown) = forwarding_service(true).await;
-        let (gateway_port, mut hops, gateway_task) = gateway_server(service_port, true).await;
-        let gateway_id = authenticated_gateway(gateway_port).await;
-        let target = ssh_handshake_via_gateway("internal-service.test".into(), 2222, gateway_id)
+        // 仅登录网关，目标是原始 TCP 回显服务，不接受 SSH 握手或认证。
+        let (gateway_port, mut requests, _shutdown) = forwarding_service(true).await;
+        let key = ssh_handshake("127.0.0.1".into(), gateway_port)
             .await
             .unwrap();
+        assert_eq!(
+            key.fingerprint,
+            test_key(41)
+                .public_key()
+                .fingerprint(HashAlg::Sha256)
+                .to_string()
+        );
         let session_id = ssh_authenticate(
-            target.session_id,
-            target.fingerprint,
-            "service-user".into(),
+            key.session_id,
+            key.fingerprint,
+            "gateway-user".into(),
             "test-only".into(),
         )
         .await
         .unwrap();
-        assert_eq!(
-            hops.recv().await.unwrap(),
-            ("internal-service.test".into(), 2222)
-        );
         // 先占住两个临时端口，确保生成的端口号互异。
         let first = TcpListener::bind(("0.0.0.0", 0)).await.unwrap();
         let second = TcpListener::bind(("0.0.0.0", 0)).await.unwrap();
@@ -1540,7 +1718,6 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
             sockets.push(socket);
         }
         ssh_disconnect(session_id).await.unwrap();
-        assert!(!SESSIONS.lock().await.contains_key(&gateway_id));
         assert!(!SESSIONS.lock().await.contains_key(&session_id));
         for port in ports {
             assert!(TcpListener::bind(("0.0.0.0", port)).await.is_ok());
@@ -1552,7 +1729,6 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
                 .unwrap();
             assert!(ended.is_err() || ended.unwrap() == 0);
         }
-        gateway_task.abort();
         echo_task.abort();
     }
 
@@ -1657,6 +1833,172 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
         assert_eq!(closed.kind, "closed");
         assert!(TcpListener::bind(("127.0.0.1", local_port)).await.is_ok());
         ssh_disconnect(id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn page_forward_bind_rollback_and_stop_cancel_pending_connections() {
+        let relay = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let gateway = crate::api::page::PageGateway {
+            server_host: "127.0.0.1".into(),
+            server_port: relay.local_addr().unwrap().port(),
+            client_id: "test".into(),
+            token: "access".into(),
+            server_fingerprint: String::new(),
+        };
+        let mut invalid = gateway.clone();
+        invalid.token.clear();
+        assert!(page_forward_create(invalid).await.is_err());
+        let id = page_forward_create(gateway).await.unwrap();
+        let local_port = free_forward_port().await;
+        let mapping = ForwardPortSpec {
+            local_port,
+            target_host: "10.20.30.40".into(),
+            target_port: 3306,
+        };
+        let occupied = TcpListener::bind(("0.0.0.0", 0)).await.unwrap();
+        let blocked = occupied.local_addr().unwrap().port();
+        let result = start_page_port_forwards(
+            id,
+            vec![
+                mapping.clone(),
+                ForwardPortSpec {
+                    local_port: blocked,
+                    ..mapping.clone()
+                },
+            ],
+            |_| true,
+        )
+        .await;
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains(&blocked.to_string()));
+        assert!(TcpListener::bind(("0.0.0.0", local_port)).await.is_ok());
+        let (events, mut received) = mpsc::unbounded_channel();
+        start_page_port_forwards(id, vec![mapping], move |event| events.send(event).is_ok())
+            .await
+            .unwrap();
+        assert_eq!(received.recv().await.unwrap().kind, "ready");
+        let mut local = tokio::net::TcpStream::connect(("127.0.0.1", local_port))
+            .await
+            .unwrap();
+        // 假中转接受连接后不发 ready，覆盖仍在建立目标通道时停止。
+        let (mut remote, _) = tokio::time::timeout(Duration::from_secs(2), relay.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), page_forward_disconnect(id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received.recv().await.unwrap().kind, "closed");
+        assert!(!PAGE_FORWARD_SESSIONS.lock().await.contains_key(&id));
+        assert!(TcpListener::bind(("0.0.0.0", local_port)).await.is_ok());
+        for socket in [&mut local, &mut remote] {
+            let mut bytes = Vec::new();
+            let ended =
+                tokio::time::timeout(Duration::from_secs(2), socket.read_to_end(&mut bytes))
+                    .await
+                    .unwrap();
+            // TCP 允许以 EOF 或 reset 结束；均不能残留等待目标响应的连接。
+            if let Err(error) = ended {
+                assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+            }
+        }
+        page_forward_disconnect(id).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PAGAGATEWAY_BIN; starts actual Go relay"]
+    async fn page_go_relay_forwards_tcp_without_target_ssh_and_releases_listeners() {
+        for use_tls in [true, false] {
+            let echo = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+            let target_port = echo.local_addr().unwrap().port();
+            let echo_task = tokio::spawn(async move {
+                loop {
+                    let (mut socket, _) = echo.accept().await.unwrap();
+                    tokio::spawn(async move {
+                        let (mut read, mut write) = socket.split();
+                        let _ = tokio::io::copy(&mut read, &mut write).await;
+                    });
+                }
+            });
+            let relay = crate::page::GoRelay::start(&[target_port], use_tls).await;
+            let id = page_forward_create(relay.gateway.clone()).await.unwrap();
+            let first = TcpListener::bind(("0.0.0.0", 0)).await.unwrap();
+            let second = TcpListener::bind(("0.0.0.0", 0)).await.unwrap();
+            let ports = [
+                first.local_addr().unwrap().port(),
+                second.local_addr().unwrap().port(),
+            ];
+            drop((first, second));
+            let (events, mut received) = mpsc::unbounded_channel();
+            start_page_port_forwards(
+                id,
+                vec![
+                    ForwardPortSpec {
+                        local_port: ports[0],
+                        target_host: "127.0.0.1".into(),
+                        target_port,
+                    },
+                    // 实际目标可从本机直连，Page ACL 拒绝时必须报错，不能回退直连。
+                    ForwardPortSpec {
+                        local_port: ports[1],
+                        target_host: "localhost".into(),
+                        target_port,
+                    },
+                ],
+                move |event| events.send(event).is_ok(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(received.recv().await.unwrap().kind, "ready");
+            let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", ports[0]))
+                .await
+                .unwrap();
+            let data = b"raw TCP target without an SSH server";
+            socket.write_all(data).await.unwrap();
+            socket.shutdown().await.unwrap();
+            let mut reply = Vec::new();
+            tokio::time::timeout(Duration::from_secs(3), socket.read_to_end(&mut reply))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(reply, data);
+            let mut denied = tokio::net::TcpStream::connect(("127.0.0.1", ports[1]))
+                .await
+                .unwrap();
+            let event = tokio::time::timeout(Duration::from_secs(3), received.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(event.kind, "connectionError");
+            assert_eq!(event.local_port, Some(ports[1]));
+            let mut byte = [0];
+            assert_eq!(denied.read(&mut byte).await.unwrap(), 0);
+            // 一条目标失败不关闭其他监听，后续连接仍可成功。
+            let mut active = tokio::net::TcpStream::connect(("127.0.0.1", ports[0]))
+                .await
+                .unwrap();
+            active.write_all(b"ok").await.unwrap();
+            let mut reply = [0; 2];
+            tokio::time::timeout(Duration::from_secs(3), active.read_exact(&mut reply))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(&reply, b"ok");
+            page_forward_disconnect(id).await.unwrap();
+            assert_eq!(received.recv().await.unwrap().kind, "closed");
+            assert!(!PAGE_FORWARD_SESSIONS.lock().await.contains_key(&id));
+            for port in ports {
+                assert!(TcpListener::bind(("0.0.0.0", port)).await.is_ok());
+            }
+            let ended = tokio::time::timeout(Duration::from_secs(2), active.read(&mut byte))
+                .await
+                .unwrap();
+            assert!(ended.is_err() || ended.unwrap() == 0);
+            echo_task.abort();
+        }
     }
 
     struct TestServer {

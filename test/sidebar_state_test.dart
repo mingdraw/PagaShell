@@ -78,7 +78,7 @@ void main() {
       find.ancestor(of: toggle, matching: find.byType(DragToMoveArea)),
       findsNothing,
     );
-    expect(tester.widget<AppIconButton>(toggle).tooltip, isNull);
+    expect(tester.widget<AppIconButton>(toggle).tooltip, '隐藏侧边栏');
     await tester.tap(findAppIconButton('隐藏侧边栏'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));

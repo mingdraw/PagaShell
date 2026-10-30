@@ -5,6 +5,7 @@ import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 import '../../application/gateways/gateway_controller.dart';
 import '../../application/hosts/host_controller.dart';
 import '../../domain/entities/host.dart';
+import '../../domain/entities/proxy_config.dart';
 import '../../domain/vault/secret_store.dart';
 import '../components/app_dialog.dart';
 import '../components/app_icon_button.dart';
@@ -193,6 +194,9 @@ class _HostEditDialogState extends State<HostEditDialog> {
     final id = _hostId;
     final name = _name.text.trim();
     final username = _username.text.trim();
+    final latest = widget.host == null
+        ? widget.copyFrom
+        : controller.hosts.firstWhereOrNull((h) => h.id == id) ?? widget.host;
     final host = Host(
       id: id,
       name: name.isEmpty ? _hostname.text.trim() : name,
@@ -215,13 +219,8 @@ class _HostEditDialogState extends State<HostEditDialog> {
       pageServerFingerprint: _isPage ? _pageFingerprint.text.trim() : '',
       colorValue: (widget.host ?? widget.copyFrom)?.colorValue,
       sortOrder: widget.host?.sortOrder ?? 0,
-      forwardPorts:
-          (widget.host == null
-                  ? widget.copyFrom
-                  : controller.hosts.firstWhereOrNull((h) => h.id == id) ??
-                        widget.host)
-              ?.forwardPorts ??
-          const [],
+      forwardPorts: latest?.forwardPorts ?? const [],
+      proxyConfig: latest?.proxyConfig ?? const ProxyConfig(),
     );
     final password = _password.text;
     final mode = _mode;

@@ -2,7 +2,7 @@ name: pagashell
 description: "An open-source, local-first SSH/SFTP/RDP desktop client with an optional AI Agent, built with Flutter."
 repository: https://github.com/mingdraw/PagaShell
 publish_to: 'none'
-version: 0.1.0+1
+version: 0.2.0+2
 
 environment:
   sdk: ^3.13.0

@@ -4,6 +4,7 @@ import 'package:drift_flutter/drift_flutter.dart';
 import '../../domain/entities/host.dart';
 import '../../domain/entities/identity.dart';
 import '../../domain/services/identity_protocol_migration.dart';
+import '../storage/application_directories.dart';
 
 part 'app_database.g.dart';
 
@@ -32,7 +33,7 @@ class IdentityFolders extends Table {
   Set<Column> get primaryKey => {id};
 }
 
-/// 服务及网关元数据。端口映射随服务保存，凭据存于系统钥匙串。
+/// 服务及网关元数据。转发与代理随网关保存，凭据存于系统钥匙串。
 @DataClassName('HostRow')
 class Hosts extends Table {
   BoolColumn get isGateway => boolean().withDefault(const Constant(false))();
@@ -54,6 +55,7 @@ class Hosts extends Table {
   IntColumn get colorValue => integer().nullable()();
   IntColumn get sortOrder => integer().withDefault(const Constant(0))();
   TextColumn get forwardPortsJson => text().withDefault(const Constant('[]'))();
+  TextColumn get proxyConfigJson => text().withDefault(const Constant('{}'))();
 
   @override
   Set<Column> get primaryKey => {id};
@@ -113,11 +115,13 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase.forTesting(super.executor);
 
   @override
-  int get schemaVersion => 11;
+  int get schemaVersion => 13;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
     onUpgrade: (m, from, to) async {
+      // 先添加新列，后面的历史迁移会使用生成的整行查询。
+      if (from < 13) await m.addColumn(hosts, hosts.proxyConfigJson);
       if (from < 2) await m.createTable(knownHosts);
       if (from < 3) await m.createTable(appSettings);
       if (from < 4) {
@@ -201,8 +205,17 @@ class AppDatabase extends _$AppDatabase {
           }
         }
       }
+      if (from < 12) {
+        // 转发改为归属网关；用户确认清除旧的服务映射，不推断新的目标地址。
+        await customStatement("UPDATE hosts SET forward_ports_json = '[]'");
+      }
     },
   );
 
-  static QueryExecutor _open() => driftDatabase(name: 'pagashell');
+  static QueryExecutor _open() => driftDatabase(
+    name: 'pagashell',
+    native: const DriftNativeOptions(
+      databaseDirectory: ApplicationDirectories.database,
+    ),
+  );
 }

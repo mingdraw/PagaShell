@@ -101,9 +101,19 @@ abstract interface class SshEngineSession {
   Future<void> close();
 }
 
-/// 独立转发连接的可选能力，不要求终端/SFTP 测试替身实现。
+/// 独立网关转发连接；不需要目标服务的 SSH 登录信息。
+abstract interface class GatewayForwardEngine {
+  Future<PortForwardSession> connectForward(
+    SshGateway gateway, {
+    HostKeyVerifier? verifyHostKey,
+    Future<void>? cancelled,
+  });
+}
+
+/// 网关转发连接的可选能力，不要求终端/SFTP 测试替身实现。
 abstract interface class PortForwardSession {
   Stream<PortForwardEvent> startPortForwards(List<ForwardPort> ports);
+  Future<void> close();
 }
 
 class PortForwardEvent {

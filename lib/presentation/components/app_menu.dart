@@ -28,6 +28,7 @@ IconData? _menuIcon(Object? action) => switch (action) {
   'open-transfer' => shadcn.LucideIcons.folderOpen,
   'new-host' => shadcn.LucideIcons.fileTerminal,
   'new-gateway' => shadcn.LucideIcons.network,
+  'dynamic-proxy' => shadcn.LucideIcons.network,
   'port-forward' ||
   'new-forward' ||
   'start' => shadcn.LucideIcons.arrowLeftRight,

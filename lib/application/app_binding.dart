@@ -4,6 +4,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:get/get.dart';
 
 import '../domain/entities/sidebar_state.dart';
+import '../domain/rdp/rdp_clipboard.dart';
 import '../domain/repositories/folder_repository.dart';
 import '../domain/repositories/host_repository.dart';
 import '../domain/repositories/host_tree_repository.dart';
@@ -28,6 +29,8 @@ import '../infrastructure/db/drift_identity_tree_repository.dart';
 import '../infrastructure/db/drift_known_host_repository.dart';
 import '../infrastructure/db/drift_settings_repository.dart';
 import '../infrastructure/files/io_local_file_repository.dart';
+import '../infrastructure/files/system_clipboard.dart';
+import '../infrastructure/proxy/desktop_system_proxy.dart';
 import '../infrastructure/ssh/rust_ssh_engine.dart';
 import '../infrastructure/vault/encrypted_secret_store.dart';
 import '../infrastructure/vault/encrypted_vault_storage.dart';
@@ -85,6 +88,21 @@ class AppBinding extends Bindings {
           )
         : keychain;
     const sshEngine = RustSshEngine();
+    final transfers = Get.put<TransferController>(
+      TransferController(),
+      permanent: true,
+    );
+    final sessions = Get.put<SessionController>(
+      SessionController(
+        engine: sshEngine,
+        rdpEngine: const RustRdpEngine(),
+        vncEngine: const RustVncEngine(),
+        knownHosts: knownHosts,
+        transfers: transfers,
+        systemProxy: DesktopSystemProxy(),
+      ),
+      permanent: true,
+    );
 
     final gatewayRepository = DriftHostRepository(db, gateways: true);
     final gatewayFolders = DriftFolderRepository(db, gateways: true);
@@ -101,6 +119,7 @@ class AppBinding extends Bindings {
         secretStore: secretStore,
         treeRepository: gatewayTree,
         services: hostRepository,
+        sessions: sessions,
       ),
       permanent: true,
     );
@@ -132,6 +151,7 @@ class AppBinding extends Bindings {
     Get.put<KnownHostRepository>(knownHosts, permanent: true);
     Get.put<SettingsRepository>(settingsRepository, permanent: true);
     Get.put<SshEngine>(sshEngine, permanent: true);
+    Get.put<LocalClipboard>(SystemClipboard(), permanent: true);
     Get.put<LocalFileRepository>(
       IoLocalFileRepository(userHomeDirectory: localHomeDirectory),
       permanent: true,
@@ -154,20 +174,6 @@ class AppBinding extends Bindings {
       () => AppConnect(timeout: const Duration(seconds: 90)),
       tag: 'ai',
       fenix: true,
-    );
-    final transfers = Get.put<TransferController>(
-      TransferController(),
-      permanent: true,
-    );
-    final sessions = Get.put<SessionController>(
-      SessionController(
-        engine: sshEngine,
-        rdpEngine: const RustRdpEngine(),
-        vncEngine: const RustVncEngine(),
-        knownHosts: knownHosts,
-        transfers: transfers,
-      ),
-      permanent: true,
     );
     Get.lazyPut<AgentController>(
       () => AgentController(

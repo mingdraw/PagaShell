@@ -18,6 +18,8 @@ tracing = "0.1"
 ironrdp = { git = "https://github.com/Devolutions/IronRDP", rev = "1f69e124e6bf85608efce3495c12eaf5f6b5a95d", features = ["connector", "session", "graphics", "dvc", "svc", "displaycontrol"] }
 ironrdp-tokio = { git = "https://github.com/Devolutions/IronRDP", rev = "1f69e124e6bf85608efce3495c12eaf5f6b5a95d" }
 ironrdp-egfx = { git = "https://github.com/Devolutions/IronRDP", rev = "1f69e124e6bf85608efce3495c12eaf5f6b5a95d", features = ["openh264-bundled"] }
+ironrdp-cliprdr = { git = "https://github.com/Devolutions/IronRDP", rev = "1f69e124e6bf85608efce3495c12eaf5f6b5a95d" }
+tempfile = "3"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 sha2 = "0.10"
 x509-cert = "0.2"
@@ -25,6 +27,11 @@ rustls-native-certs = "0.8.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 vnc-rs = "0.6.0"
+hyper = { version = "1", features = ["http1", "client", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+ipnet = "2"
+tokio-util = { version = "0.7", features = ["rt"] }
 
 [dev-dependencies]
 openh264 = "0.9.9"

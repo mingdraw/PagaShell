@@ -61,6 +61,9 @@ void main() {
     await old.customStatement(
       'ALTER TABLE identities DROP COLUMN service_type',
     );
+    await old.customStatement(
+      'ALTER TABLE hosts DROP COLUMN proxy_config_json',
+    );
     await old.customStatement('PRAGMA user_version = 10');
     await old.close();
     final db = AppDatabase.forTesting(NativeDatabase(file));

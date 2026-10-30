@@ -145,15 +145,32 @@ fn parse_pin(value: &str) -> Result<Vec<u8>> {
         .collect()
 }
 
+pub(crate) fn validate_gateway(gateway: &PageGateway) -> Result<()> {
+    if gateway.server_host.trim().is_empty()
+        || gateway.server_port == 0
+        || gateway.token.is_empty()
+        || gateway.client_id.is_empty()
+        || gateway.client_id.len() > 64
+        || !gateway
+            .client_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        bail!("Page 网关配置无效，请检查 Client ID 与访问令牌");
+    }
+    if !gateway.server_fingerprint.trim().is_empty() {
+        parse_pin(&gateway.server_fingerprint)?;
+    }
+    Ok(())
+}
+
 pub(crate) async fn connect(gateway: PageGateway, host: &str, port: u16) -> Result<PageStream> {
+    validate_gateway(&gateway)?;
     let fingerprint = if gateway.server_fingerprint.trim().is_empty() {
         None
     } else {
         Some(parse_pin(&gateway.server_fingerprint)?)
     };
-    if gateway.token.is_empty() || gateway.client_id.is_empty() {
-        bail!("Page 网关配置无效，请检查 Client ID 与访问令牌");
-    }
     let tcp = TcpStream::connect((gateway.server_host.as_str(), gateway.server_port))
         .await
         .context("无法连接 Page Server")?;

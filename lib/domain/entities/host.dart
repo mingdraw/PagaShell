@@ -1,4 +1,5 @@
 import 'forward_port.dart';
+import 'proxy_config.dart';
 
 enum GatewayType {
   ssh,
@@ -44,6 +45,7 @@ class Host {
     this.pageClientId = '',
     this.pageServerFingerprint = '',
     this.forwardPorts = const [],
+    this.proxyConfig = const ProxyConfig(),
   });
 
   final String id;
@@ -71,8 +73,9 @@ class Host {
   final String pageClientId;
   final String pageServerFingerprint;
 
-  /// 随服务保存的端口映射；打开页签不会自动启动。
+  /// 随网关保存的端口映射；打开页签不会自动启动。
   final List<ForwardPort> forwardPorts;
+  final ProxyConfig proxyConfig;
 
   /// 侧边栏色标（ARGB），null 表示未设置。
   final int? colorValue;
@@ -110,6 +113,7 @@ class Host {
     int? colorValue,
     int? sortOrder,
     List<ForwardPort>? forwardPorts,
+    ProxyConfig? proxyConfig,
   }) {
     return Host(
       id: id,
@@ -137,6 +141,7 @@ class Host {
       colorValue: colorValue ?? this.colorValue,
       sortOrder: sortOrder ?? this.sortOrder,
       forwardPorts: forwardPorts ?? this.forwardPorts,
+      proxyConfig: proxyConfig ?? this.proxyConfig,
     );
   }
 

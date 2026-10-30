@@ -6,6 +6,7 @@ use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
 use crate::api::desktop::{DesktopCursor, DesktopFrame, DesktopHandshake};
+use crate::desktop_clipboard::{Clipboard, Command as ClipboardCommand};
 use crate::desktop_display::{DisplayControl, ResizeRequest};
 use crate::desktop_frame::{FrameEncoder, FrameRequest};
 use crate::desktop_input::HeldInputs;
@@ -82,6 +83,7 @@ struct Pending {
     public_key: Vec<u8>,
     host: String,
     display: DisplayControl,
+    clipboard: Clipboard,
 }
 struct Desktop {
     fingerprint: String,
@@ -94,6 +96,7 @@ struct Desktop {
     finished: watch::Sender<Option<String>>,
     resizes: mpsc::Sender<ResizeRequest>,
     resize_receiver: Mutex<Option<mpsc::Receiver<ResizeRequest>>>,
+    clipboard: Clipboard,
 }
 
 struct GraphicsHandler;
@@ -152,6 +155,8 @@ pub(crate) async fn prepare_with_page(
         config.support_dyn_vc_gfx_protocol = true;
         let mut connector = ClientConnector::new(config, "0.0.0.0:0".parse()?);
         let display = DisplayControl::default();
+        let clipboard = Clipboard::new();
+        connector.attach_static_channel(clipboard.client());
         connector.attach_static_channel(
             DrdynvcClient::new()
                 .with_dynamic_channel(graphics_pipeline())
@@ -207,6 +212,7 @@ pub(crate) async fn prepare_with_page(
                 public_key,
                 host,
                 display,
+                clipboard,
             },
             fingerprint,
             verifier.certificate_error(),
@@ -220,6 +226,7 @@ pub(crate) async fn prepare_with_page(
     let (frames, requests) = mpsc::channel(4);
     let (resizes, resize_receiver) = mpsc::channel(4);
     let fingerprint = pending.1;
+    let clipboard = pending.0.clipboard.clone();
     let entry = Arc::new(Desktop {
         fingerprint: fingerprint.clone(),
         pending: Mutex::new(Some(pending.0)),
@@ -231,6 +238,7 @@ pub(crate) async fn prepare_with_page(
         finished: watch::channel(None).0,
         resizes,
         resize_receiver: Mutex::new(Some(resize_receiver)),
+        clipboard,
     });
     let weak = Arc::downgrade(&entry);
     SESSIONS.lock().await.insert(id, entry);
@@ -289,19 +297,20 @@ pub(crate) async fn authenticate(
             public_key,
             host,
             display,
+            clipboard,
         } = pending;
         connector.config.credentials = Credentials::UsernamePassword { username, password };
         connector.config.domain = (!domain.is_empty()).then_some(domain);
         let result =
             crate::rdp_connection::finalize(upgraded, connector, &mut framed, host, public_key)
                 .await?;
-        Ok::<_, anyhow::Error>((result, framed, display))
+        Ok::<_, anyhow::Error>((result, framed, display, clipboard))
     };
     let result = tokio::select! { biased;
         _ = cancel.changed() => Err(anyhow!("连接已取消")),
         result = task => result,
     };
-    let (result, framed, display) = match result {
+    let (result, framed, display, clipboard) = match result {
         Ok(value) => value,
         Err(error) => {
             disconnect(id).await;
@@ -328,7 +337,15 @@ pub(crate) async fn authenticate(
         .context("RDP 会话已关闭")?;
     start_session(
         entry,
-        run(result, framed, commands, cancel, requests, display, resizes),
+        run(
+            result,
+            framed,
+            commands,
+            cancel,
+            requests,
+            (display, clipboard),
+            resizes,
+        ),
     );
     Ok(())
 }
@@ -345,6 +362,7 @@ fn start_session(
             // Do not expose panic payloads, which may contain arbitrary data.
             Err(_) => "RDP 会话处理异常，请重新连接".into(),
         };
+        entry.clipboard.cancel();
         entry.finished.send_replace(Some(reason));
     });
 }
@@ -497,11 +515,44 @@ pub(crate) async fn disconnect(id: u32) {
     let entry = SESSIONS.lock().await.remove(&id);
     if let Some(entry) = entry {
         entry.cancel.send_replace(true);
+        entry.clipboard.cancel();
         entry.pending.lock().await.take();
         entry.receiver.lock().await.take();
         entry.requests.lock().await.take();
         entry.resize_receiver.lock().await.take();
     }
+}
+
+pub(crate) async fn clipboard_active(id: u32, active: bool, directory: String) -> Result<()> {
+    session(id).await?.clipboard.active(active, directory).await
+}
+
+pub(crate) async fn clipboard_update(
+    id: u32,
+    text: Option<String>,
+    files: Vec<String>,
+) -> Result<()> {
+    let entry = session(id).await?;
+    tokio::select! {
+        error = session_end(&entry) => Err(error),
+        result = entry.clipboard.update(text, files) => result,
+    }
+}
+
+pub(crate) async fn clipboard_event(
+    id: u32,
+    after: u32,
+) -> Result<Option<crate::api::desktop::DesktopClipboardEvent>> {
+    let entry = session(id).await?;
+    tokio::select! {
+        error = session_end(&entry) => Err(error),
+        result = entry.clipboard.next(after) => Ok(result),
+    }
+}
+
+pub(crate) async fn clipboard_cancel(id: u32) -> Result<()> {
+    session(id).await?.clipboard.cancel();
+    Ok(())
 }
 
 async fn run(
@@ -510,9 +561,13 @@ async fn run(
     mut commands: mpsc::Receiver<Vec<FastPathInputEvent>>,
     mut cancel: watch::Receiver<bool>,
     mut requests: mpsc::Receiver<FrameRequest>,
-    display: DisplayControl,
+    controls: (DisplayControl, Clipboard),
     mut resizes: mpsc::Receiver<ResizeRequest>,
 ) -> Result<()> {
+    let (display, clipboard) = controls;
+    let mut clipboard_commands = clipboard.receiver();
+    let mut clipboard_tick = tokio::time::interval(Duration::from_secs(5));
+    clipboard_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let activation_factory = result.activation_factory;
     let mut image = crate::rdp::new_image(result.desktop_size)?;
     let mut stage = ActiveStageBuilder {
@@ -566,6 +621,15 @@ async fn run(
         // Fair polling keeps both sustained graphics and input traffic moving.
         let outputs = tokio::select! {
             _ = cancel.changed() => break,
+            command = clipboard_commands.recv() => {
+                match command {
+                    Some(ClipboardCommand::Protocol(message)) => clipboard.process(&mut stage, message),
+                    Some(ClipboardCommand::Publish(local)) => clipboard.publish(&mut stage, local),
+                    Some(ClipboardCommand::Barrier(reply)) => { let _ = reply.send(()); continue; }
+                    None => break,
+                }
+            }
+            _ = clipboard_tick.tick() => clipboard.timeouts(&mut stage),
             request = resizes.recv(), if pending_resize.is_none() => {
                 let Some(request) = request else { break; };
                 pending_resize = Some(request);
@@ -1080,6 +1144,7 @@ mod tests {
         let (resizes, resize_receiver) = mpsc::channel(4);
         let entry = Arc::new(Desktop {
             fingerprint: "trusted-cert".into(),
+            clipboard: Clipboard::new(),
             pending: Mutex::new(None),
             cancel: watch::channel(false).0,
             commands,

@@ -29,6 +29,7 @@ class SidebarToggleButton extends StatelessWidget {
       return AppIconButton(
         key: const ValueKey('sidebar-toggle'),
         semanticLabel: (visible ? '隐藏侧边栏' : '显示侧边栏').tr,
+        tooltip: (visible ? '隐藏侧边栏' : '显示侧边栏').tr,
         icon: Icon(
           visible
               ? shadcn.LucideIcons.panelLeftClose

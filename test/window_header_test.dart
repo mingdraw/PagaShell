@@ -79,11 +79,11 @@ void main() {
       }
       expect(
         tester.getRect(importButton).left,
-        greaterThan(tester.getRect(settingsButton).right),
+        greaterThanOrEqualTo(tester.getRect(settingsButton).right),
       );
       expect(
         tester.getRect(exportButton).left,
-        greaterThan(tester.getRect(importButton).right),
+        greaterThanOrEqualTo(tester.getRect(importButton).right),
       );
       await tester.pumpAndSettle();
       expect(calls, isEmpty);

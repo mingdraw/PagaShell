@@ -9,6 +9,10 @@ class AppTranslations extends Translations {
 
   /// Rust 桥接错误携带动态地址/句柄；只识别已知前缀，其他诊断保持原文。
   static String error(String message) {
+    final proxyBind = RegExp(r'^无法监听本地代理端口 (\d+)$').firstMatch(message);
+    if (proxyBind != null) {
+      return '无法监听本地代理端口 @port，请检查端口占用或权限'.trParams({'port': proxyBind[1]!});
+    }
     final rdp = RegExp(
       r'^(RDP NLA 认证失败|RDP 会话初始化失败)：([^（）\r\n]+)（([^（）\r\n]+)）$',
     ).firstMatch(message);
@@ -23,10 +27,12 @@ class AppTranslations extends Translations {
     if (bind != null) {
       return '无法监听本地端口 @port，请检查端口占用或权限'.trParams({'port': bind[1]!});
     }
-    final forward = RegExp(r'^本地端口 (\d+) 的目标连接失败，请检查服务端口和转发权限$')
+    final forward = RegExp(r'^本地端口 (\d+) 的目标连接失败，请检查目标地址、端口和网关转发权限$')
         .firstMatch(message);
     if (forward != null) {
-      return '本地端口 @port 的目标连接失败，请检查服务端口和转发权限'.trParams({'port': forward[1]!});
+      return '本地端口 @port 的目标连接失败，请检查目标地址、端口和网关转发权限'.trParams({
+        'port': forward[1]!,
+      });
     }
     for (final prefix in _errorPrefixes) {
       if (message.startsWith(prefix)) {
@@ -54,6 +60,57 @@ class AppTranslations extends Translations {
   };
 
   static const Map<String, String> _english = {
+    '动态代理': 'Dynamic proxy',
+    'Clash 扩展脚本': 'Clash extension script',
+    '复制脚本': 'Copy script',
+    '已复制': 'Copied',
+    '复制失败，请重试': 'Could not copy. Try again.',
+    '订阅 → 右键当前订阅 → 编辑扩展脚本。已有自定义脚本时，请合入原来的 main 函数。': 'Profiles → right-click the active profile → Edit extension script. Merge into the existing main function if you already have a custom script.',
+    '全局模式：Clash 原有规则未匹配的其余流量通过 PagaShell 网关。': 'Global mode: Traffic not matched by existing Clash rules uses the PagaShell gateway.',
+    '尚未配置代理规则，脚本仅添加节点。可先在规则模式下添加规则，再重新生成。': 'No proxy rules are configured, so this script only adds a node. Add rules in Rule mode, then generate the script again.',
+    '规则模式：命中已配置规则的请求通过 PagaShell 网关，其余流量沿用 Clash 原有分流。': 'Rule mode: Requests matching configured rules use the PagaShell gateway. Other traffic follows existing Clash routes.',
+    '代理模式': 'Proxy mode',
+    '规则': 'Rule',
+    '全局': 'Global',
+    '直连': 'Direct',
+    '代理规则': 'Proxy rules',
+    '协议端口': 'Protocol ports',
+    '监听端口': 'Listen port',
+    '代理失败': 'Proxy failed',
+    '添加规则': 'Add rule',
+    '移除规则': 'Remove rule',
+    '匹配方式': 'Match type',
+    '匹配内容': 'Match value',
+    '域名全匹配': 'Exact domain',
+    '域名前缀': 'Domain prefix',
+    '域名后缀': 'Domain suffix',
+    '启动代理': 'Start proxy',
+    '停止代理': 'Stop proxy',
+    '自动设置系统网络代理': 'Set system network proxy automatically',
+    '系统代理待恢复': 'System proxy restore pending',
+    '系统代理配置已被部分修改，请在系统设置中移除本应用代理后重试停止': 'System proxy settings were partially changed. Remove the remaining PagaShell proxy entries in system settings, then try stopping again.',
+    '监听地址：127.0.0.1；支持手动配置或自动设置系统网络代理': 'Listen address: 127.0.0.1. Configure apps manually or set the system network proxy automatically.',
+    '系统代理已被占用，请先停止其他代理或取消自动设置': 'A system proxy is already active. Stop the other proxy or disable automatic setup.',
+    '没有修改系统代理的权限，请授权后重试': 'Permission to change system proxy settings was denied. Authorize and try again.',
+    '自动设置系统代理失败，请检查系统设置或取消自动设置': 'Could not set the system proxy. Check system settings or disable automatic setup.',
+    '当前系统不支持自动设置网络代理，请手动设置': 'Automatic proxy setup is unavailable on this system. Configure the proxy manually.',
+    '恢复系统代理失败，请重试停止代理':
+        'Could not restore the system proxy. Try stopping the proxy again.',
+    '监听地址：127.0.0.1；请在浏览器或应用中设置代理': 'Listen address: 127.0.0.1. Configure the proxy in your browser or application.',
+    '命中任一规则走网关，其余请求由本机直连': 'Matching requests use the gateway. Other requests connect directly from this computer.',
+    '所有请求通过当前网关连接目标': 'All requests connect through this gateway.',
+    '请填写有效的 IPv4、IPv6 或 CIDR': 'Enter a valid IPv4, IPv6 or CIDR address.',
+    '请填写域名，不包含协议、端口或通配符': 'Enter a domain without a scheme, port or wildcard.',
+    '请至少启用一种代理协议': 'Enable at least one proxy protocol.',
+    '请先停止动态代理再编辑配置': 'Stop the dynamic proxy before editing its configuration.',
+    '当前引擎不支持动态代理': 'This engine does not support dynamic proxies.',
+    '动态代理监听已断开': 'The dynamic proxy listener has stopped.',
+    '无法监听本地代理端口 @port，请检查端口占用或权限':
+        'Cannot listen on proxy port @port. Check port usage and permissions.',
+    '代理配置无效': 'Invalid proxy configuration.',
+    '代理配置过大': 'Proxy configuration is too large.',
+    '代理规则过多': 'Too many proxy rules.',
+    '代理目标连接超时': 'Proxy target connection timed out.',
     '展开 Agent': 'Expand Agent',
     '较早的对话已移出模型上下文，聊天内容仍可查看': 'Earlier turns are no longer sent to the model. You can still read them here.',
     '数据保存在本机 · AI 按需连接外部 API': 'Local data · Optional external AI API',
@@ -250,6 +307,29 @@ class AppTranslations extends Translations {
     '远程桌面': 'Remote desktop',
     '分辨率': 'Resolution',
     '自适应窗口': 'Fit to window',
+    '正在同步剪贴板': 'Syncing clipboard',
+    '正在接收剪贴板文件（@percent%）': 'Receiving clipboard files (@percent%)',
+    '取消剪贴板传输': 'Cancel clipboard transfer',
+    'RDP 剪贴板已断开，请重新连接':
+        'The RDP clipboard disconnected. Reconnect to continue.',
+    '无法访问本机剪贴板': 'Could not access the local clipboard.',
+    '无法写入本机剪贴板': 'Could not write to the local clipboard.',
+    'RDP 剪贴板同步失败，请重新复制': 'Clipboard sync failed. Copy again to retry.',
+    'RDP 剪贴板传输失败，请重新复制': 'Clipboard transfer failed. Copy again to retry.',
+    'RDP 剪贴板缓存目录无效': 'The clipboard cache directory is invalid.',
+    'RDP 剪贴板缓存不可用': 'The clipboard cache is unavailable.',
+    'RDP 剪贴板内容超出大小或数量限制': 'Clipboard content exceeds the size or item limit.',
+    '无法读取剪贴板文件，请检查权限、文件名或文件数量': 'Could not read the clipboard files. Check permissions, names, or the item count.',
+    'RDP 剪贴板通道已关闭': 'The clipboard channel is closed.',
+    'RDP 剪贴板同步超时': 'Clipboard sync timed out.',
+    '远端未建立剪贴板通道，请检查 Windows 剪贴板重定向设置或重新连接': 'The remote clipboard channel was not established. Check Windows clipboard redirection settings or reconnect.',
+    '远端未启用文件剪贴板重定向':
+        'File clipboard redirection is disabled on the remote computer.',
+    '远端拒绝了剪贴板内容，请重新复制':
+        'The remote computer rejected the clipboard. Copy again to retry.',
+    '无法读取远端剪贴板，请重新复制':
+        'Could not read the remote clipboard. Copy again to retry.',
+    '剪贴板文件接收失败，请检查文件大小、磁盘空间或重新复制': 'Could not receive clipboard files. Check the file size and free disk space, or copy again.',
     '全屏（Ctrl+Alt+Enter）': 'Full screen (Ctrl+Alt+Enter)',
     '退出全屏': 'Exit full screen',
     '无法进入全屏，请重试': 'Could not enter full screen. Try again.',
@@ -291,13 +371,16 @@ class AppTranslations extends Translations {
     '添加映射': 'Add mapping',
     '移除映射': 'Remove mapping',
     '目标端口': 'Target port',
+    '目标地址': 'Target address',
+    '请填写有效的目标地址': 'Enter a valid target address',
     '目标端口：@port': 'Target port: @port',
     '本地端口': 'Local port',
     '本机端口：@port': 'Local port: @port',
     '复制本机端口': 'Copy local port',
-    '关联服务：@name': 'Service: @name',
+    '关联网关：@name': 'Gateway: @name',
     '通过网关：@name': 'Via gateway: @name',
-    '转发到服务的目标端口，本地监听 *（所有 IPv4 网卡）': 'Forwards to the service’s target port. Listens on * (all IPv4 interfaces).',
+    '目标地址由内网 Client 访问，127.0.0.1 指 Client 本机': 'Targets are accessed by the internal Client. 127.0.0.1 refers to the Client machine.',
+    '目标地址由 SSH 网关访问，127.0.0.1 指网关本机': 'Targets are accessed by the SSH gateway. 127.0.0.1 refers to the gateway machine.',
     '暂无端口映射，添加后可手动启动转发':
         'No port mappings. Add one to start forwarding manually.',
     '所选服务已不存在': 'The selected service no longer exists',
@@ -312,7 +395,7 @@ class AppTranslations extends Translations {
     '端口转发已启动': 'Port forwarding is already running',
     '会话已关闭': 'The session is closed',
     '无法监听本地端口 @port，请检查端口占用或权限': 'Unable to listen on local port @port. Check port usage and permissions.',
-    '本地端口 @port 的目标连接失败，请检查服务端口和转发权限': 'The target for local port @port could not be reached. Check the service port and forwarding permissions.',
+    '本地端口 @port 的目标连接失败，请检查目标地址、端口和网关转发权限': 'The target for local port @port could not be reached. Check the target address, port, and gateway forwarding permissions.',
     '设置': 'Settings',
     '隐藏侧边栏': 'Hide sidebar',
     '显示侧边栏': 'Show sidebar',
@@ -490,6 +573,10 @@ class AppTranslations extends Translations {
     '关闭当前标签': 'Close this tab',
     '关闭其他标签': 'Close other tabs',
     '关闭全部标签': 'Close all tabs',
+    '停止并关闭标签？': 'Stop and close tabs?',
+    '关闭标签将自动停止以下端口转发或动态代理，是否继续？': 'Closing these tabs will automatically stop the following port forwarding or dynamic proxies. Continue?',
+    '@name（@kind）': '@name (@kind)',
+    '停止并关闭': 'Stop and close',
     '会话列表': 'Session list',
     '批量执行命令': 'Run command on multiple terminals',
     '选择 SSH 终端': 'Select SSH terminals',

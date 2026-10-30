@@ -9,6 +9,7 @@ import 'package:pagashell/domain/entities/folder.dart';
 import 'package:pagashell/domain/entities/forward_port.dart';
 import 'package:pagashell/domain/entities/host.dart';
 import 'package:pagashell/domain/entities/identity.dart';
+import 'package:pagashell/domain/entities/proxy_config.dart';
 import 'package:pagashell/domain/services/host_tree.dart';
 import 'package:pagashell/domain/services/identity_tree.dart';
 import 'package:pagashell/domain/vault/secret_store.dart';
@@ -70,7 +71,6 @@ ConnectionConfiguration _fixture() => ConnectionConfiguration(
       gatewayId: 'jump',
       colorValue: 0xff00ff00,
       sortOrder: 0,
-      forwardPorts: [ForwardPort(localPort: 8080, targetPort: 80)],
     ),
     Host(
       id: 'nested',
@@ -105,7 +105,22 @@ ConnectionConfiguration _fixture() => ConnectionConfiguration(
       gatewayType: GatewayType.page,
       pageClientId: 'test-client',
       pageServerFingerprint: 'test-page-fingerprint',
+      proxyConfig: ProxyConfig(
+        mode: ProxyMode.rule,
+        socks5Enabled: true,
+        rules: [
+          ProxyRule(type: ProxyRuleType.ip, value: '10.0.0.0/16'),
+          ProxyRule(type: ProxyRuleType.domainSuffix, value: 'internal.test'),
+        ],
+      ),
       sortOrder: 0,
+      forwardPorts: [
+        ForwardPort(
+          localPort: 13306,
+          targetHost: 'db.internal',
+          targetPort: 3306,
+        ),
+      ],
     ),
     Host(
       id: 'jump',
@@ -113,6 +128,7 @@ ConnectionConfiguration _fixture() => ConnectionConfiguration(
       hostname: 'jump.example',
       folderId: 'gf-child',
       identityId: 'key',
+      forwardPorts: [ForwardPort(localPort: 8080, targetPort: 80)],
     ),
   ],
   identityFolders: const [
@@ -159,6 +175,70 @@ ConnectionConfiguration _fixture() => ConnectionConfiguration(
 Matcher get _configurationError => throwsA(isA<ConfigurationException>());
 
 void main() {
+  for (final version in [1, 2]) {
+    test('导入 v$version 清除旧端口映射，保留服务、网关和凭据', () async {
+      final data = _fixture().toJson();
+      data['version'] = version;
+      final services = data['services']! as List<Object?>;
+      (services.first! as Map<String, Object?>)['forwardPorts'] = [
+        {'localPort': 8080, 'targetPort': 80},
+      ];
+      final converted = ConnectionConfiguration.fromJson(data);
+      expect(converted.services.every((h) => h.forwardPorts.isEmpty), isTrue);
+      expect(converted.gateways.every((h) => h.forwardPorts.isEmpty), isTrue);
+      expect(
+        converted.services.map((h) => h.hostname),
+        _fixture().services.map((h) => h.hostname),
+      );
+      expect(
+        converted.gateways.map((h) => h.hostname),
+        _fixture().gateways.map((h) => h.hostname),
+      );
+      expect(
+        converted.services.singleWhere((h) => h.id == 'ssh').gatewayId,
+        'jump',
+      );
+      expect(converted.hostSecrets, _fixture().hostSecrets);
+      final store = _Store();
+      addTearDown(store.db.close);
+      await store.repository.merge(converted);
+      final stored = (await store.repository.read()).toJson();
+      final expected = converted.toJson();
+      for (final key in [
+        'serviceFolders',
+        'services',
+        'gatewayFolders',
+        'gateways',
+        'identityFolders',
+        'identities',
+      ]) {
+        expect(stored[key], unorderedEquals(expected[key]! as List<Object?>));
+      }
+      expect(stored['identitySecrets'], expected['identitySecrets']);
+      expect(stored['hostSecrets'], expected['hostSecrets']);
+    });
+  }
+
+  test('v3 保留网关目标地址，拒绝服务上的端口映射', () {
+    final data = _fixture().toJson();
+    expect(data['version'], 4);
+    data['version'] = 3;
+    for (final host in data['gateways']! as List<Object?>) {
+      (host! as Map<String, Object?>).remove('proxyConfig');
+    }
+    final converted = ConnectionConfiguration.fromJson(data);
+    expect(converted.gateways.first.proxyConfig.mode, ProxyMode.global);
+    expect(
+      converted.gateways.first.forwardPorts.first.targetHost,
+      'db.internal',
+    );
+    final services = data['services']! as List<Object?>;
+    (services.first! as Map<String, Object?>)['forwardPorts'] = [
+      {'localPort': 8080, 'targetHost': 'db.internal', 'targetPort': 80},
+    ];
+    expect(() => ConnectionConfiguration.fromJson(data), _configurationError);
+  });
+
   test('默认导出未加密文件，无密码导入保留配置、排序与全部凭据', () async {
     final source = _Store();
     late ConnectionConfiguration exported;
@@ -670,7 +750,7 @@ void main() {
           services: [Host(id: 'a', name: 'A', hostname: 'a', port: 65536)],
         ),
         const ConnectionConfiguration(
-          services: [
+          gateways: [
             Host(
               id: 'a',
               name: 'A',

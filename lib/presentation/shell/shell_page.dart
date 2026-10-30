@@ -11,6 +11,7 @@ import '../../application/ai/agent_controller.dart';
 import '../../application/session/session.dart';
 import '../../application/session/session_controller.dart';
 import '../../application/settings/settings_controller.dart';
+import '../../domain/proxy/system_proxy.dart';
 import '../ai/agent_workspace.dart';
 import '../components/app_dialog.dart';
 import '../components/app_icon_button.dart';
@@ -23,6 +24,7 @@ import '../settings/settings_dialog.dart';
 import '../theme/app_theme.dart';
 import 'agent_sidebar_scope.dart';
 import 'command_palette.dart';
+import 'session_close_confirmation.dart';
 import 'widgets/settings_menu_button.dart';
 import 'widgets/sidebar.dart';
 import 'widgets/window_controls.dart';
@@ -203,6 +205,14 @@ class _ShellPageState extends State<ShellPage> with WindowListener {
               true;
         }
       }
+      if (allow) {
+        try {
+          await _sessions.closeAll();
+        } on SystemProxyException catch (error) {
+          allow = false;
+          AppNotice.error(error.message);
+        }
+      }
       _allowExit = allow;
       _exitPending = null;
       return allow;
@@ -251,7 +261,10 @@ class _ShellPageState extends State<ShellPage> with WindowListener {
   }
 
   void _closeActiveTab() {
-    if (_canRunWorkspaceCommand) unawaited(_sessions.closeActive());
+    final id = _sessions.activeSessionId.value;
+    if (_canRunWorkspaceCommand && id != null) {
+      unawaited(requestSessionTabClose(_sessions, [id]));
+    }
   }
 
   void _openSettings() {
@@ -464,29 +477,25 @@ class _SidebarPanel extends StatelessWidget {
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           const SettingsMenuButton(),
-                          const SizedBox(width: 12),
                           AppIconButton.ghost(
                             key: const ValueKey('import-configuration'),
                             semanticLabel: '导入配置'.tr,
                             tooltip: '导入配置'.tr,
                             icon: const Icon(
                               shadcn.LucideIcons.download,
-                              size: AppTheme.statusBarIconSize,
+                              size: AppTheme.toolbarIconSize,
                             ),
-                            density: shadcn.ButtonDensity.compact,
                             onPressed: () =>
                                 unawaited(showConfigurationImportDialog()),
                           ),
-                          const SizedBox(width: 12),
                           AppIconButton.ghost(
                             key: const ValueKey('export-configuration'),
                             semanticLabel: '导出配置'.tr,
                             tooltip: '导出配置'.tr,
                             icon: const Icon(
                               shadcn.LucideIcons.upload,
-                              size: AppTheme.statusBarIconSize,
+                              size: AppTheme.toolbarIconSize,
                             ),
-                            density: shadcn.ButtonDensity.compact,
                             onPressed: () =>
                                 unawaited(showConfigurationExportDialog()),
                           ),

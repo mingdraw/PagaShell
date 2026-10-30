@@ -3,10 +3,15 @@ import 'dart:convert';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge.dart'
     show AnyhowException;
+import 'package:path/path.dart' as path;
+import 'package:path_provider/path_provider.dart';
 
 import '../../domain/entities/forward_port.dart';
 import '../../domain/entities/host.dart';
 import '../../domain/entities/identity.dart';
+import '../../domain/entities/proxy_config.dart';
+import '../../domain/proxy/dynamic_proxy_engine.dart';
+import '../../domain/rdp/rdp_clipboard.dart';
 import '../../domain/rdp/rdp_engine.dart';
 import '../../domain/ssh/host_key.dart';
 import '../../domain/ssh/server_status.dart';
@@ -14,6 +19,7 @@ import '../../domain/ssh/ssh_engine.dart';
 import '../../domain/vnc/vnc_engine.dart';
 import '../../src/rust/api/desktop.dart' as desktop;
 import '../../src/rust/api/page.dart' as page;
+import '../../src/rust/api/proxy.dart' as proxy;
 import '../../src/rust/api/ssh.dart' as rust;
 import '../../src/rust/api/vnc.dart' as vnc;
 import 'rdp_connection_error.dart';
@@ -32,8 +38,122 @@ page.PageGateway _pageSettings(SshGateway gateway) => page.PageGateway(
 ///
 /// 桥接层职责：域模型 ↔ FFI 参数转换、字节流 → UTF-8 解码（容忍分片的
 /// 多字节字符）、异常语义转换。协议逻辑全部在 Rust 侧。
-class RustSshEngine implements SshEngine, PrivateKeyValidator {
+class RustSshEngine
+    implements
+        SshEngine,
+        PrivateKeyValidator,
+        GatewayForwardEngine,
+        DynamicProxyEngine {
   const RustSshEngine();
+
+  @override
+  Future<DynamicProxySession> startProxy(
+    ProxyConfig config, {
+    SshGateway? gateway,
+    HostKeyVerifier? verifyHostKey,
+    Future<void>? cancelled,
+  }) async {
+    config.validate(forStart: true);
+    _RustEngineSession? sshGateway;
+    int? id;
+    var wasCancelled = false;
+    var finished = false;
+    var success = false;
+    Future<void> cleanup() async {
+      try {
+        if (id != null) await proxy.proxyStop(proxyId: id);
+      } finally {
+        await sshGateway?.close();
+      }
+    }
+
+    void checkCancelled() {
+      if (wasCancelled) throw const SshEngineException('连接已取消');
+    }
+
+    if (cancelled != null) {
+      unawaited(
+        cancelled.then((_) async {
+          if (finished) return;
+          wasCancelled = true;
+          await cleanup();
+        }),
+      );
+    }
+    try {
+      checkCancelled();
+      if (gateway == null) throw const SshEngineException('所选网关不可用');
+      if (gateway.host.gatewayType == GatewayType.ssh) {
+        sshGateway = await connect(
+          gateway.host,
+          gateway.credentials,
+          verifyHostKey: verifyHostKey,
+          cancelled: cancelled,
+        ) as _RustEngineSession;
+      }
+      checkCancelled();
+      id = await proxy.proxyStart(
+        configJson: jsonEncode(config.toEngineJson()),
+        sshGatewayId: sshGateway?._sessionId,
+        pageGateway: gateway.host.gatewayType == GatewayType.page
+            ? _pageSettings(gateway)
+            : null,
+      );
+      checkCancelled();
+      success = true;
+      return _RustProxySession(id, sshGateway);
+    } on AnyhowException catch (e) {
+      throw SshEngineException(e.message.split('\n').first, e);
+    } finally {
+      finished = true;
+      if (!success) await cleanup();
+    }
+  }
+
+  @override
+  Future<PortForwardSession> connectForward(
+    SshGateway gateway, {
+    HostKeyVerifier? verifyHostKey,
+    Future<void>? cancelled,
+  }) async {
+    if (gateway.host.gatewayType == GatewayType.ssh) {
+      final session = await connect(
+        gateway.host,
+        gateway.credentials,
+        verifyHostKey: verifyHostKey,
+        cancelled: cancelled,
+      );
+      return session as PortForwardSession;
+    }
+    var wasCancelled = false;
+    var finished = false;
+    int? id;
+    if (cancelled != null) {
+      unawaited(
+        cancelled.then((_) async {
+          if (finished) return;
+          wasCancelled = true;
+          if (id != null) {
+            await rust
+                .pageForwardDisconnect(sessionId: id)
+                .catchError((Object _) {});
+          }
+        }),
+      );
+    }
+    try {
+      id = await rust.pageForwardCreate(gateway: _pageSettings(gateway));
+      if (wasCancelled) {
+        await rust.pageForwardDisconnect(sessionId: id);
+        throw const SshEngineException('连接已取消');
+      }
+      return _RustPageForwardSession(id);
+    } on AnyhowException catch (e) {
+      throw SshEngineException(e.message.split('\n').first, e);
+    } finally {
+      finished = true;
+    }
+  }
 
   @override
   Future<void> validatePrivateKey(
@@ -265,7 +385,7 @@ class RustRdpEngine implements RdpEngine {
       );
       checkCancelled();
       success = true;
-      return _RustDesktopSession(id, sshGateway);
+      return _RustRdpDesktopSession(id, sshGateway);
     } on AnyhowException catch (e) {
       throw rdpConnectionError(e.message, cause: e);
     } finally {
@@ -352,6 +472,69 @@ class RustVncEngine implements VncEngine {
       finished = true;
       if (!success) await cleanup();
     }
+  }
+}
+
+class _RustRdpDesktopSession extends _RustDesktopSession
+    implements RdpClipboardSession {
+  _RustRdpDesktopSession(super.id, super.gateway);
+
+  @override
+  Stream<RdpClipboardEvent> get clipboardEvents async* {
+    var sequence = 0;
+    while (!_closed) {
+      try {
+        final event = await desktop.desktopClipboardEvent(
+          sessionId: id,
+          afterSequence: sequence,
+        );
+        if (_closed) return;
+        if (event == null) continue;
+        sequence = event.sequence;
+        yield RdpClipboardEvent(
+          kind: RdpClipboardEventKind.values[event.kind],
+          content: ClipboardContent(text: event.text, files: event.files),
+          transferred: event.transferred.toInt(),
+          total: event.total.toInt(),
+          error: event.error,
+        );
+      } on AnyhowException {
+        if (_closed) return;
+        throw const SshEngineException('RDP 剪贴板已断开，请重新连接');
+      }
+    }
+  }
+
+  @override
+  Future<void> setClipboardActive(bool active) async {
+    if (_closed) return;
+    final directory = active
+        ? path.join((await getTemporaryDirectory()).path, 'rdp-clipboard')
+        : '';
+    await desktop.desktopClipboardActive(
+      sessionId: id,
+      active: active,
+      cacheDirectory: directory,
+    );
+  }
+
+  @override
+  Future<void> updateClipboard(ClipboardContent content) async {
+    if (_closed) return;
+    try {
+      await desktop.desktopClipboardUpdate(
+        sessionId: id,
+        text: content.text,
+        files: content.files,
+      );
+    } on AnyhowException catch (error) {
+      throw SshEngineException(error.message.split('\n').first);
+    }
+  }
+
+  @override
+  Future<void> cancelClipboardTransfer() async {
+    if (!_closed) await desktop.desktopClipboardCancel(sessionId: id);
   }
 }
 
@@ -503,7 +686,7 @@ class _RustEngineSession
           for (final port in ports)
             rust.ForwardPortSpec(
               localPort: port.localPort,
-              targetHost: '127.0.0.1',
+              targetHost: port.targetHost,
               targetPort: port.targetPort,
             ),
         ],
@@ -650,5 +833,62 @@ class _RustEngineSession
     } on Object {
       // 断开失败不影响本地清理。
     }
+  }
+}
+
+class _RustProxySession implements DynamicProxySession {
+  _RustProxySession(this.id, this.gateway) {
+    done = proxy.proxyWait(proxyId: id).then((error) {
+      if (error != null) throw SshEngineException(error);
+    });
+  }
+  final int id;
+  final _RustEngineSession? gateway;
+  @override
+  late final Future<void> done;
+  Future<void>? _closing;
+
+  @override
+  Future<void> close() => _closing ??= () async {
+    try {
+      await proxy.proxyStop(proxyId: id);
+    } finally {
+      await gateway?.close();
+    }
+  }();
+}
+
+class _RustPageForwardSession implements PortForwardSession {
+  _RustPageForwardSession(this.id);
+  final int id;
+  bool _closed = false;
+
+  @override
+  Stream<PortForwardEvent> startPortForwards(List<ForwardPort> ports) async* {
+    if (_closed) throw const SshEngineException('端口转发已断开');
+    try {
+      await for (final event in rust.pageStartPortForwards(
+        sessionId: id,
+        ports: [
+          for (final port in ports)
+            rust.ForwardPortSpec(
+              localPort: port.localPort,
+              targetHost: port.targetHost,
+              targetPort: port.targetPort,
+            ),
+        ],
+      )) {
+        yield PortForwardEvent(kind: event.kind, localPort: event.localPort);
+      }
+    } on AnyhowException catch (e) {
+      throw SshEngineException(e.message.split('\n').first, e);
+    }
+  }
+
+  @override
+  Future<void> close() async {
+    if (_closed) return;
+    _closed = true;
+    await rust.pageForwardDisconnect(sessionId: id);
   }
 }

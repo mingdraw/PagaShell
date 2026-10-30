@@ -898,6 +898,8 @@ class _HostTileState extends State<_HostTile> {
         );
       case 'port-forward':
         Get.find<SessionController>().openForward(widget.host);
+      case 'dynamic-proxy':
+        Get.find<SessionController>().openProxy(widget.host);
       case 'edit':
         await showHostEditDialog(
           context,
@@ -935,7 +937,8 @@ class _HostTileState extends State<_HostTile> {
     final actions = [
       if (!widget.gateway) ('new-session', '新建会话'.tr),
       if (!widget.gateway && !host.isDesktop) ('open-transfer', '文件传输'.tr),
-      if (!widget.gateway && !host.isDesktop) ('port-forward', '端口转发'.tr),
+      if (widget.gateway) ('port-forward', '端口转发'.tr),
+      if (widget.gateway) ('dynamic-proxy', '动态代理'.tr),
       ('edit', '编辑'.tr),
       ('copy', '复制'.tr),
       ('delete', '删除'.tr),

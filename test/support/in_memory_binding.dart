@@ -15,6 +15,7 @@ import 'package:pagashell/application/settings/settings_controller.dart';
 import 'package:pagashell/application/transfer/transfer_controller.dart';
 import 'package:pagashell/domain/entities/host.dart';
 import 'package:pagashell/domain/entities/sidebar_state.dart';
+import 'package:pagashell/domain/proxy/system_proxy.dart';
 import 'package:pagashell/domain/rdp/rdp_engine.dart';
 import 'package:pagashell/domain/repositories/folder_repository.dart';
 import 'package:pagashell/domain/repositories/host_repository.dart';
@@ -51,6 +52,7 @@ class InMemoryBinding extends Bindings {
     this.rdpEngine,
     this.vncEngine,
     this.knownHosts,
+    this.systemProxy,
     LocalFileRepository? localFiles,
     SecretStore? secretStore,
   }) : settingsRepository = settingsRepository ?? InMemorySettingsRepository(),
@@ -62,6 +64,7 @@ class InMemoryBinding extends Bindings {
   final RdpEngine? rdpEngine;
   final VncEngine? vncEngine;
   final KnownHostRepository? knownHosts;
+  final SystemProxy? systemProxy;
   final SecretStore secretStore;
   final LocalFileRepository localFiles;
 
@@ -83,12 +86,24 @@ class InMemoryBinding extends Bindings {
       folders: gatewayFolders,
       hosts: gatewayRepository,
     );
+    final transfers = Get.put(TransferController());
+    final sessions = Get.put(
+      SessionController(
+        engine: sshEngine,
+        transfers: transfers,
+        rdpEngine: rdpEngine,
+        vncEngine: vncEngine,
+        knownHosts: knownHosts,
+        systemProxy: systemProxy,
+      ),
+    );
     final gateways = Get.put(
       GatewayController(
         repository: gatewayRepository,
         secretStore: secretStore,
         treeRepository: gatewayTree,
         services: hostRepository,
+        sessions: sessions,
       ),
     );
     final gatewayFolderController = Get.put(
@@ -137,16 +152,6 @@ class InMemoryBinding extends Bindings {
     Get.put<SettingsRepository>(settingsRepository);
     final settings = Get.put(
       SettingsController(repository: settingsRepository),
-    );
-    final transfers = Get.put(TransferController());
-    final sessions = Get.put(
-      SessionController(
-        engine: sshEngine,
-        transfers: transfers,
-        rdpEngine: rdpEngine,
-        vncEngine: vncEngine,
-        knownHosts: knownHosts,
-      ),
     );
     final aiSettings = Get.put(
       AiSettingsController(

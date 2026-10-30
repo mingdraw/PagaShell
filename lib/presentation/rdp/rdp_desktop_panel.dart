@@ -1,12 +1,15 @@
 import 'dart:async';
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
+import '../../application/rdp/rdp_clipboard_controller.dart';
+import '../../domain/rdp/rdp_clipboard.dart';
 import '../../domain/rdp/rdp_engine.dart';
 import '../../domain/rdp/rdp_resolution.dart';
 import '../../domain/ssh/ssh_engine.dart';
@@ -49,6 +52,9 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
   final _pressed = <int>{};
   final _vncPressed = <PhysicalKeyboardKey, int>{};
   final _buttons = <int>{};
+  final _macMeta = <PhysicalKeyboardKey>{};
+  final _clipboardShortcutKeys = <PhysicalKeyboardKey>{};
+  RdpClipboardController? _clipboard;
   StreamSubscription<void>? _frames;
   final _surface = RdpSurface();
   final _cursorPosition = ValueNotifier<Offset?>(null);
@@ -59,7 +65,8 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
   Offset? _move;
   Offset _position = Offset.zero;
   bool _failed = false;
-  bool _appResumed = true;
+  AppLifecycleState _lifecycle =
+      WidgetsBinding.instance.lifecycleState ?? AppLifecycleState.resumed;
   bool _framesPaused = false;
   RdpResolution? _resolution;
   RdpResolution? _viewport;
@@ -69,6 +76,11 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
   int _resizeSerial = 0;
   Timer? _resizeDebounce;
   Timer? _resizeConfirmation;
+
+  bool get _appResumed => _lifecycle == AppLifecycleState.resumed;
+  bool get _clipboardAvailable =>
+      _lifecycle != AppLifecycleState.paused &&
+      _lifecycle != AppLifecycleState.detached;
 
   @override
   void initState() {
@@ -86,6 +98,16 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
         );
     _syncFrames();
     _focus.addListener(_focusChanged);
+    final clipboardSession = widget.session;
+    if (clipboardSession is RdpClipboardSession &&
+        Get.isRegistered<LocalClipboard>()) {
+      _clipboard = RdpClipboardController(
+        session: clipboardSession,
+        local: Get.find<LocalClipboard>(),
+        onError: AppNotice.error,
+      )..setForeground(_appResumed);
+      _syncClipboard();
+    }
     if (widget.active) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _focus.requestFocus();
@@ -149,6 +171,7 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     _failed = true;
     _resizeDebounce?.cancel();
     _resizeConfirmation?.cancel();
+    _clipboard?.setActive(false);
     widget.onError(
       error is SshEngineException ? error.message : '远程桌面已断开，请重新连接',
     );
@@ -174,17 +197,24 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     if (!_focus.hasFocus) _release();
   }
 
+  void _syncClipboard() {
+    _clipboard?.setActive(widget.active && _clipboardAvailable);
+    _clipboard?.setForeground(_appResumed);
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    _appResumed = state == AppLifecycleState.resumed;
+    _lifecycle = state;
     if (!_appResumed) _release();
     _syncFrames();
+    _syncClipboard();
   }
 
   @override
   void didUpdateWidget(RdpDesktopPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
     _syncFrames();
+    _syncClipboard();
     if (widget.active && !oldWidget.active) {
       _focus.requestFocus();
       _scheduleAutomaticResize();
@@ -206,6 +236,8 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     _moveTimer = null;
     _move = null;
     _cursorPosition.value = null;
+    _macMeta.clear();
+    _clipboardShortcutKeys.clear();
     final vncSession = widget.session;
     if (vncSession is VncEngineSession) {
       for (final symbol in _vncPressed.values) {
@@ -228,6 +260,62 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
 
   KeyEventResult _key(FocusNode node, KeyEvent event) {
     if (!widget.active) return KeyEventResult.ignored;
+    // Defer macOS Command so Cmd+C/X/V does not send a Windows-key tap.
+    // Other Command combinations retain the ordinary Windows scan-code path.
+    if (_clipboard != null && defaultTargetPlatform == TargetPlatform.macOS) {
+      final physical = event.physicalKey;
+      if (physical == PhysicalKeyboardKey.metaLeft ||
+          physical == PhysicalKeyboardKey.metaRight) {
+        if (event is KeyUpEvent) {
+          _macMeta.remove(physical);
+          final scan = rdpScanCode(physical)!;
+          if (_pressed.remove(scan)) {
+            _send(
+              () =>
+                  widget.session.key(scan & 0xff, down: false, extended: true),
+            );
+          }
+        } else {
+          _macMeta.add(physical);
+        }
+        return KeyEventResult.handled;
+      }
+      if (_clipboardShortcutKeys.contains(physical)) {
+        if (event is KeyUpEvent) _clipboardShortcutKeys.remove(physical);
+        return KeyEventResult.handled;
+      }
+      if (_macMeta.isNotEmpty &&
+          !HardwareKeyboard.instance.isAltPressed &&
+          !HardwareKeyboard.instance.isControlPressed &&
+          !HardwareKeyboard.instance.isShiftPressed &&
+          [
+            PhysicalKeyboardKey.keyC,
+            PhysicalKeyboardKey.keyX,
+            PhysicalKeyboardKey.keyV,
+          ].contains(physical) &&
+          event is KeyDownEvent) {
+        _clipboardShortcutKeys.add(physical);
+        final scan = rdpScanCode(physical)!;
+        _send(() async {
+          if (physical == PhysicalKeyboardKey.keyV) {
+            if (!await _clipboard!.syncBeforePaste()) return;
+          }
+          await widget.session.key(0x1d, down: true);
+          await widget.session.key(scan, down: true);
+          await widget.session.key(scan, down: false);
+          await widget.session.key(0x1d, down: false);
+        });
+        return KeyEventResult.handled;
+      }
+      for (final meta in _macMeta) {
+        final scan = rdpScanCode(meta)!;
+        if (_pressed.add(scan)) {
+          _send(
+            () => widget.session.key(scan & 0xff, down: true, extended: true),
+          );
+        }
+      }
+    }
     if (event.logicalKey == LogicalKeyboardKey.enter ||
         event.logicalKey == LogicalKeyboardKey.numpadEnter) {
       if (_fullscreenShortcutHeld) {
@@ -263,9 +351,16 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     } else {
       _pressed.remove(scan);
     }
-    _send(
-      () => widget.session.key(scan & 0xff, down: down, extended: scan > 255),
-    );
+    final paste =
+        down &&
+        event.physicalKey == PhysicalKeyboardKey.keyV &&
+        HardwareKeyboard.instance.isControlPressed;
+    _send(() async {
+      if (paste && _clipboard != null) {
+        if (!await _clipboard!.syncBeforePaste()) return;
+      }
+      await widget.session.key(scan & 0xff, down: down, extended: scan > 255);
+    });
     return KeyEventResult.handled;
   }
 
@@ -464,6 +559,7 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     _resizeDebounce?.cancel();
     _resizeConfirmation?.cancel();
     _release();
+    _clipboard?.dispose();
     _focus.removeListener(_focusChanged);
     _focus.dispose();
     unawaited(_frames?.cancel());
@@ -478,182 +574,246 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     final image = _surface;
     final resolutionDisabled = _resizeBusy || !image.hasImage;
     final actual = RdpResolution(image.width, image.height);
-    return Column(
+    return Stack(
+      fit: StackFit.expand,
       children: [
-        Offstage(
-          offstage: widget.fullscreen,
-          child: Padding(
-            padding: const EdgeInsets.all(8),
-            child: Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              children: [
-                Text(
-                  !image.hasImage
-                      ? '远程桌面'.tr
-                      : '${widget.protocolLabel} · ${image.width} × ${image.height}',
-                  overflow: TextOverflow.ellipsis,
-                ),
-                if (widget.dynamicResolution)
-                  ExcludeFocus(
-                    excluding: resolutionDisabled,
-                    child: IgnorePointer(
-                      ignoring: resolutionDisabled,
-                      child: AppMenuButton<String>(
-                        key: const ValueKey('rdp-resolution-menu'),
-                        semanticLabel: '分辨率'.tr,
-                        selectedValue: _resolution == null
-                            ? 'auto'
-                            : '${_resolution!.width}x${_resolution!.height}',
-                        items: [
-                          ('auto', '自适应窗口'.tr),
-                          for (final r in RdpResolution.presets)
-                            ('${r.width}x${r.height}', r.label),
-                          if (image.hasImage &&
-                              !RdpResolution.presets.contains(actual))
-                            ('${actual.width}x${actual.height}', actual.label),
-                        ],
-                        onSelected: _selectResolution,
-                        icon: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            if (_resizeBusy)
-                              const SizedBox(
-                                width: 14,
-                                height: 14,
-                                child: shadcn.CircularProgressIndicator(),
-                              )
-                            else
-                              const Icon(shadcn.LucideIcons.monitor, size: 16),
-                            const SizedBox(width: 6),
-                            Text(_resolution == null ? '自适应窗口'.tr : '分辨率'.tr),
-                            const SizedBox(width: 4),
-                            const Icon(
-                              shadcn.LucideIcons.chevronDown,
-                              size: 14,
+        Column(
+          children: [
+            Offstage(
+              offstage: widget.fullscreen,
+              child: Padding(
+                padding: const EdgeInsets.all(8),
+                child: Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    Text(
+                      !image.hasImage
+                          ? '远程桌面'.tr
+                          : '${widget.protocolLabel} · ${image.width} × ${image.height}',
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    if (widget.dynamicResolution)
+                      ExcludeFocus(
+                        excluding: resolutionDisabled,
+                        child: IgnorePointer(
+                          ignoring: resolutionDisabled,
+                          child: AppMenuButton<String>(
+                            key: const ValueKey('rdp-resolution-menu'),
+                            semanticLabel: '分辨率'.tr,
+                            selectedValue: _resolution == null
+                                ? 'auto'
+                                : '${_resolution!.width}x${_resolution!.height}',
+                            items: [
+                              ('auto', '自适应窗口'.tr),
+                              for (final r in RdpResolution.presets)
+                                ('${r.width}x${r.height}', r.label),
+                              if (image.hasImage &&
+                                  !RdpResolution.presets.contains(actual))
+                                (
+                                  '${actual.width}x${actual.height}',
+                                  actual.label,
+                                ),
+                            ],
+                            onSelected: _selectResolution,
+                            icon: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                if (_resizeBusy)
+                                  const SizedBox(
+                                    width: 14,
+                                    height: 14,
+                                    child: shadcn.CircularProgressIndicator(),
+                                  )
+                                else
+                                  const Icon(
+                                    shadcn.LucideIcons.monitor,
+                                    size: 16,
+                                  ),
+                                const SizedBox(width: 6),
+                                Text(
+                                  _resolution == null ? '自适应窗口'.tr : '分辨率'.tr,
+                                ),
+                                const SizedBox(width: 4),
+                                const Icon(
+                                  shadcn.LucideIcons.chevronDown,
+                                  size: 14,
+                                ),
+                              ],
                             ),
-                          ],
+                          ),
                         ),
                       ),
+                    shadcn.OutlineButton(
+                      onPressed: _secureAttention,
+                      child: const Text('Ctrl+Alt+Del'),
                     ),
-                  ),
-                shadcn.OutlineButton(
-                  onPressed: _secureAttention,
-                  child: const Text('Ctrl+Alt+Del'),
+                    AppIconButton(
+                      key: const ValueKey('rdp-enter-fullscreen'),
+                      semanticLabel: '全屏（Ctrl+Alt+Enter）'.tr,
+                      tooltip: '全屏（Ctrl+Alt+Enter）'.tr,
+                      icon: const Icon(shadcn.LucideIcons.maximize, size: 16),
+                      onPressed: widget.fullscreenBusy
+                          ? null
+                          : widget.onToggleFullscreen,
+                    ),
+                  ],
                 ),
-                AppIconButton(
-                  key: const ValueKey('rdp-enter-fullscreen'),
-                  semanticLabel: '全屏（Ctrl+Alt+Enter）'.tr,
-                  tooltip: '全屏（Ctrl+Alt+Enter）'.tr,
-                  icon: const Icon(shadcn.LucideIcons.maximize, size: 16),
-                  onPressed: widget.fullscreenBusy
-                      ? null
-                      : widget.onToggleFullscreen,
-                ),
-              ],
+              ),
             ),
-          ),
-        ),
-        Expanded(
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              if (constraints.maxWidth.isFinite &&
-                  constraints.maxHeight.isFinite &&
-                  constraints.maxWidth > 0 &&
-                  constraints.maxHeight > 0) {
-                final viewport = RdpResolution.fromViewport(
-                  constraints.maxWidth,
-                  constraints.maxHeight,
-                );
-                if (_viewport != viewport) {
-                  _viewport = viewport;
-                  _scheduleAutomaticResize();
-                }
-              }
-              return Focus(
-                focusNode: _focus,
-                onKeyEvent: _key,
-                child: ColoredBox(
-                  color: const Color(0xff000000),
-                  child: SizedBox.expand(
-                    child: !image.hasImage
-                        ? const Center(
-                            child: shadcn.CircularProgressIndicator(),
-                          )
-                        : FittedBox(
-                            fit: BoxFit.contain,
-                            child: SizedBox(
-                              width: image.width.toDouble(),
-                              height: image.height.toDouble(),
-                              child: Listener(
-                                behavior: HitTestBehavior.opaque,
-                                onPointerDown: (e) => _button(e, true),
-                                onPointerUp: (e) => _button(e, e.buttons != 0),
-                                onPointerCancel: (_) => _release(),
-                                onPointerHover: _moving,
-                                onPointerMove: _moving,
-                                onPointerSignal: _scroll,
-                                child: MouseRegion(
-                                  cursor:
-                                      _cursor?.kind == RdpCursorKind.bitmap ||
-                                          _cursor?.kind == RdpCursorKind.hidden
-                                      ? SystemMouseCursors.none
-                                      : SystemMouseCursors.basic,
-                                  onEnter: (event) => _cursorPosition.value =
-                                      event.localPosition,
-                                  onExit: (_) => _cursorPosition.value = null,
-                                  child: Stack(
-                                    children: [
-                                      Positioned.fill(
-                                        child: RepaintBoundary(
-                                          child: CustomPaint(
-                                            key: const ValueKey(
-                                              'rdp-desktop-image',
-                                            ),
-                                            painter: RdpSurfacePainter(
-                                              _surface,
-                                            ),
-                                            isComplex: true,
-                                            willChange: true,
-                                          ),
-                                        ),
-                                      ),
-                                      if (_cursorImage != null)
-                                        ValueListenableBuilder<Offset?>(
-                                          valueListenable: _cursorPosition,
-                                          builder: (_, position, _) =>
-                                              position == null
-                                              ? const SizedBox.shrink()
-                                              : Positioned(
-                                                  left:
-                                                      position.dx -
-                                                      _cursor!.hotspotX,
-                                                  top:
-                                                      position.dy -
-                                                      _cursor!.hotspotY,
-                                                  child: IgnorePointer(
-                                                    child: RawImage(
-                                                      key: const ValueKey(
-                                                        'rdp-cursor-image',
-                                                      ),
-                                                      image: _cursorImage,
-                                                    ),
-                                                  ),
+            Expanded(
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  if (constraints.maxWidth.isFinite &&
+                      constraints.maxHeight.isFinite &&
+                      constraints.maxWidth > 0 &&
+                      constraints.maxHeight > 0) {
+                    final viewport = RdpResolution.fromViewport(
+                      constraints.maxWidth,
+                      constraints.maxHeight,
+                    );
+                    if (_viewport != viewport) {
+                      _viewport = viewport;
+                      _scheduleAutomaticResize();
+                    }
+                  }
+                  return Focus(
+                    focusNode: _focus,
+                    onKeyEvent: _key,
+                    child: ColoredBox(
+                      color: const Color(0xff000000),
+                      child: SizedBox.expand(
+                        child: !image.hasImage
+                            ? const Center(
+                                child: shadcn.CircularProgressIndicator(),
+                              )
+                            : FittedBox(
+                                fit: BoxFit.contain,
+                                child: SizedBox(
+                                  width: image.width.toDouble(),
+                                  height: image.height.toDouble(),
+                                  child: Listener(
+                                    behavior: HitTestBehavior.opaque,
+                                    onPointerDown: (e) => _button(e, true),
+                                    onPointerUp: (e) =>
+                                        _button(e, e.buttons != 0),
+                                    onPointerCancel: (_) => _release(),
+                                    onPointerHover: _moving,
+                                    onPointerMove: _moving,
+                                    onPointerSignal: _scroll,
+                                    child: MouseRegion(
+                                      cursor:
+                                          _cursor?.kind ==
+                                                  RdpCursorKind.bitmap ||
+                                              _cursor?.kind ==
+                                                  RdpCursorKind.hidden
+                                          ? SystemMouseCursors.none
+                                          : SystemMouseCursors.basic,
+                                      onEnter: (event) =>
+                                          _cursorPosition.value =
+                                              event.localPosition,
+                                      onExit: (_) =>
+                                          _cursorPosition.value = null,
+                                      child: Stack(
+                                        children: [
+                                          Positioned.fill(
+                                            child: RepaintBoundary(
+                                              child: CustomPaint(
+                                                key: const ValueKey(
+                                                  'rdp-desktop-image',
                                                 ),
-                                        ),
-                                    ],
+                                                painter: RdpSurfacePainter(
+                                                  _surface,
+                                                ),
+                                                isComplex: true,
+                                                willChange: true,
+                                              ),
+                                            ),
+                                          ),
+                                          if (_cursorImage != null)
+                                            ValueListenableBuilder<Offset?>(
+                                              valueListenable: _cursorPosition,
+                                              builder: (_, position, _) =>
+                                                  position == null
+                                                  ? const SizedBox.shrink()
+                                                  : Positioned(
+                                                      left:
+                                                          position.dx -
+                                                          _cursor!.hotspotX,
+                                                      top:
+                                                          position.dy -
+                                                          _cursor!.hotspotY,
+                                                      child: IgnorePointer(
+                                                        child: RawImage(
+                                                          key: const ValueKey(
+                                                            'rdp-cursor-image',
+                                                          ),
+                                                          image: _cursorImage,
+                                                        ),
+                                                      ),
+                                                    ),
+                                            ),
+                                        ],
+                                      ),
+                                    ),
                                   ),
                                 ),
                               ),
-                            ),
-                          ),
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+        if (_clipboard != null)
+          Positioned(
+            left: 16,
+            right: 16,
+            bottom: 12,
+            child: Obx(() {
+              final progress = _clipboard!.progress.value;
+              if (progress == null) return const SizedBox.shrink();
+              return Center(
+                child: shadcn.Card(
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: shadcn.CircularProgressIndicator(),
+                      ),
+                      const SizedBox(width: 8),
+                      Flexible(
+                        child: Text(
+                          progress.total == 0
+                              ? '正在同步剪贴板'.tr
+                              : '正在接收剪贴板文件（@percent%）'.trParams({
+                                  'percent':
+                                      (progress.transferred *
+                                              100 ~/
+                                              progress.total)
+                                          .toString(),
+                                }),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      AppIconButton(
+                        key: const ValueKey('rdp-clipboard-cancel'),
+                        semanticLabel: '取消剪贴板传输'.tr,
+                        onPressed: () =>
+                            unawaited(_clipboard!.cancelTransfer()),
+                        icon: const Icon(shadcn.LucideIcons.x, size: 16),
+                      ),
+                    ],
                   ),
                 ),
               );
-            },
+            }),
           ),
-        ),
       ],
     );
   }

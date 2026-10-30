@@ -13,8 +13,9 @@ A modern, open-source, local-first SSH/SFTP and RDP/VNC client for desktop (Wind
 | 🗂 主机管理 | 嵌套文件夹、拖拽归档、标签字段、名称/地址/标签子串搜索 |
 | 💾 本地持久化 | 元数据存 SQLite；macOS 凭据存 AES-256-GCM 保险库，主密钥存钥匙串；其他平台存系统安全存储 |
 | 💻 SSH 终端 | 密码/私钥认证、多标签、批量执行命令、xterm-256color、CJK/emoji、可折叠 Linux/macOS 服务状态 |
-| ⇄ 端口转发 | 服务右键打开、多组端口映射随服务保存、复用服务网关、页签内编辑与手动启停 |
-| 🖥 RDP 桌面 | IronRDP、Windows 密码认证、证书确认、多种分辨率、自适应窗口、原生全屏与悬浮退出 |
+| ⇄ 端口转发 | 网关右键打开、多组目标地址映射随网关保存、SSH / Page TCP 通道、手动启停 |
+| 🌐 动态代理 | 网关独立标签、HTTP / HTTPS CONNECT / SOCKS5、规则/全局/直连、IPv4/IPv6/CIDR 和域名规则 |
+| 🖥 RDP 桌面 | IronRDP、Windows 密码认证、证书确认、多种分辨率、自适应窗口、原生全屏、双向文字/文件剪贴板 |
 | 🖥 VNC 桌面 | RFB 3.3/3.7/3.8、VNC 密码认证、键鼠操作、按窗口缩放、原生全屏 |
 | 🔑 凭证分类 | SSH / RDP / VNC 独立类型、按服务协议筛选、旧共享凭证自动拆分并保留绑定 |
 | 🌐 网关 | SSH 跳板、Page TCP 中转；支持 SSH、RDP 与 VNC 服务，SSH/RDP 目标身份独立核验 |
@@ -72,13 +73,21 @@ macOS 由钥匙串托管一把随机主密钥，服务、网关和凭证的密�
 
 ### 本地端口转发
 
-右键服务选择「端口转发」打开配置页签，在页签内维护多组「本地端口 → 目标端口」映射，输入修改后自动保存，转发需手动启动。本地端口和目标端口都为空的行不保存，未填完整或无效的映射需修正后才保存。映射随服务配置保存，删除服务时一并移除；每个服务复用一个转发页签。打开页签不会读取凭据或建立连接。目标固定为服务本机的 `127.0.0.1:目标端口`；服务配置了网关时，转发连接也经过该网关。
+右键 SSH / Page 网关选择「端口转发」打开配置页签，在页签内维护多组「本地端口 → 目标地址:目标端口」映射。目标地址可填写内网 IP 或域名，由该 SSH 网关或 Page Client 访问；默认 `127.0.0.1` 指网关或 Client 本机。转发不需要创建 SSH 服务或登录目标的 SSH。映射随网关配置自动保存，每个网关复用一个转发页签；打开页签不会读取凭据或建立连接。本地端口和目标端口都为空的行不保存，未填完整或无效的映射需修正后才保存。升级会清除旧服务上的端口映射，请在网关下重新配置。
 
-点击「启动转发」时保存当前映射并读取最新服务和网关配置。本地监听 `*:本地端口`（所有 IPv4 网卡），客户端通过本机 IP 与映射端口访问目标。运行页显示「本机端口 → 目标端口」，连接及停止期间保留映射内容，仅操作按钮显示加载状态。任一本地端口被占用时，本次启动整体失败。停止、关闭标签或删除服务会释放全部监听、活动连接及专用 SSH/网关连接，其他终端和文件传输不受影响。重启应用后需手动启动；编辑运行中的映射前需先停止。
+点击「启动转发」时保存当前映射并读取最新网关配置和凭据。本地监听 `*:本地端口`（所有 IPv4 网卡），客户端通过本机 IP 与映射端口访问目标。SSH 网关只校验并认证网关，通过 `direct-tcpip` 连接目标；Page 网关为每条本地连接建立独立中转流，目标须被 Client 的 `allowed_targets` 允许（`["*"]` 表示不限制）。Page 的「正在监听」表示本地端口就绪，目标连接错误在收到本地连接时报告，可修正目标网络或权限后重试。连接及停止期间保留映射内容，仅操作按钮显示加载状态。任一本地端口被占用时，本次启动整体失败。停止、关闭标签或删除网关会释放全部监听、活动连接及专用网关连接，其他终端和文件传输不受影响。重启应用后需手动启动；编辑运行中的映射前需先停止。
+
+### 网关动态代理
+
+右键 SSH / Page 网关选择「动态代理」，勾选 HTTP(S)、SOCKS5 并设置端口后手动启动。HTTP(S) 通过一个开关和端口同时代理 HTTP 与 HTTPS。默认监听 `127.0.0.1`，HTTP(S) 端口为 `18080`，SOCKS5 默认 `1080`。HTTPS 使用 CONNECT 隧道，保留目标网站的域名和 TLS，无需本地代理证书，适合通过网关访问按域名分流的 HTTPS 服务。
+
+支持全局（全部走网关）、直连（全部由本机连接）和规则（匹配走网关，其余直连）。规则支持 IPv4、IPv6、CIDR，以及域名前缀、后缀和全匹配。配置自动保存，运行中先停止再编辑；关闭标签或删除网关会清理监听与连接。使用方法、DNS 匹配和浏览器配置见 [动态代理](docs/dynamic-proxy.md)。
 
 ### Windows RDP 远程桌面
 
 服务支持 SSH/RDP/VNC 类型。RDP 服务可直接或通过 SSH / Page 网关连接 Windows，在独立标签中显示远程桌面并接收键鼠输入。分辨率默认为自适应窗口，也可在工具栏选择固定分辨率；可通过全屏按钮或 Ctrl+Alt+Enter 全屏显示，顶部悬浮框退出全屏；支持 macOS、Windows 和 Linux 的原生窗口接口。详见 [RDP 服务配置与验证范围](docs/rdp-service.md)。
+
+RDP 支持双向 Unicode 文字、文件及目录复制粘贴，macOS 的 Command+C/X/V 自动映射到 Windows 的 Ctrl+C/X/V。远端文件接收完成后可在本机文件管理器粘贴，接收时显示进度并可取消；跨机文件操作按复制处理。只同步活动页签，要求 Windows 允许剪贴板重定向。RDP supports bidirectional Unicode text, files and directories over CLIPRDR, with macOS Command shortcuts and cancellable background file reception. Text and file round trips have been verified between macOS Debug and Windows; native Windows/Linux hosts still require platform testing.
 
 ### VNC 远程桌面与凭证类型
 
@@ -103,6 +112,8 @@ macOS 由钥匙串托管一把随机主密钥，服务、网关和凭证的密�
 ## 📦 下载与发布
 
 从 [GitHub Releases](https://github.com/mingdraw/PagaShell/releases) 下载，Windows、macOS 和 Linux 均提供 amd64（x86_64）与 arm64（AArch64）版本。
+
+版本更新记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 | 平台 | 安装方式 |
 |---|---|

@@ -24,6 +24,8 @@ class _FakeEngineSession implements SshEngineSession {
   final StreamController<String> _output = StreamController<String>();
   final List<String> written = [];
   bool failWrites = false;
+  Completer<void>? closeGate;
+  Completer<void>? outputCancelGate;
   (int, int)? initialSize;
   final List<(int, int)> resized = [];
 
@@ -68,6 +70,11 @@ class _FakeEngineSession implements SshEngineSession {
 
   @override
   Future<void> close() async {
+    final cancellation = outputCancelGate;
+    if (cancellation != null && !cancellation.isCompleted) {
+      cancellation.complete();
+    }
+    await closeGate?.future;
     closed = true;
     unawaited(_output.close());
     if (throwOnClose) throw const SshEngineException('连接已断开');
@@ -1013,6 +1020,226 @@ void main() {
       expect(controller.sessions.length, 2);
       expect(second, isNot(first));
       expect(controller.findByHost(_host.id)?.id, first);
+    });
+
+    test('批量关闭仅确认运行中的转发和代理，取消保留全部标签，确认只关闭请求快照', () async {
+      final controller = SessionController(engine: _FakeEngine());
+      final initial = [
+        const Session(id: 'terminal', host: _host, phase: SessionPhase.ready),
+        const Session(
+          id: 'forward',
+          host: _host,
+          kind: SessionKind.portForward,
+          phase: SessionPhase.ready,
+        ),
+        const Session(
+          id: 'starting-proxy',
+          host: _host,
+          kind: SessionKind.dynamicProxy,
+        ),
+        const Session(
+          id: 'idle-forward',
+          host: _host,
+          kind: SessionKind.portForward,
+          phase: SessionPhase.closed,
+        ),
+        const Session(
+          id: 'failed-proxy',
+          host: _host,
+          kind: SessionKind.dynamicProxy,
+          phase: SessionPhase.failed,
+        ),
+      ];
+      controller.sessions.addAll(initial);
+      controller.activate('terminal');
+      var confirmations = 0;
+      await controller.requestTabClose(
+        [...initial.map((s) => s.id), 'forward', 'missing'],
+        confirm: (running) async {
+          confirmations++;
+          expect(running.map((s) => s.id), ['forward', 'starting-proxy']);
+          return false;
+        },
+      );
+      expect(controller.sessions, initial);
+      expect(controller.activeSessionId.value, 'terminal');
+      final decision = Completer<bool>();
+      final closing = controller.requestTabClose(
+        controller.sessions.map((s) => s.id),
+        confirm: (_) {
+          confirmations++;
+          return decision.future;
+        },
+      );
+      controller.sessions.add(
+        const Session(id: 'added', host: _host, phase: SessionPhase.failed),
+      );
+      decision.complete(true);
+      await closing;
+      expect(confirmations, 2);
+      expect(controller.sessions.single.id, 'added');
+      var prompted = false;
+      await controller.requestTabClose(
+        ['added'],
+        confirm: (_) async {
+          prompted = true;
+          return false;
+        },
+      );
+      expect(prompted, isFalse);
+      expect(controller.sessions, isEmpty);
+      controller.onClose();
+    });
+
+    test('关闭其他标签确认后激活保留项，保留项消失则不继续关闭', () async {
+      final controller = SessionController(engine: _FakeEngine());
+      const keep = Session(id: 'keep', host: _host, phase: SessionPhase.closed);
+      const forward = Session(
+        id: 'forward',
+        host: _host,
+        kind: SessionKind.portForward,
+        phase: SessionPhase.ready,
+      );
+      controller.sessions.addAll([keep, forward]);
+      controller.activate(forward.id);
+      await controller.requestTabClose(
+        [forward.id],
+        keepSessionId: 'missing',
+        confirm: (_) async => fail('保留项不存在时不应确认'),
+      );
+      expect(controller.sessions, [keep, forward]);
+      await controller.requestTabClose(
+        [forward.id],
+        keepSessionId: keep.id,
+        confirm: (_) async {
+          await controller.close(keep.id);
+          return true;
+        },
+      );
+      expect(controller.sessions, [forward]);
+      controller.sessions.add(keep);
+      await controller.requestTabClose(
+        [forward.id],
+        keepSessionId: keep.id,
+        confirm: (_) async => false,
+      );
+      expect(controller.activeSessionId.value, forward.id);
+      await controller.requestTabClose(
+        [keep.id, forward.id],
+        keepSessionId: keep.id,
+        confirm: (_) async => true,
+      );
+      expect(controller.sessions, [keep]);
+      expect(controller.activeSessionId.value, keep.id);
+      await controller.closeAll();
+      controller.onClose();
+    });
+
+    test('一个终端清理未完成时，其他终端和文件传输标签仍能关闭', () async {
+      final engine = _FakeEngine();
+      final controller = SessionController(engine: engine);
+      final first = await controller.open(_host, _credentials);
+      final second = await controller.open(_host, _credentials);
+      final files = await controller.open(
+        _host,
+        _credentials,
+        kind: SessionKind.fileTransfer,
+      );
+      final gate = Completer<void>();
+      engine.created.first.closeGate = gate;
+      Future<bool> confirm(List<Session> _) async => fail('普通页签不应弹出确认');
+      final firstClose = controller.requestTabClose([first], confirm: confirm);
+      await _flush();
+      final secondClose = controller.requestTabClose([
+        second,
+      ], confirm: confirm);
+      final filesClose = controller.requestTabClose([files], confirm: confirm);
+      try {
+        await _flush();
+        expect(controller.sessions, isEmpty);
+        expect(engine.created.first.closed, isFalse);
+        expect(engine.created.skip(1).every((s) => s.closed), isTrue);
+      } finally {
+        gate.complete();
+        await Future.wait([firstClose, secondClose, filesClose]);
+        await controller.closeAll();
+        controller.onClose();
+      }
+    });
+
+    test('终端输出取消需要断开时，先发出断开再等待取消完成', () async {
+      final engine = _FakeEngine();
+      final controller = SessionController(engine: engine);
+      final id = await controller.open(_host, _credentials);
+      final session = engine.created.single;
+      final cancellation = Completer<void>();
+      session.outputCancelGate = cancellation;
+      session._output.onCancel = () => cancellation.future;
+      final closing = controller.close(id);
+      try {
+        await _flush();
+        expect(session.closed, isTrue);
+        expect(cancellation.isCompleted, isTrue);
+      } finally {
+        if (!cancellation.isCompleted) cancellation.complete();
+        await closing;
+        controller.onClose();
+      }
+    });
+
+    test('不同运行页签的关闭分别确认，取消一个不影响另一个', () async {
+      final controller = SessionController(engine: _FakeEngine());
+      controller.sessions.addAll([
+        const Session(
+          id: 'first',
+          host: _host,
+          kind: SessionKind.dynamicProxy,
+          phase: SessionPhase.ready,
+        ),
+        const Session(
+          id: 'second',
+          host: _host,
+          kind: SessionKind.portForward,
+          phase: SessionPhase.ready,
+        ),
+      ]);
+      final firstDecision = Completer<bool>();
+      final secondDecision = Completer<bool>();
+      final confirmations = <String>[];
+      final firstClose = controller.requestTabClose(
+        ['first'],
+        confirm: (running) {
+          confirmations.add(running.single.id);
+          return firstDecision.future;
+        },
+      );
+      final secondClose = controller.requestTabClose(
+        ['second'],
+        confirm: (running) {
+          confirmations.add(running.single.id);
+          return secondDecision.future;
+        },
+      );
+      try {
+        await _flush();
+        expect(confirmations, ['first']);
+        firstDecision.complete(true);
+        await _flush();
+        expect(confirmations, ['first', 'second']);
+        secondDecision.complete(false);
+        await Future.wait([firstClose, secondClose]);
+        expect(controller.sessions.single.id, 'second');
+        await controller.requestTabClose([
+          'second',
+        ], confirm: (_) async => true);
+        expect(controller.sessions, isEmpty);
+      } finally {
+        if (!firstDecision.isCompleted) firstDecision.complete(false);
+        if (!secondDecision.isCompleted) secondDecision.complete(false);
+        await Future.wait([firstClose, secondClose]);
+        await controller.closeAll();
+        controller.onClose();
+      }
     });
 
     test('并发 close 同一会话不抛错且标签立即消失', () async {

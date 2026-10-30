@@ -26,6 +26,7 @@ import 'package:pagashell/presentation/components/app_text_form_field.dart';
 import 'package:pagashell/presentation/forward/forward_session_panel.dart';
 import 'package:pagashell/presentation/hosts/host_edit_dialog.dart';
 import 'package:pagashell/presentation/localization/app_translations.dart';
+import 'package:pagashell/presentation/shell/connect_flow.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import 'support/in_memory_binding.dart';
@@ -86,12 +87,20 @@ class _ForwardSession implements SshEngineSession, PortForwardSession {
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-class _ForwardEngine implements SshEngine {
+class _ForwardEngine implements SshEngine, GatewayForwardEngine {
   final sessions = <_ForwardSession>[];
   final hosts = <Host>[];
   final credentials = <SshCredentials>[];
   final gateways = <SshGateway?>[];
   Completer<void>? connectGate;
+  int ordinaryConnects = 0;
+
+  @override
+  Future<PortForwardSession> connectForward(
+    SshGateway gateway, {
+    HostKeyVerifier? verifyHostKey,
+    Future<void>? cancelled,
+  }) => _create(gateway.host, gateway.credentials, gateway);
 
   @override
   Future<SshEngineSession> connect(
@@ -101,6 +110,15 @@ class _ForwardEngine implements SshEngine {
     Future<void>? cancelled,
     SshGateway? gateway,
   }) async {
+    ordinaryConnects++;
+    return _create(host, credentials, gateway);
+  }
+
+  Future<_ForwardSession> _create(
+    Host host,
+    SshCredentials credentials,
+    SshGateway? gateway,
+  ) async {
     hosts.add(host);
     this.credentials.add(credentials);
     gateways.add(gateway);
@@ -134,12 +152,12 @@ const _service = Host(
   name: 'Database server',
   hostname: 'internal.example.test',
   gatewayId: 'gateway',
-  forwardPorts: _ports,
 );
 const _gateway = Host(
   id: 'gateway',
   name: 'Operations gateway',
   hostname: 'jump.example.test',
+  forwardPorts: _ports,
 );
 
 void main() {
@@ -167,7 +185,7 @@ void main() {
 
   Future<(_ForwardEngine, _Secrets)> pump(
     WidgetTester tester, {
-    Host service = _service,
+    Host gateway = _gateway,
   }) async {
     tester.view.physicalSize = const Size(1280, 900);
     tester.view.devicePixelRatio = 1;
@@ -185,14 +203,14 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    await Get.find<GatewayController>().save(_gateway);
+    await Get.find<GatewayController>().save(gateway);
     await Get.find<GatewayController>().savePassword(
-      _gateway.id,
+      gateway.id,
       'gateway-test-only',
     );
-    await Get.find<HostController>().save(service);
+    await Get.find<HostController>().save(_service);
     await Get.find<HostController>().savePassword(
-      service.id,
+      _service.id,
       'service-test-only',
     );
     await tester.pumpAndSettle();
@@ -235,8 +253,8 @@ void main() {
     }
   }
 
-  Future<String> open(WidgetTester tester, {Host service = _service}) async {
-    final id = Get.find<SessionController>().openForward(service);
+  Future<String> open(WidgetTester tester, {Host gateway = _gateway}) async {
+    final id = Get.find<SessionController>().openForward(gateway);
     await tester.pumpAndSettle();
     return id;
   }
@@ -258,6 +276,10 @@ void main() {
     final targets = tester.widgetList<AppTextFormField>(
       find.widgetWithText(AppTextFormField, '目标端口'),
     );
+    final hosts = tester.widgetList<AppTextFormField>(
+      find.widgetWithText(AppTextFormField, '目标地址'),
+    );
+    expect(hosts.map((f) => f.controller.text), ports.map((p) => p.targetHost));
     expect(
       locals.map((f) => f.controller.text),
       ports.map((p) => p.localPort.toString()),
@@ -268,11 +290,16 @@ void main() {
     );
   }
 
-  testWidgets('服务右键只打开一个未启用页签，不读取密文或建立连接', (tester) async {
+  testWidgets('服务无转发菜单，网关右键只打开一个未启用页签且不读取密文', (tester) async {
     final (engine, secrets) = await pump(tester);
     await Get.find<HostController>().clearPassword(_service.id);
     await Get.find<GatewayController>().clearPassword(_gateway.id);
     await tester.tap(find.text(_service.name), buttons: kSecondaryButton);
+    await tester.pumpAndSettle();
+    expect(find.widgetWithText(shadcn.MenuButton, '端口转发'), findsNothing);
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text(_gateway.name), buttons: kSecondaryButton);
     await tester.pumpAndSettle();
     expect(find.text('新建端口转换'), findsNothing);
     expect(find.text('停止转发'), findsNothing);
@@ -287,7 +314,7 @@ void main() {
     await tester.pumpAndSettle();
     final sessions = Get.find<SessionController>();
     expect(sessions.sessions.single.phase, SessionPhase.closed);
-    expect(sessions.openForward(_service), sessions.sessions.single.id);
+    expect(sessions.openForward(_gateway), sessions.sessions.single.id);
     expect(sessions.sessions, hasLength(1));
     expect(secrets.reads, 0);
     expect(engine.sessions, isEmpty);
@@ -314,25 +341,87 @@ void main() {
     );
     tester.view.physicalSize = const Size(1680, 900);
     await tester.pumpAndSettle();
-    expect(tester.getSize(local).width, greaterThan(before + 100));
+    expect(tester.getSize(local).width, greaterThan(before + 70));
     expect(
       tester.getTopRight(card).dx,
       closeTo(tester.getTopRight(panel).dx - 24, 0.1),
     );
     expect(find.text('连接到 Database server'), findsNothing);
     expect(find.text('名称'), findsNothing);
-    expect(find.text('目标地址'), findsNothing);
-    await capture(tester, 'service-forward-idle');
+    expect(find.text('目标地址'), findsNWidgets(2));
+    expect(find.text('关联网关：Operations gateway'), findsOneWidget);
+    await capture(tester, 'gateway-forward-idle');
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('Page 网关按最新配置和令牌启动 TCP 转发，不登录 SSH 服务', (tester) async {
+    final page = _gateway.copyWith(
+      gatewayType: GatewayType.page,
+      pageClientId: 'internal-client',
+      pageServerFingerprint: '',
+    );
+    final (engine, secrets) = await pump(tester, gateway: page);
+    final gateways = Get.find<GatewayController>();
+    await tester.tap(find.text(page.name), buttons: kSecondaryButton);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('端口转发'));
+    await tester.pumpAndSettle();
+    expect(secrets.reads, 0);
+    expect(engine.sessions, isEmpty);
+    expect(
+      find.text('目标地址由内网 Client 访问，127.0.0.1 指 Client 本机'),
+      findsOneWidget,
+    );
+    await gateways.clearPassword(page.id);
+    await start(tester);
+    expect(engine.sessions, isEmpty);
+    expect(find.text('Page 访问令牌未保存，请编辑网关'), findsOneWidget);
+    await tester.pump(const Duration(seconds: 6));
+    await tester.pumpAndSettle();
+    await gateways.savePassword(page.id, 'page-access-token');
+    await field(tester, '目标地址', '10.20.30.40');
+    secrets.reads = 0;
+    await start(tester);
+    expect(secrets.reads, 1);
+    expect(engine.ordinaryConnects, 0);
+    expect(engine.hosts.single.gatewayType, GatewayType.page);
+    expect(engine.hosts.single.pageClientId, 'internal-client');
+    expect(engine.credentials.single.password, 'page-access-token');
+    expect(engine.sessions.single.ports!.first.targetHost, '10.20.30.40');
+    expect(find.text('正在监听'), findsOneWidget);
+    await capture(tester, 'page-gateway-forward-ip');
+    await tester.tap(find.text('停止转发'));
+    await settleCleanup(tester);
+    expect(engine.sessions.single.closed, isTrue);
+    final stale = gateways.hosts.single;
+    await gateways.save(stale.copyWith(pageClientId: 'new-client'));
+    await gateways.savePassword(page.id, 'new-token');
+    // 模拟树订阅尚未投递最新记录，启动仍须使用已保存配置。
+    gateways.hosts.assignAll([stale]);
+    final id = Get.find<SessionController>().sessions.single.id;
+    await connectToHost(
+      tester.element(find.byType(ForwardSessionPanel)),
+      stale,
+      kind: SessionKind.portForward,
+      forwardSessionId: id,
+    );
+    await tester.pumpAndSettle();
+    expect(engine.hosts.last.pageClientId, 'new-client');
+    expect(engine.credentials.last.password, 'new-token');
+    final closing = Get.find<SessionController>().close(id);
+    await settleCleanup(tester);
+    await closing;
+    expect(engine.sessions.every((s) => s.closed), isTrue);
     expect(tester.takeException(), isNull);
   });
 
   testWidgets('输入自动保存，空白行不入库，不完整及重复端口不覆盖已存配置', (tester) async {
     final (engine, secrets) = await pump(
       tester,
-      service: _service.copyWith(forwardPorts: []),
+      gateway: _gateway.copyWith(forwardPorts: []),
     );
-    final hosts = Get.find<HostController>();
-    await open(tester, service: hosts.hosts.single);
+    final hosts = Get.find<GatewayController>();
+    await open(tester, gateway: hosts.hosts.single);
     await tester.tap(find.text('添加映射'));
     await autoSave(tester);
     expect(hosts.hosts.single.forwardPorts, isEmpty);
@@ -381,15 +470,16 @@ void main() {
     final tree = _DelayedTree(hosts: repository, folders: folders);
     final sessions = Get.put(SessionController(engine: _ForwardEngine()));
     final hosts = Get.put(
-      HostController(
+      GatewayController(
         repository: repository,
         secretStore: InMemorySecretStore(),
         treeRepository: tree,
         sessions: sessions,
+        services: InMemoryHostRepository(),
       ),
     );
-    await tree.saveHost(_service);
-    sessions.openForward(_service);
+    await tree.saveHost(_gateway);
+    sessions.openForward(_gateway);
     await tester.pumpWidget(
       ShadcnTestApp(
         home: Obx(() => ForwardSessionPanel(session: sessions.sessions.single)),
@@ -436,12 +526,12 @@ void main() {
     final closing = Get.find<SessionController>().close(id);
     await settleCleanup(tester);
     await closing;
-    final latest = Get.find<HostController>().hosts.single;
+    final latest = Get.find<GatewayController>().hosts.single;
     expect(
       latest.forwardPorts.first,
       const ForwardPort(localPort: 24444, targetPort: 5432),
     );
-    await open(tester, service: latest);
+    await open(tester, gateway: latest);
     expectMappings(tester, latest.forwardPorts);
     expect(engine.sessions, isEmpty);
     expect(tester.takeException(), isNull);
@@ -460,7 +550,7 @@ void main() {
       _ports.last,
     ];
     expect(engine.sessions.single.ports, expected);
-    expect(Get.find<HostController>().hosts.single.forwardPorts, expected);
+    expect(Get.find<GatewayController>().hosts.single.forwardPorts, expected);
     expect(
       Get.find<SessionController>().sessions.single.phase,
       SessionPhase.ready,
@@ -472,7 +562,7 @@ void main() {
     final (engine, _) = await pump(tester);
     final sessions = Get.find<SessionController>();
     final id = await open(tester);
-    final sidebarIcon = find.byIcon(shadcn.LucideIcons.fileTerminal).first;
+    final sidebarIcon = find.byIcon(shadcn.LucideIcons.network).first;
     final iconColor = tester.widget<Icon>(sidebarIcon).color;
     engine.connectGate = Completer<void>();
     await tester.tap(find.text('启动转发'));
@@ -505,7 +595,7 @@ void main() {
       isFalse,
     );
     await expectLater(
-      Get.find<HostController>().saveForwardPorts(_service.id, []),
+      Get.find<GatewayController>().saveForwardPorts(_gateway.id, []),
       throwsStateError,
     );
     engine.sessions.single.closeGate = Completer<void>();
@@ -537,7 +627,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('重新启动保存当前映射，并读取更新后的服务、网关及密文', (tester) async {
+  testWidgets('重新启动读取最新网关、密文和目标地址，不读取服务凭据', (tester) async {
     final (engine, secrets) = await pump(tester);
     final id = await open(tester);
     await start(tester);
@@ -545,51 +635,135 @@ void main() {
     final stopping = sessions.stopForward(id);
     await settleCleanup(tester);
     await stopping;
-    final hosts = Get.find<HostController>();
     final gateways = Get.find<GatewayController>();
-    const newGateway = Host(
-      id: 'new-gateway',
-      name: 'New jump',
-      hostname: 'new-jump.test',
-      port: 2223,
-    );
-    await gateways.save(newGateway);
-    await gateways.savePassword(newGateway.id, 'new-gateway-test-only');
-    await hosts.save(
-      hosts.hosts.single.copyWith(
-        hostname: 'new-db.test',
+    await gateways.save(
+      gateways.hosts.single.copyWith(
+        hostname: 'new-jump.test',
         port: 2222,
         username: 'operator',
-        gatewayId: newGateway.id,
       ),
     );
-    await hosts.savePassword(_service.id, 'new-service-test-only');
+    await gateways.savePassword(_gateway.id, 'new-gateway-test-only');
     await tester.pumpAndSettle();
     await field(tester, '本地端口', '23306');
     await field(tester, '目标端口', '5432');
+    await field(tester, '目标地址', 'new-db.test');
     await sessions.retry(id);
     expect(engine.sessions, hasLength(1));
     secrets.reads = 0;
     await start(tester);
     expect(engine.sessions, hasLength(2));
-    expect(engine.hosts.last.hostname, 'new-db.test');
+    expect(engine.hosts.last.hostname, 'new-jump.test');
     expect(engine.hosts.last.port, 2222);
     expect(engine.hosts.last.username, 'operator');
-    expect(engine.credentials.last.password, 'new-service-test-only');
+    expect(engine.credentials.last.password, 'new-gateway-test-only');
     expect(engine.gateways.last!.host.hostname, 'new-jump.test');
     expect(engine.gateways.last!.credentials.password, 'new-gateway-test-only');
-    expect(secrets.reads, 2);
+    expect(secrets.reads, 1);
     expect(
       engine.sessions.last.ports!.first,
-      const ForwardPort(localPort: 23306, targetPort: 5432),
+      const ForwardPort(
+        localPort: 23306,
+        targetHost: 'new-db.test',
+        targetPort: 5432,
+      ),
     );
     expect(
-      hosts.hosts.single.forwardPorts.first,
+      gateways.hosts.single.forwardPorts.first,
       engine.sessions.last.ports!.first,
     );
     expect(sessions.sessions.single.phase, SessionPhase.ready);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('未启用或已停止的转发关闭标签不弹确认框', (tester) async {
+    final (engine, _) = await pump(tester);
+    final sessions = Get.find<SessionController>();
+    var id = await open(tester);
+    await tester.tap(find.byKey(ValueKey('session-tab-close-$id')));
+    await tester.pumpAndSettle();
+    expect(sessions.sessions, isEmpty);
+    expect(Get.isDialogOpen, isFalse);
+    expect(engine.sessions, isEmpty);
+
+    id = await open(tester);
+    await start(tester);
+    final stopping = sessions.stopForward(id);
+    await settleCleanup(tester);
+    await stopping;
+    await tester.tap(find.byKey(ValueKey('session-tab-close-$id')));
+    await tester.pumpAndSettle();
+    expect(sessions.sessions, isEmpty);
+    expect(Get.isDialogOpen, isFalse);
+    expect(engine.sessions.single.closed, isTrue);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('关闭运行中转发先确认，取消保留连接，确认停止并关闭', (tester) async {
+    final (engine, _) = await pump(tester);
+    final sessions = Get.find<SessionController>();
+    final id = await open(tester);
+    await start(tester);
+    final close = find.byKey(ValueKey('session-tab-close-$id'));
+    await tester.tap(close);
+    await tester.pumpAndSettle();
+    expect(find.text('停止并关闭标签？'), findsOneWidget);
+    expect(find.text('${_gateway.name}（端口转发）'), findsOneWidget);
+    expect(engine.sessions.single.closed, isFalse);
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect(sessions.sessions.single.phase, SessionPhase.ready);
+    expect(engine.sessions.single.closed, isFalse);
+
+    await tester.tap(close);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('session-stop-and-close')));
+    await settleCleanup(tester);
+    expect(engine.sessions.single.closed, isTrue);
+    expect(sessions.sessions, isEmpty);
+    expect(Get.isDialogOpen, isFalse);
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final action in ['关闭其他标签', '关闭全部标签']) {
+    testWidgets('右键$action 统一确认，取消不部分关闭', (tester) async {
+      final (engine, _) = await pump(tester);
+      final sessions = Get.find<SessionController>();
+      final forward = await open(tester);
+      await start(tester);
+      final keep = sessions.openProxy(_gateway);
+      await tester.pumpAndSettle();
+      final close = find.byKey(ValueKey('session-tab-close-$keep'));
+
+      Future<void> request() async {
+        await tester.tap(close, buttons: kSecondaryButton);
+        await tester.pumpAndSettle();
+        await tester.tap(find.text(action));
+        await tester.pumpAndSettle();
+      }
+
+      await request();
+      expect(find.text('${_gateway.name}（端口转发）'), findsOneWidget);
+      expect(find.text('${_gateway.name}（动态代理）'), findsNothing);
+      await tester.tap(find.text('取消'));
+      await tester.pumpAndSettle();
+      expect(sessions.sessions.map((s) => s.id), [forward, keep]);
+      expect(sessions.activeSessionId.value, keep);
+      expect(engine.sessions.single.closed, isFalse);
+
+      await request();
+      await tester.tap(find.byKey(const ValueKey('session-stop-and-close')));
+      await settleCleanup(tester);
+      expect(engine.sessions.single.closed, isTrue);
+      expect(
+        sessions.sessions.map((s) => s.id),
+        action == '关闭其他标签' ? [keep] : <String>[],
+      );
+      expect(Get.isDialogOpen, isFalse);
+      expect(tester.takeException(), isNull);
+      await sessions.closeAll();
+    });
+  }
 
   testWidgets('关页签释放连接，重开保持未启用，再启动等待旧监听释放', (tester) async {
     final (engine, _) = await pump(tester);
@@ -603,7 +777,7 @@ void main() {
     expect(sessions.sessions, isEmpty);
     final reopened = await open(
       tester,
-      service: Get.find<HostController>().hosts.single,
+      gateway: Get.find<GatewayController>().hosts.single,
     );
     expect(reopened, isNot(id));
     expect(engine.sessions, hasLength(1));
@@ -623,7 +797,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('删除服务关闭转发并移除映射，终端与文件传输生命周期独立', (tester) async {
+  testWidgets('删除服务不影响转发，删除网关关闭转发，终端和文件传输相互独立', (tester) async {
     final (engine, _) = await pump(tester);
     final sessions = Get.find<SessionController>();
     final forward = await open(tester);
@@ -653,18 +827,27 @@ void main() {
     expect(engine.sessions.first.closed, isFalse);
     expect(engine.sessions.last.closed, isFalse);
     sessions.activate(forward);
-    final removing = Get.find<HostController>().remove(_service.id);
+    final removingService = Get.find<HostController>().remove(_service.id);
+    await settleCleanup(tester);
+    await removingService;
+    expect(engine.sessions.first.closed, isFalse);
+    expect(
+      sessions.findByHost(_gateway.id, kind: SessionKind.portForward),
+      isNotNull,
+    );
+    final removing = Get.find<GatewayController>().remove(_gateway.id);
     await settleCleanup(tester);
     await removing;
     expect(
-      sessions.findByHost(_service.id, kind: SessionKind.portForward),
+      sessions.findByHost(_gateway.id, kind: SessionKind.portForward),
       isNull,
     );
     expect(engine.sessions.first.closed, isTrue);
     expect(sessions.sessions.single.id, transfer);
     expect(engine.sessions.last.closed, isFalse);
     expect(await Get.find<HostRepository>().getAll(), isEmpty);
-    expect(await Get.find<HostController>().passwordOf(_service.id), isNull);
+    expect(Get.find<GatewayController>().hosts, isEmpty);
+    expect(await Get.find<GatewayController>().passwordOf(_gateway.id), isNull);
     expect(tester.takeException(), isNull);
   });
 
@@ -689,46 +872,51 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('已有映射在服务编辑及复制后保留，包括编辑弹窗打开后保存的映射', (tester) async {
+  testWidgets('网关编辑和复制保留最新映射，包括编辑弹窗打开后保存的映射', (tester) async {
     await pump(tester);
-    final hosts = Get.find<HostController>();
-    final context = tester.element(find.text(_service.name));
-    final editing = showHostEditDialog(context, host: hosts.hosts.single);
+    final hosts = Get.find<GatewayController>();
+    final context = tester.element(find.text(_gateway.name));
+    final editing = showHostEditDialog(
+      context,
+      host: hosts.hosts.single,
+      gateway: true,
+    );
     await tester.pumpAndSettle();
     const updatedPorts = [ForwardPort(localPort: 15432, targetPort: 5432)];
-    await hosts.saveForwardPorts(_service.id, updatedPorts);
+    await hosts.saveForwardPorts(_gateway.id, updatedPorts);
     await tester.pumpAndSettle();
-    await field(tester, '名称', 'Renamed service');
+    await field(tester, '名称', 'Renamed gateway');
     await tester.tap(find.text('保存'));
     await tester.pumpAndSettle();
     await editing;
     expect(hosts.hosts.single.forwardPorts, updatedPorts);
     final copying = showHostEditDialog(
-      tester.element(find.text('Renamed service')),
+      tester.element(find.text('Renamed gateway')),
       copyFrom: hosts.hosts.single,
+      gateway: true,
     );
     await tester.pumpAndSettle();
-    await field(tester, '名称', 'Copied service');
+    await field(tester, '名称', 'Copied gateway');
     await tester.tap(find.text('保存'));
     await tester.pumpAndSettle();
     await copying;
     expect(hosts.hosts, hasLength(2));
     expect(
-      hosts.hosts.firstWhere((h) => h.name == 'Copied service').forwardPorts,
+      hosts.hosts.firstWhere((h) => h.name == 'Copied gateway').forwardPorts,
       updatedPorts,
     );
     expect(tester.takeException(), isNull);
   });
 
   testWidgets('多映射可滚动，指纹确认置顶，英文小窗口操作区始终可见', (tester) async {
-    final many = _service.copyWith(
+    final many = _gateway.copyWith(
       forwardPorts: [
         for (var i = 0; i < 8; i++)
           ForwardPort(localPort: 15000 + i, targetPort: 3306 + i),
       ],
     );
-    await pump(tester, service: many);
-    final id = await open(tester, service: many);
+    await pump(tester, gateway: many);
+    final id = await open(tester, gateway: many);
     final sessions = Get.find<SessionController>();
     sessions.sessions[0] = Session(
       id: id,

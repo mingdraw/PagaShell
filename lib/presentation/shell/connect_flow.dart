@@ -72,14 +72,28 @@ Future<void> _connectToHost(
   }
   final sessionController = Get.find<SessionController>();
 
-  if (kind == SessionKind.portForward) {
+  if (kind == SessionKind.portForward || kind == SessionKind.dynamicProxy) {
     final session = sessionController.sessions.firstWhereOrNull(
-      (s) =>
-          s.id == forwardSessionId &&
-          s.host.id == host.id &&
-          s.kind == SessionKind.portForward,
+      (s) => s.id == forwardSessionId && s.host.id == host.id && s.kind == kind,
     );
     if (session == null || session.phase.isAlive) return;
+    final controller = Get.find<GatewayController>();
+    final endpoint = await controller.findSaved(host.id);
+    if (endpoint == null) throw const SshEngineException('所选网关已不存在');
+    if (!context.mounted) return;
+    final gateway = await _prepareGateway(context, endpoint, controller);
+    if (gateway != null && context.mounted) {
+      if (kind == SessionKind.dynamicProxy) {
+        await sessionController.startProxy(
+          forwardSessionId!,
+          gateway.host,
+          gateway: gateway,
+        );
+      } else {
+        await sessionController.startForward(forwardSessionId!, gateway);
+      }
+    }
+    return;
   } else if (!forceNew &&
       sessionController.focusExisting(host.id, kind: kind)) {
     return;
@@ -97,37 +111,36 @@ Future<void> _connectToHost(
       (h) => h.id == gatewayId,
     );
     if (endpoint == null) throw const SshEngineException('所选网关已不存在');
-    if (endpoint.gatewayType == GatewayType.page) {
-      final token = await controller.passwordOf(endpoint.id);
-      if (token == null || token.isEmpty) {
-        throw const SshEngineException('Page 访问令牌未保存，请编辑网关');
-      }
-      gateway = SshGateway.page(host: endpoint, token: token);
-    } else {
-      final gatewayLogin = await _prepareLogin(context, endpoint, controller);
-      if (gatewayLogin == null || !context.mounted) return;
-      gateway = SshGateway(host: gatewayLogin.$1, credentials: gatewayLogin.$2);
-    }
+    gateway = await _prepareGateway(context, endpoint, controller);
+    if (gateway == null || !context.mounted) return;
   }
-  if (kind == SessionKind.portForward) {
-    await sessionController.startForward(
-      forwardSessionId!,
-      login.$1,
-      login.$2,
-      gateway: gateway,
-    );
-  } else {
-    // 准备凭据及网关期间可能已有同类标签打开，创建前再检查一次。
-    if (!forceNew && sessionController.focusExisting(host.id, kind: kind)) {
-      return;
-    }
-    await sessionController.open(
-      login.$1,
-      login.$2,
-      kind: kind,
-      gateway: gateway,
-    );
+  // 准备凭据及网关期间可能已有同类标签打开，创建前再检查一次。
+  if (!forceNew && sessionController.focusExisting(host.id, kind: kind)) {
+    return;
   }
+  await sessionController.open(
+    login.$1,
+    login.$2,
+    kind: kind,
+    gateway: gateway,
+  );
+}
+
+Future<SshGateway?> _prepareGateway(
+  BuildContext context,
+  Host endpoint,
+  GatewayController controller,
+) async {
+  if (endpoint.gatewayType == GatewayType.page) {
+    final token = await controller.passwordOf(endpoint.id);
+    if (token == null || token.isEmpty) {
+      throw const SshEngineException('Page 访问令牌未保存，请编辑网关');
+    }
+    return SshGateway.page(host: endpoint, token: token);
+  }
+  final login = await _prepareLogin(context, endpoint, controller);
+  if (login == null || !context.mounted) return null;
+  return SshGateway(host: login.$1, credentials: login.$2);
 }
 
 Future<(Host, SshCredentials)?> _prepareLogin(

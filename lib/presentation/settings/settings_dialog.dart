@@ -273,16 +273,16 @@ class _SettingsDialogState extends State<SettingsDialog> {
               onPressed: _busy ? null : _test,
               child: Text((_testing ? '正在测试' : '测试连接').tr),
             ),
-          shadcn.OutlineButton(
-            onPressed: _saving ? null : AppNavigation.closeDialog<void>,
-            child: Text('关闭'.tr),
-          ),
           if (_tab == 1 && ready)
             shadcn.PrimaryButton(
               key: const ValueKey('ai-model-save'),
               onPressed: _busy ? null : _save,
               child: Text((_saving ? '保存中' : '保存').tr),
             ),
+          shadcn.OutlineButton(
+            onPressed: _saving ? null : AppNavigation.closeDialog<void>,
+            child: Text('关闭'.tr),
+          ),
         ],
       ),
     );

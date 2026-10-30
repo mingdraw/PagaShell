@@ -20,9 +20,8 @@ class SettingsMenuButton extends StatelessWidget {
       tooltip: '设置'.tr,
       icon: const Icon(
         shadcn.LucideIcons.settings,
-        size: AppTheme.statusBarIconSize,
+        size: AppTheme.toolbarIconSize,
       ),
-      density: shadcn.ButtonDensity.compact,
       onPressed: () => unawaited(showSettingsDialog()),
     );
   }

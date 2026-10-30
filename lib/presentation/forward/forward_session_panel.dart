@@ -5,7 +5,7 @@ import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
-import '../../application/hosts/host_controller.dart';
+import '../../application/gateways/gateway_controller.dart';
 import '../../application/session/session.dart';
 import '../../application/session/session_controller.dart';
 import '../../domain/entities/forward_port.dart';
@@ -27,22 +27,25 @@ class ForwardSessionPanel extends StatefulWidget {
 class _PortEditors {
   _PortEditors(ForwardPort? port)
     : local = TextEditingController(text: port?.localPort.toString() ?? ''),
+      host = TextEditingController(text: port?.targetHost ?? '127.0.0.1'),
       target = TextEditingController(text: port?.targetPort.toString() ?? '');
   final key = UniqueKey();
   final TextEditingController local;
+  final TextEditingController host;
   final TextEditingController target;
 
   bool get isBlank => local.text.trim().isEmpty && target.text.trim().isEmpty;
 
   void dispose() {
     local.dispose();
+    host.dispose();
     target.dispose();
   }
 }
 
 class _ForwardSessionPanelState extends State<ForwardSessionPanel> {
   final _form = GlobalKey<FormState>();
-  late final HostController _hosts;
+  late final GatewayController _hosts;
   late List<_PortEditors> _ports;
   late List<ForwardPort> _savedPorts;
   final _retired = <_PortEditors>[];
@@ -56,7 +59,7 @@ class _ForwardSessionPanelState extends State<ForwardSessionPanel> {
   @override
   void initState() {
     super.initState();
-    _hosts = Get.find<HostController>();
+    _hosts = Get.find<GatewayController>();
     _savedPorts = widget.session.host.forwardPorts;
     _ports = _savedPorts.map(_PortEditors.new).toList();
   }
@@ -120,7 +123,13 @@ class _ForwardSessionPanelState extends State<ForwardSessionPanel> {
       if (local == null || target == null) {
         throw StateError('请填写有效的端口（1-65535）');
       }
-      ports.add(ForwardPort(localPort: local, targetPort: target));
+      ports.add(
+        ForwardPort(
+          localPort: local,
+          targetHost: row.host.text.trim(),
+          targetPort: target,
+        ),
+      );
     }
     ForwardPort.validateAll(ports);
     return ports;
@@ -236,13 +245,31 @@ class _ForwardSessionPanelState extends State<ForwardSessionPanel> {
               ),
               validator: (value) => row.isBlank ? null : _port(value),
             );
+            final host = AppTextFormField(
+              controller: row.host,
+              enabled: editable,
+              decoration: AppInputDecoration(
+                labelText: '目标地址'.tr,
+                inlineLabel: true,
+              ),
+              validator: (value) =>
+                  row.isBlank || (value?.trim().isNotEmpty ?? false)
+                  ? null
+                  : '请填写有效的目标地址'.tr,
+            );
             return Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Expanded(
-                  child: constraints.maxWidth < 480
+                  child: constraints.maxWidth < 720
                       ? Column(
-                          children: [local, const SizedBox(height: 12), target],
+                          children: [
+                            local,
+                            const SizedBox(height: 12),
+                            host,
+                            const SizedBox(height: 12),
+                            target,
+                          ],
                         )
                       : Row(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -255,6 +282,8 @@ class _ForwardSessionPanelState extends State<ForwardSessionPanel> {
                                 size: 16,
                               ),
                             ),
+                            Expanded(flex: 2, child: host),
+                            const SizedBox(width: 12),
                             Expanded(child: target),
                           ],
                         ),
@@ -325,10 +354,18 @@ class _ForwardSessionPanelState extends State<ForwardSessionPanel> {
                 _hosts.hosts.firstWhereOrNull((h) => h.id == session.host.id) ??
                 session.host;
             return Text(
-              '关联服务：@name'.trParams({'name': host.name}),
+              '关联网关：@name'.trParams({'name': host.name}),
               overflow: TextOverflow.ellipsis,
             );
           }),
+          const SizedBox(height: 8),
+          Text(
+            (session.host.gatewayType == GatewayType.page
+                    ? '目标地址由内网 Client 访问，127.0.0.1 指 Client 本机'
+                    : '目标地址由 SSH 网关访问，127.0.0.1 指网关本机')
+                .tr,
+            style: TextStyle(color: colors.mutedForeground, fontSize: 12),
+          ),
           const SizedBox(height: 16),
           Expanded(
             child: SingleChildScrollView(

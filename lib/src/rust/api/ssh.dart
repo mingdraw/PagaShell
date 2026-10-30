@@ -9,9 +9,9 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 import 'page.dart';
 
-// These functions are ignored because they are not marked as `pub`: `authenticate_inner`, `authenticate`, `desktop_tunnel`, `download_inner`, `forward_listener`, `handshake`, `load_private_key`, `open_sftp_inner`, `open_sftp`, `register_transfer`, `remove_dir_recursive`, `shell_tx`, `start_port_forwards`, `start_shell`, `transfer_cleanup`, `transfer_io`, `unregister_transfer`, `upload_inner`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Credentials`, `PendingSession`, `PinningHandler`, `SessionEntry`, `ShellCmd`, `TransferTimeout`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `check_server_key`, `clone`, `fmt`, `fmt`
+// These functions are ignored because they are not marked as `pub`: `authenticate_inner`, `authenticate`, `bind_forward_ports`, `desktop_tunnel`, `download_inner`, `forward_listener`, `handshake`, `is_closed`, `load_private_key`, `open_sftp_inner`, `open_sftp`, `register_transfer`, `remove_dir_recursive`, `shell_tx`, `spawn_port_forwards`, `start_page_port_forwards`, `start_port_forwards`, `start_shell`, `transfer_cleanup`, `transfer_io`, `unregister_transfer`, `upload_inner`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Credentials`, `ForwardTransport`, `PageForwardEntry`, `PendingSession`, `PinningHandler`, `SessionEntry`, `ShellCmd`, `TransferTimeout`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `check_server_key`, `clone`, `clone`, `fmt`, `fmt`
 
 /// 只进行 SSH 握手并返回服务器指纹。此阶段不接收或发送密码。
 Future<SshHandshake> sshHandshake({required String host, required int port}) =>
@@ -110,6 +110,22 @@ Future<String> sshReadServerStatus({required int sessionId}) =>
 /// 关闭会话：结束 shell 通道并断开连接。
 Future<void> sshDisconnect({required int sessionId}) =>
     RustLib.instance.api.crateApiSshSshDisconnect(sessionId: sessionId);
+
+/// 创建 Page 网关转发句柄。每次接受本地连接时独立鉴权并连接目标 TCP。
+Future<int> pageForwardCreate({required PageGateway gateway}) =>
+    RustLib.instance.api.crateApiSshPageForwardCreate(gateway: gateway);
+
+Stream<PortForwardEvent> pageStartPortForwards({
+  required int sessionId,
+  required List<ForwardPortSpec> ports,
+}) => RustLib.instance.api.crateApiSshPageStartPortForwards(
+  sessionId: sessionId,
+  ports: ports,
+);
+
+/// 释放 Page 转发的监听、已接受连接和正在建立的目标通道。
+Future<void> pageForwardDisconnect({required int sessionId}) =>
+    RustLib.instance.api.crateApiSshPageForwardDisconnect(sessionId: sessionId);
 
 /// 一条专用 SSH 会话上的多端口转发。任一 bind 失败时不保留部分监听。
 Stream<PortForwardEvent> sshStartPortForwards({

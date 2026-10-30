@@ -5,6 +5,8 @@ import 'package:xterm/xterm.dart';
 
 import '../../domain/entities/forward_port.dart';
 import '../../domain/entities/host.dart';
+import '../../domain/proxy/dynamic_proxy_engine.dart';
+import '../../domain/proxy/system_proxy.dart';
 import '../../domain/rdp/rdp_engine.dart';
 import '../../domain/repositories/known_host_repository.dart';
 import '../../domain/ssh/host_key.dart';
@@ -24,11 +26,13 @@ class SessionController extends GetxController {
     this._transfers,
     this._rdpEngine,
     this._vncEngine,
+    this._systemProxy,
   });
 
   final SshEngine _engine;
   final RdpEngine? _rdpEngine;
   final VncEngine? _vncEngine;
+  final SystemProxy? _systemProxy;
   final KnownHostRepository? _knownHosts;
   final TransferController? _transfers;
   final Map<String, Completer<bool>> _hostKeyDecisions = {};
@@ -45,8 +49,18 @@ class SessionController extends GetxController {
   final Map<String, StreamSubscription<String>> _outputSubs = {};
   final Map<String, StreamSubscription<PortForwardEvent>> _forwardSubs = {};
   final Map<String, Future<void>> _forwardCleanup = {};
-  // 标签关闭后仍需按服务跟踪清理，重新启动必须等旧监听端口释放。
+  // 标签关闭后仍需按网关跟踪清理，重新启动必须等旧监听端口释放。
   final Map<String, Future<void>> _forwardHostCleanup = {};
+  final Map<String, Future<void>> _proxyCleanup = {};
+  final Map<String, Future<void>> _proxyHostCleanup = {};
+  final Map<String, Completer<void>> _proxyStarts = {};
+  final Map<String, DynamicProxySession> _proxyHandles = {};
+  final Map<String, SystemProxyLease> _systemProxyLeases = {};
+  final Set<String> _proxyRestoreFailures = {};
+  final Map<String, Future<void>> _tabCloseRequests = {};
+  Future<void>? _tabCloseConfirmation;
+
+  bool proxyNeedsCleanup(String id) => _proxyRestoreFailures.contains(id);
 
   int _nextId = 1;
 
@@ -106,7 +120,7 @@ class SessionController extends GetxController {
     SessionKind kind = SessionKind.terminal,
     SshGateway? gateway,
   }) async {
-    if (kind == SessionKind.portForward) {
+    if (kind == SessionKind.portForward || kind == SessionKind.dynamicProxy) {
       throw ArgumentError('请通过端口转发页签手动启动');
     }
     if (host.isDesktop) {
@@ -155,13 +169,10 @@ class SessionController extends GetxController {
     return id;
   }
 
-  /// 每次启动都由调用方重新准备服务、凭据及网关。
-  Future<void> startForward(
-    String id,
-    Host host,
-    SshCredentials credentials, {
-    SshGateway? gateway,
-  }) async {
+  /// 每次启动都由调用方重新准备网关配置和网关凭据。
+  Future<void> startForward(String id, SshGateway gateway) async {
+    final host = gateway.host;
+    final credentials = gateway.credentials;
     if (host.isDesktop) {
       throw const SshEngineException('远程桌面服务不支持 SSH 文件传输或端口转发');
     }
@@ -176,7 +187,6 @@ class SessionController extends GetxController {
     ForwardPort.validateAll(host.forwardPorts, allowEmpty: false);
     _credentials[id] = credentials;
     _gateways.remove(id);
-    if (gateway != null) _gateways[id] = gateway;
     _update(
       id,
       (s) => Session(
@@ -205,12 +215,267 @@ class SessionController extends GetxController {
     await _forwardHostCleanup[hostId];
   }
 
+  String openProxy(Host host) {
+    final existing = findByHost(host.id, kind: SessionKind.dynamicProxy);
+    if (existing != null) {
+      activate(existing.id);
+      return existing.id;
+    }
+    final id = 'ssn-${_nextId++}';
+    sessions.add(
+      Session(
+        id: id,
+        host: host,
+        kind: SessionKind.dynamicProxy,
+        phase: SessionPhase.closed,
+      ),
+    );
+    activeSessionId.value = id;
+    return id;
+  }
+
+  void updateProxyHost(Host host) {
+    final session = findByHost(host.id, kind: SessionKind.dynamicProxy);
+    if (session != null && !session.phase.isAlive) {
+      _update(session.id, (s) => s.copyWith(host: host));
+    }
+  }
+
+  Future<void> startProxy(String id, Host host, {SshGateway? gateway}) async {
+    final session = _find(id);
+    if (_disposed ||
+        session == null ||
+        session.kind != SessionKind.dynamicProxy ||
+        session.host.id != host.id ||
+        session.phase.isAlive) {
+      return;
+    }
+    host.proxyConfig.validate(forStart: true);
+    if (gateway?.host.id != host.id) {
+      throw const SshEngineException('所选网关不可用');
+    }
+    _update(id, (s) => Session(id: id, host: host, kind: s.kind));
+    final cancellation = Completer<void>();
+    final completed = Completer<void>();
+    _proxyStarts[id] = completed;
+    _connectionCancels[id] = cancellation;
+    try {
+      await _proxyHostCleanup[host.id];
+      if (cancellation.isCompleted ||
+          _disposed ||
+          _find(id) == null ||
+          _find(id)?.phase == SessionPhase.stopping) {
+        return;
+      }
+      final engine = _engine;
+      if (engine is! DynamicProxyEngine) {
+        throw const SshEngineException('当前引擎不支持动态代理');
+      }
+      final proxy = await (engine as DynamicProxyEngine).startProxy(
+        host.proxyConfig,
+        gateway: gateway,
+        verifyHostKey: (key) => _verifyHostKey(id, key),
+        cancelled: cancellation.future,
+      );
+      _proxyHandles[id] = proxy;
+      Future<void> ended(String message) async {
+        if (!identical(_proxyHandles[id], proxy)) return;
+        if (!completed.isCompleted && !cancellation.isCompleted) {
+          cancellation.complete();
+        }
+        await _proxyFailed(id, message);
+      }
+
+      unawaited(
+        proxy.done.then(
+          (_) => ended('动态代理监听已断开'),
+          onError: (Object error) =>
+              ended(error is SshEngineException ? error.message : '动态代理监听已断开'),
+        ),
+      );
+      if (!cancellation.isCompleted && host.proxyConfig.autoSystemProxy) {
+        final systemProxy = _systemProxy;
+        if (systemProxy == null) {
+          throw const SystemProxyException('当前系统不支持自动设置网络代理，请手动设置');
+        }
+        final lease = systemProxy.createLease(host.proxyConfig);
+        _systemProxyLeases[id] = lease;
+        await lease.enable();
+      }
+      if (cancellation.isCompleted ||
+          _disposed ||
+          _find(id) == null ||
+          _find(id)?.phase == SessionPhase.stopping) {
+        await _releaseProxyResources(id);
+        return;
+      }
+      _update(
+        id,
+        (s) => s.copyWith(phase: SessionPhase.ready, proxySession: proxy),
+      );
+    } on Object catch (e) {
+      Object failure = e;
+      try {
+        await _releaseProxyResources(id);
+      } on SystemProxyException catch (restoreError) {
+        failure = restoreError;
+        _proxyRestoreFailures.add(id);
+      }
+      final current = _find(id);
+      if ((_proxyRestoreFailures.contains(id) || !cancellation.isCompleted) &&
+          current != null &&
+          current.phase != SessionPhase.stopping) {
+        _update(
+          id,
+          (s) => Session(
+            id: s.id,
+            host: s.host,
+            kind: s.kind,
+            phase: _proxyRestoreFailures.contains(id)
+                ? SessionPhase.ready
+                : SessionPhase.failed,
+            error: failure is SshEngineException
+                ? failure.message
+                : failure.toString(),
+            proxySession: _proxyHandles[id],
+            hostKeyFailure: e is HostKeyChangedException ? e.review : null,
+          ),
+        );
+      }
+    } finally {
+      _connectionCancels.remove(id);
+      if (!cancellation.isCompleted) cancellation.complete();
+      _proxyStarts.remove(id);
+      completed.complete();
+    }
+  }
+
+  Future<void> _proxyFailed(String id, String message) async {
+    final session = _find(id);
+    if (session == null ||
+        !session.phase.isAlive ||
+        session.phase == SessionPhase.stopping) {
+      return;
+    }
+    _update(
+      id,
+      (s) => Session(
+        id: s.id,
+        host: s.host,
+        kind: s.kind,
+        phase: SessionPhase.failed,
+        error: message,
+      ),
+    );
+    try {
+      await _cleanupProxy(session);
+    } on SystemProxyException {
+      // The cleanup error is shown on the retained proxy tab for retry.
+    }
+  }
+
+  Future<void> stopProxy(String id) async {
+    final session = _find(id);
+    if (session == null ||
+        session.kind != SessionKind.dynamicProxy ||
+        (!session.phase.isAlive &&
+            !_proxyHandles.containsKey(id) &&
+            !_systemProxyLeases.containsKey(id))) {
+      return;
+    }
+    _update(
+      id,
+      (s) => Session(
+        id: s.id,
+        host: s.host,
+        kind: s.kind,
+        phase: SessionPhase.stopping,
+      ),
+    );
+    final cancellation = _connectionCancels[id];
+    if (cancellation != null && !cancellation.isCompleted) {
+      cancellation.complete();
+    }
+    final decision = _hostKeyDecisions.remove(id);
+    if (decision != null && !decision.isCompleted) decision.complete(false);
+    try {
+      await _cleanupProxy(session);
+    } on SystemProxyException {
+      // Keep the listener and tab available until settings can be restored.
+    }
+  }
+
+  Future<void> _cleanupProxy(Session session) async {
+    final existing = _proxyCleanup[session.id];
+    if (existing != null) return existing;
+    final hostId = session.host.id;
+    final previous = _proxyHostCleanup[hostId];
+    final starting = _proxyStarts[session.id]?.future;
+    final cleanup = () async {
+      await previous;
+      await starting;
+      try {
+        await _releaseResources(session);
+        _proxyRestoreFailures.remove(session.id);
+        if (_find(session.id)?.phase == SessionPhase.stopping) {
+          _update(
+            session.id,
+            (s) => Session(
+              id: s.id,
+              host: s.host,
+              kind: s.kind,
+              phase: SessionPhase.closed,
+            ),
+          );
+        }
+      } on SystemProxyException catch (error) {
+        _proxyRestoreFailures.add(session.id);
+        _update(
+          session.id,
+          (s) => s.copyWith(
+            phase: SessionPhase.ready,
+            error: error.message,
+            proxySession: _proxyHandles[session.id],
+          ),
+        );
+        rethrow;
+      }
+    }();
+    _proxyCleanup[session.id] = cleanup;
+    _proxyHostCleanup[hostId] = cleanup;
+    try {
+      await cleanup;
+    } finally {
+      if (identical(_proxyCleanup[session.id], cleanup)) {
+        unawaited(_proxyCleanup.remove(session.id));
+      }
+      if (identical(_proxyHostCleanup[hostId], cleanup)) {
+        unawaited(_proxyHostCleanup.remove(hostId));
+      }
+    }
+  }
+
+  Future<void> closeProxyForHost(String hostId) async {
+    final ids = sessions
+        .where((s) => s.host.id == hostId && s.kind == SessionKind.dynamicProxy)
+        .map((s) => s.id)
+        .toList();
+    await Future.wait(ids.map(close));
+    await _proxyHostCleanup[hostId];
+    if (sessions.any(
+      (s) => s.host.id == hostId && s.kind == SessionKind.dynamicProxy,
+    )) {
+      throw const SystemProxyException('恢复系统代理失败，请重试停止代理');
+    }
+  }
+
   /// 认证失败后先重新输入密码；其他失败沿用当前会话凭据。
   Future<void> retry(String id) async {
     final session = _find(id);
     final credentials = _credentials[id];
     if (session == null ||
         session.kind == SessionKind.portForward ||
+        session.kind == SessionKind.dynamicProxy ||
         session.phase != SessionPhase.failed ||
         credentials == null) {
       return;
@@ -242,6 +507,7 @@ class SessionController extends GetxController {
     if (_disposed ||
         session == null ||
         session.kind == SessionKind.portForward ||
+        session.kind == SessionKind.dynamicProxy ||
         session.phase != SessionPhase.failed ||
         review == null ||
         !review.hasChanged ||
@@ -427,25 +693,21 @@ class SessionController extends GetxController {
         );
         return null;
       }
-      final engineSession = await _engine.connect(
-        host,
-        credentials,
-        verifyHostKey: (key) => _verifyHostKey(id, key),
-        cancelled: cancellation.future,
-        gateway: _gateways[id],
-      );
-      // 会话可能在 connect 期间被用户关闭。
-      if (_disposed || _find(id) == null) {
-        await engineSession.close();
-        return null;
-      }
-
       if (_find(id)!.kind == SessionKind.portForward) {
-        _update(id, (s) => s.copyWith(engineSession: engineSession));
-        if (engineSession is! PortForwardSession) {
+        final engine = _engine;
+        if (engine is! GatewayForwardEngine) {
           throw const SshEngineException('当前引擎不支持端口转发');
         }
-        final forwarder = engineSession as PortForwardSession;
+        final forwarder = await (engine as GatewayForwardEngine).connectForward(
+          SshGateway(host: host, credentials: credentials),
+          verifyHostKey: (key) => _verifyHostKey(id, key),
+          cancelled: cancellation.future,
+        );
+        if (_disposed || _find(id) == null) {
+          await forwarder.close();
+          return null;
+        }
+        _update(id, (s) => s.copyWith(forwardSession: forwarder));
         _forwardSubs[id] = forwarder
             .startPortForwards(host.forwardPorts)
             .listen(
@@ -456,7 +718,8 @@ class SessionController extends GetxController {
                   _update(
                     id,
                     (s) => s.copyWith(
-                      error: '本地端口 ${event.localPort} 的目标连接失败，请检查服务端口和转发权限',
+                      error:
+                          '本地端口 ${event.localPort} 的目标连接失败，请检查目标地址、端口和网关转发权限',
                     ),
                   );
                 } else if (event.kind == 'closed') {
@@ -471,6 +734,19 @@ class SessionController extends GetxController {
               ),
               onDone: () => unawaited(_forwardFailed(id, '端口转发已断开')),
             );
+        return null;
+      }
+
+      final engineSession = await _engine.connect(
+        host,
+        credentials,
+        verifyHostKey: (key) => _verifyHostKey(id, key),
+        cancelled: cancellation.future,
+        gateway: _gateways[id],
+      );
+      // 会话可能在 connect 期间被用户关闭。
+      if (_disposed || _find(id) == null) {
+        await engineSession.close();
         return null;
       }
 
@@ -524,13 +800,17 @@ class SessionController extends GetxController {
 
   Future<bool> _verifyHostKey(String id, SshHostKey key) async {
     final repository = _knownHosts;
-    if (repository == null || _disposed || _find(id) == null) return false;
+    bool cancelled() =>
+        _disposed ||
+        _find(id) == null ||
+        _find(id)?.phase == SessionPhase.stopping;
+    if (repository == null || cancelled()) return false;
     final trusted = await repository.find(
       key.hostname,
       key.port,
       protocol: key.protocol,
     );
-    if (_disposed || _find(id) == null) return false;
+    if (cancelled()) return false;
     if (trusted != null &&
         trusted.matches(key) &&
         (!key.isRdp || key.certificateError == null)) {
@@ -558,7 +838,7 @@ class SessionController extends GetxController {
     if (review.hasChanged && !key.isRdp) {
       throw HostKeyChangedException(review, '主机指纹已变更，已拒绝连接；请通过可信渠道核验服务器密钥');
     }
-    if (!accepted || _disposed || _find(id) == null) return false;
+    if (!accepted || cancelled()) return false;
     if (key.isRdp && (review.hasChanged || key.certificateError != null)) {
       // Explicit exception applies only to this TLS connection, never silently
       // replacing the saved certificate or suppressing future PKI warnings.
@@ -580,7 +860,7 @@ class SessionController extends GetxController {
         '可信主机指纹已发生变化，已拒绝连接',
       );
     }
-    if (_disposed || _find(id) == null) return false;
+    if (cancelled()) return false;
     _update(id, (s) => s.copyWith(phase: SessionPhase.authenticating));
     return true;
   }
@@ -734,7 +1014,89 @@ class SessionController extends GetxController {
     return true;
   }
 
+  /// 用户关闭标签前确认运行中的转发和代理；批量操作取消时保留所有标签。
+  Future<void> requestTabClose(
+    Iterable<String> sessionIds, {
+    required Future<bool> Function(List<Session> running) confirm,
+    String? keepSessionId,
+  }) {
+    final pending = <Future<void>>{};
+    final ids = <String>{};
+    for (final id in sessionIds.toSet()) {
+      if (id == keepSessionId) continue;
+      final existing = _tabCloseRequests[id];
+      if (existing != null) {
+        pending.add(existing);
+      } else {
+        ids.add(id);
+      }
+    }
+    if (ids.isNotEmpty) {
+      // 确认框逐个展示；连接清理只阻止同一标签的重复请求。
+      final previousConfirmation = _tabCloseConfirmation;
+      final confirmationDone = Completer<void>();
+      _tabCloseConfirmation = confirmationDone.future;
+      late final Future<void> request;
+      request =
+          (() async {
+            try {
+              if (previousConfirmation != null) await previousConfirmation;
+              if (keepSessionId != null && _find(keepSessionId) == null) return;
+              final running = sessions
+                  .where(
+                    (s) => ids.contains(s.id) && _needsTabCloseConfirmation(s),
+                  )
+                  .toList(growable: false);
+              if (running.isNotEmpty && !await confirm(running)) return;
+              if (keepSessionId != null) {
+                if (_find(keepSessionId) == null) return;
+                activate(keepSessionId);
+              }
+            } finally {
+              confirmationDone.complete();
+              if (identical(_tabCloseConfirmation, confirmationDone.future)) {
+                _tabCloseConfirmation = null;
+              }
+            }
+            await Future.wait(ids.map(close));
+          })().whenComplete(() {
+            for (final id in ids) {
+              if (identical(_tabCloseRequests[id], request)) {
+                unawaited(_tabCloseRequests.remove(id));
+              }
+            }
+          });
+      for (final id in ids) {
+        _tabCloseRequests[id] = request;
+      }
+      pending.add(request);
+    }
+    if (pending.length == 1) return pending.single;
+    return Future.wait(pending).then((_) {});
+  }
+
+  bool _needsTabCloseConfirmation(Session session) => switch (session.kind) {
+    SessionKind.portForward =>
+      session.phase.isAlive || _forwardCleanup.containsKey(session.id),
+    SessionKind.dynamicProxy =>
+      session.phase.isAlive ||
+          _proxyHandles.containsKey(session.id) ||
+          _systemProxyLeases.containsKey(session.id) ||
+          _proxyStarts.containsKey(session.id) ||
+          _proxyCleanup.containsKey(session.id),
+    _ => false,
+  };
+
   Future<void> close(String id) async {
+    final current = _find(id);
+    if (current?.kind == SessionKind.dynamicProxy &&
+        (current!.host.proxyConfig.autoSystemProxy ||
+            _systemProxyLeases.containsKey(id))) {
+      await stopProxy(id);
+      if (_proxyHandles.containsKey(id) || _systemProxyLeases.containsKey(id)) {
+        return;
+      }
+    }
     final index = sessions.indexWhere((s) => s.id == id);
     if (index == -1) return;
     final session = sessions[index];
@@ -762,25 +1124,52 @@ class SessionController extends GetxController {
 
     if (session.kind == SessionKind.portForward) {
       await _cleanupForward(session);
+    } else if (session.kind == SessionKind.dynamicProxy) {
+      await _cleanupProxy(session);
     } else {
       await _releaseResources(session);
     }
   }
 
   Future<void> _releaseResources(Session session) async {
+    if (session.kind == SessionKind.dynamicProxy) {
+      await _releaseProxyResources(session.id);
+    }
     // 先取消传输，让引擎清理半成品，再断开连接。
     await _transfers?.cancelSession(session.id);
-    await _outputSubs.remove(session.id)?.cancel();
-    // async* 流可能正等待 native 事件；先发起取消并断开 SSH，
-    // native 转发结束后再等待取消完成，避免两边互相等待。
+    // 原生输出或 async* 转发流可能需要断开连接后才结束；先发起取消，
+    // 同时断开连接，再一起等待，避免取消与断开互相等待。
+    final outputCancellation = _outputSubs.remove(session.id)?.cancel();
     final forwardCancellation = _forwardSubs.remove(session.id)?.cancel();
-    try {
-      await session.engineSession?.close();
-      await session.desktopSession?.close();
-    } on Object catch (_) {
-      // 引擎侧可能已自行断开（shell 退出/网络中断），重复关闭报错可忽略。
+    await Future.wait([
+      ?outputCancellation,
+      ?forwardCancellation,
+      () async {
+        try {
+          await session.forwardSession?.close();
+          await session.engineSession?.close();
+          await session.desktopSession?.close();
+        } on Object catch (_) {
+          // 引擎侧可能已自行断开（shell 退出/网络中断），重复关闭报错可忽略。
+        }
+      }(),
+    ]);
+  }
+
+  Future<void> _releaseProxyResources(String id) async {
+    // Restore first: a failed restore must not leave the system pointing at a dead listener.
+    await _systemProxyLeases[id]?.restore();
+    _systemProxyLeases.remove(id);
+    _proxyRestoreFailures.remove(id);
+    final proxy = _proxyHandles[id];
+    if (proxy != null) {
+      try {
+        await proxy.close();
+      } on Object {
+        // An unexpectedly terminated listener can already be closed.
+      }
+      if (identical(_proxyHandles[id], proxy)) _proxyHandles.remove(id);
     }
-    if (forwardCancellation != null) await forwardCancellation;
   }
 
   Future<void> closeActive() async {
@@ -800,6 +1189,9 @@ class SessionController extends GetxController {
   Future<void> closeAll() async {
     final ids = sessions.map((s) => s.id).toList();
     await Future.wait(ids.map(close));
+    if (_systemProxyLeases.isNotEmpty) {
+      throw const SystemProxyException('恢复系统代理失败，请重试停止代理');
+    }
   }
 
   @override
@@ -820,7 +1212,7 @@ class SessionController extends GetxController {
     _credentials.clear();
     _gateways.clear();
     for (final session in sessions.toList()) {
-      unawaited(_releaseResources(session));
+      unawaited(_releaseResources(session).catchError((Object _) {}));
       if (session.phase == SessionPhase.credentialsPending) {
         _update(session.id, (s) => s.copyWith(phase: SessionPhase.closed));
       }

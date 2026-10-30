@@ -1,6 +1,7 @@
 import 'package:xterm/xterm.dart';
 
 import '../../domain/entities/host.dart';
+import '../../domain/proxy/dynamic_proxy_engine.dart';
 import '../../domain/rdp/rdp_engine.dart';
 import '../../domain/ssh/host_key.dart';
 import '../../domain/ssh/ssh_engine.dart';
@@ -36,7 +37,13 @@ enum SessionPhase {
       this == stopping;
 }
 
-enum SessionKind { terminal, fileTransfer, portForward, remoteDesktop }
+enum SessionKind {
+  terminal,
+  fileTransfer,
+  portForward,
+  dynamicProxy,
+  remoteDesktop,
+}
 
 /// 一个终端、文件传输或端口转发标签对应的会话快照（不可变）。
 class Session {
@@ -48,6 +55,8 @@ class Session {
     this.phase = SessionPhase.connecting,
     this.error,
     this.engineSession,
+    this.forwardSession,
+    this.proxySession,
     this.terminal,
     this.hostKeyReview,
     this.hostKeyFailure,
@@ -83,6 +92,8 @@ class Session {
 
   /// ready 后持有的引擎会话句柄。
   final SshEngineSession? engineSession;
+  final PortForwardSession? forwardSession;
+  final DynamicProxySession? proxySession;
   final RdpEngineSession? desktopSession;
 
   /// ready 后与 [engineSession] 双向绑定的 xterm 终端（跨快照复用同一实例）。
@@ -94,6 +105,8 @@ class Session {
     SessionPhase? phase,
     String? error,
     SshEngineSession? engineSession,
+    PortForwardSession? forwardSession,
+    DynamicProxySession? proxySession,
     Terminal? terminal,
     HostKeyReview? hostKeyReview,
     HostKeyReview? hostKeyFailure,
@@ -108,6 +121,8 @@ class Session {
       phase: phase ?? this.phase,
       error: error ?? this.error,
       engineSession: engineSession ?? this.engineSession,
+      forwardSession: forwardSession ?? this.forwardSession,
+      proxySession: proxySession ?? this.proxySession,
       desktopSession: desktopSession ?? this.desktopSession,
       terminal: terminal ?? this.terminal,
       hostKeyReview: (phase ?? this.phase) == SessionPhase.hostKeyPending

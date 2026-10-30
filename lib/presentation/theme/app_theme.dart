@@ -66,6 +66,7 @@ abstract final class AppTheme {
   static const double windowDragWidth = 64;
   static const double statusBarHeight = 28;
   static const double statusBarIconSize = 14;
+  static const double toolbarIconSize = 15;
   static const double terminalSelectionEdgeExtent = 24;
   static const Duration terminalSelectionScrollInterval = Duration(
     milliseconds: 40,
@@ -74,9 +75,16 @@ abstract final class AppTheme {
   static const double serverStatusCoreValueWidth = 44;
   static const double fileSizeColumnWidth = 64;
   static const double fileModifiedColumnWidth = 140;
+  static const double fileBrowserMinHeight = 180;
+  static const double transferProgressCollapsedHeight = 36;
+  static const double transferProgressDefaultHeight = 240;
+  static const double transferProgressMinHeight = 96;
+  static const double transferProgressResizeHeight = 6;
   static const double sidebarWidth = 264;
   static const double sidebarFooterHeight = 40;
   static const double settingsDialogMaxWidth = 600;
+  static const double proxyModeCardWidth = 320;
+  static const double clashScriptDialogMaxWidth = 840;
   static const double agentMinWidth = 300;
   static const double agentMaxWidth = 640;
   static const double agentMinWorkspaceWidth = 540;

@@ -5,6 +5,7 @@ import 'package:get/get.dart';
 import '../../domain/entities/forward_port.dart';
 import '../../domain/entities/host.dart';
 import '../../domain/entities/host_tree_item.dart';
+import '../../domain/entities/proxy_config.dart';
 import '../../domain/repositories/host_repository.dart';
 import '../../domain/repositories/host_tree_repository.dart';
 import '../../domain/vault/secret_store.dart';
@@ -87,6 +88,16 @@ class HostController extends GetxController {
     }
     final saved = await _treeRepository.saveForwardPorts(id, ports);
     _sessions?.updateForwardHost(saved);
+    return saved;
+  }
+
+  Future<Host> saveProxyConfig(String id, ProxyConfig config) async {
+    final session = _sessions?.findByHost(id, kind: SessionKind.dynamicProxy);
+    if (session?.phase.isAlive ?? false) {
+      throw StateError('请先停止动态代理再编辑配置');
+    }
+    final saved = await _treeRepository.saveProxyConfig(id, config);
+    _sessions?.updateProxyHost(saved);
     return saved;
   }
 

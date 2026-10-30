@@ -13,6 +13,7 @@ class AppSelectField<T> extends FormField<T> {
     required String label,
     required List<AppSelectOption<T>> items,
     required ValueChanged<T?>? onChanged,
+    bool inlineLabel = false,
     bool canUnselect = false,
     WidgetBuilder? popupBuilder,
     super.initialValue,
@@ -21,17 +22,13 @@ class AppSelectField<T> extends FormField<T> {
   }) : super(
          builder: (state) {
            final colors = shadcn.Theme.of(state.context).colorScheme;
-           return Column(
+           final labelText = Text(
+             label,
+             style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+           );
+           final input = Column(
              crossAxisAlignment: CrossAxisAlignment.stretch,
              children: [
-               Text(
-                 label,
-                 style: const TextStyle(
-                   fontSize: 13,
-                   fontWeight: FontWeight.w500,
-                 ),
-               ),
-               const SizedBox(height: 6),
                shadcn.OverlayAnchor(
                  anchor: state,
                  child: shadcn.Select<T>(
@@ -80,6 +77,23 @@ class AppSelectField<T> extends FormField<T> {
                  ),
                ],
              ],
+           );
+           if (inlineLabel) {
+             return Row(
+               crossAxisAlignment: CrossAxisAlignment.start,
+               children: [
+                 Padding(
+                   padding: const EdgeInsets.only(top: 8),
+                   child: labelText,
+                 ),
+                 const SizedBox(width: 12),
+                 Expanded(child: input),
+               ],
+             );
+           }
+           return Column(
+             crossAxisAlignment: CrossAxisAlignment.stretch,
+             children: [labelText, const SizedBox(height: 6), input],
            );
          },
        );

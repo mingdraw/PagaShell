@@ -7,6 +7,45 @@ pub struct DesktopHandshake {
     pub certificate_error: Option<String>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct DesktopClipboardEvent {
+    pub sequence: u32,
+    /// 0: ready, 1: Unicode text, 2: cached files, 3: receiving, 4: error.
+    pub kind: u8,
+    pub text: Option<String>,
+    pub files: Vec<String>,
+    pub transferred: u64,
+    pub total: u64,
+    pub error: Option<String>,
+}
+
+pub async fn desktop_clipboard_active(
+    session_id: u32,
+    active: bool,
+    cache_directory: String,
+) -> Result<()> {
+    crate::desktop::clipboard_active(session_id, active, cache_directory).await
+}
+
+pub async fn desktop_clipboard_update(
+    session_id: u32,
+    text: Option<String>,
+    files: Vec<String>,
+) -> Result<()> {
+    crate::desktop::clipboard_update(session_id, text, files).await
+}
+
+pub async fn desktop_clipboard_event(
+    session_id: u32,
+    after_sequence: u32,
+) -> Result<Option<DesktopClipboardEvent>> {
+    crate::desktop::clipboard_event(session_id, after_sequence).await
+}
+
+pub async fn desktop_clipboard_cancel(session_id: u32) -> Result<()> {
+    crate::desktop::clipboard_cancel(session_id).await
+}
+
 pub struct DesktopFrame {
     pub sequence: u32,
     /// Full desktop size. Pixels contain a packed atlas of changed tiles.

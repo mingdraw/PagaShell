@@ -9,7 +9,40 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 import 'page.dart';
 
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `fmt`
+
+Future<void> desktopClipboardActive({
+  required int sessionId,
+  required bool active,
+  required String cacheDirectory,
+}) => RustLib.instance.api.crateApiDesktopDesktopClipboardActive(
+  sessionId: sessionId,
+  active: active,
+  cacheDirectory: cacheDirectory,
+);
+
+Future<void> desktopClipboardUpdate({
+  required int sessionId,
+  String? text,
+  required List<String> files,
+}) => RustLib.instance.api.crateApiDesktopDesktopClipboardUpdate(
+  sessionId: sessionId,
+  text: text,
+  files: files,
+);
+
+Future<DesktopClipboardEvent?> desktopClipboardEvent({
+  required int sessionId,
+  required int afterSequence,
+}) => RustLib.instance.api.crateApiDesktopDesktopClipboardEvent(
+  sessionId: sessionId,
+  afterSequence: afterSequence,
+);
+
+Future<void> desktopClipboardCancel({required int sessionId}) => RustLib
+    .instance
+    .api
+    .crateApiDesktopDesktopClipboardCancel(sessionId: sessionId);
 
 /// An SSH gateway ID must refer to an already authenticated/verified session.
 Future<DesktopHandshake> desktopHandshake({
@@ -87,6 +120,54 @@ Future<bool> desktopResize({
 
 Future<void> desktopDisconnect({required int sessionId}) =>
     RustLib.instance.api.crateApiDesktopDesktopDisconnect(sessionId: sessionId);
+
+class DesktopClipboardEvent {
+  final int sequence;
+
+  /// 0: ready, 1: Unicode text, 2: cached files, 3: receiving, 4: error.
+  final int kind;
+  final String? text;
+  final List<String> files;
+  final BigInt transferred;
+  final BigInt total;
+  final String? error;
+
+  const DesktopClipboardEvent({
+    required this.sequence,
+    required this.kind,
+    this.text,
+    required this.files,
+    required this.transferred,
+    required this.total,
+    this.error,
+  });
+
+  static Future<DesktopClipboardEvent> default_() =>
+      RustLib.instance.api.crateApiDesktopDesktopClipboardEventDefault();
+
+  @override
+  int get hashCode =>
+      sequence.hashCode ^
+      kind.hashCode ^
+      text.hashCode ^
+      files.hashCode ^
+      transferred.hashCode ^
+      total.hashCode ^
+      error.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DesktopClipboardEvent &&
+          runtimeType == other.runtimeType &&
+          sequence == other.sequence &&
+          kind == other.kind &&
+          text == other.text &&
+          files == other.files &&
+          transferred == other.transferred &&
+          total == other.total &&
+          error == other.error;
+}
 
 class DesktopCursor {
   /// 0: local default pointer; 1: hidden; 2: RGBA bitmap.

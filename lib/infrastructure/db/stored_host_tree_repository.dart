@@ -2,6 +2,7 @@ import '../../domain/entities/folder.dart';
 import '../../domain/entities/forward_port.dart';
 import '../../domain/entities/host.dart';
 import '../../domain/entities/host_tree_item.dart';
+import '../../domain/entities/proxy_config.dart';
 import '../../domain/repositories/folder_repository.dart';
 import '../../domain/repositories/host_repository.dart';
 import '../../domain/repositories/host_tree_repository.dart';
@@ -39,9 +40,22 @@ abstract class StoredHostTreeRepository implements HostTreeRepository {
         ForwardPort.validateAll(ports);
         final all = await hosts.getAll();
         final matches = all.where((host) => host.id == hostId);
-        if (matches.isEmpty) throw StateError('所选服务已不存在');
+        if (matches.isEmpty) throw StateError('所选网关已不存在');
         final host = matches.first.copyWith(
           forwardPorts: List.unmodifiable(ports),
+        );
+        await hosts.upsert(host);
+        return host;
+      });
+
+  @override
+  Future<Host> saveProxyConfig(String hostId, ProxyConfig config) =>
+      transaction(() async {
+        config.validate();
+        final matches = (await hosts.getAll()).where((h) => h.id == hostId);
+        if (matches.isEmpty) throw StateError('所选网关已不存在');
+        final host = matches.first.copyWith(
+          proxyConfig: ProxyConfig.fromJson(config.toJson()),
         );
         await hosts.upsert(host);
         return host;

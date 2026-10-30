@@ -81,7 +81,7 @@ void main() {
       ),
       findsOneWidget,
     );
-    expect(find.text('端口转发'), findsOneWidget);
+    expect(find.text('端口转发'), findsNothing);
     expect(find.text('编辑'), findsOneWidget);
     expect(find.text('删除'), findsOneWidget);
     expect(tester.takeException(), isNull);

@@ -122,7 +122,10 @@ class _AgentPanelState extends State<AgentPanel> {
                   key: const ValueKey('agent-history'),
                   semanticLabel: '历史对话'.tr,
                   tooltip: '历史对话'.tr,
-                  icon: const Icon(shadcn.LucideIcons.history, size: 15),
+                  icon: const Icon(
+                    shadcn.LucideIcons.history,
+                    size: AppTheme.toolbarIconSize,
+                  ),
                   onPressed: () async {
                     if (await showAgentHistory(_agent) == true && mounted) {
                       _input.clear();
@@ -134,7 +137,10 @@ class _AgentPanelState extends State<AgentPanel> {
                   key: const ValueKey('agent-new-chat'),
                   semanticLabel: '新对话'.tr,
                   tooltip: '新对话'.tr,
-                  icon: const Icon(shadcn.LucideIcons.squarePen, size: 15),
+                  icon: const Icon(
+                    shadcn.LucideIcons.squarePen,
+                    size: AppTheme.toolbarIconSize,
+                  ),
                   onPressed: () {
                     _agent.clear();
                     _input.clear();
@@ -143,7 +149,10 @@ class _AgentPanelState extends State<AgentPanel> {
                 AppIconButton(
                   semanticLabel: 'AI 设置'.tr,
                   tooltip: 'AI 设置'.tr,
-                  icon: const Icon(shadcn.LucideIcons.settings2, size: 15),
+                  icon: const Icon(
+                    shadcn.LucideIcons.settings2,
+                    size: AppTheme.toolbarIconSize,
+                  ),
                   onPressed: () => unawaited(showSettingsDialog(ai: true)),
                 ),
               ],

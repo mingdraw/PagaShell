@@ -8,6 +8,7 @@
 
 import 'api/desktop.dart';
 import 'api/page.dart';
+import 'api/proxy.dart';
 import 'api/ssh.dart';
 import 'api/vnc.dart';
 
@@ -51,6 +52,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool dco_decode_bool(dynamic raw);
 
   @protected
+  DesktopClipboardEvent dco_decode_box_autoadd_desktop_clipboard_event(
+    dynamic raw,
+  );
+
+  @protected
   DesktopCursor dco_decode_box_autoadd_desktop_cursor(dynamic raw);
 
   @protected
@@ -66,6 +72,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int dco_decode_box_autoadd_u_32(dynamic raw);
 
   @protected
+  DesktopClipboardEvent dco_decode_desktop_clipboard_event(dynamic raw);
+
+  @protected
   DesktopCursor dco_decode_desktop_cursor(dynamic raw);
 
   @protected
@@ -79,6 +88,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ForwardPortSpec dco_decode_forward_port_spec(dynamic raw);
+
+  @protected
+  List<String> dco_decode_list_String(dynamic raw);
 
   @protected
   List<DesktopTile> dco_decode_list_desktop_tile(dynamic raw);
@@ -97,6 +109,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   String? dco_decode_opt_String(dynamic raw);
+
+  @protected
+  DesktopClipboardEvent? dco_decode_opt_box_autoadd_desktop_clipboard_event(
+    dynamic raw,
+  );
 
   @protected
   DesktopCursor? dco_decode_opt_box_autoadd_desktop_cursor(dynamic raw);
@@ -168,6 +185,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
+  DesktopClipboardEvent sse_decode_box_autoadd_desktop_clipboard_event(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   DesktopCursor sse_decode_box_autoadd_desktop_cursor(
     SseDeserializer deserializer,
   );
@@ -187,6 +209,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int sse_decode_box_autoadd_u_32(SseDeserializer deserializer);
 
   @protected
+  DesktopClipboardEvent sse_decode_desktop_clipboard_event(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   DesktopCursor sse_decode_desktop_cursor(SseDeserializer deserializer);
 
   @protected
@@ -200,6 +227,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ForwardPortSpec sse_decode_forward_port_spec(SseDeserializer deserializer);
+
+  @protected
+  List<String> sse_decode_list_String(SseDeserializer deserializer);
 
   @protected
   List<DesktopTile> sse_decode_list_desktop_tile(SseDeserializer deserializer);
@@ -220,6 +250,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   String? sse_decode_opt_String(SseDeserializer deserializer);
+
+  @protected
+  DesktopClipboardEvent? sse_decode_opt_box_autoadd_desktop_clipboard_event(
+    SseDeserializer deserializer,
+  );
 
   @protected
   DesktopCursor? sse_decode_opt_box_autoadd_desktop_cursor(
@@ -306,6 +341,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_bool(bool self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_desktop_clipboard_event(
+    DesktopClipboardEvent self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_desktop_cursor(
     DesktopCursor self,
     SseSerializer serializer,
@@ -330,6 +371,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer);
 
   @protected
+  void sse_encode_desktop_clipboard_event(
+    DesktopClipboardEvent self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_desktop_cursor(DesktopCursor self, SseSerializer serializer);
 
   @protected
@@ -349,6 +396,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     ForwardPortSpec self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_list_String(List<String> self, SseSerializer serializer);
 
   @protected
   void sse_encode_list_desktop_tile(
@@ -379,6 +429,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_opt_String(String? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_desktop_clipboard_event(
+    DesktopClipboardEvent? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_box_autoadd_desktop_cursor(

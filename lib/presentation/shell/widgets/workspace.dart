@@ -11,6 +11,7 @@ import '../../../domain/ssh/server_status.dart';
 import '../../forward/forward_session_panel.dart';
 import '../../hosts/host_edit_dialog.dart';
 import '../../localization/app_translations.dart';
+import '../../proxy/dynamic_proxy_panel.dart';
 import '../../rdp/rdp_certificate_prompt.dart';
 import '../../rdp/rdp_desktop_panel.dart';
 import '../../rdp/rdp_fullscreen_scope.dart';
@@ -20,6 +21,7 @@ import '../../terminal/app_terminal_view.dart';
 import '../../terminal/server_status_panel.dart';
 import '../../theme/app_theme.dart';
 import '../command_palette.dart';
+import '../session_close_confirmation.dart';
 import 'session_tab_pane.dart';
 
 /// 主工作区：会话标签与内容。
@@ -231,6 +233,9 @@ class _SessionView extends StatelessWidget {
     if (session.kind == SessionKind.portForward) {
       return ForwardSessionPanel(session: session);
     }
+    if (session.kind == SessionKind.dynamicProxy) {
+      return DynamicProxyPanel(session: session);
+    }
     return switch (session.phase) {
       SessionPhase.failed => _FailedView(session: session),
       SessionPhase.hostKeyPending when session.hostKeyReview != null =>
@@ -366,7 +371,8 @@ class _FailedView extends StatelessWidget {
               runSpacing: 8,
               children: [
                 shadcn.OutlineButton(
-                  onPressed: () => controller.close(session.id),
+                  onPressed: () =>
+                      requestSessionTabClose(controller, [session.id]),
                   child: Text('关闭'.tr),
                 ),
                 if (session.hostKeyFailure?.hasChanged == true)
