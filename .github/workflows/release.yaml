@@ -8,7 +8,7 @@ on:
       tag:
         description: Existing version tag to build and publish
         required: true
-        default: v0.2.0
+        default: v0.2.1
 
 permissions:
   contents: read
@@ -103,6 +103,9 @@ jobs:
           cargo fmt --manifest-path rust/Cargo.toml --check
           cargo clippy --manifest-path rust/Cargo.toml --locked --all-targets -- -D warnings
           cargo test --manifest-path rust/Cargo.toml --locked
+      - name: Verify Windows terminal input and close lifecycle
+        if: runner.os == 'Windows'
+        run: flutter test test/terminal_input_test.dart test/window_close_test.dart --reporter expanded
       - name: Build Linux
         if: runner.os == 'Linux'
         run: flutter build linux --release
@@ -153,6 +156,24 @@ jobs:
               }
             }
           }
+      - name: Verify Windows window close and clean process exit
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          PACKAGE_ARCH: ${{ matrix.arch }}
+        run: |
+          $targetArch = if ($env:PACKAGE_ARCH -eq 'amd64') { 'x64' } else { 'arm64' }
+          ./scripts/test_windows_close.ps1 -Executable "build/windows/$targetArch/runner/Release/pagashell.exe" `
+            -MaxVisibleMilliseconds 1500 -MaxExitMilliseconds 5000
+      - uses: actions/upload-artifact@v4
+        if: always() && runner.os == 'Windows'
+        with:
+          name: windows-close-${{ matrix.arch }}
+          path: |
+            build/windows-close-results.json
+            build/close-*.log
+          if-no-files-found: warn
+          retention-days: 7
       - name: Build macOS
         if: runner.os == 'macOS'
         env:
