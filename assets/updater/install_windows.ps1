@@ -65,6 +65,11 @@ if ($Mode -ne 'Watch') {
   return
 }
 
+trap {
+  $_ | Out-String | Add-Content -LiteralPath (Join-Path $work 'helper.log') -Encoding UTF8
+  exit 1
+}
+
 function Invoke-Transaction([string]$Action) {
   if ($config.requiresAdmin) {
     $command = "& '" + $PSCommandPath.Replace("'", "''") + "' -Mode $Action -ConfigPath '" + $ConfigPath.Replace("'", "''") + "'"

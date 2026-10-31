@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      helpers_only:
+        description: Only verify native update helper transactions
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -15,7 +20,37 @@ env:
   PUB_HOSTED_URL: https://pub.dev
 
 jobs:
+  update-helpers:
+    name: Update helper ${{ matrix.platform }} ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            platform: linux
+            arch: amd64
+          - os: ubuntu-22.04-arm
+            platform: linux
+            arch: arm64
+          - os: macos-15-intel
+            platform: macos
+            arch: amd64
+          - os: macos-15
+            platform: macos
+            arch: arm64
+          - os: windows-2022
+            platform: windows
+            arch: amd64
+          - os: windows-11-arm
+            platform: windows
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: python scripts/test_updater_helpers.py
+
   analyze-and-test:
+    if: inputs.helpers_only != true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,6 +64,7 @@ jobs:
       - run: flutter test
 
   rust-check:
+    if: inputs.helpers_only != true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -50,7 +86,8 @@ jobs:
         working-directory: rust
 
   build:
-    needs: [analyze-and-test, rust-check]
+    if: inputs.helpers_only != true
+    needs: [analyze-and-test, rust-check, update-helpers]
     name: Build ${{ matrix.target }} ${{ matrix.arch }}
     timeout-minutes: 90
     strategy:
@@ -98,8 +135,6 @@ jobs:
         with:
           workspaces: rust
           key: ci-${{ matrix.target }}-${{ matrix.arch }}
-      - name: Verify update helper transactions
-        run: python scripts/test_updater_helpers.py
       - name: Set up Flutter on Linux and macOS
         if: runner.os != 'Windows'
         shell: bash

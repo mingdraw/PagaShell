@@ -66,10 +66,15 @@ class UpdaterHelperTests(unittest.TestCase):
         return result
 
     def start_watcher(self):
-        child = subprocess.Popen(self.command("Watch"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        with (self.work / "watcher.log").open("wb") as log:
+            child = subprocess.Popen(self.command("Watch"), stdout=log, stderr=subprocess.STDOUT)
         self.children.append(child)
         self.wait_for(self.work / "ready")
         return child
+
+    def watcher_log(self):
+        return "\n".join(file.read_text(encoding="utf-8", errors="replace")
+                         for file in [self.work / "watcher.log", self.work / "helper.log"] if file.exists())
 
     def wait_for(self, file):
         deadline = time.monotonic() + 15
@@ -145,7 +150,7 @@ class UpdaterHelperTests(unittest.TestCase):
                     'AppDomain.CurrentDomain.BaseDirectory, "launched"), "ok"); }}')
             compile_script = self.work / "compile.ps1"
             compile_script.write_text(
-                "param([string]$Output)\nAdd-Type -TypeDefinition '" + code +
+                "param([string]$Output)\n$ErrorActionPreference = 'Stop'\nAdd-Type -TypeDefinition '" + code +
                 "' -OutputAssembly $Output -OutputType WindowsApplication\n", encoding="utf-8")
             compiler = self.command("Apply")[:5]
             subprocess.run([*compiler, "-File", str(compile_script), "-Output", str(self.source / "pagashell.exe")],
@@ -160,7 +165,7 @@ class UpdaterHelperTests(unittest.TestCase):
         self.assertEqual((self.target / "version").read_text(), "old")
         self.parent.terminate()
         self.parent.wait(timeout=10)
-        self.assertEqual(child.wait(timeout=20), 0)
+        self.assertEqual(child.wait(timeout=20), 0, self.watcher_log())
         self.wait_for(self.target / "launched")
         self.assertTrue((self.work / "complete").exists())
         self.assertEqual((self.target / "version").read_text(), "new")
