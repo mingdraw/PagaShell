@@ -117,5 +117,11 @@ try {
   throw
 }
 New-Item -ItemType File -Path (Join-Path $work 'complete') -Force | Out-Null
-Remove-Item -LiteralPath $config.stage -Recurse -Force
-Remove-Item -LiteralPath $config.archive -Force
+# A successful installation must not fail because a temporary file is already
+# gone or still held by a scanner. A later system cleanup can remove leftovers.
+if (Test-Path -LiteralPath $config.stage) {
+  Remove-Item -LiteralPath $config.stage -Recurse -Force -ErrorAction SilentlyContinue
+}
+if (Test-Path -LiteralPath $config.archive) {
+  Remove-Item -LiteralPath $config.archive -Force -ErrorAction SilentlyContinue
+}

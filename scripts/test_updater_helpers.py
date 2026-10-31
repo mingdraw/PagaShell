@@ -33,6 +33,7 @@ class UpdaterHelperTests(unittest.TestCase):
         self.children = []
         self.config = self.work / "install.json"
         self.archive = self.work / "package.zip"
+        self.archive.write_bytes(b"fixture download")
         self.script = self.work / ("install_windows.ps1" if WINDOWS else "install_posix.sh")
         shutil.copy2(REPO / "assets" / "updater" / self.script.name, self.script)
         self.config.write_text(json.dumps({
