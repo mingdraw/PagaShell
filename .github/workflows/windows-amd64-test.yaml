@@ -2,11 +2,17 @@ name: Windows amd64 test package
 
 on:
   workflow_dispatch:
+    inputs:
+      artifact_run_id:
+        description: 'Measure close using an existing build run (leave empty to build)'
+        required: false
+        type: string
   push:
     branches: [codex/windows-ssh-input-fix]
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: windows-amd64-test-${{ github.ref }}
@@ -17,7 +23,36 @@ env:
   PUB_HOSTED_URL: https://pub.dev
 
 jobs:
+  measure-existing:
+    if: github.event_name == 'workflow_dispatch' && inputs.artifact_run_id != ''
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: pagashell-windows-amd64-ssh-fix
+          path: existing-package
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.artifact_run_id }}
+      - name: Measure real window close and process exit
+        shell: pwsh
+        run: |
+          $package = Get-ChildItem 'existing-package/*.zip' | Select-Object -First 1
+          Expand-Archive $package.FullName 'existing-app'
+          $executable = Get-ChildItem 'existing-app' -Filter pagashell.exe -Recurse | Select-Object -First 1
+          ./scripts/test_windows_close.ps1 -Executable $executable.FullName
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-close-measurements
+          path: |
+            build/windows-close-results.json
+            build/close-*.log
+          if-no-files-found: error
+          retention-days: 7
   build:
+    if: github.event_name != 'workflow_dispatch' || inputs.artifact_run_id == ''
     runs-on: windows-2022
     timeout-minutes: 90
     steps:
