@@ -298,11 +298,25 @@ class _TerminalHostState extends State<_TerminalHost> {
   final _focusNode = FocusNode();
 
   @override
+  void initState() {
+    super.initState();
+    _focusWhenActive();
+  }
+
+  @override
   void didUpdateWidget(_TerminalHost oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.active && !oldWidget.active) {
-      _focusNode.requestFocus();
+      _focusWhenActive();
     }
+  }
+
+  void _focusWhenActive() {
+    // autofocus 不会替换搜索框等控件已有的焦点。等终端挂载后明确接管，
+    // 同时让 xterm 建立文本输入连接，保留 Windows 输入法支持。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && widget.active) _focusNode.requestFocus();
+    });
   }
 
   @override

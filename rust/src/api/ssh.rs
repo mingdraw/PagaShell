@@ -17,7 +17,7 @@ use russh::{ChannelMsg, Disconnect};
 use russh_sftp::client::SftpSession;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, watch, Mutex, Notify};
+use tokio::sync::{mpsc, watch, Mutex, Notify, RwLock};
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::frb_generated::StreamSink;
@@ -45,6 +45,7 @@ const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(200);
 const TRANSFER_IO_TIMEOUT: Duration = Duration::from_secs(10);
 const TRANSFER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 const TRANSFER_RESPONSE_ATTEMPTS: usize = 3;
+const SSH_CLEANUP_TIMEOUT: Duration = Duration::from_millis(500);
 
 #[derive(Debug)]
 struct TransferTimeout;
@@ -96,13 +97,15 @@ async fn transfer_cleanup<T>(operation: impl Future<Output = T>) {
 enum ShellCmd {
     Data(Vec<u8>),
     Resize(u32, u32),
-    Close,
 }
 
 struct SessionEntry {
-    handle: Arc<Mutex<Handle<PinningHandler>>>,
+    // 认证需要独占访问；已认证连接的开通道和 disconnect 均只需共享访问。
+    // 慢速 exec 通道不能挡住其他通道及退出时发送 disconnect。
+    handle: Arc<RwLock<Handle<PinningHandler>>>,
     gateway_id: Option<u32>,
     shell_tx: Option<mpsc::Sender<ShellCmd>>,
+    shell_task: Option<JoinHandle<()>>,
     pending_terminal_size: Option<(u32, u32)>,
     forwards: Option<(watch::Sender<bool>, JoinHandle<()>)>,
 }
@@ -123,7 +126,7 @@ pub struct SshHandshake {
 }
 
 struct PendingSession {
-    handle: Arc<Mutex<Handle<PinningHandler>>>,
+    handle: Arc<RwLock<Handle<PinningHandler>>>,
     gateway_id: Option<u32>,
     fingerprint: String,
     authenticating: bool,
@@ -200,7 +203,7 @@ pub(crate) async fn desktop_tunnel(
         .clone();
     let channel = tokio::time::timeout(Duration::from_secs(15), async {
         handle
-            .lock()
+            .read()
             .await
             .channel_open_direct_tcpip(host, u32::from(port), "127.0.0.1", 0)
             .await
@@ -239,7 +242,7 @@ async fn handshake(
                 .handle
                 .clone();
             let channel = handle
-                .lock()
+                .read()
                 .await
                 .channel_open_direct_tcpip(host.clone(), u32::from(port), "127.0.0.1", 0)
                 .await
@@ -276,7 +279,7 @@ async fn handshake(
     PENDING_SESSIONS.lock().await.insert(
         result.session_id,
         PendingSession {
-            handle: Arc::new(Mutex::new(handle)),
+            handle: Arc::new(RwLock::new(handle)),
             gateway_id,
             fingerprint,
             authenticating: false,
@@ -290,12 +293,7 @@ async fn handshake(
         let pending = PENDING_SESSIONS.lock().await.remove(&id);
         if let Some(pending) = pending {
             pending.cancelled.notify_one();
-            let _ = pending
-                .handle
-                .lock()
-                .await
-                .disconnect(Disconnect::ByApplication, "", "en")
-                .await;
+            disconnect_handle(&pending.handle).await;
             if let Some(gateway_id) = pending.gateway_id {
                 let _ = ssh_disconnect(gateway_id).await;
             }
@@ -439,7 +437,7 @@ async fn authenticate(
         return Err(anyhow!("主机指纹不匹配，已拒绝认证"));
     }
     let auth = {
-        let mut guard = handle.lock().await;
+        let mut guard = handle.write().await;
         tokio::select! {
             biased;
             _ = cancelled.notified() => None,
@@ -477,6 +475,7 @@ async fn authenticate(
             handle,
             gateway_id: entry.gateway_id,
             shell_tx: None,
+            shell_task: None,
             pending_terminal_size: None,
             forwards: None,
         },
@@ -512,7 +511,7 @@ async fn start_shell(
     };
 
     let mut channel = {
-        let guard = handle.lock().await;
+        let guard = handle.read().await;
         guard.channel_open_session().await?
     };
     channel
@@ -521,23 +520,21 @@ async fn start_shell(
     channel.request_shell(false).await?;
 
     let (tx, mut rx) = mpsc::channel::<ShellCmd>(64);
-    {
-        let mut sessions = SESSIONS.lock().await;
-        let entry = sessions
-            .get_mut(&session_id)
-            .ok_or_else(|| anyhow!("会话不存在: {session_id}"))?;
-        // 布局通知可能早于 PTY 就绪。先补发启动期间的最新尺寸，再发布
-        // 命令队列，使后续 resize 不会被旧尺寸覆盖。
-        if let Some((c, r)) = entry.pending_terminal_size.take() {
-            if (c, r) != (cols, rows) {
-                tx.try_send(ShellCmd::Resize(c, r))
-                    .map_err(|_| anyhow!("终端已关闭"))?;
-            }
+    let mut sessions = SESSIONS.lock().await;
+    let entry = sessions
+        .get_mut(&session_id)
+        .ok_or_else(|| anyhow!("会话不存在: {session_id}"))?;
+    // 布局通知可能早于 PTY 就绪。先补发启动期间的最新尺寸，再发布
+    // 命令队列，使后续 resize 不会被旧尺寸覆盖。
+    if let Some((c, r)) = entry.pending_terminal_size.take() {
+        if (c, r) != (cols, rows) {
+            tx.try_send(ShellCmd::Resize(c, r))
+                .map_err(|_| anyhow!("终端已关闭"))?;
         }
-        entry.shell_tx = Some(tx);
     }
-
-    tokio::spawn(async move {
+    // 与队列一起注册任务，关闭时可直接取消正在等待 SSH 流控的写入，
+    // 不必把 Close 排在可能已经填满的输入队列后面。
+    entry.shell_task = Some(tokio::spawn(async move {
         loop {
             tokio::select! {
                 msg = channel.wait() => match msg {
@@ -563,15 +560,18 @@ async fn start_shell(
                     Some(ShellCmd::Resize(c, r)) => {
                         let _ = channel.window_change(c, r, 0, 0).await;
                     }
-                    Some(ShellCmd::Close) | None => {
-                        let _ = channel.eof().await;
-                        let _ = channel.close().await;
+                    None => {
+                        let _ = tokio::time::timeout(SSH_CLEANUP_TIMEOUT, async {
+                            let _ = channel.eof().await;
+                            let _ = channel.close().await;
+                        }).await;
                         break;
                     }
                 },
             }
         }
-    });
+    }));
+    entry.shell_tx = Some(tx);
     Ok(())
 }
 
@@ -614,13 +614,17 @@ pub async fn ssh_read_server_status(session_id: u32) -> Result<String> {
         .handle
         .clone();
     let mut channel = tokio::time::timeout(Duration::from_secs(8), async {
-        handle.lock().await.channel_open_session().await
+        handle.read().await.channel_open_session().await
     })
     .await
     .map_err(|_| anyhow!("服务状态采集超时"))??;
     let result = tokio::time::timeout(Duration::from_secs(8), async {
-        let script = include_str!("server_status.sh").replace('\'', "'\\''");
-        channel.exec(true, format!("sh -c '{script}'")).await?;
+        channel
+            .exec(
+                true,
+                server_status_command(include_str!("server_status.sh")),
+            )
+            .await?;
         let mut output = Vec::new();
         let mut exit_status = None;
         while let Some(message) = channel.wait().await {
@@ -645,8 +649,25 @@ pub async fn ssh_read_server_status(session_id: u32) -> Result<String> {
     .await
     .map_err(|_| anyhow!("服务状态采集超时"))
     .and_then(|value| value);
-    let _ = channel.close().await;
+    let _ = tokio::time::timeout(SSH_CLEANUP_TIMEOUT, channel.close()).await;
     result
+}
+
+fn server_status_command(script: &str) -> String {
+    // include_str! 保留检出文件的换行；Windows 构建也必须发送 POSIX 换行。
+    let script = script.replace("\r\n", "\n").replace('\'', "'\\''");
+    format!("sh -c '{script}'")
+}
+
+async fn disconnect_handle(handle: &RwLock<Handle<PinningHandler>>) {
+    let _ = tokio::time::timeout(SSH_CLEANUP_TIMEOUT, async {
+        handle
+            .read()
+            .await
+            .disconnect(Disconnect::ByApplication, "", "en")
+            .await
+    })
+    .await;
 }
 
 /// 关闭会话：结束 shell 通道并断开连接。
@@ -654,12 +675,7 @@ pub async fn ssh_disconnect(session_id: u32) -> Result<()> {
     let pending = PENDING_SESSIONS.lock().await.remove(&session_id);
     if let Some(pending) = pending {
         pending.cancelled.notify_one();
-        let _ = pending
-            .handle
-            .lock()
-            .await
-            .disconnect(Disconnect::ByApplication, "", "en")
-            .await;
+        disconnect_handle(&pending.handle).await;
         if let Some(id) = pending.gateway_id {
             Box::pin(ssh_disconnect(id)).await?;
         }
@@ -676,11 +692,11 @@ pub async fn ssh_disconnect(session_id: u32) -> Result<()> {
                 let _ = task.await;
             }
         }
-        if let Some(tx) = entry.shell_tx {
-            let _ = tx.send(ShellCmd::Close).await;
+        if let Some(task) = entry.shell_task {
+            task.abort();
+            let _ = task.await;
         }
-        let guard = entry.handle.lock().await;
-        let _ = guard.disconnect(Disconnect::ByApplication, "", "en").await;
+        disconnect_handle(&entry.handle).await;
         if let Some(id) = entry.gateway_id {
             Box::pin(ssh_disconnect(id)).await?;
         }
@@ -704,14 +720,14 @@ pub struct PortForwardEvent {
 
 #[derive(Clone)]
 enum ForwardTransport {
-    Ssh(Arc<Mutex<Handle<PinningHandler>>>),
+    Ssh(Arc<RwLock<Handle<PinningHandler>>>),
     Page(crate::api::page::PageGateway),
 }
 
 impl ForwardTransport {
     fn is_closed(&self) -> bool {
         if let Self::Ssh(handle) = self {
-            if let Ok(guard) = handle.try_lock() {
+            if let Ok(guard) = handle.try_read() {
                 return guard.is_closed();
             }
         }
@@ -905,7 +921,7 @@ async fn forward_listener(
                         match transport {
                             ForwardTransport::Ssh(handle) => {
                                 let channel = tokio::time::timeout(Duration::from_secs(10), async {
-                                    handle.lock().await.channel_open_direct_tcpip(
+                                    handle.read().await.channel_open_direct_tcpip(
                                         port.target_host, u32::from(port.target_port),
                                         peer.ip().to_string(), u32::from(peer.port()),
                                     ).await
@@ -956,7 +972,7 @@ async fn open_sftp_inner(session_id: u32) -> Result<SftpSession> {
     };
 
     let channel = {
-        let guard = handle.lock().await;
+        let guard = handle.read().await;
         guard.channel_open_session().await?
     };
     channel.request_subsystem(true, "sftp").await?;
@@ -2440,6 +2456,8 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
         Pty(u32, u32),
         Shell,
         Resize(u32, u32),
+        Data(Vec<u8>),
+        Exec,
     }
 
     struct TerminalServer {
@@ -2483,10 +2501,39 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
 
         async fn shell_request(
             &mut self,
-            _: russh::ChannelId,
-            _: &mut server::Session,
+            channel: russh::ChannelId,
+            session: &mut server::Session,
         ) -> Result<(), Self::Error> {
             self.events.send(TerminalEvent::Shell).unwrap();
+            session.data(channel, b"test$ ".to_vec())?;
+            Ok(())
+        }
+
+        async fn data(
+            &mut self,
+            channel: russh::ChannelId,
+            data: &[u8],
+            session: &mut server::Session,
+        ) -> Result<(), Self::Error> {
+            self.events
+                .send(TerminalEvent::Data(data.to_vec()))
+                .unwrap();
+            session.data(channel, data.to_vec())?;
+            Ok(())
+        }
+
+        async fn exec_request(
+            &mut self,
+            channel: russh::ChannelId,
+            _: &[u8],
+            session: &mut server::Session,
+        ) -> Result<(), Self::Error> {
+            self.events.send(TerminalEvent::Exec).unwrap();
+            session.channel_success(channel)?;
+            session.data(channel, b"PAGASHELL_STATUS_OS\nLinux\n".to_vec())?;
+            session.exit_status_request(channel, 0)?;
+            session.eof(channel)?;
+            session.close(channel)?;
             Ok(())
         }
 
@@ -2541,7 +2588,9 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
             command: &[u8],
             session: &mut server::Session,
         ) -> Result<(), Self::Error> {
-            let script = include_str!("server_status.sh").replace('\'', "'\\''");
+            let script = include_str!("server_status.sh")
+                .replace("\r\n", "\n")
+                .replace('\'', "'\\''");
             assert_eq!(command, format!("sh -c '{script}'").as_bytes());
             session.channel_success(channel)?;
             session.data(channel, self.output.clone())?;
@@ -2623,6 +2672,189 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
             ssh_disconnect(id).await.unwrap();
             task.abort();
         }
+    }
+
+    #[tokio::test]
+    async fn terminal_bytes_round_trip_before_and_after_status_collection_and_close_output() {
+        let config = Arc::new(server::Config {
+            keys: vec![test_key(42)],
+            ..Default::default()
+        });
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (events_tx, mut events) = mpsc::unbounded_channel();
+        let allow_open = Arc::new(Notify::new());
+        let handler = TerminalServer {
+            events: events_tx,
+            allow_open: allow_open.clone(),
+        };
+        let server_task = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let session = server::run_stream(config, socket, handler).await.unwrap();
+            let _ = session.await;
+        });
+        let handshake = ssh_handshake("127.0.0.1".into(), port).await.unwrap();
+        let id = ssh_authenticate(
+            handshake.session_id,
+            handshake.fingerprint,
+            "test".into(),
+            "test-only".into(),
+        )
+        .await
+        .unwrap();
+        let (output_tx, mut output) = mpsc::unbounded_channel();
+        allow_open.notify_one();
+        start_shell(id, 80, 24, move |bytes| output_tx.send(bytes).is_ok())
+            .await
+            .unwrap();
+        assert_eq!(
+            next_terminal_event(&mut events).await,
+            TerminalEvent::Opening
+        );
+        assert_eq!(
+            next_terminal_event(&mut events).await,
+            TerminalEvent::Pty(80, 24)
+        );
+        assert_eq!(next_terminal_event(&mut events).await, TerminalEvent::Shell);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), output.recv())
+                .await
+                .unwrap(),
+            Some(b"test$ ".to_vec())
+        );
+
+        for input in ["echo 中文\r", "\u{3}"] {
+            ssh_write(id, input.as_bytes().to_vec()).await.unwrap();
+            assert_eq!(
+                next_terminal_event(&mut events).await,
+                TerminalEvent::Data(input.as_bytes().to_vec())
+            );
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(2), output.recv())
+                    .await
+                    .unwrap(),
+                Some(input.as_bytes().to_vec())
+            );
+            allow_open.notify_one();
+            assert_eq!(
+                ssh_read_server_status(id).await.unwrap(),
+                "PAGASHELL_STATUS_OS\nLinux\n"
+            );
+            assert_eq!(
+                next_terminal_event(&mut events).await,
+                TerminalEvent::Opening
+            );
+            assert_eq!(next_terminal_event(&mut events).await, TerminalEvent::Exec);
+        }
+        ssh_disconnect(id).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), output.recv())
+                .await
+                .unwrap()
+                .is_none(),
+            "disconnect must release the terminal output stream"
+        );
+        server_task.abort();
+    }
+
+    #[test]
+    fn status_command_normalizes_windows_checkout_line_endings() {
+        let lf = include_str!("server_status.sh").replace("\r\n", "\n");
+        let command = server_status_command(&lf.replace('\n', "\r\n"));
+        assert!(!command.contains('\r'));
+        assert_eq!(command, server_status_command(&lf));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn status_command_executes_crlf_script_and_preserves_shell_quotes() {
+        let command = server_status_command("set -e\r\nprintf '%s\\n' \"it's 中文\"\r\n");
+        let output = std::process::Command::new("sh")
+            .args(["-c", &command])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, "it's 中文\n".as_bytes());
+    }
+
+    #[tokio::test]
+    async fn disconnect_does_not_wait_for_status_channel_open_or_a_full_shell_queue() {
+        let config = Arc::new(server::Config {
+            keys: vec![test_key(42)],
+            ..Default::default()
+        });
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (events_tx, mut events) = mpsc::unbounded_channel();
+        let handler = TerminalServer {
+            events: events_tx,
+            allow_open: Arc::new(Notify::new()),
+        };
+        let server_task = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let session = server::run_stream(config, socket, handler).await.unwrap();
+            let _ = session.await;
+        });
+        let handshake = ssh_handshake("127.0.0.1".into(), port).await.unwrap();
+        let id = ssh_authenticate(
+            handshake.session_id,
+            handshake.fingerprint,
+            "test".into(),
+            "test-only".into(),
+        )
+        .await
+        .unwrap();
+        let mut status = tokio::spawn(ssh_read_server_status(id));
+        assert_eq!(
+            next_terminal_event(&mut events).await,
+            TerminalEvent::Opening
+        );
+        let result = tokio::time::timeout(Duration::from_secs(1), ssh_disconnect(id)).await;
+        let status_result = tokio::time::timeout(Duration::from_secs(1), &mut status).await;
+        status.abort();
+        server_task.abort();
+        assert!(
+            result.is_ok(),
+            "disconnect waited for the status channel to open"
+        );
+        assert!(
+            status_result.is_ok(),
+            "status collection outlived the disconnected session"
+        );
+        assert!(!SESSIONS.lock().await.contains_key(&id));
+
+        let (port, fingerprint, _, server_task) = local_server().await;
+        let handshake = ssh_handshake("127.0.0.1".into(), port).await.unwrap();
+        let id = ssh_authenticate(
+            handshake.session_id,
+            fingerprint,
+            "test".into(),
+            "test-only".into(),
+        )
+        .await
+        .unwrap();
+        let (tx, _rx) = mpsc::channel(1);
+        tx.send(ShellCmd::Data(vec![b'x'])).await.unwrap();
+        let shell_task = tokio::spawn(std::future::pending::<()>());
+        let shell_abort = shell_task.abort_handle();
+        {
+            let mut sessions = SESSIONS.lock().await;
+            let entry = sessions.get_mut(&id).unwrap();
+            entry.shell_tx = Some(tx);
+            entry.shell_task = Some(shell_task);
+        }
+        let result = tokio::time::timeout(Duration::from_secs(1), ssh_disconnect(id)).await;
+        server_task.abort();
+        assert!(
+            result.is_ok(),
+            "disconnect waited for space in the shell queue"
+        );
+        assert!(shell_abort.is_finished());
+        assert!(!SESSIONS.lock().await.contains_key(&id));
     }
 
     #[tokio::test]

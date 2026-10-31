@@ -1,0 +1,98 @@
+name: Windows amd64 test package
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/windows-ssh-input-fix]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-amd64-test-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLUTTER_VERSION: '3.47.8'
+  PUB_HOSTED_URL: https://pub.dev
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native build dependencies
+        shell: pwsh
+        run: |
+          choco install nasm --yes --no-progress
+          Add-Content $env:GITHUB_PATH 'C:\Program Files\NASM'
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: release-windows-amd64
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - run: flutter pub get
+      - name: Verify terminal input configuration
+        run: flutter test test/terminal_input_test.dart --reporter expanded
+      - name: Build Windows amd64
+        run: flutter build windows --release
+      - name: Include Visual C++ runtime
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products '*' -property installationPath
+          if (-not $vs) { throw 'Visual Studio installation was not found' }
+          $crt = Get-ChildItem "$vs\VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT" -Directory |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $crt) { throw 'Visual C++ x64 runtime was not found' }
+          $destination = 'build\windows\x64\runner\Release'
+          $runtimes = @(Get-ChildItem "$($crt.FullName)\*.dll")
+          Copy-Item $runtimes.FullName "$destination\" -Force
+          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $dumpbin) { throw 'dumpbin was not found' }
+          foreach ($binary in Get-ChildItem "$destination\*.exe", "$destination\*.dll") {
+            $dependencies = & $dumpbin.FullName /dependents $binary.FullName
+            if ($LASTEXITCODE -ne 0) { throw "Cannot inspect $($binary.Name)" }
+            foreach ($line in $dependencies) {
+              if ($line -match '^\s+(\S+\.dll)\s*$') {
+                $dependency = $Matches[1]
+                if ($runtimes.Name -contains $dependency) {
+                  if (-not (Test-Path "$destination\$dependency")) {
+                    throw "$($binary.Name) requires missing CRT $dependency"
+                  }
+                }
+              }
+            }
+          }
+      - name: Package and verify amd64 binaries
+        shell: pwsh
+        run: |
+          $versionLine = Get-Content pubspec.yaml | Where-Object { $_ -match '^version:' }
+          $version = (($versionLine -split ':', 2)[1].Trim() -split '\+')[0]
+          $shortSha = $env:GITHUB_SHA.Substring(0, 8)
+          @(
+            'PagaShell Windows amd64 SSH fix test build'
+            "Commit: $env:GITHUB_SHA"
+            "Workflow: https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+            'Checks: SSH typing (ASCII/Chinese/Enter), server status, window close.'
+            'Extract the entire ZIP before running pagashell.exe.'
+          ) | Set-Content 'build\windows\x64\runner\Release\BUILD-INFO.txt' -Encoding utf8
+          python scripts/package_release.py --platform windows --arch amd64 --version "v$version"
+          if ($LASTEXITCODE -ne 0) { throw 'Package architecture verification failed' }
+          $packageName = "pagashell_v${version}_windows_amd64_ssh-fix_${shortSha}.zip"
+          Move-Item "dist\pagashell_v${version}_windows_amd64.zip" "dist\$packageName"
+          $checksum = (Get-FileHash "dist\$packageName" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$checksum  $packageName" | Set-Content 'dist\checksums.txt' -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pagashell-windows-amd64-ssh-fix
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7

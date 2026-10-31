@@ -1,0 +1,2 @@
+# Scripts embedded by Rust must keep POSIX line endings on Windows checkouts.
+*.sh text eol=lf
