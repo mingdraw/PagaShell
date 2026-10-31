@@ -38,6 +38,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
     ::DispatchMessage(&msg);
   }
 
+  // Plugins may own COM objects. Release them before uninitializing the
+  // apartment, also when the loop exits through an external WM_QUIT.
+  window.Destroy();
   ::CoUninitialize();
   return EXIT_SUCCESS;
 }

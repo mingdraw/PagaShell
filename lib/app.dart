@@ -61,22 +61,29 @@ class _PagaShellAppState extends State<PagaShellApp> {
         navigatorKey: Get.key,
         navigatorObservers: [GetObserver(null, Get.routing)],
         initialRoute: AppRoutes.workspace,
-        onGenerateRoute: (settings) {
-          final page = AppRoutes.pages.firstWhere(
-            (page) => page.name == settings.name,
-            orElse: () => AppRoutes.pages.first,
-          );
-          return GetPageRoute<void>(
-            settings: settings,
-            routeName: page.name,
-            page: page.page,
-            binding: page.binding,
-            bindings: page.bindings,
-            middlewares: page.middlewares,
-            transition: Transition.noTransition,
-          );
-        },
+        // The default initial-route generator also requests '/'. Our fallback
+        // maps that to ShellPage too, registering two native close listeners.
+        onGenerateInitialRoutes: (initialRoute) => [
+          _generateRoute(RouteSettings(name: initialRoute)),
+        ],
+        onGenerateRoute: _generateRoute,
       );
     });
+  }
+
+  Route<void> _generateRoute(RouteSettings settings) {
+    final page = AppRoutes.pages.firstWhere(
+      (page) => page.name == settings.name,
+      orElse: () => AppRoutes.pages.first,
+    );
+    return GetPageRoute<void>(
+      settings: settings,
+      routeName: page.name,
+      page: page.page,
+      binding: page.binding,
+      bindings: page.bindings,
+      middlewares: page.middlewares,
+      transition: Transition.noTransition,
+    );
   }
 }

@@ -18,6 +18,7 @@ using Map = flutter::EncodableMap;
 using List = flutter::EncodableList;
 using Result = flutter::MethodResult<Value>;
 constexpr size_t kMaxText = 16 * 1024 * 1024;
+constexpr UINT kDestroyWindowMessage = WM_APP + 1;
 
 std::string Utf8(const std::wstring& value) {
   if (value.empty()) return {};
@@ -157,7 +158,11 @@ void ClipboardCall(HWND window, const flutter::MethodCall<Value>& call,
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
     : project_(project) {}
 
-FlutterWindow::~FlutterWindow() {}
+FlutterWindow::~FlutterWindow() {
+  // Run the derived cleanup before member destruction, including on startup
+  // failure. Win32Window's destructor cannot dispatch to this OnDestroy().
+  Destroy();
+}
 
 bool FlutterWindow::OnCreate() {
   if (!Win32Window::OnCreate()) {
@@ -175,6 +180,23 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
+  window_channel_ = std::make_unique<flutter::MethodChannel<Value>>(
+      flutter_controller_->engine()->messenger(), "pagashell/window",
+      &flutter::StandardMethodCodec::GetInstance());
+  window_channel_->SetMethodCallHandler(
+      [this](const flutter::MethodCall<Value>& call, std::unique_ptr<Result> result) {
+        if (call.method_name() != "destroy") {
+          result->NotImplemented();
+          return;
+        }
+        // Leave the method-channel callback before destroying its engine. Keep
+        // the message loop and COM alive until the view/plugins are released.
+        if (!PostMessage(GetHandle(), kDestroyWindowMessage, 0, 0)) {
+          result->Error("window_close_failed", "Could not schedule window destruction");
+          return;
+        }
+        result->Success();
+      });
   system_proxy_ = std::make_unique<SystemNetworkProxy>();
   system_proxy_channel_ = std::make_unique<flutter::MethodChannel<Value>>(
       flutter_controller_->engine()->messenger(), "pagashell/system_proxy",
@@ -205,6 +227,7 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  window_channel_.reset();
   system_proxy_channel_.reset();
   system_proxy_.reset();
   clipboard_channel_.reset();
@@ -219,6 +242,14 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  if (message == kDestroyWindowMessage) {
+    // Dart has finished saving data and restoring the system proxy. Remove the
+    // window now, then shut down Flutter while the native loop still exists.
+    ShowWindow(hwnd, SW_HIDE);
+    Destroy();
+    return 0;
+  }
+
   // Give Flutter, including plugins, an opportunity to handle window messages.
   if (flutter_controller_) {
     std::optional<LRESULT> result =

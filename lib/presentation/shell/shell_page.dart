@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:ui' show AppExitResponse;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
@@ -171,9 +172,20 @@ class _ShellPageState extends State<ShellPage> with WindowListener {
 
   @override
   void onWindowClose() async {
-    if (_destroying || !await _prepareExit()) return;
+    if (_destroying || !await _prepareExit() || _destroying) return;
     _destroying = true;
-    await windowManager.destroy();
+    try {
+      if (defaultTargetPlatform == TargetPlatform.windows) {
+        // window_manager.destroy() posts WM_QUIT on Windows. The runner must
+        // destroy the view/plugins before its message loop and COM shut down.
+        await _windowChannel.invokeMethod<void>('destroy');
+      } else {
+        await windowManager.destroy();
+      }
+    } on Object {
+      _destroying = false;
+      rethrow;
+    }
   }
 
   Future<bool> _prepareExit() {

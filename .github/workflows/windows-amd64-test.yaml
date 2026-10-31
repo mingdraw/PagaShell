@@ -73,8 +73,8 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
       - run: flutter pub get
-      - name: Verify terminal input configuration
-        run: flutter test test/terminal_input_test.dart --reporter expanded
+      - name: Verify terminal input and close lifecycle
+        run: flutter test test/terminal_input_test.dart test/window_close_test.dart --reporter expanded
       - name: Build Windows amd64
         run: flutter build windows --release
       - name: Include Visual C++ runtime
@@ -106,6 +106,11 @@ jobs:
               }
             }
           }
+      - name: Verify real window close and clean process exit
+        shell: pwsh
+        run: |
+          ./scripts/test_windows_close.ps1 -Executable 'build/windows/x64/runner/Release/pagashell.exe' `
+            -MaxVisibleMilliseconds 1500 -MaxExitMilliseconds 5000
       - name: Package and verify amd64 binaries
         shell: pwsh
         run: |
@@ -113,7 +118,7 @@ jobs:
           $version = (($versionLine -split ':', 2)[1].Trim() -split '\+')[0]
           $shortSha = $env:GITHUB_SHA.Substring(0, 8)
           @(
-            'PagaShell Windows amd64 SSH fix test build'
+            'PagaShell Windows amd64 SSH and window close fix test build'
             "Commit: $env:GITHUB_SHA"
             "Workflow: https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
             'Checks: SSH typing (ASCII/Chinese/Enter), server status, window close.'
@@ -130,4 +135,13 @@ jobs:
           name: pagashell-windows-amd64-ssh-fix
           path: dist/*
           if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-close-measurements
+          path: |
+            build/windows-close-results.json
+            build/close-*.log
+          if-no-files-found: warn
           retention-days: 7
