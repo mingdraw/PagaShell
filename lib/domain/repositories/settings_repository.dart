@@ -9,4 +9,8 @@ abstract interface class SettingsRepository {
   Future<SidebarState> readSidebarState();
 
   Future<void> saveSidebarState(SidebarState state);
+
+  Future<bool> readAutomaticUpdates();
+
+  Future<void> saveAutomaticUpdates(bool enabled);
 }

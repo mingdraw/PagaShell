@@ -1,9 +1,7 @@
 /// 应用元信息。
 ///
-/// 版本号与 pubspec.yaml 保持一致；后续可切换为 package_info_plus 运行时读取。
+/// 更新检查使用安装包中的运行时版本，不使用开发阶段的占位版本。
 abstract final class AppInfo {
   static const String name = 'PagaShell';
-  static const String version = '0.1.0-dev';
-  static const String versionLabel = 'v$version';
-  static const String repository = 'https://github.com/zhongxuming/PagaShell';
+  static const String repository = 'https://github.com/mingdraw/PagaShell';
 }

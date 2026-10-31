@@ -5,10 +5,19 @@ import 'package:pagashell/domain/repositories/settings_repository.dart';
 class InMemorySettingsRepository implements SettingsRepository {
   InMemorySettingsRepository({
     this.themeMode = AppThemeMode.system,
+    this.automaticUpdates = true,
     SidebarState? sidebarState,
   }) : sidebarState = sidebarState ?? SidebarState();
 
   AppThemeMode themeMode;
+  bool automaticUpdates;
+
+  @override
+  Future<bool> readAutomaticUpdates() async => automaticUpdates;
+
+  @override
+  Future<void> saveAutomaticUpdates(bool enabled) async =>
+      automaticUpdates = enabled;
   SidebarState sidebarState;
 
   @override

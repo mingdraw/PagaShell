@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -50,16 +51,32 @@ jobs:
 
   build:
     needs: [analyze-and-test, rust-check]
+    name: Build ${{ matrix.target }} ${{ matrix.arch }}
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             target: linux
-          - os: macos-latest
+            arch: amd64
+          - os: ubuntu-22.04-arm
+            target: linux
+            arch: arm64
+          - os: macos-15-intel
             target: macos
-          - os: windows-latest
+            arch: amd64
+            xcode_arch: x86_64
+          - os: macos-15
+            target: macos
+            arch: arm64
+            xcode_arch: arm64
+          - os: windows-2022
             target: windows
+            arch: amd64
+          - os: windows-11-arm
+            target: windows
+            arch: arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -72,7 +89,7 @@ jobs:
         if: matrix.target == 'macos'
         run: brew install nasm
       - name: Install Windows build dependencies
-        if: matrix.target == 'windows'
+        if: matrix.target == 'windows' && matrix.arch == 'amd64'
         run: |
           choco install nasm --yes --no-progress
           Add-Content $env:GITHUB_PATH 'C:\Program Files\NASM'
@@ -80,10 +97,35 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          cache: true
+          key: ci-${{ matrix.target }}-${{ matrix.arch }}
+      - name: Verify update helper transactions
+        run: python scripts/test_updater_helpers.py
+      - name: Set up Flutter on Linux and macOS
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          git clone --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+      - name: Set up Flutter on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch $env:FLUTTER_VERSION https://github.com/flutter/flutter.git "$env:RUNNER_TEMP\flutter"
+          if ($LASTEXITCODE -ne 0) { throw 'Flutter checkout failed' }
+          Add-Content $env:GITHUB_PATH "$env:RUNNER_TEMP\flutter\bin"
       - run: flutter pub get
-      - run: flutter build ${{ matrix.target }} --release
+      - name: Verify update interface and exit lifecycle
+        run: flutter test test/app_update_test.dart test/application/app_update_controller_test.dart test/domain/app_release_test.dart --reporter expanded
+      - name: Build Linux and Windows
+        if: matrix.target != 'macos'
+        run: flutter build ${{ matrix.target }} --release
+      - name: Build macOS
+        if: matrix.target == 'macos'
+        env:
+          XCODE_ARCH: ${{ matrix.xcode_arch }}
+        run: |
+          flutter build macos --release --config-only
+          xcodebuild -workspace macos/Runner.xcworkspace -scheme Runner \
+            -configuration Release -derivedDataPath build/macos \
+            -destination 'generic/platform=macOS' \
+            ARCHS="$XCODE_ARCH" ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO

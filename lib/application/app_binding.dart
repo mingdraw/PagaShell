@@ -32,6 +32,7 @@ import '../infrastructure/files/io_local_file_repository.dart';
 import '../infrastructure/files/system_clipboard.dart';
 import '../infrastructure/proxy/desktop_system_proxy.dart';
 import '../infrastructure/ssh/rust_ssh_engine.dart';
+import '../infrastructure/updates/desktop_update_installer.dart';
 import '../infrastructure/vault/encrypted_secret_store.dart';
 import '../infrastructure/vault/encrypted_vault_storage.dart';
 import '../infrastructure/vault/secure_secret_store.dart';
@@ -49,6 +50,7 @@ import 'network/app_connect.dart';
 import 'session/session_controller.dart';
 import 'settings/settings_controller.dart';
 import 'transfer/transfer_controller.dart';
+import 'updates/app_update_controller.dart';
 
 /// 全局依赖装配：唯一允许把 infrastructure 实现绑定到 domain 接口的地方。
 ///
@@ -161,6 +163,18 @@ class AppBinding extends Bindings {
 
     final settings = Get.put<SettingsController>(
       SettingsController(repository: settingsRepository),
+      permanent: true,
+    );
+    Get.put<AppUpdateController>(
+      AppUpdateController(
+        connect: Get.find<GetConnect>(),
+        createDownloadConnect: () => AppConnect(
+          followRedirects: true,
+          timeout: const Duration(seconds: 30),
+        ),
+        settings: settings,
+        installer: DesktopUpdateInstaller(),
+      ),
       permanent: true,
     );
     final aiSettings = Get.put<AiSettingsController>(

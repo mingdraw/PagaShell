@@ -50,6 +50,10 @@ SSH、SFTP、RDP 和 VNC 会话可以分别打开标签。主机、凭据和网�
 
 发布页附带 `checksums.txt`，可用于 SHA-256 校验。macOS 版本尚未经过 Apple 公证，Windows 版本未使用代码签名证书。
 
+### 软件更新
+
+打开软件时会检查 GitHub 上的新版本，确认后自动下载、安装并重启。也可以在 **设置 → 通用** 中点击 **检查更新**，或关闭 **自动更新**，改为手动检查。更新会保留本机配置和凭据。
+
 ## 使用文档
 
 - [Page 网关部署与连接](docs/page-gateway.md)
@@ -57,6 +61,7 @@ SSH、SFTP、RDP 和 VNC 会话可以分别打开标签。主机、凭据和网�
 - [RDP 远程桌面](docs/rdp-service.md)
 - [VNC 远程桌面](docs/vnc-service.md)
 - [配置导入与导出](docs/configuration-transfer.md)
+- [软件更新](docs/software-updates.md)
 - [AI 助手](docs/ai-agent.md)
 
 ## 反馈与贡献

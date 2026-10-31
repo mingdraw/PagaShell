@@ -92,6 +92,8 @@ jobs:
           Add-Content $env:GITHUB_PATH "$env:RUNNER_TEMP\flutter\bin"
       - run: flutter --version
       - run: flutter pub get
+      - name: Verify update helper transactions
+        run: python scripts/test_updater_helpers.py
       - name: Validate version
         shell: bash
         run: python scripts/package_release.py --check-version "$RELEASE_TAG"

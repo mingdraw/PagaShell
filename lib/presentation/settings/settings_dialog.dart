@@ -8,6 +8,7 @@ import '../../application/ai/agent_api_codec.dart';
 import '../../application/ai/agent_controller.dart';
 import '../../application/ai/ai_settings_controller.dart';
 import '../../application/settings/settings_controller.dart';
+import '../../application/updates/app_update_controller.dart';
 import '../../domain/ai/ai_model.dart';
 import '../../domain/entities/app_theme_mode.dart';
 import '../components/app_dialog.dart';
@@ -18,6 +19,7 @@ import '../localization/app_translations.dart';
 import '../navigation/app_navigation.dart';
 import '../navigation/app_notice.dart';
 import '../theme/app_theme.dart';
+import 'app_update_section.dart';
 
 Future<void> showSettingsDialog({bool ai = false}) =>
     AppNavigation.dialog<void>(SettingsDialog(initialTab: ai ? 1 : 0));
@@ -515,6 +517,10 @@ class _GeneralSettings extends StatelessWidget {
               onLocaleChanged();
             },
           ),
+          if (Get.isRegistered<AppUpdateController>()) ...[
+            const SizedBox(height: 28),
+            const AppUpdateSection(),
+          ],
         ],
       ),
     );

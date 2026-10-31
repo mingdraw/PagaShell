@@ -13,6 +13,8 @@ class SettingsController extends GetxController {
   final themeMode = AppThemeMode.system.obs;
   final sidebarState = SidebarState().obs;
   final isLoaded = false.obs;
+  final automaticUpdates = true.obs;
+  final savingAutomaticUpdates = false.obs;
   late final Future<void> ready = _load();
   Future<void> _pendingSave = Future<void>.value();
   Future<void> _pendingSidebarSave = Future<void>.value();
@@ -40,6 +42,13 @@ class SettingsController extends GetxController {
       if (!isClosed) sidebarState.value = saved;
     } on Object {
       // 显示偏好不可读时保留默认布局，不影响主题和启动。
+    }
+    try {
+      final saved = await _repository.readAutomaticUpdates();
+      if (!isClosed) automaticUpdates.value = saved;
+    } on Object {
+      // 无法确认已保存的选择时，不主动发起启动检查。
+      if (!isClosed) automaticUpdates.value = false;
     }
     if (isClosed) return;
     for (final entry in _sidebarFolders.entries) {
@@ -103,6 +112,19 @@ class SettingsController extends GetxController {
       worker.dispose();
     }
     super.onClose();
+  }
+
+  /// 保存成功后再应用开关；写入期间禁用重复操作。
+  Future<void> setAutomaticUpdates(bool enabled) async {
+    if (savingAutomaticUpdates.value) return;
+    savingAutomaticUpdates.value = true;
+    try {
+      await ready;
+      await _repository.saveAutomaticUpdates(enabled);
+      if (!isClosed) automaticUpdates.value = enabled;
+    } finally {
+      if (!isClosed) savingAutomaticUpdates.value = false;
+    }
   }
 
   /// 顺序保存快速连续的选择；保存成功后再应用，失败时保留原模式。

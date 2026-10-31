@@ -12,6 +12,7 @@ import '../../application/ai/agent_controller.dart';
 import '../../application/session/session.dart';
 import '../../application/session/session_controller.dart';
 import '../../application/settings/settings_controller.dart';
+import '../../application/updates/app_update_controller.dart';
 import '../../domain/proxy/system_proxy.dart';
 import '../ai/agent_workspace.dart';
 import '../components/app_dialog.dart';
@@ -21,6 +22,7 @@ import '../hosts/host_edit_dialog.dart';
 import '../navigation/app_navigation.dart';
 import '../navigation/app_notice.dart';
 import '../rdp/rdp_fullscreen_scope.dart';
+import '../settings/app_update_section.dart';
 import '../settings/settings_dialog.dart';
 import '../theme/app_theme.dart';
 import 'agent_sidebar_scope.dart';
@@ -56,6 +58,8 @@ class _ShellPageState extends State<ShellPage> with WindowListener {
   Future<bool>? _exitPending;
   bool _allowExit = false;
   bool _destroying = false;
+  AppUpdateController? _updates;
+  late final Future<bool> Function(Future<void> Function()) _updateExit;
   final _shortcutKeys = <PhysicalKeyboardKey>{};
   SessionController get _sessions => Get.find<SessionController>();
 
@@ -88,6 +92,29 @@ class _ShellPageState extends State<ShellPage> with WindowListener {
       final id = _fullscreenId;
       if (id != null && !_isDesktopReady(id)) unawaited(_exitFullscreen());
     });
+    if (Get.isRegistered<AppUpdateController>()) {
+      final updates = _updates = Get.find<AppUpdateController>();
+      _updateExit = (commit) => _exitApplication(beforeDestroy: commit);
+      updates.exitForUpdate = _updateExit;
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => unawaited(_checkForUpdates()),
+      );
+    }
+  }
+
+  Future<void> _checkForUpdates() async {
+    final updates = _updates!;
+    final release = await updates.checkOnStartup();
+    if (release == null) return;
+    // A startup result should wait for the user's current form or dialog.
+    while (mounted && Get.isDialogOpen == true) {
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+    }
+    if (mounted &&
+        !_destroying &&
+        Get.find<SettingsController>().automaticUpdates.value) {
+      await showAppUpdateDialog(updates, release, automatic: true);
+    }
   }
 
   bool _isDesktopReady(String id) =>
@@ -172,9 +199,20 @@ class _ShellPageState extends State<ShellPage> with WindowListener {
 
   @override
   void onWindowClose() async {
-    if (_destroying || !await _prepareExit() || _destroying) return;
+    await _exitApplication();
+  }
+
+  Future<bool> _exitApplication({
+    Future<void> Function()? beforeDestroy,
+  }) async {
+    if (_destroying) return false;
     _destroying = true;
     try {
+      if (!await _prepareExit()) {
+        _destroying = false;
+        return false;
+      }
+      await beforeDestroy?.call();
       if (defaultTargetPlatform == TargetPlatform.windows) {
         // window_manager.destroy() posts WM_QUIT on Windows. The runner must
         // destroy the view/plugins before its message loop and COM shut down.
@@ -182,8 +220,10 @@ class _ShellPageState extends State<ShellPage> with WindowListener {
       } else {
         await windowManager.destroy();
       }
+      return true;
     } on Object {
       _destroying = false;
+      _allowExit = false;
       rethrow;
     }
   }
@@ -248,6 +288,9 @@ class _ShellPageState extends State<ShellPage> with WindowListener {
 
   @override
   void dispose() {
+    if (_updates != null && identical(_updates!.exitForUpdate, _updateExit)) {
+      _updates!.exitForUpdate = null;
+    }
     _windowChannel.setMethodCallHandler(null);
     FocusManager.instance.removeEarlyKeyEventHandler(_handleShortcut);
     _lifecycle.dispose();

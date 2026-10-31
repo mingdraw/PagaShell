@@ -4,6 +4,7 @@ import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import '../../../application/session/session.dart';
 import '../../../application/session/session_controller.dart';
+import '../../../application/updates/app_update_controller.dart';
 import '../../../core/app_info.dart';
 import '../../theme/app_theme.dart';
 
@@ -54,7 +55,17 @@ class StatusBar extends StatelessWidget {
               );
             }),
           ),
-          Text(AppInfo.versionLabel, style: style),
+          if (Get.isRegistered<AppUpdateController>())
+            Obx(() {
+              final version =
+                  Get.find<AppUpdateController>().currentVersion.value;
+              return Text(
+                version.isEmpty ? AppInfo.name : 'v$version',
+                style: style,
+              );
+            })
+          else
+            Text(AppInfo.name, style: style),
         ],
       ),
     );

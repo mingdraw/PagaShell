@@ -11,6 +11,25 @@ class DriftSettingsRepository implements SettingsRepository {
   final AppDatabase _db;
   static const _themeModeKey = 'theme_mode';
   static const _sidebarStateKey = 'sidebar_state';
+  static const _automaticUpdatesKey = 'automatic_updates';
+
+  @override
+  Future<bool> readAutomaticUpdates() async {
+    final row = await (_db.select(
+      _db.appSettings,
+    )..where((s) => s.key.equals(_automaticUpdatesKey))).getSingleOrNull();
+    return row == null || row.value == 'true';
+  }
+
+  @override
+  Future<void> saveAutomaticUpdates(bool enabled) => _db
+      .into(_db.appSettings)
+      .insertOnConflictUpdate(
+        AppSettingsCompanion.insert(
+          key: _automaticUpdatesKey,
+          value: enabled.toString(),
+        ),
+      );
 
   @override
   Future<AppThemeMode> readThemeMode() async {
