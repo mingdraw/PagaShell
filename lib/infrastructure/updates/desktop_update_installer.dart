@@ -121,17 +121,28 @@ class DesktopUpdateInstaller implements UpdateInstaller {
       flush: true,
     );
     var requiresAdmin = false;
-    final probe = File(
-      path.join(
-        target.parent.path,
-        '.pagashell-write-$pid-${path.basename(work.path)}',
-      ),
-    );
-    try {
-      await probe.writeAsString('', flush: true);
-      await probe.delete();
-    } on FileSystemException {
-      requiresAdmin = true;
+    final backup = Directory('${target.path}.pagashell-backup');
+    // A writable parent can still contain a root-owned app or older backup.
+    // Removing either bundle requires access inside that directory as well.
+    for (final directory in [
+      target.parent,
+      target,
+      if (backup.existsSync() && File('${backup.path}.marker').existsSync())
+        backup,
+    ]) {
+      final probe = File(
+        path.join(
+          directory.path,
+          '.pagashell-write-$pid-${path.basename(work.path)}',
+        ),
+      );
+      try {
+        await probe.writeAsString('', flush: true);
+        await probe.delete();
+      } on FileSystemException {
+        requiresAdmin = true;
+        break;
+      }
     }
     if (requiresAdmin &&
         release.platform == UpdatePlatform.macos &&

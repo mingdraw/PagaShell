@@ -122,6 +122,21 @@ class UpdaterHelperTests(unittest.TestCase):
         self.assertEqual(child.wait(timeout=10), 0)
         self.assertEqual((self.target / "version").read_text(), "old")
 
+    def test_cancel_revokes_commit_while_application_is_running(self):
+        child = self.start_watcher()
+        (self.work / "commit").touch()
+        time.sleep(0.3)
+        (self.work / "cancel").touch()
+        self.assertEqual(child.wait(timeout=10), 0)
+        self.assertEqual((self.target / "version").read_text(), "old")
+
+    def test_later_update_rotates_only_managed_backup(self):
+        self.run_helper("Apply")
+        (self.source / "version").write_text("newer", encoding="utf-8")
+        self.run_helper("Apply")
+        self.assertEqual((self.target / "version").read_text(), "newer")
+        self.assertEqual((self.backup / "version").read_text(), "new")
+
     def test_commit_waits_for_application_exit_then_restarts(self):
         if WINDOWS:
             # A tiny managed GUI executable records restart without using PagaShell.
