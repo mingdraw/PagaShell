@@ -48,7 +48,18 @@ class UpdaterHelperTests(unittest.TestCase):
             if child.poll() is None:
                 child.terminate()
             child.wait(timeout=10)
-        self.temp.cleanup()
+        # The restarted Windows fixture may still be closing its final write.
+        # Wait for those handles, rather than leaving a detached test process
+        # or treating its short lifetime as an installer failure.
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                self.temp.cleanup()
+                break
+            except PermissionError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
 
     def command(self, mode, platform="linux"):
         if WINDOWS:
