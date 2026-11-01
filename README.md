@@ -50,6 +50,8 @@ SSH、SFTP、RDP 和 VNC 会话可以分别打开标签。主机、凭据和网�
 
 发布页附带 `checksums.txt`，可用于 SHA-256 校验。macOS 版本尚未经过 Apple 公证，Windows 版本未使用代码签名证书。
 
+Windows 首次运行可能出现 SmartScreen 的“无法识别的应用”提示。签名现状和免费开源签名计划见 [Code signing policy](docs/windows-code-signing.md)。
+
 ### 软件更新
 
 打开软件时会检查 GitHub 上的新版本，确认后自动下载、安装并重启。也可以在 **设置 → 通用** 中点击 **检查更新**，或关闭 **自动更新**，改为手动检查。更新会保留本机配置和凭据。
