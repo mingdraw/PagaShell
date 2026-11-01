@@ -75,15 +75,29 @@ class _AppUpdateSectionState extends State<AppUpdateSection> {
         Row(
           children: [
             Expanded(
-              child: Text(
-                '当前版本：@version'.trParams({
-                  'version': _updates.currentVersion.value.isEmpty
-                      ? '—'
-                      : 'v${_updates.currentVersion.value}',
-                }),
-                style: TextStyle(fontSize: 12, color: muted),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '当前版本：@version'.trParams({
+                      'version': _updates.currentVersion.value.isEmpty
+                          ? '—'
+                          : 'v${_updates.currentVersion.value}',
+                    }),
+                  ),
+                  if (_saveError != null ||
+                      _updates.message.value.isNotEmpty) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      (_saveError ?? _updates.message.value).tr,
+                      key: const ValueKey('update-status'),
+                      style: TextStyle(fontSize: 12, color: muted),
+                    ),
+                  ],
+                ],
               ),
             ),
+            const SizedBox(width: 12),
             shadcn.OutlineButton(
               key: const ValueKey('check-for-updates'),
               onPressed: _updates.busy ? null : _check,
@@ -96,14 +110,6 @@ class _AppUpdateSectionState extends State<AppUpdateSection> {
             ),
           ],
         ),
-        if (_saveError != null || _updates.message.value.isNotEmpty) ...[
-          const SizedBox(height: 12),
-          Text(
-            (_saveError ?? _updates.message.value).tr,
-            key: const ValueKey('update-status'),
-            style: const TextStyle(fontSize: 12),
-          ),
-        ],
       ],
     );
   });
