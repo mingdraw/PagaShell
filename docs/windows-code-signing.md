@@ -2,15 +2,19 @@
 
 ## 当前状态
 
-截至 2026-11-01，PagaShell 的 Windows 发布包未进行 Authenticode 代码签名，尚未取得 SignPath Foundation 的签名资格。本页记录拟采用的免费签名方案及申请准备事项。
+截至 2026-11-01，PagaShell 处于测试阶段，Windows 发布包未进行 Authenticode 代码签名，暂不申请签名服务，也尚未取得 SignPath Foundation 的签名资格。本页记录当前运行方式及后续可选的免费签名方案。
 
 SmartScreen 会判断下载文件及发布者的信誉。可信签名有助于验证发布者身份和积累信誉，但新签名程序仍可能显示提示；无法承诺首次下载立即免提示。详见 [Microsoft：SmartScreen reputation for Windows app developers](https://learn.microsoft.com/windows/apps/package-and-deploy/smartscreen-reputation)。
 
 程序版本资源中的产品名与文件描述使用 `PagaShell`。这些字段便于识别文件及设置签名约束，本身不构成可信签名。
 
-## 免费签名方案
+## 测试阶段首次运行
 
-计划申请 [SignPath Foundation](https://signpath.org/apply) 的免费开源代码签名服务。申请需要审核；基金会以自身名义提供证书，不代表开发者已获得以个人名义签发的证书。
+从项目的 GitHub Releases 下载并核对 `checksums.txt` 后，解压完整 ZIP，运行 `pagashell.exe`。出现 SmartScreen 提示时，点击 **更多信息 → 仍要运行** 手动放行。该选项受 Windows 管理策略约束。参见 [Microsoft：Publish your first Windows app](https://learn.microsoft.com/windows/apps/package-and-deploy/publish-first-app)。
+
+## 后续可选的免费签名方案
+
+后续需要代码签名时，可考虑申请 [SignPath Foundation](https://signpath.org/apply) 的免费开源代码签名服务，当前暂不申请。申请需要审核；基金会以自身名义提供证书，不代表开发者已获得以个人名义签发的证书。
 
 申请条件包括开源组件许可、项目维护与信誉、可验证的构建来源、团队角色、双重验证和发布时人工批准。仅为项目自有构建产物申请签名，第三方组件按其来源及原有签名处理。完整要求以 [Foundation 条件](https://signpath.org/terms) 为准。
 
@@ -30,7 +34,7 @@ SmartScreen 会判断下载文件及发布者的信誉。可信签名有助于�
 
 > PagaShell is an open-source desktop client for SSH, SFTP, RDP and VNC. It manages connections and credentials locally, supports user-configured gateways and proxies, and offers an optional AI assistant using an API selected by the user. Windows releases are built from the public repository using GitHub-hosted runners and distributed as portable ZIP archives.
 
-提交申请前仍需维护者完成：
+如果后续申请，提交前需维护者完成：
 
 - 确认作者、代码审阅者和签名批准人的实际账号与职责，并在本页公布经确认的成员信息。
 - 确认相关 GitHub、SignPath 账号均已启用双重验证。
