@@ -169,6 +169,12 @@ void main() {
         await tester.ensureVisible(card);
         await tester.tap(card);
         await tester.pumpAndSettle();
+        if (credential) {
+          expect(
+            find.text('认证方式'),
+            type == 'SSH' ? findsOneWidget : findsNothing,
+          );
+        }
         if (type == 'VNC') {
           expect(username, findsNothing);
         } else {
@@ -200,9 +206,12 @@ void main() {
     await pumpApp(tester, FakeRdpEngine());
     unawaited(showIdentityEditDialog(tester.element(find.text('服务'))));
     await tester.pumpAndSettle();
+    expect(find.text('认证方式'), findsOneWidget);
     expect(find.byKey(const ValueKey('identity-rdp-domain')), findsNothing);
     await tester.tap(find.widgetWithText(shadcn.RadioCard<ServiceType>, 'RDP'));
     await tester.pumpAndSettle();
+    expect(find.text('认证方式'), findsNothing);
+    expect(find.widgetWithText(AppTextFormField, '密码'), findsOneWidget);
     final username = find.widgetWithText(AppTextFormField, '用户名');
     expect(
       tester.widget<AppTextFormField>(username).controller.text,
@@ -252,6 +261,7 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(tester.widget<AppTextFormField>(domain).controller.text, 'CORP');
+    expect(find.text('认证方式'), findsNothing);
     await tester.ensureVisible(domain);
     await tester.enterText(domain, 'NEW-CORP');
     await tester.pumpAndSettle();

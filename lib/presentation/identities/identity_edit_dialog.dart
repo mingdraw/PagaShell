@@ -278,7 +278,15 @@ class _IdentityEditDialogState extends State<_IdentityEditDialog> {
                   label: '凭证类型'.tr,
                   items: [
                     for (final type in ServiceType.values)
-                      AppRadioCardOption(value: type, child: Text(type.label)),
+                      AppRadioCardOption(
+                        value: type,
+                        icon: switch (type) {
+                          ServiceType.ssh => shadcn.LucideIcons.terminal,
+                          ServiceType.rdp => shadcn.LucideIcons.monitor,
+                          ServiceType.vnc => shadcn.LucideIcons.screenShare,
+                        },
+                        child: Text(type.label),
+                      ),
                   ],
                   onChanged: _saving || _loadingCopy || _isEdit
                       ? null
@@ -300,6 +308,7 @@ class _IdentityEditDialogState extends State<_IdentityEditDialog> {
                 const SizedBox(height: 12),
                 if (_serviceType != ServiceType.vnc) ...[
                   AppTextFormField(
+                    key: const ValueKey('identity-username'),
                     controller: _username,
                     enabled: !_saving,
                     decoration: AppInputDecoration(labelText: '用户名'.tr),
@@ -318,33 +327,34 @@ class _IdentityEditDialogState extends State<_IdentityEditDialog> {
                   ),
                   const SizedBox(height: 12),
                 ],
-                AppSelectField<AuthType>(
-                  key: ValueKey('identity-auth-$_serviceType'),
-                  initialValue: _authType,
-                  label: '认证方式'.tr,
-                  items: [
-                    AppSelectOption(
-                      value: AuthType.password,
-                      child: Text('密码'.tr),
-                    ),
-                    if (_serviceType == ServiceType.ssh)
+                if (_serviceType == ServiceType.ssh) ...[
+                  AppSelectField<AuthType>(
+                    key: ValueKey('identity-auth-$_serviceType'),
+                    initialValue: _authType,
+                    label: '认证方式'.tr,
+                    items: [
+                      AppSelectOption(
+                        value: AuthType.password,
+                        child: Text('密码'.tr),
+                      ),
                       AppSelectOption(
                         value: AuthType.privateKey,
                         child: Text('私钥'.tr),
                       ),
-                    if (!_supported)
-                      AppSelectOption(
-                        value: _authType,
-                        child: Text('暂不支持此认证方式'.tr),
-                      ),
-                  ],
-                  onChanged: _saving || _loadingCopy || _isEdit
-                      ? null
-                      : (type) {
-                          if (type != null) setState(() => _authType = type);
-                        },
-                ),
-                const SizedBox(height: 12),
+                      if (!_supported)
+                        AppSelectOption(
+                          value: _authType,
+                          child: Text('暂不支持此认证方式'.tr),
+                        ),
+                    ],
+                    onChanged: _saving || _loadingCopy || _isEdit
+                        ? null
+                        : (type) {
+                            if (type != null) setState(() => _authType = type);
+                          },
+                  ),
+                  const SizedBox(height: 12),
+                ],
                 if (_authType == AuthType.privateKey)
                   PrivateKeyFields(
                     privateKey: _privateKey,
@@ -361,6 +371,7 @@ class _IdentityEditDialogState extends State<_IdentityEditDialog> {
                   )
                 else if (_authType == AuthType.password)
                   AppTextFormField(
+                    key: const ValueKey('identity-password'),
                     controller: _password,
                     enabled: !_saving && !_loadingCopy,
                     obscureText: _obscure,

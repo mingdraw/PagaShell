@@ -155,6 +155,8 @@ void main() {
     await tester.tap(find.widgetWithText(shadcn.RadioCard<ServiceType>, 'VNC'));
     await tester.pumpAndSettle();
     expect(find.text('用户名'), findsNothing);
+    expect(find.text('认证方式'), findsNothing);
+    expect(find.widgetWithText(AppTextFormField, '密码'), findsOneWidget);
     await _capture(tester, 'vnc-credential-form');
     await tester.enterText(
       find.widgetWithText(AppTextFormField, '名称'),

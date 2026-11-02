@@ -129,6 +129,10 @@ abstract final class AppTheme {
   static const double inputIconSize = 16;
   static const double inputFontSize = 13;
   static const double inputMinHeight = 34;
+  static const EdgeInsets typeRadioCardPadding = EdgeInsets.symmetric(
+    horizontal: 10,
+    vertical: 6,
+  );
   static const double treeDropGuideHeight = 2;
   static const double treeFolderDropEdgeFraction = 0.25;
   static const double treeDragFeedbackOpacity = 0.8;

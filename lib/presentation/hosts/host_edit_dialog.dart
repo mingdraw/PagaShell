@@ -320,10 +320,12 @@ class _HostEditDialogState extends State<HostEditDialog> {
                     items: const [
                       AppRadioCardOption(
                         value: GatewayType.ssh,
+                        icon: shadcn.LucideIcons.terminal,
                         child: Text('SSH'),
                       ),
                       AppRadioCardOption(
                         value: GatewayType.page,
+                        icon: shadcn.LucideIcons.network,
                         child: Text('Page'),
                       ),
                     ],
@@ -351,14 +353,17 @@ class _HostEditDialogState extends State<HostEditDialog> {
                     items: const [
                       AppRadioCardOption(
                         value: ServiceType.ssh,
+                        icon: shadcn.LucideIcons.terminal,
                         child: Text('SSH'),
                       ),
                       AppRadioCardOption(
                         value: ServiceType.rdp,
+                        icon: shadcn.LucideIcons.monitor,
                         child: Text('RDP'),
                       ),
                       AppRadioCardOption(
                         value: ServiceType.vnc,
+                        icon: shadcn.LucideIcons.screenShare,
                         child: Text('VNC'),
                       ),
                     ],

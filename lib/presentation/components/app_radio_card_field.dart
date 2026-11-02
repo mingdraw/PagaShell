@@ -4,10 +4,15 @@ import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 import '../theme/app_theme.dart';
 
 class AppRadioCardOption<T> {
-  const AppRadioCardOption({required this.value, required this.child});
+  const AppRadioCardOption({
+    required this.value,
+    required this.child,
+    this.icon,
+  });
 
   final T value;
   final Widget child;
+  final IconData? icon;
 }
 
 /// 等宽的 shadcn Radio Card 选项，与 Flutter 核心 Form 校验互通。
@@ -54,7 +59,26 @@ class AppRadioCardField<T> extends FormField<T> {
                          child: shadcn.RadioCard<T>(
                            value: items[i].value,
                            enabled: onChanged != null,
-                           child: Center(child: items[i].child),
+                           theme: const shadcn.RadioCardTheme(
+                             padding: AppTheme.typeRadioCardPadding,
+                           ),
+                           child: DefaultTextStyle.merge(
+                             style: const TextStyle(
+                               fontSize: AppTheme.inputFontSize,
+                             ),
+                             child: Center(
+                               child: Row(
+                                 mainAxisSize: MainAxisSize.min,
+                                 children: [
+                                   if (items[i].icon case final icon?) ...[
+                                     Icon(icon, size: AppTheme.inputIconSize),
+                                     const SizedBox(width: 6),
+                                   ],
+                                   items[i].child,
+                                 ],
+                               ),
+                             ),
+                           ),
                          ),
                        ),
                      ),
