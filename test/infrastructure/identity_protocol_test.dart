@@ -14,6 +14,46 @@ import 'package:pagashell/infrastructure/db/drift_identity_repository.dart';
 import 'package:pagashell/infrastructure/vault/in_memory_secret_store.dart';
 
 void main() {
+  test('schema 13 升级保留旧凭证，RDP 域写入重开后保留并可清空', () async {
+    final directory = await Directory.systemTemp.createTemp('rdp-domain-');
+    addTearDown(() => directory.delete(recursive: true));
+    final file = File('${directory.path}/db.sqlite');
+    final old = AppDatabase.forTesting(NativeDatabase(file));
+    await DriftIdentityRepository(old).upsert(
+      const Identity(
+        id: 'rdp',
+        name: 'Windows',
+        username: 'operator',
+        authType: AuthType.password,
+        serviceType: ServiceType.rdp,
+        secretRef: 'sec-rdp',
+      ),
+    );
+    await old.customStatement('ALTER TABLE identities DROP COLUMN rdp_domain');
+    await old.customStatement('PRAGMA user_version = 13');
+    await old.close();
+
+    final upgraded = AppDatabase.forTesting(NativeDatabase(file));
+    final repository = DriftIdentityRepository(upgraded);
+    final existing = (await repository.getAll()).single;
+    expect(existing.username, 'operator');
+    expect(existing.serviceType, ServiceType.rdp);
+    expect(existing.secretRef, 'sec-rdp');
+    expect(existing.rdpDomain, isNull);
+    await repository.upsert(existing.copyWith(rdpDomain: 'CORP'));
+    await upgraded.close();
+
+    final reopened = AppDatabase.forTesting(NativeDatabase(file));
+    addTearDown(reopened.close);
+    final savedRepository = DriftIdentityRepository(reopened);
+    final saved = (await savedRepository.getAll()).single;
+    expect(saved.rdpDomain, 'CORP');
+    await savedRepository.upsert(saved.copyWith(name: 'Renamed'));
+    expect((await savedRepository.getAll()).single.rdpDomain, 'CORP');
+    await savedRepository.upsert(saved.copyWith(rdpDomain: null));
+    expect((await savedRepository.getAll()).single.rdpDomain, isNull);
+  });
+
   test('schema 10 迁移按绑定拆分共享凭证，保留原密文引用及独立凭证', () async {
     final directory = await Directory.systemTemp.createTemp('vnc-migration-');
     addTearDown(() => directory.delete(recursive: true));
@@ -64,12 +104,14 @@ void main() {
     await old.customStatement(
       'ALTER TABLE hosts DROP COLUMN proxy_config_json',
     );
+    await old.customStatement('ALTER TABLE identities DROP COLUMN rdp_domain');
     await old.customStatement('PRAGMA user_version = 10');
     await old.close();
     final db = AppDatabase.forTesting(NativeDatabase(file));
     addTearDown(db.close);
     final saved = await DriftIdentityRepository(db).getAll();
     expect(saved.length, 4);
+    expect(saved.every((i) => i.rdpDomain == null), isTrue);
     expect(
       saved.singleWhere((i) => i.id == 'shared').serviceType,
       ServiceType.ssh,

@@ -1778,6 +1778,17 @@ class $IdentitiesTable extends Identities
     requiredDuringInsert: false,
     defaultValue: const Constant('ssh'),
   );
+  static const VerificationMeta _rdpDomainMeta = const VerificationMeta(
+    'rdpDomain',
+  );
+  @override
+  late final GeneratedColumn<String> rdpDomain = GeneratedColumn<String>(
+    'rdp_domain',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
   static const VerificationMeta _secretRefMeta = const VerificationMeta(
     'secretRef',
   );
@@ -1819,6 +1830,7 @@ class $IdentitiesTable extends Identities
     username,
     authType,
     serviceType,
+    rdpDomain,
     secretRef,
     folderId,
     sortOrder,
@@ -1871,6 +1883,12 @@ class $IdentitiesTable extends Identities
         ),
       );
     }
+    if (data.containsKey('rdp_domain')) {
+      context.handle(
+        _rdpDomainMeta,
+        rdpDomain.isAcceptableOrUnknown(data['rdp_domain']!, _rdpDomainMeta),
+      );
+    }
     if (data.containsKey('secret_ref')) {
       context.handle(
         _secretRefMeta,
@@ -1918,6 +1936,10 @@ class $IdentitiesTable extends Identities
         DriftSqlType.string,
         data['${effectivePrefix}service_type'],
       )!,
+      rdpDomain: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}rdp_domain'],
+      ),
       secretRef: attachedDatabase.typeMapping.read(
         DriftSqlType.string,
         data['${effectivePrefix}secret_ref'],
@@ -1945,6 +1967,7 @@ class IdentityRow extends DataClass implements Insertable<IdentityRow> {
   final String username;
   final int authType;
   final String serviceType;
+  final String? rdpDomain;
   final String? secretRef;
   final String? folderId;
   final int sortOrder;
@@ -1954,6 +1977,7 @@ class IdentityRow extends DataClass implements Insertable<IdentityRow> {
     required this.username,
     required this.authType,
     required this.serviceType,
+    this.rdpDomain,
     this.secretRef,
     this.folderId,
     required this.sortOrder,
@@ -1966,6 +1990,9 @@ class IdentityRow extends DataClass implements Insertable<IdentityRow> {
     map['username'] = Variable<String>(username);
     map['auth_type'] = Variable<int>(authType);
     map['service_type'] = Variable<String>(serviceType);
+    if (!nullToAbsent || rdpDomain != null) {
+      map['rdp_domain'] = Variable<String>(rdpDomain);
+    }
     if (!nullToAbsent || secretRef != null) {
       map['secret_ref'] = Variable<String>(secretRef);
     }
@@ -1983,6 +2010,9 @@ class IdentityRow extends DataClass implements Insertable<IdentityRow> {
       username: Value(username),
       authType: Value(authType),
       serviceType: Value(serviceType),
+      rdpDomain: rdpDomain == null && nullToAbsent
+          ? const Value.absent()
+          : Value(rdpDomain),
       secretRef: secretRef == null && nullToAbsent
           ? const Value.absent()
           : Value(secretRef),
@@ -2004,6 +2034,7 @@ class IdentityRow extends DataClass implements Insertable<IdentityRow> {
       username: serializer.fromJson<String>(json['username']),
       authType: serializer.fromJson<int>(json['authType']),
       serviceType: serializer.fromJson<String>(json['serviceType']),
+      rdpDomain: serializer.fromJson<String?>(json['rdpDomain']),
       secretRef: serializer.fromJson<String?>(json['secretRef']),
       folderId: serializer.fromJson<String?>(json['folderId']),
       sortOrder: serializer.fromJson<int>(json['sortOrder']),
@@ -2018,6 +2049,7 @@ class IdentityRow extends DataClass implements Insertable<IdentityRow> {
       'username': serializer.toJson<String>(username),
       'authType': serializer.toJson<int>(authType),
       'serviceType': serializer.toJson<String>(serviceType),
+      'rdpDomain': serializer.toJson<String?>(rdpDomain),
       'secretRef': serializer.toJson<String?>(secretRef),
       'folderId': serializer.toJson<String?>(folderId),
       'sortOrder': serializer.toJson<int>(sortOrder),
@@ -2030,6 +2062,7 @@ class IdentityRow extends DataClass implements Insertable<IdentityRow> {
     String? username,
     int? authType,
     String? serviceType,
+    Value<String?> rdpDomain = const Value.absent(),
     Value<String?> secretRef = const Value.absent(),
     Value<String?> folderId = const Value.absent(),
     int? sortOrder,
@@ -2039,6 +2072,7 @@ class IdentityRow extends DataClass implements Insertable<IdentityRow> {
     username: username ?? this.username,
     authType: authType ?? this.authType,
     serviceType: serviceType ?? this.serviceType,
+    rdpDomain: rdpDomain.present ? rdpDomain.value : this.rdpDomain,
     secretRef: secretRef.present ? secretRef.value : this.secretRef,
     folderId: folderId.present ? folderId.value : this.folderId,
     sortOrder: sortOrder ?? this.sortOrder,
@@ -2052,6 +2086,7 @@ class IdentityRow extends DataClass implements Insertable<IdentityRow> {
       serviceType: data.serviceType.present
           ? data.serviceType.value
           : this.serviceType,
+      rdpDomain: data.rdpDomain.present ? data.rdpDomain.value : this.rdpDomain,
       secretRef: data.secretRef.present ? data.secretRef.value : this.secretRef,
       folderId: data.folderId.present ? data.folderId.value : this.folderId,
       sortOrder: data.sortOrder.present ? data.sortOrder.value : this.sortOrder,
@@ -2066,6 +2101,7 @@ class IdentityRow extends DataClass implements Insertable<IdentityRow> {
           ..write('username: $username, ')
           ..write('authType: $authType, ')
           ..write('serviceType: $serviceType, ')
+          ..write('rdpDomain: $rdpDomain, ')
           ..write('secretRef: $secretRef, ')
           ..write('folderId: $folderId, ')
           ..write('sortOrder: $sortOrder')
@@ -2080,6 +2116,7 @@ class IdentityRow extends DataClass implements Insertable<IdentityRow> {
     username,
     authType,
     serviceType,
+    rdpDomain,
     secretRef,
     folderId,
     sortOrder,
@@ -2093,6 +2130,7 @@ class IdentityRow extends DataClass implements Insertable<IdentityRow> {
           other.username == this.username &&
           other.authType == this.authType &&
           other.serviceType == this.serviceType &&
+          other.rdpDomain == this.rdpDomain &&
           other.secretRef == this.secretRef &&
           other.folderId == this.folderId &&
           other.sortOrder == this.sortOrder);
@@ -2104,6 +2142,7 @@ class IdentitiesCompanion extends UpdateCompanion<IdentityRow> {
   final Value<String> username;
   final Value<int> authType;
   final Value<String> serviceType;
+  final Value<String?> rdpDomain;
   final Value<String?> secretRef;
   final Value<String?> folderId;
   final Value<int> sortOrder;
@@ -2114,6 +2153,7 @@ class IdentitiesCompanion extends UpdateCompanion<IdentityRow> {
     this.username = const Value.absent(),
     this.authType = const Value.absent(),
     this.serviceType = const Value.absent(),
+    this.rdpDomain = const Value.absent(),
     this.secretRef = const Value.absent(),
     this.folderId = const Value.absent(),
     this.sortOrder = const Value.absent(),
@@ -2125,6 +2165,7 @@ class IdentitiesCompanion extends UpdateCompanion<IdentityRow> {
     required String username,
     this.authType = const Value.absent(),
     this.serviceType = const Value.absent(),
+    this.rdpDomain = const Value.absent(),
     this.secretRef = const Value.absent(),
     this.folderId = const Value.absent(),
     this.sortOrder = const Value.absent(),
@@ -2138,6 +2179,7 @@ class IdentitiesCompanion extends UpdateCompanion<IdentityRow> {
     Expression<String>? username,
     Expression<int>? authType,
     Expression<String>? serviceType,
+    Expression<String>? rdpDomain,
     Expression<String>? secretRef,
     Expression<String>? folderId,
     Expression<int>? sortOrder,
@@ -2149,6 +2191,7 @@ class IdentitiesCompanion extends UpdateCompanion<IdentityRow> {
       if (username != null) 'username': username,
       if (authType != null) 'auth_type': authType,
       if (serviceType != null) 'service_type': serviceType,
+      if (rdpDomain != null) 'rdp_domain': rdpDomain,
       if (secretRef != null) 'secret_ref': secretRef,
       if (folderId != null) 'folder_id': folderId,
       if (sortOrder != null) 'sort_order': sortOrder,
@@ -2162,6 +2205,7 @@ class IdentitiesCompanion extends UpdateCompanion<IdentityRow> {
     Value<String>? username,
     Value<int>? authType,
     Value<String>? serviceType,
+    Value<String?>? rdpDomain,
     Value<String?>? secretRef,
     Value<String?>? folderId,
     Value<int>? sortOrder,
@@ -2173,6 +2217,7 @@ class IdentitiesCompanion extends UpdateCompanion<IdentityRow> {
       username: username ?? this.username,
       authType: authType ?? this.authType,
       serviceType: serviceType ?? this.serviceType,
+      rdpDomain: rdpDomain ?? this.rdpDomain,
       secretRef: secretRef ?? this.secretRef,
       folderId: folderId ?? this.folderId,
       sortOrder: sortOrder ?? this.sortOrder,
@@ -2198,6 +2243,9 @@ class IdentitiesCompanion extends UpdateCompanion<IdentityRow> {
     if (serviceType.present) {
       map['service_type'] = Variable<String>(serviceType.value);
     }
+    if (rdpDomain.present) {
+      map['rdp_domain'] = Variable<String>(rdpDomain.value);
+    }
     if (secretRef.present) {
       map['secret_ref'] = Variable<String>(secretRef.value);
     }
@@ -2221,6 +2269,7 @@ class IdentitiesCompanion extends UpdateCompanion<IdentityRow> {
           ..write('username: $username, ')
           ..write('authType: $authType, ')
           ..write('serviceType: $serviceType, ')
+          ..write('rdpDomain: $rdpDomain, ')
           ..write('secretRef: $secretRef, ')
           ..write('folderId: $folderId, ')
           ..write('sortOrder: $sortOrder, ')
@@ -3715,6 +3764,7 @@ typedef $$IdentitiesTableCreateCompanionBuilder = IdentitiesCompanion Function({
   required String username,
   Value<int> authType,
   Value<String> serviceType,
+  Value<String?> rdpDomain,
   Value<String?> secretRef,
   Value<String?> folderId,
   Value<int> sortOrder,
@@ -3726,6 +3776,7 @@ typedef $$IdentitiesTableUpdateCompanionBuilder = IdentitiesCompanion Function({
   Value<String> username,
   Value<int> authType,
   Value<String> serviceType,
+  Value<String?> rdpDomain,
   Value<String?> secretRef,
   Value<String?> folderId,
   Value<int> sortOrder,
@@ -3763,6 +3814,11 @@ class $$IdentitiesTableFilterComposer
 
   ColumnFilters<String> get serviceType => $composableBuilder(
     column: $table.serviceType,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get rdpDomain => $composableBuilder(
+    column: $table.rdpDomain,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -3816,6 +3872,11 @@ class $$IdentitiesTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<String> get rdpDomain => $composableBuilder(
+    column: $table.rdpDomain,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<String> get secretRef => $composableBuilder(
     column: $table.secretRef,
     builder: (column) => ColumnOrderings(column),
@@ -3857,6 +3918,9 @@ class $$IdentitiesTableAnnotationComposer
     column: $table.serviceType,
     builder: (column) => column,
   );
+
+  GeneratedColumn<String> get rdpDomain =>
+      $composableBuilder(column: $table.rdpDomain, builder: (column) => column);
 
   GeneratedColumn<String> get secretRef =>
       $composableBuilder(column: $table.secretRef, builder: (column) => column);
@@ -3904,6 +3968,7 @@ class $$IdentitiesTableTableManager
                 Value<String> username = const Value.absent(),
                 Value<int> authType = const Value.absent(),
                 Value<String> serviceType = const Value.absent(),
+                Value<String?> rdpDomain = const Value.absent(),
                 Value<String?> secretRef = const Value.absent(),
                 Value<String?> folderId = const Value.absent(),
                 Value<int> sortOrder = const Value.absent(),
@@ -3914,6 +3979,7 @@ class $$IdentitiesTableTableManager
                 username: username,
                 authType: authType,
                 serviceType: serviceType,
+                rdpDomain: rdpDomain,
                 secretRef: secretRef,
                 folderId: folderId,
                 sortOrder: sortOrder,
@@ -3926,6 +3992,7 @@ class $$IdentitiesTableTableManager
                 required String username,
                 Value<int> authType = const Value.absent(),
                 Value<String> serviceType = const Value.absent(),
+                Value<String?> rdpDomain = const Value.absent(),
                 Value<String?> secretRef = const Value.absent(),
                 Value<String?> folderId = const Value.absent(),
                 Value<int> sortOrder = const Value.absent(),
@@ -3936,6 +4003,7 @@ class $$IdentitiesTableTableManager
                 username: username,
                 authType: authType,
                 serviceType: serviceType,
+                rdpDomain: rdpDomain,
                 secretRef: secretRef,
                 folderId: folderId,
                 sortOrder: sortOrder,

@@ -61,12 +61,16 @@ Future<void> _checkPasswordFieldSize(
   );
   final referenceSize = tester.getSize(reference);
   expect(tester.getSize(password), referenceSize);
+  await tester.ensureVisible(password);
+  await tester.pumpAndSettle();
   await tester.enterText(password, 'layout-check');
   final toggle = find.descendant(
     of: password,
     matching: find.byType(AppIconButton),
   );
   for (final obscure in [false, true]) {
+    await tester.ensureVisible(toggle);
+    await tester.pumpAndSettle();
     await tester.tap(toggle);
     await tester.pump();
     expect(tester.getSize(password), referenceSize);
@@ -445,7 +449,10 @@ void main() {
         }
         await tester.pumpAndSettle();
 
-        await tester.tap(find.widgetWithText(shadcn.OutlineButton, '新建服务'.tr));
+        await tester.tap(findAppIconButton('服务组操作'.tr));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+        await tester.tap(find.widgetWithText(shadcn.MenuButton, '新建服务'.tr));
         await tester.pumpAndSettle();
         final save = find.widgetWithText(shadcn.PrimaryButton, '保存'.tr);
         expect(find.text('留空则使用服务地址'.tr), findsOneWidget);

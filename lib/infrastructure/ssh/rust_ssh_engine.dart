@@ -381,7 +381,7 @@ class RustRdpEngine implements RdpEngine {
         expectedFingerprint: prepared.fingerprint,
         username: credentials.username ?? host.username,
         password: credentials.password!,
-        domain: host.rdpDomain,
+        domain: credentials.rdpDomain ?? host.rdpDomain,
       );
       checkCancelled();
       success = true;

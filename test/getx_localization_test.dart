@@ -82,7 +82,10 @@ void main() {
       PagaShellApp(binding: InMemoryBinding(), platform: TargetPlatform.macOS),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(shadcn.OutlineButton, '新建服务'));
+    await tester.tap(findAppIconButton('服务组操作'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(find.widgetWithText(shadcn.MenuButton, '新建服务'));
     await tester.pumpAndSettle();
     await tester.enterText(
       find.widgetWithText(AppTextFormField, '名称'),

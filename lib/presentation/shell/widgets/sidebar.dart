@@ -26,6 +26,7 @@ import '../../../domain/ssh/ssh_engine.dart';
 import '../../../domain/vault/secret_store.dart';
 import '../../components/app_list_row.dart';
 import '../../components/app_menu.dart';
+import '../../components/app_tree_expansion.dart';
 import '../../folders/folder_dialogs.dart';
 import '../../hosts/host_edit_dialog.dart';
 import '../../identities/identity_edit_dialog.dart';
@@ -191,12 +192,17 @@ class _SidebarState extends State<Sidebar> {
                         ),
                       ),
                     ),
-                    if (_hostsExpanded)
-                      ..._hostGroupChildren(
-                        folderController,
-                        treeController.snapshot,
-                        _dragAnchor,
-                      ),
+                    AppTreeExpansion(
+                      key: const ValueKey('sidebar-services-expansion'),
+                      expanded: _hostsExpanded,
+                      children: _hostsExpanded
+                          ? _hostGroupChildren(
+                              folderController,
+                              treeController.snapshot,
+                              _dragAnchor,
+                            )
+                          : const [],
+                    ),
                     const SizedBox(height: 4),
                     DragTarget<IdentityTreeItem>(
                       onWillAcceptWithDetails: (d) => identityTree.canMove(
@@ -236,38 +242,54 @@ class _SidebarState extends State<Sidebar> {
                         ),
                       ),
                     ),
-                    if (_identitiesExpanded)
-                      ..._identityGroupChildren(
-                        identityFolders,
-                        identityTree.snapshot,
-                        _identityDragAnchor,
-                      ),
+                    AppTreeExpansion(
+                      key: const ValueKey('sidebar-identities-expansion'),
+                      expanded: _identitiesExpanded,
+                      children: _identitiesExpanded
+                          ? _identityGroupChildren(
+                              identityFolders,
+                              identityTree.snapshot,
+                              _identityDragAnchor,
+                            )
+                          : const [],
+                    ),
                     if (Get.isRegistered<GatewayTreeController>()) ...[
                       const SizedBox(height: 4),
                       _gatewayHeader(),
-                      if (_gatewaysExpanded)
-                        ..._buildTreeNodes(
-                          Get.find<GatewayFolderController>(),
-                          Get.find<GatewayTreeController>().snapshot,
-                          null,
-                          1,
-                          _gatewayDragAnchor,
-                          gateway: true,
-                        ),
-                      if (_gatewaysExpanded &&
-                          Get.find<GatewayController>().hosts.isEmpty)
-                        Padding(
-                          padding: const EdgeInsets.fromLTRB(28, 8, 12, 8),
-                          child: Text(
-                            '还没有网关，可通过组菜单新建'.tr,
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: shadcn.Theme.of(context)
-                                  .colorScheme
-                                  .mutedForeground,
+                      AppTreeExpansion(
+                        key: const ValueKey('sidebar-gateways-expansion'),
+                        expanded: _gatewaysExpanded,
+                        children: [
+                          if (_gatewaysExpanded) ...[
+                            ..._buildTreeNodes(
+                              Get.find<GatewayFolderController>(),
+                              Get.find<GatewayTreeController>().snapshot,
+                              null,
+                              1,
+                              _gatewayDragAnchor,
+                              gateway: true,
                             ),
-                          ),
-                        ),
+                            if (Get.find<GatewayController>().hosts.isEmpty)
+                              Padding(
+                                padding: const EdgeInsets.fromLTRB(
+                                  28,
+                                  8,
+                                  12,
+                                  8,
+                                ),
+                                child: Text(
+                                  '还没有网关，可通过组菜单新建'.tr,
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: shadcn.Theme.of(context)
+                                        .colorScheme
+                                        .mutedForeground,
+                                  ),
+                                ),
+                              ),
+                          ],
+                        ],
+                      ),
                     ],
                   ],
                 );
@@ -372,17 +394,21 @@ List<Widget> _buildIdentityTreeNodes(
           dragAnchor: dragAnchor,
         ),
       );
-      if (expanded) {
-        widgets.addAll(
-          _buildIdentityTreeNodes(
-            folders,
-            snapshot,
-            folder.id,
-            depth + 1,
-            dragAnchor,
-          ),
-        );
-      }
+      widgets.add(
+        AppTreeExpansion(
+          key: ValueKey('identity-folder-children:${folder.id}'),
+          expanded: expanded,
+          children: expanded
+              ? _buildIdentityTreeNodes(
+                  folders,
+                  snapshot,
+                  folder.id,
+                  depth + 1,
+                  dragAnchor,
+                )
+              : const [],
+        ),
+      );
     } else {
       widgets.add(
         _IdentityTile(
@@ -434,13 +460,7 @@ class _SectionHeader extends StatelessWidget {
             height: 32,
             child: Row(
               children: [
-                Icon(
-                  expanded
-                      ? shadcn.LucideIcons.chevronDown
-                      : shadcn.LucideIcons.chevronRight,
-                  size: 16,
-                  color: colors.mutedForeground,
-                ),
+                AppTreeChevron(expanded: expanded),
                 const SizedBox(width: 2),
                 Icon(
                   icon,
@@ -500,18 +520,22 @@ List<Widget> _buildTreeNodes(
           dragAnchor: dragAnchor,
         ),
       );
-      if (expanded) {
-        widgets.addAll(
-          _buildTreeNodes(
-            folderController,
-            snapshot,
-            folder.id,
-            depth + 1,
-            dragAnchor,
-            gateway: gateway,
-          ),
-        );
-      }
+      widgets.add(
+        AppTreeExpansion(
+          key: ValueKey('host-folder-children:${folder.id}'),
+          expanded: expanded,
+          children: expanded
+              ? _buildTreeNodes(
+                  folderController,
+                  snapshot,
+                  folder.id,
+                  depth + 1,
+                  dragAnchor,
+                  gateway: gateway,
+                )
+              : const [],
+        ),
+      );
     } else {
       widgets.add(
         _HostTile(
@@ -617,13 +641,7 @@ class _FolderTile extends StatelessWidget {
           height: AppTheme.sidebarItemHeight,
           child: Row(
             children: [
-              Icon(
-                expanded
-                    ? shadcn.LucideIcons.chevronDown
-                    : shadcn.LucideIcons.chevronRight,
-                size: 16,
-                color: colors.mutedForeground,
-              ),
+              AppTreeChevron(expanded: expanded),
               const SizedBox(width: 2),
               Icon(
                 containsIdentities
@@ -732,21 +750,9 @@ class _EmptyHostsHint extends StatelessWidget {
     final colors = shadcn.Theme.of(context).colorScheme;
     return Padding(
       padding: const EdgeInsets.fromLTRB(28, 8, 12, 8),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            '还没有服务'.tr,
-            style: TextStyle(fontSize: 13, color: colors.mutedForeground),
-          ),
-          const SizedBox(height: 8),
-          shadcn.OutlineButton(
-            onPressed: () => showHostEditDialog(context),
-            leading: const Icon(shadcn.LucideIcons.plus, size: 14),
-            size: shadcn.ButtonSize.small,
-            child: Text('新建服务'.tr),
-          ),
-        ],
+      child: Text(
+        '还没有服务'.tr,
+        style: TextStyle(fontSize: 12, color: colors.mutedForeground),
       ),
     );
   }

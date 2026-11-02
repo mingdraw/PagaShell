@@ -19,6 +19,11 @@ enum ServiceType {
     rdp => 3389,
     vnc => 5900,
   };
+  String get defaultUsername => switch (this) {
+    ssh => 'root',
+    rdp => 'administrator',
+    vnc => '',
+  };
 }
 
 /// 一台可连接的远程主机。

@@ -703,6 +703,10 @@ class AppTranslations extends Translations {
     '其中的子文件夹与凭证会移动到上一级，不会被删除。':
         'Child folders and credentials will be moved up one level and kept.',
     '删除文件夹「@name」？': 'Delete folder “@name”?',
+    '同时删除文件夹下的全部内容': 'Also delete everything inside this folder',
+    '其中的全部子文件夹与服务都会被删除，此操作无法撤销。': 'All nested folders and services will be deleted. This cannot be undone.',
+    '其中的全部子文件夹与凭证都会被删除，此操作无法撤销。': 'All nested folders and credentials will be deleted. This cannot be undone.',
+    '其中的全部子文件夹与网关都会被删除，此操作无法撤销。': 'All nested folders and gateways will be deleted. This cannot be undone.',
     '其中的子文件夹与服务会移动到上一级，不会被删除。':
         'Subfolders and services will move up one level and will be kept.',
     '删除凭证「@name」？': 'Delete credential “@name”?',

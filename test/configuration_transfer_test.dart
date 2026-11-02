@@ -144,6 +144,7 @@ ConnectionConfiguration _fixture() => ConnectionConfiguration(
       serviceType: ServiceType.rdp,
       folderId: 'if-child',
       sortOrder: 1,
+      rdpDomain: 'CREDENTIAL-CORP',
     ),
     Identity(
       id: 'password',
@@ -175,6 +176,25 @@ ConnectionConfiguration _fixture() => ConnectionConfiguration(
 Matcher get _configurationError => throwsA(isA<ConfigurationException>());
 
 void main() {
+  for (final version in [1, 2, 3, 4]) {
+    test('旧 v$version 配置没有凭证域仍可导入', () {
+      final data = _fixture().toJson();
+      data['version'] = version;
+      for (final identity in data['identities']! as List<Object?>) {
+        (identity! as Map<String, Object?>).remove('rdpDomain');
+      }
+      final configuration = ConnectionConfiguration.fromJson(data);
+      expect(
+        configuration.identities.every((i) => i.rdpDomain == null),
+        isTrue,
+      );
+      expect(
+        configuration.services.singleWhere((h) => h.isRdp).rdpDomain,
+        'EXAMPLE',
+      );
+    });
+  }
+
   for (final version in [1, 2]) {
     test('导入 v$version 清除旧端口映射，保留服务、网关和凭据', () async {
       final data = _fixture().toJson();
@@ -221,7 +241,7 @@ void main() {
 
   test('v3 保留网关目标地址，拒绝服务上的端口映射', () {
     final data = _fixture().toJson();
-    expect(data['version'], 4);
+    expect(data['version'], 5);
     data['version'] = 3;
     for (final host in data['gateways']! as List<Object?>) {
       (host! as Map<String, Object?>).remove('proxyConfig');

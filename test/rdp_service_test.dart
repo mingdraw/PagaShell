@@ -15,9 +15,10 @@ import 'package:pagashell/application/session/session.dart';
 import 'package:pagashell/application/session/session_controller.dart';
 import 'package:pagashell/domain/entities/host.dart';
 import 'package:pagashell/domain/rdp/rdp_engine.dart';
-import 'package:pagashell/presentation/components/app_select_field.dart';
+import 'package:pagashell/domain/ssh/ssh_engine.dart';
 import 'package:pagashell/presentation/components/app_text_form_field.dart';
 import 'package:pagashell/presentation/hosts/host_edit_dialog.dart';
+import 'package:pagashell/presentation/identities/identity_edit_dialog.dart';
 import 'package:pagashell/presentation/rdp/rdp_desktop_panel.dart';
 import 'package:pagashell/presentation/shell/connect_flow.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
@@ -86,9 +87,7 @@ void main() {
     unawaited(showHostEditDialog(tester.element(find.text('服务'))));
     await tester.pumpAndSettle();
     expect(find.text('服务类型'), findsOneWidget);
-    await tester.tap(find.byType(AppSelectField<ServiceType>));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('RDP').last);
+    await tester.tap(find.widgetWithText(shadcn.RadioCard<ServiceType>, 'RDP'));
     await tester.pumpAndSettle();
     expect(
       tester
@@ -98,6 +97,13 @@ void main() {
       '3389',
     );
     expect(find.textContaining('Windows 跳板机需运行'), findsNothing);
+    expect(
+      tester
+          .widget<AppTextFormField>(find.byKey(const ValueKey('host-username')))
+          .controller
+          .text,
+      'administrator',
+    );
     await tester.enterText(
       find.widgetWithText(AppTextFormField, '名称'),
       'Windows',
@@ -120,6 +126,7 @@ void main() {
     final original = hosts.hosts.single;
     expect(original.serviceType, ServiceType.rdp);
     expect(original.rdpDomain, 'CORP');
+    expect(original.username, 'administrator');
     unawaited(
       showHostEditDialog(
         tester.element(find.text('Windows')),
@@ -132,12 +139,129 @@ void main() {
     final copy = hosts.hosts.firstWhere((h) => h.id != original.id);
     expect(copy.serviceType, ServiceType.rdp);
     expect(copy.rdpDomain, 'CORP');
+    expect(copy.username, 'administrator');
     expect(await hosts.passwordOf(copy.id), 'secret');
     await tester.tap(find.text('Windows'), buttons: kSecondaryMouseButton);
     await tester.pumpAndSettle();
     expect(find.text('新建会话'), findsOneWidget);
     expect(find.text('文件传输'), findsNothing);
     expect(find.text('端口转发'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('服务和凭证切换协议只替换默认用户名，保留自定义值', (tester) async {
+    await pumpApp(tester, FakeRdpEngine());
+    for (final credential in [false, true]) {
+      if (credential) {
+        unawaited(showIdentityEditDialog(tester.element(find.text('服务'))));
+      } else {
+        unawaited(showHostEditDialog(tester.element(find.text('服务'))));
+      }
+      await tester.pumpAndSettle();
+      final username = find.widgetWithText(AppTextFormField, '用户名');
+      for (final (type, expected) in [
+        ('RDP', 'administrator'),
+        ('SSH', 'root'),
+        ('VNC', ''),
+        ('RDP', 'administrator'),
+      ]) {
+        final card = find.widgetWithText(shadcn.RadioCard<ServiceType>, type);
+        await tester.ensureVisible(card);
+        await tester.tap(card);
+        await tester.pumpAndSettle();
+        if (type == 'VNC') {
+          expect(username, findsNothing);
+        } else {
+          expect(
+            tester.widget<AppTextFormField>(username).controller.text,
+            expected,
+          );
+        }
+      }
+      await tester.ensureVisible(username);
+      await tester.enterText(username, 'custom-operator');
+      for (final type in ['SSH', 'RDP']) {
+        final card = find.widgetWithText(shadcn.RadioCard<ServiceType>, type);
+        await tester.ensureVisible(card);
+        await tester.tap(card);
+        await tester.pumpAndSettle();
+        expect(
+          tester.widget<AppTextFormField>(username).controller.text,
+          'custom-operator',
+        );
+      }
+      await tester.tap(find.text('取消'));
+      await tester.pumpAndSettle();
+    }
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('RDP 凭证显示可选域，保存编辑复制保留域与自定义用户名', (tester) async {
+    await pumpApp(tester, FakeRdpEngine());
+    unawaited(showIdentityEditDialog(tester.element(find.text('服务'))));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('identity-rdp-domain')), findsNothing);
+    await tester.tap(find.widgetWithText(shadcn.RadioCard<ServiceType>, 'RDP'));
+    await tester.pumpAndSettle();
+    final username = find.widgetWithText(AppTextFormField, '用户名');
+    expect(
+      tester.widget<AppTextFormField>(username).controller.text,
+      'administrator',
+    );
+    await tester.enterText(
+      find.widgetWithText(AppTextFormField, '名称'),
+      'Windows login',
+    );
+    await tester.ensureVisible(username);
+    await tester.enterText(username, 'custom-operator');
+    final domain = find.byKey(const ValueKey('identity-rdp-domain'));
+    await tester.ensureVisible(domain);
+    await tester.enterText(domain, ' CORP ');
+    final password = find.widgetWithText(AppTextFormField, '密码');
+    await tester.ensureVisible(password);
+    await tester.enterText(password, 'test-password');
+    await tester.tap(find.text('保存'));
+    await tester.pumpAndSettle();
+    final identities = Get.find<IdentityController>();
+    final original = identities.identities.single;
+    expect(original.username, 'custom-operator');
+    expect(original.rdpDomain, 'CORP');
+
+    unawaited(
+      showIdentityEditDialog(
+        tester.element(find.text('服务')),
+        copyFrom: original,
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<AppTextFormField>(username).controller.text,
+      'custom-operator',
+    );
+    expect(tester.widget<AppTextFormField>(domain).controller.text, 'CORP');
+    await tester.tap(find.text('保存'));
+    await tester.pumpAndSettle();
+    final copy = identities.identities.firstWhere((i) => i.id != original.id);
+    expect(copy.rdpDomain, 'CORP');
+    expect(copy.username, 'custom-operator');
+    expect(copy.secretRef, isNot(original.secretRef));
+    expect(await identities.passwordOf(copy), 'test-password');
+
+    unawaited(
+      showIdentityEditDialog(tester.element(find.text('服务')), identity: copy),
+    );
+    await tester.pumpAndSettle();
+    expect(tester.widget<AppTextFormField>(domain).controller.text, 'CORP');
+    await tester.ensureVisible(domain);
+    await tester.enterText(domain, 'NEW-CORP');
+    await tester.pumpAndSettle();
+    await capture(tester, 'rdp-credential-domain');
+    await tester.tap(find.text('保存'));
+    await tester.pumpAndSettle();
+    final edited = identities.byId(copy.id)!;
+    expect(edited.rdpDomain, 'NEW-CORP');
+    expect(await identities.passwordOf(edited), 'test-password');
+    expect(identities.byId(original.id)?.rdpDomain, 'CORP');
     expect(tester.takeException(), isNull);
   });
 
@@ -177,7 +301,15 @@ void main() {
   });
 
   testWidgets('SSH 服务切换 RDP 要求选择 RDP 凭证', (tester) async {
-    await pumpApp(tester, FakeRdpEngine());
+    var failNext = true;
+    final engine = FakeRdpEngine(
+      authenticationError: (_, _) {
+        if (!failNext) return null;
+        failNext = false;
+        return const SshEngineException('连接超时');
+      },
+    );
+    await pumpApp(tester, engine);
     final identity = await Get.find<IdentityController>().saveWithPassword(
       name: 'Windows login',
       username: 'operator',
@@ -188,20 +320,21 @@ void main() {
       username: 'operator',
       password: 'secret',
       serviceType: ServiceType.rdp,
+      rdpDomain: 'CREDENTIAL-CORP',
     );
     final host = Host(
       id: 'switch',
       name: 'Switch',
       hostname: 'windows.test',
       identityId: identity.id,
+      username: 'service-operator',
+      rdpDomain: 'HOST-CORP',
     );
     await Get.find<HostController>().save(host);
     await tester.pumpAndSettle();
     unawaited(showHostEditDialog(tester.element(find.text('服务')), host: host));
     await tester.pumpAndSettle();
-    await tester.tap(find.byType(AppSelectField<ServiceType>));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('RDP').last);
+    await tester.tap(find.widgetWithText(shadcn.RadioCard<ServiceType>, 'RDP'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('保存'));
     await tester.pumpAndSettle();
@@ -215,6 +348,20 @@ void main() {
     final saved = Get.find<HostController>().hosts.single;
     expect(saved.isRdp, isTrue);
     expect(saved.identityId, rdpIdentity.id);
+    expect(saved.username, 'service-operator');
+    expect(saved.rdpDomain, 'HOST-CORP');
+    await connectToHost(tester.element(find.text('服务')), saved);
+    await tester.pump();
+    expect(engine.attempts.single.username, 'operator');
+    expect(engine.attempts.single.rdpDomain, 'CREDENTIAL-CORP');
+    final sessions = Get.find<SessionController>();
+    expect(sessions.sessions.single.phase, SessionPhase.failed);
+    await sessions.retry(sessions.sessions.single.id);
+    await tester.pump();
+    expect(engine.attempts.length, 2);
+    expect(engine.attempts.last.rdpDomain, 'CREDENTIAL-CORP');
+    await sessions.closeAll();
+    await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
   });
 

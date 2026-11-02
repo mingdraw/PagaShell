@@ -253,6 +253,7 @@ void main() {
     await old.customStatement(
       'ALTER TABLE hosts DROP COLUMN proxy_config_json',
     );
+    await old.customStatement('ALTER TABLE identities DROP COLUMN rdp_domain');
     await old.customStatement('PRAGMA user_version = 11');
     await old.close();
     final db = AppDatabase.forTesting(NativeDatabase(file));
@@ -315,6 +316,7 @@ void main() {
     await old.customStatement(
       'ALTER TABLE hosts DROP COLUMN proxy_config_json',
     );
+    await old.customStatement('ALTER TABLE identities DROP COLUMN rdp_domain');
     await old.customStatement('PRAGMA user_version = 7');
     await old.close();
 

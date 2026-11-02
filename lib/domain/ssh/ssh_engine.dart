@@ -7,17 +7,21 @@ import 'host_key.dart';
 ///
 /// 可来自用户即时输入，或由已保存凭证（Identity + SecretStore）解出。
 class SshCredentials {
-  const SshCredentials.password(String this.password, {this.username})
-    : authType = AuthType.password,
-      privateKey = null,
-      passphrase = null;
+  const SshCredentials.password(
+    String this.password, {
+    this.username,
+    this.rdpDomain,
+  }) : authType = AuthType.password,
+       privateKey = null,
+       passphrase = null;
 
   const SshCredentials.privateKey(
     String this.privateKey, {
     this.passphrase,
     this.username,
   }) : authType = AuthType.privateKey,
-       password = null;
+       password = null,
+       rdpDomain = null;
 
   final AuthType authType;
   final String? password;
@@ -26,6 +30,9 @@ class SshCredentials {
 
   /// 覆盖主机默认用户名（来自所选凭证）；null 表示使用主机配置的用户名。
   final String? username;
+
+  /// 所选 RDP 凭证的 Windows 域；null 时沿用服务配置。
+  final String? rdpDomain;
 }
 
 /// 每个目标会话独立建立 SSH 或 Page 网关连接，凭据只在内存中保留。

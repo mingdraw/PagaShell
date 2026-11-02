@@ -21,6 +21,7 @@ class DriftIdentityRepository implements IdentityRepository {
     folderId: row.folderId,
     sortOrder: row.sortOrder,
     serviceType: ServiceType.values.byName(row.serviceType),
+    rdpDomain: row.rdpDomain,
   );
 
   @override
@@ -43,6 +44,7 @@ class DriftIdentityRepository implements IdentityRepository {
           username: identity.username,
           authType: Value(identity.authType.index),
           serviceType: Value(identity.serviceType.name),
+          rdpDomain: Value(identity.rdpDomain),
           secretRef: Value(identity.secretRef),
           folderId: Value(identity.folderId),
           sortOrder: Value(identity.sortOrder),

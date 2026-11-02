@@ -79,6 +79,7 @@ class IdentityController extends GetxController {
     required String password,
     String? folderId,
     ServiceType serviceType = ServiceType.ssh,
+    String? rdpDomain,
   }) async {
     return _save(
       name,
@@ -87,6 +88,7 @@ class IdentityController extends GetxController {
       password,
       folderId,
       serviceType,
+      rdpDomain: rdpDomain,
     );
   }
 
@@ -128,8 +130,9 @@ class IdentityController extends GetxController {
     AuthType type,
     String secret,
     String? folderId,
-    ServiceType serviceType,
-  ) async {
+    ServiceType serviceType, {
+    String? rdpDomain,
+  }) async {
     final id = 'idn-${DateTime.now().microsecondsSinceEpoch}';
     final secretRef = 'sec-$id';
     await _secretStore.put(secretRef, secret);
@@ -141,6 +144,7 @@ class IdentityController extends GetxController {
       secretRef: secretRef,
       folderId: folderId,
       serviceType: serviceType,
+      rdpDomain: _normalizeRdpDomain(serviceType, rdpDomain),
     );
     try {
       return await _saveMetadata(identity);
@@ -162,7 +166,8 @@ class IdentityController extends GetxController {
     }
   }
 
-  /// 未提供新密文时保留原值；认证方式不可更换，需新建对应类型的凭证。
+  /// 未提供新密文或域时保留原值；域传空字符串可清空。
+  /// 认证方式不可更换，需新建对应类型的凭证。
   Future<void> updateIdentity({
     required String id,
     required String name,
@@ -171,6 +176,7 @@ class IdentityController extends GetxController {
     AuthType? authType,
     String? privateKey,
     String? passphrase,
+    String? rdpDomain,
   }) async {
     final existing = byId(id);
     if (existing == null) return;
@@ -212,6 +218,9 @@ class IdentityController extends GetxController {
           name: name.trim(),
           username: username,
           secretRef: secretRef,
+          rdpDomain: rdpDomain == null
+              ? existing.rdpDomain
+              : _normalizeRdpDomain(existing.serviceType, rdpDomain),
         ),
       );
     } on Object {
@@ -239,7 +248,14 @@ class IdentityController extends GetxController {
     final secret = await _secretStore.read(ref);
     if (secret == null) return null;
     if (identity.authType == AuthType.password) {
-      return SshCredentials.password(secret, username: identity.username);
+      return SshCredentials.password(
+        secret,
+        username: identity.username,
+        rdpDomain: _normalizeRdpDomain(
+          identity.serviceType,
+          identity.rdpDomain,
+        ),
+      );
     }
     try {
       final Object? decoded = jsonDecode(secret);
@@ -260,6 +276,27 @@ class IdentityController extends GetxController {
       );
     } on Object {
       throw const SecretStoreException('已保存的私钥凭证无法读取，请重新编辑并导入私钥');
+    }
+  }
+
+  String? _normalizeRdpDomain(ServiceType type, String? value) {
+    if (type != ServiceType.rdp) return null;
+    final domain = value?.trim();
+    return domain == null || domain.isEmpty ? null : domain;
+  }
+
+  /// 整组检查引用后再删除；共享密文继续由单项删除判断是否仍被保留的凭证使用。
+  Future<void> removeInFolders(Set<String> folderIds) async {
+    final targets = (await _repository.getAll())
+        .where((identity) => folderIds.contains(identity.folderId))
+        .toList();
+    for (final identity in targets) {
+      if (await _repository.isReferenced(identity.id)) {
+        throw StateError('凭证正在被网关或服务使用，请先修改对应的凭证配置');
+      }
+    }
+    for (final identity in targets) {
+      await remove(identity.id);
     }
   }
 

@@ -101,9 +101,7 @@ void main() {
     await pumpApp(tester, FakeVncEngine());
     unawaited(showHostEditDialog(tester.element(find.text('服务'))));
     await tester.pumpAndSettle();
-    await tester.tap(find.byType(AppSelectField<ServiceType>));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('VNC').last);
+    await tester.tap(find.widgetWithText(shadcn.RadioCard<ServiceType>, 'VNC'));
     await tester.pumpAndSettle();
     expect(
       tester
@@ -154,9 +152,7 @@ void main() {
     await pumpApp(tester, FakeVncEngine());
     unawaited(showIdentityEditDialog(tester.element(find.text('凭证'))));
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('identity-service-type')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('VNC').last);
+    await tester.tap(find.widgetWithText(shadcn.RadioCard<ServiceType>, 'VNC'));
     await tester.pumpAndSettle();
     expect(find.text('用户名'), findsNothing);
     await _capture(tester, 'vnc-credential-form');
@@ -342,9 +338,7 @@ void main() {
       showHostEditDialog(tester.element(find.text('服务')), host: original),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.byType(AppSelectField<ServiceType>));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('VNC').last);
+    await tester.tap(find.widgetWithText(shadcn.RadioCard<ServiceType>, 'VNC'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('保存'));
     await tester.pumpAndSettle();

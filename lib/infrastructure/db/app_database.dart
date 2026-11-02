@@ -69,6 +69,7 @@ class Identities extends Table {
   TextColumn get username => text()();
   IntColumn get authType => integer().withDefault(const Constant(0))();
   TextColumn get serviceType => text().withDefault(const Constant('ssh'))();
+  TextColumn get rdpDomain => text().nullable()();
   TextColumn get secretRef => text().nullable()();
   TextColumn get folderId => text().nullable()();
   IntColumn get sortOrder => integer().withDefault(const Constant(0))();
@@ -115,12 +116,13 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase.forTesting(super.executor);
 
   @override
-  int get schemaVersion => 13;
+  int get schemaVersion => 14;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
     onUpgrade: (m, from, to) async {
       // 先添加新列，后面的历史迁移会使用生成的整行查询。
+      if (from < 14) await m.addColumn(identities, identities.rdpDomain);
       if (from < 13) await m.addColumn(hosts, hosts.proxyConfigJson);
       if (from < 2) await m.createTable(knownHosts);
       if (from < 3) await m.createTable(appSettings);

@@ -17,6 +17,7 @@ class Identity {
     this.folderId,
     this.sortOrder = 0,
     this.serviceType = ServiceType.ssh,
+    this.rdpDomain,
   });
 
   final String id;
@@ -27,6 +28,9 @@ class Identity {
   final String? folderId;
   final int sortOrder;
   final ServiceType serviceType;
+
+  /// RDP 登录使用的 Windows 域；null 表示未指定。
+  final String? rdpDomain;
 
   bool supports(ServiceType type) =>
       serviceType == type &&
@@ -40,6 +44,7 @@ class Identity {
     Object? folderId = _unset,
     int? sortOrder,
     ServiceType? serviceType,
+    Object? rdpDomain = _unset,
   }) => Identity(
     id: id,
     name: name ?? this.name,
@@ -51,6 +56,9 @@ class Identity {
     folderId: identical(folderId, _unset) ? this.folderId : folderId as String?,
     sortOrder: sortOrder ?? this.sortOrder,
     serviceType: serviceType ?? this.serviceType,
+    rdpDomain: identical(rdpDomain, _unset)
+        ? this.rdpDomain
+        : rdpDomain as String?,
   );
 
   static const _unset = Object();

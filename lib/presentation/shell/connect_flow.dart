@@ -201,6 +201,7 @@ Future<(Host, SshCredentials)?> _prepareLogin(
             username: host.username,
             password: credentials.password!,
             serviceType: host.serviceType,
+            rdpDomain: host.isRdp ? host.rdpDomain : null,
           );
     connectHost = host.copyWith(identityId: identity.id);
     await hostController.save(connectHost);

@@ -9,6 +9,7 @@ import '../../domain/ssh/ssh_engine.dart';
 import '../../domain/vault/secret_store.dart';
 import '../components/app_dialog.dart';
 import '../components/app_icon_button.dart';
+import '../components/app_radio_card_field.dart';
 import '../components/app_select_field.dart';
 import '../components/app_text_form_field.dart';
 import '../components/copy_name.dart';
@@ -103,8 +104,9 @@ class _IdentityEditDialogState extends State<_IdentityEditDialog> {
           ),
   );
   late final _username = TextEditingController(
-    text: _source?.username ?? 'root',
+    text: _source?.username ?? _serviceType.defaultUsername,
   );
+  late final _rdpDomain = TextEditingController(text: _source?.rdpDomain ?? '');
   final _password = TextEditingController();
   final _privateKey = TextEditingController();
   final _passphrase = TextEditingController();
@@ -161,6 +163,7 @@ class _IdentityEditDialogState extends State<_IdentityEditDialog> {
   void dispose() {
     _name.dispose();
     _username.dispose();
+    _rdpDomain.dispose();
     _password.dispose();
     _privateKey.dispose();
     _passphrase.dispose();
@@ -195,6 +198,7 @@ class _IdentityEditDialogState extends State<_IdentityEditDialog> {
           authType: _authType,
           privateKey: _privateKey.text.trim().isEmpty ? null : _privateKey.text,
           passphrase: _passphrase.text,
+          rdpDomain: _serviceType == ServiceType.rdp ? _rdpDomain.text : '',
         );
       } else if (_authType == AuthType.password) {
         await controller.saveWithPassword(
@@ -203,6 +207,7 @@ class _IdentityEditDialogState extends State<_IdentityEditDialog> {
           password: _password.text,
           folderId: _folderId,
           serviceType: _serviceType,
+          rdpDomain: _rdpDomain.text,
         );
       } else {
         await controller.saveWithPrivateKey(
@@ -267,19 +272,24 @@ class _IdentityEditDialogState extends State<_IdentityEditDialog> {
                   ),
                 ),
                 const SizedBox(height: 12),
-                AppSelectField<ServiceType>(
+                AppRadioCardField<ServiceType>(
                   key: const ValueKey('identity-service-type'),
                   initialValue: _serviceType,
                   label: '凭证类型'.tr,
                   items: [
                     for (final type in ServiceType.values)
-                      AppSelectOption(value: type, child: Text(type.label)),
+                      AppRadioCardOption(value: type, child: Text(type.label)),
                   ],
                   onChanged: _saving || _loadingCopy || _isEdit
                       ? null
                       : (type) {
-                          if (type == null) return;
+                          if (type == _serviceType) return;
                           setState(() {
+                            if (_username.text.trim().isEmpty ||
+                                _username.text ==
+                                    _serviceType.defaultUsername) {
+                              _username.text = type.defaultUsername;
+                            }
                             _serviceType = type;
                             if (type != ServiceType.ssh) {
                               _authType = AuthType.password;
@@ -294,6 +304,17 @@ class _IdentityEditDialogState extends State<_IdentityEditDialog> {
                     enabled: !_saving,
                     decoration: AppInputDecoration(labelText: '用户名'.tr),
                     validator: _required,
+                  ),
+                  const SizedBox(height: 12),
+                ],
+                if (_serviceType == ServiceType.rdp) ...[
+                  AppTextFormField(
+                    key: const ValueKey('identity-rdp-domain'),
+                    controller: _rdpDomain,
+                    enabled: !_saving,
+                    decoration: AppInputDecoration(
+                      labelText: 'Windows 域（可选）'.tr,
+                    ),
                   ),
                   const SizedBox(height: 12),
                 ],

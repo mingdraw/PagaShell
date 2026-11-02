@@ -118,6 +118,16 @@ class HostController extends GetxController {
     }
   }
 
+  /// 递归删除文件夹时，沿用单项删除的密码及会话清理流程。
+  Future<void> removeInFolders(Set<String> folderIds) async {
+    final targets = (await _repository.getAll())
+        .where((host) => folderIds.contains(host.folderId))
+        .toList();
+    for (final host in targets) {
+      await remove(host.id);
+    }
+  }
+
   /// 删除主机时一并清掉其自有密码密文。
   Future<void> remove(String id) async {
     final password = await passwordOf(id);

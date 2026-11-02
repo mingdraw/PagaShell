@@ -118,6 +118,73 @@ void main() {
       expect(await controller.passwordOf(identity), 'pw');
     });
 
+    test('RDP 凭证保存、更新和清空域，保留原密码', () async {
+      final identity = await controller.saveWithPassword(
+        name: 'Windows',
+        username: 'administrator',
+        password: 'test-password',
+        serviceType: ServiceType.rdp,
+        rdpDomain: ' CORP ',
+      );
+      await pump();
+      expect(identity.rdpDomain, 'CORP');
+      expect((await controller.credentialsOf(identity))?.rdpDomain, 'CORP');
+
+      await controller.updateIdentity(
+        id: identity.id,
+        name: 'Renamed',
+        username: identity.username,
+      );
+      await pump();
+      expect(controller.byId(identity.id)?.rdpDomain, 'CORP');
+
+      await controller.updateIdentity(
+        id: identity.id,
+        name: 'Renamed',
+        username: identity.username,
+        rdpDomain: ' NEW-CORP ',
+      );
+      await pump();
+      final updated = controller.byId(identity.id)!;
+      expect(updated.rdpDomain, 'NEW-CORP');
+      expect(updated.secretRef, identity.secretRef);
+      expect(
+        (await controller.credentialsOf(updated))?.password,
+        'test-password',
+      );
+
+      await controller.updateIdentity(
+        id: identity.id,
+        name: updated.name,
+        username: updated.username,
+        rdpDomain: ' ',
+      );
+      await pump();
+      final cleared = controller.byId(identity.id)!;
+      expect(cleared.rdpDomain, isNull);
+      expect((await controller.credentialsOf(cleared))?.rdpDomain, isNull);
+      expect(await controller.passwordOf(cleared), 'test-password');
+    });
+
+    for (final type in [ServiceType.ssh, ServiceType.vnc]) {
+      test('${type.label} 凭证不保存或传递 RDP 域', () async {
+        final identity = await controller.saveWithPassword(
+          name: type.label,
+          username: type.defaultUsername,
+          password: 'test-password',
+          serviceType: type,
+          rdpDomain: 'IGNORED',
+        );
+        expect(identity.rdpDomain, isNull);
+        expect((await controller.credentialsOf(identity))?.rdpDomain, isNull);
+        expect(
+          (await controller.credentialsOf(identity.copyWith(rdpDomain: 'OLD')))
+              ?.rdpDomain,
+          isNull,
+        );
+      });
+    }
+
     test('删除凭证时密文一并删除', () async {
       final identity = await controller.saveWithPassword(
         name: 'temp',

@@ -9,6 +9,7 @@ import '../../domain/entities/proxy_config.dart';
 import '../../domain/vault/secret_store.dart';
 import '../components/app_dialog.dart';
 import '../components/app_icon_button.dart';
+import '../components/app_radio_card_field.dart';
 import '../components/app_select_field.dart';
 import '../components/app_text_form_field.dart';
 import '../components/copy_name.dart';
@@ -126,7 +127,9 @@ class _HostEditDialogState extends State<HostEditDialog> {
     );
     _hostname = TextEditingController(text: h?.hostname ?? '');
     _port = TextEditingController(text: '${h?.port ?? 22}');
-    _username = TextEditingController(text: h?.username ?? 'root');
+    _username = TextEditingController(
+      text: h?.username ?? _serviceType.defaultUsername,
+    );
     _password = TextEditingController();
     _note = TextEditingController(text: h?.note ?? '');
     _identityId = h?.identityId;
@@ -205,7 +208,7 @@ class _HostEditDialogState extends State<HostEditDialog> {
       username: _isVnc
           ? ''
           : username.isEmpty
-          ? 'root'
+          ? _serviceType.defaultUsername
           : username,
       note: _note.text.trim(),
       tags: (widget.host ?? widget.copyFrom)?.tags ?? const [],
@@ -310,16 +313,16 @@ class _HostEditDialogState extends State<HostEditDialog> {
                 ),
                 const SizedBox(height: 12),
                 if (widget.gateway)
-                  AppSelectField<GatewayType>(
+                  AppRadioCardField<GatewayType>(
                     key: const ValueKey('gateway-type'),
                     initialValue: _gatewayType,
                     label: '网关类型'.tr,
                     items: const [
-                      AppSelectOption(
+                      AppRadioCardOption(
                         value: GatewayType.ssh,
                         child: Text('SSH'),
                       ),
-                      AppSelectOption(
+                      AppRadioCardOption(
                         value: GatewayType.page,
                         child: Text('Page'),
                       ),
@@ -327,7 +330,7 @@ class _HostEditDialogState extends State<HostEditDialog> {
                     onChanged: _saving
                         ? null
                         : (type) {
-                            if (type == null || type == _gatewayType) return;
+                            if (type == _gatewayType) return;
                             setState(() {
                               if (_port.text == (_isPage ? '7443' : '22')) {
                                 _port.text = type == GatewayType.page
@@ -341,20 +344,20 @@ class _HostEditDialogState extends State<HostEditDialog> {
                           },
                   )
                 else
-                  AppSelectField<ServiceType>(
+                  AppRadioCardField<ServiceType>(
                     key: const ValueKey('service-type'),
                     initialValue: _serviceType,
                     label: '服务类型'.tr,
                     items: const [
-                      AppSelectOption(
+                      AppRadioCardOption(
                         value: ServiceType.ssh,
                         child: Text('SSH'),
                       ),
-                      AppSelectOption(
+                      AppRadioCardOption(
                         value: ServiceType.rdp,
                         child: Text('RDP'),
                       ),
-                      AppSelectOption(
+                      AppRadioCardOption(
                         value: ServiceType.vnc,
                         child: Text('VNC'),
                       ),
@@ -362,11 +365,16 @@ class _HostEditDialogState extends State<HostEditDialog> {
                     onChanged: _saving
                         ? null
                         : (type) {
-                            if (type == null || type == _serviceType) return;
+                            if (type == _serviceType) return;
                             setState(() {
                               final oldDefault = '${_serviceType.defaultPort}';
                               if (_port.text == oldDefault) {
                                 _port.text = '${type.defaultPort}';
+                              }
+                              if (_username.text.trim().isEmpty ||
+                                  _username.text ==
+                                      _serviceType.defaultUsername) {
+                                _username.text = type.defaultUsername;
                               }
                               _serviceType = type;
                               _identityId = null;

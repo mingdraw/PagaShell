@@ -217,7 +217,7 @@
 
 ```
 Identity(id, name, username, serviceType[ssh|rdp|vnc]=ssh, authType[password|key|agent],
-         secretRef→Vault, folderId?, sortOrder, keyRef→Vault, createdAt)
+         secretRef→Vault, folderId?, sortOrder, rdpDomain?, keyRef→Vault, createdAt)
 
 Host(id, name, hostname, port=22, identityId?, groupId?,
      tags[], color, gatewayId?, charset, note,
@@ -247,7 +247,7 @@ Settings(theme, terminalFont, fontSize, scrollback, keepaliveSec,
          locale, confirmOnExit, reuseConnection, ...)
 ```
 
-当前数据库 schema 为 13：新增 `proxy_config_json` 保存网关动态代理配置；从 12 升级保留网关端口映射，从更早版本升级仍按原有规则清除旧服务映射。保留历史 `gateway_type` 列，服务按 `serviceType` 读写 SSH/RDP/VNC 协议，网关加载和写入 SSH/Page。凭证新增 `service_type`，升级根据服务和网关的绑定分类，跨协议共享凭证拆分并重绑；无绑定凭证默认 SSH。`pageClientId` 与 `pageServerFingerprint` 默认为空，Page 访问令牌仍存 SecretStore。Windows 域只用于 RDP 服务。旧 RDP 网关继续停用、隐藏并保留服务引用；需改选 SSH/Page 或明确取消绑定后直连。可信记录主键包含协议，隔离 RDP 证书和 SSH 密钥；标准 VNC 不提供目标证书或主机密钥校验。映射按顺序存于 `forwardPortsJson`；历史升级中移除旧独立转发表，不迁移未发布转发配置。服务、网关、凭证及其他配置保留。桌面功能见 [RDP 远程桌面](rdp-service.md) 和 [VNC 远程桌面](vnc-service.md)，中转部署和验证边界见 [Page 网关](page-gateway.md)。
+当前数据库 schema 为 14：凭证新增可空 `rdp_domain` 保存 RDP Windows 域，旧凭证默认为未指定。RDP 连接优先采用凭证填写的域，否则沿用服务域；新建 RDP 服务和凭证默认用户名为 administrator。schema 13 的 `proxy_config_json` 保存网关动态代理配置；从 12 升级保留网关端口映射，从更早版本升级仍按原有规则清除旧服务映射。保留历史 `gateway_type` 列，服务按 `serviceType` 读写 SSH/RDP/VNC 协议，网关加载和写入 SSH/Page。凭证新增 `service_type`，升级根据服务和网关的绑定分类，跨协议共享凭证拆分并重绑；无绑定凭证默认 SSH。`pageClientId` 与 `pageServerFingerprint` 默认为空，Page 访问令牌仍存 SecretStore。Windows 域只用于 RDP。旧 RDP 网关继续停用、隐藏并保留服务引用；需改选 SSH/Page 或明确取消绑定后直连。可信记录主键包含协议，隔离 RDP 证书和 SSH 密钥；标准 VNC 不提供目标证书或主机密钥校验。映射按顺序存于 `forwardPortsJson`；历史升级中移除旧独立转发表，不迁移未发布转发配置。服务、网关、凭证及其他配置保留。桌面功能见 [RDP 远程桌面](rdp-service.md) 和 [VNC 远程桌面](vnc-service.md)，中转部署和验证边界见 [Page 网关](page-gateway.md)。
 
 **加密边界**：密码、私钥、passphrase 一律不进 `Host`/`Identity` 表，只保留 `SecretStore` 引用。macOS 已实现 *钥匙串中的随机 256 位主密钥 → AES-256-GCM 加密文件*：`credentials.vault` 位于应用支持目录，版本作为认证数据，每次写入使用独立随机 nonce；进程内排队、进程间文件锁以及同文件系统原子替换保护并发写入。主密钥仅在本次运行中缓存，旧版逐项钥匙串条目按需迁移。可选主密码及 Argon2id 尚未实现。细节见 [macOS 凭据保险库](macos-keychain.md)。
 

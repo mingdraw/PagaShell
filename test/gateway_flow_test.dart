@@ -114,8 +114,8 @@ void main() {
     await tester.tap(find.text('新建网关'));
     await tester.pumpAndSettle();
     expect(find.text('高级选项'), findsNothing);
-    final type = tester.widget<shadcn.Select<GatewayType>>(
-      find.byType(shadcn.Select<GatewayType>),
+    final type = tester.widget<shadcn.RadioGroup<GatewayType>>(
+      find.byType(shadcn.RadioGroup<GatewayType>),
     );
     expect(type.enabled, isTrue);
     expect(find.text('SSH'), findsOneWidget);
@@ -254,9 +254,9 @@ void main() {
           final context = tester.element(find.text('网关'));
           unawaited(showHostEditDialog(context, gateway: true));
           await tester.pumpAndSettle();
-          await tester.tap(find.byType(shadcn.Select<GatewayType>));
-          await tester.pumpAndSettle();
-          await tester.tap(find.text('Page').last);
+          await tester.tap(
+            find.widgetWithText(shadcn.RadioCard<GatewayType>, 'Page'),
+          );
           await tester.pumpAndSettle();
           expect(find.byKey(const ValueKey('host-username')), findsNothing);
           expect(find.text('认证方式'), findsNothing);

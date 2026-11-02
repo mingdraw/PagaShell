@@ -8,6 +8,7 @@ import 'package:pagashell/presentation/navigation/app_routes.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import 'support/in_memory_binding.dart';
+import 'support/shadcn_test_app.dart';
 
 void main() {
   // 应用启动会向 GetX 全局容器注册依赖，测试间必须重置。
@@ -20,20 +21,28 @@ void main() {
     await tester.pump();
   }
 
-  testWidgets('应用壳渲染欢迎页与空主机侧边栏', (tester) async {
+  Future<void> openNewHostDialog(WidgetTester tester) async {
+    await tester.tap(findAppIconButton('服务组操作'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(find.widgetWithText(shadcn.MenuButton, '新建服务'));
+    await tester.pumpAndSettle();
+  }
+
+  testWidgets('应用壳渲染欢迎页，空服务侧边栏保留提示及组操作入口', (tester) async {
     await pumpApp(tester);
     expect(find.text('PagaShell'), findsNothing);
     expect(find.text('本地工作区'), findsOneWidget);
     expect(find.text('还没有服务'), findsOneWidget);
-    expect(find.widgetWithText(shadcn.OutlineButton, '新建服务'), findsOneWidget);
+    expect(find.widgetWithText(shadcn.OutlineButton, '新建服务'), findsNothing);
+    expect(findAppIconButton('服务组操作'), findsOneWidget);
     expect(Get.currentRoute, AppRoutes.workspace);
   });
 
   testWidgets('通过对话框新建服务后出现在侧边栏', (tester) async {
     await pumpApp(tester);
 
-    await tester.tap(find.widgetWithText(shadcn.OutlineButton, '新建服务'));
-    await tester.pumpAndSettle();
+    await openNewHostDialog(tester);
 
     await tester.enterText(
       find.widgetWithText(AppTextFormField, '服务地址'),
@@ -54,8 +63,7 @@ void main() {
   testWidgets('服务对话框无文件夹选择，「账号密码」方式密码入密文存储', (tester) async {
     await pumpApp(tester);
 
-    await tester.tap(find.widgetWithText(shadcn.OutlineButton, '新建服务'));
-    await tester.pumpAndSettle();
+    await openNewHostDialog(tester);
 
     // 不再提供文件夹选择；登录方式二选一。
     expect(find.text('文件夹'), findsNothing);
@@ -80,8 +88,7 @@ void main() {
   testWidgets('「已有凭证」方式必须选择凭证才能保存', (tester) async {
     await pumpApp(tester);
 
-    await tester.tap(find.widgetWithText(shadcn.OutlineButton, '新建服务'));
-    await tester.pumpAndSettle();
+    await openNewHostDialog(tester);
     await tester.tap(find.text('账号密码'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('已有凭证'));

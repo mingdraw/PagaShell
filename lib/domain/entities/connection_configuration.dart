@@ -40,7 +40,7 @@ class ConnectionConfiguration {
   final Map<String, String> hostSecrets;
 
   Map<String, Object?> toJson() => {
-    'version': 4,
+    'version': 5,
     'serviceFolders': serviceFolders.map(_folderJson).toList(),
     'services': services.map(_hostJson).toList(),
     'gatewayFolders': gatewayFolders.map(_folderJson).toList(),
@@ -54,6 +54,7 @@ class ConnectionConfiguration {
           'username': identity.username,
           'authType': identity.authType.name,
           'serviceType': identity.serviceType.name,
+          'rdpDomain': identity.rdpDomain,
           'folderId': identity.folderId,
           'sortOrder': identity.sortOrder,
         },
@@ -66,7 +67,10 @@ class ConnectionConfiguration {
     try {
       final legacy = json['version'] == 1;
       final oldForwards = legacy || json['version'] == 2;
-      if (!oldForwards && json['version'] != 3 && json['version'] != 4) {
+      if (!oldForwards &&
+          json['version'] != 3 &&
+          json['version'] != 4 &&
+          json['version'] != 5) {
         throw const FormatException();
       }
       var result = ConnectionConfiguration(
@@ -94,6 +98,7 @@ class ConnectionConfiguration {
             serviceType: legacy
                 ? ServiceType.ssh
                 : ServiceType.values.byName(_text(value, 'serviceType')),
+            rdpDomain: _ref(value, 'rdpDomain'),
             folderId: _ref(value, 'folderId'),
             sortOrder: value['sortOrder'] as int,
           ),

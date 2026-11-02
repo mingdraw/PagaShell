@@ -94,4 +94,29 @@ class TreeFolderController extends GetxController {
     await _removeFolder(id);
     expanded.remove(id);
   }
+
+  /// 删除整棵子树；先由对应的项目控制器处理内容，再从叶子开始移除空文件夹。
+  /// 从仓库读取完整树，不受折叠状态、搜索过滤和订阅刷新时机影响。
+  Future<void> removeWithContents(
+    String id, {
+    required Future<void> Function(Set<String> folderIds) removeItems,
+  }) async {
+    final all = await folderRepository.getAll();
+    if (!all.any((folder) => folder.id == id)) return;
+    final children = <String?, List<String>>{};
+    for (final folder in all) {
+      (children[folder.parentId] ??= []).add(folder.id);
+    }
+    final subtree = <String>{};
+    final pending = [id];
+    while (pending.isNotEmpty) {
+      final current = pending.removeLast();
+      if (!subtree.add(current)) continue;
+      pending.addAll(children[current] ?? const []);
+    }
+    await removeItems(Set.unmodifiable(subtree));
+    for (final folderId in subtree.toList().reversed) {
+      await remove(folderId);
+    }
+  }
 }

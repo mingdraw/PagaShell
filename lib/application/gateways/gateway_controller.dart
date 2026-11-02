@@ -30,6 +30,21 @@ class GatewayController extends HostController {
     return null;
   }
 
+  /// 先检查全部网关，避免因后面的网关被引用而提前删除前面的网关。
+  @override
+  Future<void> removeInFolders(Set<String> folderIds) async {
+    final targets = (await _gateways.getAll())
+        .where((gateway) => folderIds.contains(gateway.folderId))
+        .toList();
+    final ids = targets.map((gateway) => gateway.id).toSet();
+    if ((await services.getAll()).any((host) => ids.contains(host.gatewayId))) {
+      throw const SshEngineException('网关正在被服务使用，请先修改服务的网关配置');
+    }
+    for (final gateway in targets) {
+      await remove(gateway.id);
+    }
+  }
+
   @override
   Future<void> remove(String id) async {
     if ((await services.getAll()).any((host) => host.gatewayId == id)) {

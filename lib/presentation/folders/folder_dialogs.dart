@@ -4,6 +4,9 @@ import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import '../../application/folders/folder_controller.dart';
 import '../../application/folders/tree_folder_controller.dart';
+import '../../application/gateways/gateway_controller.dart';
+import '../../application/hosts/host_controller.dart';
+import '../../application/identities/identity_controller.dart';
 import '../components/app_dialog.dart';
 import '../components/app_text_form_field.dart';
 import '../navigation/app_navigation.dart';
@@ -120,7 +123,7 @@ class _FolderNameDialogState extends State<_FolderNameDialog> {
   }
 }
 
-/// 确认删除文件夹（其内容上移到父级）。
+/// 确认删除文件夹，默认将内容上移，也可勾选递归删除全部内容。
 Future<void> confirmDeleteFolder(
   BuildContext context,
   String folderId, {
@@ -132,28 +135,82 @@ Future<void> confirmDeleteFolder(
   final folder = controller.byId(folderId);
   if (folder == null) return;
 
-  final ok = await AppNavigation.dialog<bool>(
-    AppDialog(
-      title: Text('删除文件夹「@name」？'.trParams({'name': folder.name})),
-      content: Text(
-        (containsIdentities
-                ? '其中的子文件夹与凭证会移动到上一级，不会被删除。'
-                : containsGateways
-                ? '其中的子文件夹与网关会移动到上一级，不会被删除。'
-                : '其中的子文件夹与服务会移动到上一级，不会被删除。')
-            .tr,
-      ),
-      actions: [
-        shadcn.OutlineButton(
-          onPressed: () => AppNavigation.closeDialog(result: false),
-          child: Text('取消'.tr),
-        ),
-        shadcn.PrimaryButton(
-          onPressed: () => AppNavigation.closeDialog(result: true),
-          child: Text('删除'.tr),
+  final deleteContents = await AppNavigation.dialog<bool>(
+    _DeleteFolderDialog(
+      name: folder.name,
+      keepMessage: containsIdentities
+          ? '其中的子文件夹与凭证会移动到上一级，不会被删除。'
+          : containsGateways
+          ? '其中的子文件夹与网关会移动到上一级，不会被删除。'
+          : '其中的子文件夹与服务会移动到上一级，不会被删除。',
+      deleteMessage: containsIdentities
+          ? '其中的全部子文件夹与凭证都会被删除，此操作无法撤销。'
+          : containsGateways
+          ? '其中的全部子文件夹与网关都会被删除，此操作无法撤销。'
+          : '其中的全部子文件夹与服务都会被删除，此操作无法撤销。',
+    ),
+  );
+  if (deleteContents == null) return;
+  if (!deleteContents) {
+    await controller.remove(folderId);
+    return;
+  }
+  final removeItems = containsIdentities
+      ? Get.find<IdentityController>().removeInFolders
+      : containsGateways
+      ? Get.find<GatewayController>().removeInFolders
+      : Get.find<HostController>().removeInFolders;
+  await controller.removeWithContents(folderId, removeItems: removeItems);
+}
+
+class _DeleteFolderDialog extends StatefulWidget {
+  const _DeleteFolderDialog({
+    required this.name,
+    required this.keepMessage,
+    required this.deleteMessage,
+  });
+
+  final String name;
+  final String keepMessage;
+  final String deleteMessage;
+
+  @override
+  State<_DeleteFolderDialog> createState() => _DeleteFolderDialogState();
+}
+
+class _DeleteFolderDialogState extends State<_DeleteFolderDialog> {
+  bool _deleteContents = false;
+
+  @override
+  Widget build(BuildContext context) => AppDialog(
+    title: Text('删除文件夹「@name」？'.trParams({'name': widget.name})),
+    content: Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text((_deleteContents ? widget.deleteMessage : widget.keepMessage).tr),
+        const SizedBox(height: 16),
+        shadcn.Checkbox(
+          key: const ValueKey('delete-folder-contents'),
+          state: _deleteContents
+              ? shadcn.CheckboxState.checked
+              : shadcn.CheckboxState.unchecked,
+          onChanged: (state) => setState(
+            () => _deleteContents = state == shadcn.CheckboxState.checked,
+          ),
+          trailing: Text('同时删除文件夹下的全部内容'.tr),
         ),
       ],
     ),
+    actions: [
+      shadcn.OutlineButton(
+        onPressed: () => AppNavigation.closeDialog<bool>(),
+        child: Text('取消'.tr),
+      ),
+      shadcn.PrimaryButton(
+        onPressed: () => AppNavigation.closeDialog(result: _deleteContents),
+        child: Text('删除'.tr),
+      ),
+    ],
   );
-  if (ok ?? false) await controller.remove(folderId);
 }

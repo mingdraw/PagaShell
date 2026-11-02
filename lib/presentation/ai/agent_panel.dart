@@ -333,11 +333,6 @@ class _AgentPanelState extends State<AgentPanel> {
                     ),
                   ),
                 ),
-                const SizedBox(height: 8),
-                Text(
-                  '聊天及所选会话输出发送至 API · 历史加密保存在本机'.tr,
-                  style: TextStyle(fontSize: 10, color: colors.mutedForeground),
-                ),
               ],
             ),
           ),
