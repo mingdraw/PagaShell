@@ -12,6 +12,10 @@ class SettingsController extends GetxController {
   final SettingsRepository _repository;
   final themeMode = AppThemeMode.system.obs;
   final sidebarState = SidebarState().obs;
+
+  /// 侧边栏是否显示，从 [sidebarState] 派生。标题栏、标签栏、AI 工作区等
+  /// 只关心显隐，单独订阅它，展开/折叠文件夹时不再跟着重建。
+  final sidebarVisible = true.obs;
   final isLoaded = false.obs;
   final automaticUpdates = true.obs;
   final savingAutomaticUpdates = false.obs;
@@ -31,25 +35,35 @@ class SettingsController extends GetxController {
   }
 
   Future<void> _load() async {
-    try {
-      final saved = await _repository.readThemeMode();
-      if (!isClosed) themeMode.value = saved;
-    } on Object {
-      // 偏好读取失败时使用自动模式，仍允许打开应用和重新选择。
-    }
-    try {
-      final saved = await _repository.readSidebarState();
-      if (!isClosed) sidebarState.value = saved;
-    } on Object {
-      // 显示偏好不可读时保留默认布局，不影响主题和启动。
-    }
-    try {
-      final saved = await _repository.readAutomaticUpdates();
-      if (!isClosed) automaticUpdates.value = saved;
-    } on Object {
-      // 无法确认已保存的选择时，不主动发起启动检查。
-      if (!isClosed) automaticUpdates.value = false;
-    }
+    // 三项偏好相互独立，并行读取；各自失败只回退该项，不影响其他项与启动。
+    await (
+      _repository.readThemeMode().then<void>(
+        (saved) {
+          if (!isClosed) themeMode.value = saved;
+        },
+        // 偏好读取失败时使用自动模式，仍允许打开应用和重新选择。
+        onError: (Object _) {},
+      ),
+      _repository.readSidebarState().then<void>(
+        (saved) {
+          if (!isClosed) {
+            sidebarState.value = saved;
+            sidebarVisible.value = saved.visible;
+          }
+        },
+        // 显示偏好不可读时保留默认布局，不影响主题和启动。
+        onError: (Object _) {},
+      ),
+      _repository.readAutomaticUpdates().then<void>(
+        (saved) {
+          if (!isClosed) automaticUpdates.value = saved;
+        },
+        // 无法确认已保存的选择时，不主动发起启动检查。
+        onError: (Object _) {
+          if (!isClosed) automaticUpdates.value = false;
+        },
+      ),
+    ).wait;
     if (isClosed) return;
     for (final entry in _sidebarFolders.entries) {
       entry.value.assignAll(sidebarState.value.expandedFolders(entry.key));
@@ -94,6 +108,7 @@ class SettingsController extends GetxController {
 
   Future<void> _saveSidebarState(SidebarState state) {
     sidebarState.value = state;
+    sidebarVisible.value = state.visible;
     // 点击立即更新界面，快照按顺序写入，避免快速操作后旧状态覆盖新状态。
     final save = _pendingSidebarSave.then((_) async {
       await ready;

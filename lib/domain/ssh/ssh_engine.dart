@@ -71,11 +71,6 @@ abstract interface class SshEngine {
 
 /// 一条已建立的 SSH 会话（同一连接上可承载 shell 与 SFTP）。
 abstract interface class SshEngineSession {
-  /// 打开带 PTY 的 shell 通道，返回解码后的输出流（单订阅）。
-  ///
-  /// [cols]/[rows] 为初始终端尺寸；后续变化通过 [resizeTerminal] 通知。
-  Stream<String> startShell({required int cols, required int rows});
-
   /// 向远端写入用户输入。
   void write(String data);
 

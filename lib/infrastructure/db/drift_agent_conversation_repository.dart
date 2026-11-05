@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:isolate';
 
 import 'package:cryptography/cryptography.dart';
 import 'package:drift/drift.dart';
@@ -40,22 +41,14 @@ class DriftAgentConversationRepository implements AgentConversationRepository {
     )..where((s) => s.key.like('$keyPrefix%'))).get();
     if (rows.isEmpty) return [];
     final key = await _unlock(create: false);
+    final keyBytes = await key.extractBytes();
+    final sealed = [for (final row in rows) (row.key, row.value)];
+    // 纯 Dart 的 AES-GCM 与 JSON 解析放到后台 isolate，历史较多时不卡界面。
+    final decoded = await Isolate.run(() => _openAll(keyBytes, sealed));
     final result = <AgentConversation>[];
-    for (final row in rows) {
-      final box = SecretBox.fromConcatenation(
-        base64Decode(row.value),
-        nonceLength: _cipher.nonceLength,
-        macLength: 16,
-      );
-      final bytes = await _cipher.decrypt(
-        box,
-        secretKey: key,
-        aad: utf8.encode(row.key),
-      );
-      final conversation = AgentConversation.fromJson(
-        jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>,
-      );
-      if (row.key != '$keyPrefix${conversation.id}') {
+    for (final (rowKey, json) in decoded) {
+      final conversation = AgentConversation.fromJson(json);
+      if (rowKey != '$keyPrefix${conversation.id}') {
         throw const FormatException();
       }
       result.add(conversation);
@@ -65,26 +58,25 @@ class DriftAgentConversationRepository implements AgentConversationRepository {
 
   @override
   Future<void> save(AgentConversation conversation) async {
-    // 有历史但密钥丢失时禁止生成新密钥覆盖旧记录。
-    final existing =
-        await (_db.select(_db.appSettings)
-              ..where((s) => s.key.like('$keyPrefix%'))
-              ..limit(1))
-            .get();
-    final key = await _unlock(create: existing.isEmpty);
+    // 有历史但密钥丢失时禁止生成新密钥覆盖旧记录；密钥解锁后无需再查。
+    final key =
+        _key ??
+        await _unlock(
+          create:
+              (await (_db.select(_db.appSettings)
+                        ..where((s) => s.key.like('$keyPrefix%'))
+                        ..limit(1))
+                      .get())
+                  .isEmpty,
+        );
     final rowKey = '$keyPrefix${conversation.id}';
-    final box = await _cipher.encrypt(
-      utf8.encode(jsonEncode(conversation.toJson())),
-      secretKey: key,
-      aad: utf8.encode(rowKey),
-    );
+    final keyBytes = await key.extractBytes();
+    final json = conversation.toJson();
+    final value = await Isolate.run(() => _seal(keyBytes, rowKey, json));
     await _db
         .into(_db.appSettings)
         .insertOnConflictUpdate(
-          AppSettingsCompanion.insert(
-            key: rowKey,
-            value: base64Encode(box.concatenation()),
-          ),
+          AppSettingsCompanion.insert(key: rowKey, value: value),
         );
   }
 
@@ -94,4 +86,47 @@ class DriftAgentConversationRepository implements AgentConversationRepository {
       _db.appSettings,
     )..where((s) => s.key.equals('$keyPrefix$id'))).go();
   }
+}
+
+// 以下函数在后台 isolate 中运行，只接收可传递的纯数据。
+
+final _isolateCipher = AesGcm.with256bits();
+
+Future<String> _seal(
+  List<int> keyBytes,
+  String rowKey,
+  Map<String, dynamic> json,
+) async {
+  final box = await _isolateCipher.encrypt(
+    utf8.encode(jsonEncode(json)),
+    secretKey: SecretKey(keyBytes),
+    aad: utf8.encode(rowKey),
+  );
+  return base64Encode(box.concatenation());
+}
+
+Future<List<(String, Map<String, dynamic>)>> _openAll(
+  List<int> keyBytes,
+  List<(String, String)> rows,
+) async {
+  final key = SecretKey(keyBytes);
+  return [
+    for (final (rowKey, value) in rows)
+      (
+        rowKey,
+        jsonDecode(
+          utf8.decode(
+            await _isolateCipher.decrypt(
+              SecretBox.fromConcatenation(
+                base64Decode(value),
+                nonceLength: _isolateCipher.nonceLength,
+                macLength: 16,
+              ),
+              secretKey: key,
+              aad: utf8.encode(rowKey),
+            ),
+          ),
+        ) as Map<String, dynamic>,
+      ),
+  ];
 }

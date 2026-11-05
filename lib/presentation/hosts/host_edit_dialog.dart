@@ -61,6 +61,9 @@ class HostEditDialog extends StatefulWidget {
 }
 
 class _HostEditDialogState extends State<HostEditDialog> {
+  static final _clientIdPattern = RegExp(r'^[a-zA-Z0-9_-]{1,64}$');
+  static final _fingerprintPattern = RegExp(r'^[a-fA-F0-9]{64}$');
+
   final _formKey = GlobalKey<FormState>();
   late final TextEditingController _name;
   late final TextEditingController _hostname;
@@ -421,9 +424,7 @@ class _HostEditDialogState extends State<HostEditDialog> {
                     key: const ValueKey('page-client-id'),
                     controller: _pageClientId,
                     decoration: AppInputDecoration(labelText: 'Client ID'.tr),
-                    validator: (v) =>
-                        RegExp(r'^[a-zA-Z0-9_-]{1,64}$')
-                            .hasMatch(v?.trim() ?? '')
+                    validator: (v) => _clientIdPattern.hasMatch(v?.trim() ?? '')
                         ? null
                         : 'Client ID 使用 1-64 位字母、数字、下划线或短横线'.tr,
                   ),
@@ -438,7 +439,7 @@ class _HostEditDialogState extends State<HostEditDialog> {
                     validator: (v) {
                       final value = v?.trim() ?? '';
                       if (value.isEmpty) return null;
-                      return RegExp(r'^[a-fA-F0-9]{64}$').hasMatch(
+                      return _fingerprintPattern.hasMatch(
                             value
                                 .replaceFirst('SHA256:', '')
                                 .replaceAll(':', ''),

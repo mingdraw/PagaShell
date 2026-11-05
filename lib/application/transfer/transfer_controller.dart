@@ -62,6 +62,12 @@ class TransferController extends GetxController {
 
   final Duration Function() _elapsed;
   static const _rateWindow = Duration(seconds: 3);
+
+  /// 进度写入 Rx 的最小间隔。引擎每 512KB 上报一次，高吞吐时可达每秒数百次，
+  /// 逐条写入会让绑定进度的 Obx 跟着重建；首个事件立即生效，之后合并到该间隔。
+  static const progressInterval = Duration(milliseconds: 200);
+  final Map<String, SftpTransferProgress> _pendingProgress = {};
+  final Map<String, Timer> _progressTimers = {};
   final Map<String, ListQueue<({Duration time, int bytes})>> _rateSamples = {};
   Timer? _rateTimer;
 
@@ -107,6 +113,41 @@ class TransferController extends GetxController {
       task.bytesPerSecond.value =
           delta * Duration.microsecondsPerSecond / microseconds;
     }
+  }
+
+  void _onProgress(TransferTask task, SftpTransferProgress progress) {
+    if (_progressTimers.containsKey(task.id)) {
+      _pendingProgress[task.id] = progress;
+      return;
+    }
+    _applyProgress(task, progress);
+    _progressTimers[task.id] = Timer(
+      progressInterval,
+      () => _onProgressTick(task),
+    );
+  }
+
+  void _onProgressTick(TransferTask task) {
+    _progressTimers.remove(task.id);
+    final pending = _pendingProgress.remove(task.id);
+    if (pending == null) return;
+    _applyProgress(task, pending);
+    _progressTimers[task.id] = Timer(
+      progressInterval,
+      () => _onProgressTick(task),
+    );
+  }
+
+  /// 流结束、失败或取消前把尚未写入的最后进度落到 Rx。
+  void _flushProgress(TransferTask task) {
+    _progressTimers.remove(task.id)?.cancel();
+    final pending = _pendingProgress.remove(task.id);
+    if (pending != null) _applyProgress(task, pending);
+  }
+
+  static void _applyProgress(TransferTask task, SftpTransferProgress p) {
+    task.transferred.value = p.transferred;
+    task.total.value = p.total;
   }
 
   void _finishRate(TransferTask task) {
@@ -201,11 +242,9 @@ class TransferController extends GetxController {
     );
 
     _subs[task.id] = progress.listen(
-      (p) {
-        task.transferred.value = p.transferred;
-        task.total.value = p.total;
-      },
+      (p) => _onProgress(task, p),
       onError: (Object e, StackTrace _) {
+        _flushProgress(task);
         task.error.value = e is SshEngineException ? e.message : e.toString();
         task.status.value = TransferStatus.failed;
         _finishRate(task);
@@ -217,6 +256,7 @@ class TransferController extends GetxController {
             _releaseSource(task.id);
       },
       onDone: () {
+        _flushProgress(task);
         _subs.remove(task.id);
         if (task.status.value == TransferStatus.running) {
           task.status.value = TransferStatus.done;
@@ -297,6 +337,7 @@ class TransferController extends GetxController {
     // 先标记状态：取消订阅后引擎流不再投递任何事件。
     for (final task in tasks) {
       if (task.id == taskId) {
+        _flushProgress(task);
         task.status.value = TransferStatus.cancelled;
         _finishRate(task);
         break;
@@ -347,6 +388,11 @@ class TransferController extends GetxController {
     _rateTimer?.cancel();
     _rateTimer = null;
     _rateSamples.clear();
+    for (final timer in _progressTimers.values) {
+      timer.cancel();
+    }
+    _progressTimers.clear();
+    _pendingProgress.clear();
     for (final task in tasks) {
       task.bytesPerSecond.value = 0;
       task.retrying.value = false;

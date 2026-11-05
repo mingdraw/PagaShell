@@ -20,7 +20,9 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch, Mutex, Notify, RwLock};
 use tokio::task::{JoinHandle, JoinSet};
 
+use super::terminal::TerminalFrame;
 use crate::frb_generated::StreamSink;
+use crate::terminal::TerminalCore;
 
 /// SFTP 目录条目（跨 FFI 的普通数据结构）。
 pub struct SftpEntry {
@@ -46,6 +48,8 @@ const TRANSFER_IO_TIMEOUT: Duration = Duration::from_secs(10);
 const TRANSFER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 const TRANSFER_RESPONSE_ATTEMPTS: usize = 3;
 const SSH_CLEANUP_TIMEOUT: Duration = Duration::from_millis(500);
+/// 终端帧最短间隔：与旧的固定 16ms 节拍一致，ack 很快时也不超过约 60 帧/秒。
+const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 #[derive(Debug)]
 struct TransferTimeout;
@@ -99,6 +103,72 @@ enum ShellCmd {
     Resize(u32, u32),
 }
 
+/// Dart 对终端帧的应用确认。独立于 [ShellCmd] 队列：输入可能正卡在 SSH
+/// 流控上，ack 不能排在按键后面。
+#[flutter_rust_bridge::frb(ignore)]
+#[derive(Default)]
+struct FrameAcks {
+    awaiting: AtomicU32,
+    notify: Notify,
+}
+
+impl FrameAcks {
+    fn ack(&self, frame_id: u32) {
+        if frame_id != 0
+            && self
+                .awaiting
+                .compare_exchange(frame_id, 0, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            self.notify.notify_one();
+        }
+    }
+}
+
+/// 终端帧节流：发出一帧后等待 Dart ack 再放行下一帧，期间脏行继续在
+/// [TerminalCore] 中累积，放行后合成一帧发出。
+struct FramePacer {
+    acks: Arc<FrameAcks>,
+    last_attempt: Option<tokio::time::Instant>,
+    next_id: u32,
+}
+
+impl FramePacer {
+    fn new(acks: Arc<FrameAcks>) -> Self {
+        Self {
+            acks,
+            last_attempt: None,
+            next_id: 0,
+        }
+    }
+
+    /// 下一次尝试出帧的时刻已到时返回。可随时取消，外层 select 每轮重建。
+    async fn due(&self) {
+        loop {
+            if self.acks.awaiting.load(Ordering::Acquire) != 0 {
+                self.acks.notify.notified().await;
+                continue;
+            }
+            if let Some(attempt) = self.last_attempt {
+                tokio::time::sleep_until(attempt + FRAME_INTERVAL).await;
+            }
+            return;
+        }
+    }
+
+    /// 记录一次出帧尝试；同步更新未结束时可能没有帧可发。
+    fn attempted(&mut self) {
+        self.last_attempt = Some(tokio::time::Instant::now());
+    }
+
+    /// 必须在 emit 前登记，避免 Dart 的快速 ack 被发帧后的置位覆盖。
+    fn begin_frame(&mut self) -> u32 {
+        self.next_id = self.next_id.wrapping_add(1).max(1);
+        self.acks.awaiting.store(self.next_id, Ordering::Release);
+        self.next_id
+    }
+}
+
 struct SessionEntry {
     // 认证需要独占访问；已认证连接的开通道和 disconnect 均只需共享访问。
     // 慢速 exec 通道不能挡住其他通道及退出时发送 disconnect。
@@ -106,6 +176,8 @@ struct SessionEntry {
     gateway_id: Option<u32>,
     shell_tx: Option<mpsc::Sender<ShellCmd>>,
     shell_task: Option<JoinHandle<()>>,
+    /// 终端帧的 ack 通道；shell 尚未启动时为 None。
+    frame_acks: Option<Arc<FrameAcks>>,
     pending_terminal_size: Option<(u32, u32)>,
     forwards: Option<(watch::Sender<bool>, JoinHandle<()>)>,
 }
@@ -476,6 +548,7 @@ async fn authenticate(
             gateway_id: entry.gateway_id,
             shell_tx: None,
             shell_task: None,
+            frame_acks: None,
             pending_terminal_size: None,
             forwards: None,
         },
@@ -483,21 +556,73 @@ async fn authenticate(
     Ok(session_id)
 }
 
-/// 打开带 PTY 的 shell 通道，输出通过 [output] 流回 Dart。
-pub async fn ssh_start_shell(
+/// Open a shell whose raw bytes are parsed and retained entirely in Rust.
+pub async fn ssh_start_terminal(
     session_id: u32,
     cols: u32,
     rows: u32,
-    output: StreamSink<Vec<u8>>,
+    scrollback: u32,
+    output: StreamSink<TerminalFrame>,
 ) -> Result<()> {
-    start_shell(session_id, cols, rows, move |data| output.add(data).is_ok()).await
+    start_shell_output(
+        session_id,
+        cols,
+        rows,
+        ShellOutput {
+            core: Box::new(TerminalCore::new(cols, rows, scrollback)),
+            emit: Box::new(move |frame| output.add(frame).is_ok()),
+        },
+    )
+    .await
 }
 
-async fn start_shell(
+struct ShellOutput {
+    core: Box<TerminalCore>,
+    emit: Box<dyn Fn(TerminalFrame) -> bool + Send>,
+}
+
+impl ShellOutput {
+    fn feed(&mut self, data: &[u8]) -> Vec<u8> {
+        self.core.feed(data)
+    }
+
+    fn resize(&mut self, cols: u32, rows: u32) {
+        self.core.resize(cols, rows);
+    }
+
+    fn pending(&self) -> bool {
+        self.core.pending()
+    }
+
+    fn expire_sync(&mut self) -> Vec<u8> {
+        self.core.expire_sync()
+    }
+
+    /// 只在 pacer 放行后合成帧；在 emit 前登记对应序号。
+    fn flush(&mut self, pacer: &mut FramePacer) -> bool {
+        pacer.attempted();
+        if let Some(frame) = self.core.frame() {
+            let mut frame: TerminalFrame = frame.into();
+            let frame_id = pacer.begin_frame();
+            frame.frame_id = frame_id;
+            if !(self.emit)(frame) {
+                pacer.acks.ack(frame_id);
+                return false;
+            }
+        }
+        true
+    }
+
+    fn finish(&mut self) {
+        let _ = self.core.finish();
+    }
+}
+
+async fn start_shell_output(
     session_id: u32,
     cols: u32,
     rows: u32,
-    emit: impl Fn(Vec<u8>) -> bool + Send + 'static,
+    mut output: ShellOutput,
 ) -> Result<()> {
     let (handle, (cols, rows)) = {
         let sessions = SESSIONS.lock().await;
@@ -518,8 +643,11 @@ async fn start_shell(
         .request_pty(false, "xterm-256color", cols, rows, 0, 0, &[])
         .await?;
     channel.request_shell(false).await?;
+    output.resize(cols, rows);
 
     let (tx, mut rx) = mpsc::channel::<ShellCmd>(64);
+    let acks = Arc::<FrameAcks>::default();
+    let mut pacer = FramePacer::new(acks.clone());
     let mut sessions = SESSIONS.lock().await;
     let entry = sessions
         .get_mut(&session_id)
@@ -535,29 +663,41 @@ async fn start_shell(
     // 与队列一起注册任务，关闭时可直接取消正在等待 SSH 流控的写入，
     // 不必把 Close 排在可能已经填满的输入队列后面。
     entry.shell_task = Some(tokio::spawn(async move {
+        let mut channel_closed = false;
         loop {
+            if channel_closed && !output.pending() {
+                break;
+            }
             tokio::select! {
-                msg = channel.wait() => match msg {
-                    Some(ChannelMsg::Data { data }) => {
-                        if !emit(data.to_vec()) {
+                msg = channel.wait(), if !channel_closed => match msg {
+                    Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => {
+                        let replies = output.feed(&data);
+                        // Device/cursor queries are answered in Rust, in order on
+                        // this same channel. They never round-trip through Dart.
+                        if !replies.is_empty() && channel.data(&replies[..]).await.is_err() {
                             break;
                         }
                     }
-                    Some(ChannelMsg::ExtendedData { data, .. }) => {
-                        if !emit(data.to_vec()) {
-                            break;
-                        }
-                    }
-                    Some(ChannelMsg::Close) | None => break,
+                    Some(ChannelMsg::Close) | None => {
+                        channel_closed = true;
+                        output.finish();
+                    },
                     Some(_) => {}
                 },
-                cmd = rx.recv() => match cmd {
+                // 待 ack 期间继续解析并累积脏行，只有收到匹配 ack 才合成下一帧。
+                _ = pacer.due(), if output.pending() => {
+                    let replies = output.expire_sync();
+                    if !channel_closed && !replies.is_empty() && channel.data(&replies[..]).await.is_err() { break; }
+                    if !output.flush(&mut pacer) { break; }
+                },
+                cmd = rx.recv(), if !channel_closed => match cmd {
                     Some(ShellCmd::Data(data)) => {
                         if channel.data(&data[..]).await.is_err() {
                             break;
                         }
                     }
                     Some(ShellCmd::Resize(c, r)) => {
+                        output.resize(c, r);
                         let _ = channel.window_change(c, r, 0, 0).await;
                     }
                     None => {
@@ -572,6 +712,7 @@ async fn start_shell(
         }
     }));
     entry.shell_tx = Some(tx);
+    entry.frame_acks = Some(acks);
     Ok(())
 }
 
@@ -602,6 +743,19 @@ pub async fn ssh_resize(session_id: u32, cols: u32, rows: u32) -> Result<()> {
     tx.send(ShellCmd::Resize(cols, rows))
         .await
         .map_err(|_| anyhow!("终端已关闭"))
+}
+
+/// Dart 已应用指定帧，放行下一帧。关闭会话、重复或迟到的 ack 静默忽略。
+pub async fn ssh_terminal_ack(session_id: u32, frame_id: u32) -> Result<()> {
+    let acks = SESSIONS
+        .lock()
+        .await
+        .get(&session_id)
+        .and_then(|entry| entry.frame_acks.clone());
+    if let Some(acks) = acks {
+        acks.ack(frame_id);
+    }
+    Ok(())
 }
 
 /// 用独立、无 PTY 的 exec 通道执行固定只读采集脚本，不影响交互终端。
@@ -1301,6 +1455,96 @@ mod tests {
     use russh::keys::ssh_key::{Algorithm, Cipher, Kdf, LineEnding};
     use russh::keys::{encode_pkcs8_pem, encode_pkcs8_pem_encrypted};
     use russh::server;
+
+    #[tokio::test(start_paused = true)]
+    async fn frame_pacer_requires_matching_ack_and_preserves_minimum_interval() {
+        let acks = Arc::new(FrameAcks::default());
+        let mut pacer = FramePacer::new(acks.clone());
+        let started = tokio::time::Instant::now();
+        // 空闲后的首帧（如按键回显）立即发出。
+        pacer.due().await;
+        assert_eq!(started.elapsed(), Duration::ZERO);
+
+        // 同步更新未结束、没有帧可发时只按最短间隔重试，不进入等待 ack。
+        pacer.attempted();
+        pacer.due().await;
+        assert_eq!(started.elapsed(), FRAME_INTERVAL);
+
+        // 即使等待很久也不放行；错误序号不能解除背压。
+        pacer.attempted();
+        let first = pacer.begin_frame();
+        assert!(tokio::time::timeout(Duration::from_secs(5), pacer.due())
+            .await
+            .is_err());
+        acks.ack(first + 1);
+        assert!(tokio::time::timeout(Duration::from_secs(1), pacer.due())
+            .await
+            .is_err());
+        acks.ack(first);
+        let released = tokio::time::Instant::now();
+        pacer.due().await;
+        assert_eq!(released.elapsed(), Duration::ZERO);
+
+        // 重复旧 ack 不会误放行下一帧；快速 ack 仍保留最短间隔。
+        pacer.attempted();
+        let second = pacer.begin_frame();
+        let sent = tokio::time::Instant::now();
+        acks.ack(first);
+        assert!(tokio::time::timeout(Duration::from_millis(10), pacer.due())
+            .await
+            .is_err());
+        acks.ack(second);
+        pacer.due().await;
+        assert_eq!(sent.elapsed(), FRAME_INTERVAL);
+
+        // ack 早于等待开始也不会丢失（状态在原子量里，不依赖唤醒时序）。
+        pacer.attempted();
+        let third = pacer.begin_frame();
+        let sent = tokio::time::Instant::now();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        acks.ack(third);
+        pacer.due().await;
+        assert_eq!(sent.elapsed(), Duration::from_millis(100));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn frame_ack_during_emit_is_not_lost_and_finish_respects_the_gate() {
+        let acks = Arc::new(FrameAcks::default());
+        let mut pacer = FramePacer::new(acks.clone());
+        let immediate_ack = acks.clone();
+        let mut output = ShellOutput {
+            core: Box::new(TerminalCore::new(20, 3, 10)),
+            emit: Box::new(move |frame| {
+                immediate_ack.ack(frame.frame_id);
+                true
+            }),
+        };
+        assert!(output.flush(&mut pacer));
+        assert_eq!(acks.awaiting.load(Ordering::Acquire), 0);
+        pacer.due().await;
+
+        let (tx, mut frames) = mpsc::unbounded_channel();
+        let mut output = ShellOutput {
+            core: Box::new(TerminalCore::new(20, 3, 10)),
+            emit: Box::new(move |frame| tx.send(frame).is_ok()),
+        };
+        output.feed(b"first");
+        assert!(output.flush(&mut pacer));
+        let first = frames.recv().await.unwrap();
+        output.feed(b"\x1b[?2026h-final");
+        output.finish();
+        assert!(output.pending());
+        assert!(tokio::time::timeout(Duration::from_secs(1), pacer.due())
+            .await
+            .is_err());
+        assert!(frames.try_recv().is_err());
+        acks.ack(first.frame_id);
+        pacer.due().await;
+        assert!(output.flush(&mut pacer));
+        let final_frame = frames.recv().await.unwrap();
+        assert!(frame_text(&final_frame).contains("first-final"));
+        assert!(!output.pending());
+    }
 
     #[tokio::test(start_paused = true)]
     async fn transfer_stalled_upload_fails_after_bounded_response_waits_and_cleanup() {
@@ -2518,7 +2762,14 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
             self.events
                 .send(TerminalEvent::Data(data.to_vec()))
                 .unwrap();
-            session.data(channel, data.to_vec())?;
+            if data == b"\x04" {
+                // 模拟退出时仍未结束的同步更新，由客户端 finish 释放末帧。
+                session.data(channel, b"\x1b[?2026h-final".to_vec())?;
+                session.eof(channel)?;
+                session.close(channel)?;
+            } else {
+                session.data(channel, data.to_vec())?;
+            }
             Ok(())
         }
 
@@ -2549,6 +2800,26 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
             self.events.send(TerminalEvent::Resize(cols, rows)).unwrap();
             Ok(())
         }
+    }
+
+    fn frame_has_char(frame: &TerminalFrame, ch: char) -> bool {
+        frame.lines.iter().any(|line| {
+            line.cells
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|cell| cell[3] & 0x1fffff == ch as u32)
+        })
+    }
+
+    fn frame_text(frame: &TerminalFrame) -> String {
+        frame
+            .lines
+            .iter()
+            .flat_map(|line| line.cells.as_chunks::<4>().0.iter())
+            .filter_map(|cell| char::from_u32(cell[3] & 0x1fffff))
+            .filter(|c| *c != '\0')
+            .collect()
     }
 
     async fn next_terminal_event(
@@ -2675,7 +2946,7 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
     }
 
     #[tokio::test]
-    async fn terminal_bytes_round_trip_before_and_after_status_collection_and_close_output() {
+    async fn rust_terminal_shell_parses_output_replies_resizes_and_closes() {
         let config = Arc::new(server::Config {
             keys: vec![test_key(42)],
             ..Default::default()
@@ -2706,9 +2977,17 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
         .unwrap();
         let (output_tx, mut output) = mpsc::unbounded_channel();
         allow_open.notify_one();
-        start_shell(id, 80, 24, move |bytes| output_tx.send(bytes).is_ok())
-            .await
-            .unwrap();
+        start_shell_output(
+            id,
+            80,
+            24,
+            ShellOutput {
+                core: Box::new(TerminalCore::new(80, 24, 100)),
+                emit: Box::new(move |frame| output_tx.send(frame).is_ok()),
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(
             next_terminal_event(&mut events).await,
             TerminalEvent::Opening
@@ -2718,25 +2997,143 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
             TerminalEvent::Pty(80, 24)
         );
         assert_eq!(next_terminal_event(&mut events).await, TerminalEvent::Shell);
+        let prompt = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let frame = output.recv().await.unwrap();
+                ssh_terminal_ack(id, frame.frame_id).await.unwrap();
+                if frame_has_char(&frame, '$') {
+                    break frame;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(prompt.cursor_x, 6);
+        let input = "\x1b[31m中文\x1b[0m".as_bytes().to_vec();
+        ssh_write(id, input.clone()).await.unwrap();
         assert_eq!(
-            tokio::time::timeout(Duration::from_secs(2), output.recv())
-                .await
-                .unwrap(),
-            Some(b"test$ ".to_vec())
+            next_terminal_event(&mut events).await,
+            TerminalEvent::Data(input)
         );
+        let frame = tokio::time::timeout(Duration::from_secs(2), output.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        ssh_terminal_ack(id, frame.frame_id).await.unwrap();
+        assert!(frame_has_char(&frame, '中'));
+        ssh_resize(id, 120, 40).await.unwrap();
+        assert_eq!(
+            next_terminal_event(&mut events).await,
+            TerminalEvent::Resize(120, 40)
+        );
+        let resized = tokio::time::timeout(Duration::from_secs(2), output.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!((resized.columns, resized.rows), (120, 40));
+        ssh_write(id, b"\x1b[6n".to_vec()).await.unwrap();
+        assert_eq!(
+            next_terminal_event(&mut events).await,
+            TerminalEvent::Data(b"\x1b[6n".to_vec())
+        );
+        assert_eq!(
+            next_terminal_event(&mut events).await,
+            TerminalEvent::Data(b"\x1b[1;11R".to_vec())
+        );
+        allow_open.notify_one();
+        assert!(ssh_read_server_status(id).await.unwrap().contains("Linux"));
+        assert_eq!(
+            next_terminal_event(&mut events).await,
+            TerminalEvent::Opening
+        );
+        assert_eq!(next_terminal_event(&mut events).await, TerminalEvent::Exec);
+        ssh_disconnect(id).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while output.recv().await.is_some() {}
+        })
+        .await
+        .unwrap();
+        server_task.abort();
+    }
 
-        for input in ["echo 中文\r", "\u{3}"] {
+    #[tokio::test]
+    async fn terminal_frames_round_trip_before_and_after_status_collection_and_close_output() {
+        let config = Arc::new(server::Config {
+            keys: vec![test_key(42)],
+            ..Default::default()
+        });
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (events_tx, mut events) = mpsc::unbounded_channel();
+        let allow_open = Arc::new(Notify::new());
+        let handler = TerminalServer {
+            events: events_tx,
+            allow_open: allow_open.clone(),
+        };
+        let server_task = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let session = server::run_stream(config, socket, handler).await.unwrap();
+            let _ = session.await;
+        });
+        let handshake = ssh_handshake("127.0.0.1".into(), port).await.unwrap();
+        let id = ssh_authenticate(
+            handshake.session_id,
+            handshake.fingerprint,
+            "test".into(),
+            "test-only".into(),
+        )
+        .await
+        .unwrap();
+        let (output_tx, mut output) = mpsc::unbounded_channel();
+        allow_open.notify_one();
+        start_shell_output(
+            id,
+            80,
+            24,
+            ShellOutput {
+                core: Box::new(TerminalCore::new(80, 24, 100)),
+                emit: Box::new(move |frame| output_tx.send(frame).is_ok()),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            next_terminal_event(&mut events).await,
+            TerminalEvent::Opening
+        );
+        assert_eq!(
+            next_terminal_event(&mut events).await,
+            TerminalEvent::Pty(80, 24)
+        );
+        assert_eq!(next_terminal_event(&mut events).await, TerminalEvent::Shell);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let frame = output.recv().await.unwrap();
+                let prompt = frame_text(&frame).contains("test$");
+                ssh_terminal_ack(id, frame.frame_id).await.unwrap();
+                if prompt {
+                    assert_eq!(frame.cursor_x, 6);
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        for input in ["echo 中文", " after status"] {
             ssh_write(id, input.as_bytes().to_vec()).await.unwrap();
             assert_eq!(
                 next_terminal_event(&mut events).await,
                 TerminalEvent::Data(input.as_bytes().to_vec())
             );
-            assert_eq!(
-                tokio::time::timeout(Duration::from_secs(2), output.recv())
-                    .await
-                    .unwrap(),
-                Some(input.as_bytes().to_vec())
-            );
+            let frame = tokio::time::timeout(Duration::from_secs(2), output.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(frame_text(&frame).contains(input));
+            ssh_terminal_ack(id, frame.frame_id).await.unwrap();
             allow_open.notify_one();
             assert_eq!(
                 ssh_read_server_status(id).await.unwrap(),
@@ -2748,6 +3145,11 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
             );
             assert_eq!(next_terminal_event(&mut events).await, TerminalEvent::Exec);
         }
+        ssh_write(id, vec![3]).await.unwrap();
+        assert_eq!(
+            next_terminal_event(&mut events).await,
+            TerminalEvent::Data(vec![3])
+        );
         ssh_disconnect(id).await.unwrap();
         assert!(
             tokio::time::timeout(Duration::from_secs(1), output.recv())
@@ -2858,6 +3260,215 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
     }
 
     #[tokio::test]
+    async fn terminal_frames_merge_until_matching_ack_and_cancel_while_waiting() {
+        let config = Arc::new(server::Config {
+            keys: vec![test_key(42)],
+            ..Default::default()
+        });
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (events_tx, mut events) = mpsc::unbounded_channel();
+        let allow_open = Arc::new(Notify::new());
+        let handler = TerminalServer {
+            events: events_tx,
+            allow_open: allow_open.clone(),
+        };
+        let server_task = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let session = server::run_stream(config, socket, handler).await.unwrap();
+            let _ = session.await;
+        });
+        let handshake = ssh_handshake("127.0.0.1".into(), port).await.unwrap();
+        let id = ssh_authenticate(
+            handshake.session_id,
+            handshake.fingerprint,
+            "test".into(),
+            "test-only".into(),
+        )
+        .await
+        .unwrap();
+        let (output_tx, mut output) = mpsc::unbounded_channel();
+        allow_open.notify_one();
+        start_shell_output(
+            id,
+            80,
+            24,
+            ShellOutput {
+                core: Box::new(TerminalCore::new(80, 24, 100)),
+                emit: Box::new(move |frame| output_tx.send(frame).is_ok()),
+            },
+        )
+        .await
+        .unwrap();
+        for _ in 0..3 {
+            next_terminal_event(&mut events).await; // Opening, Pty, Shell
+        }
+        // 收到提示符帧后故意不 ack，进入等待状态。
+        let prompt = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let frame = output.recv().await.unwrap();
+                if frame_has_char(&frame, '$') {
+                    break frame;
+                }
+                ssh_terminal_ack(id, frame.frame_id).await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+
+        // 等待 ack 期间的多次回显只在 Rust 内累积。
+        for key in ["a", "b", "c"] {
+            ssh_write(id, key.as_bytes().to_vec()).await.unwrap();
+            assert_eq!(
+                next_terminal_event(&mut events).await,
+                TerminalEvent::Data(key.as_bytes().to_vec())
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        assert!(output.try_recv().is_err(), "frame sent before ack");
+        ssh_terminal_ack(id, prompt.frame_id).await.unwrap();
+        let merged = tokio::time::timeout(Duration::from_secs(2), output.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(frame_text(&merged).contains("test$ abc"));
+        assert_eq!(merged.cursor_x, 9);
+        // 合并帧只重绘提示符行，行序不变。
+        assert_eq!((merged.trim_front, merged.keep_rows), (0, 24));
+        assert!(merged.append_rows.is_empty());
+        assert_eq!(merged.lines.len(), 1);
+
+        // 旧 ack 不得释放新帧；等待超过旧 250ms 超时仍没有下一帧。
+        ssh_write(id, b"d".to_vec()).await.unwrap();
+        assert_eq!(
+            next_terminal_event(&mut events).await,
+            TerminalEvent::Data(b"d".to_vec())
+        );
+        ssh_terminal_ack(id, prompt.frame_id).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(350), output.recv())
+                .await
+                .is_err()
+        );
+        ssh_terminal_ack(id, merged.frame_id).await.unwrap();
+        let late = tokio::time::timeout(Duration::from_secs(2), output.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(frame_text(&late).contains("test$ abcd"));
+
+        ssh_write(id, b"e".to_vec()).await.unwrap();
+        assert_eq!(
+            next_terminal_event(&mut events).await,
+            TerminalEvent::Data(b"e".to_vec())
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), output.recv())
+                .await
+                .is_err()
+        );
+        let shell_abort = SESSIONS.lock().await[&id]
+            .shell_task
+            .as_ref()
+            .unwrap()
+            .abort_handle();
+        tokio::time::timeout(Duration::from_secs(1), ssh_disconnect(id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(shell_abort.is_finished());
+        // 会话关闭后的迟到 ack 不报错。
+        ssh_terminal_ack(id, late.frame_id).await.unwrap();
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn terminal_channel_close_waits_for_ack_before_emitting_final_frame() {
+        let config = Arc::new(server::Config {
+            keys: vec![test_key(43)],
+            ..Default::default()
+        });
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (events_tx, mut events) = mpsc::unbounded_channel();
+        let allow_open = Arc::new(Notify::new());
+        let handler = TerminalServer {
+            events: events_tx,
+            allow_open: allow_open.clone(),
+        };
+        let server_task = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let session = server::run_stream(config, socket, handler).await.unwrap();
+            let _ = session.await;
+        });
+        let handshake = ssh_handshake("127.0.0.1".into(), port).await.unwrap();
+        let id = ssh_authenticate(
+            handshake.session_id,
+            handshake.fingerprint,
+            "test".into(),
+            "test-only".into(),
+        )
+        .await
+        .unwrap();
+        let (output_tx, mut output) = mpsc::unbounded_channel();
+        allow_open.notify_one();
+        start_shell_output(
+            id,
+            80,
+            24,
+            ShellOutput {
+                core: Box::new(TerminalCore::new(80, 24, 100)),
+                emit: Box::new(move |frame| output_tx.send(frame).is_ok()),
+            },
+        )
+        .await
+        .unwrap();
+        for _ in 0..3 {
+            next_terminal_event(&mut events).await;
+        }
+        let prompt = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let frame = output.recv().await.unwrap();
+                if frame_has_char(&frame, '$') {
+                    break frame;
+                }
+                ssh_terminal_ack(id, frame.frame_id).await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        ssh_write(id, b"\x04".to_vec()).await.unwrap();
+        assert_eq!(
+            next_terminal_event(&mut events).await,
+            TerminalEvent::Data(b"\x04".to_vec())
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(350), output.recv())
+                .await
+                .is_err()
+        );
+
+        ssh_terminal_ack(id, prompt.frame_id).await.unwrap();
+        let final_frame = tokio::time::timeout(Duration::from_secs(2), output.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(frame_text(&final_frame).contains("test$ -final"));
+        assert_ne!(final_frame.frame_id, prompt.frame_id);
+        assert!(tokio::time::timeout(Duration::from_secs(2), output.recv())
+            .await
+            .unwrap()
+            .is_none());
+        ssh_terminal_ack(id, final_frame.frame_id).await.unwrap();
+        ssh_disconnect(id).await.unwrap();
+        server_task.abort();
+    }
+
+    #[tokio::test]
     async fn terminal_resize_before_and_during_shell_start_reaches_remote_pty() {
         let config = Arc::new(server::Config {
             keys: vec![test_key(42)],
@@ -2891,7 +3502,15 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
         // Flutter 布局与 FRB 的异步调度可能先于 shell 启动调用。
         ssh_resize(id, 100, 30).await.unwrap();
         ssh_resize(id, 120, 40).await.unwrap();
-        let starting = tokio::spawn(start_shell(id, 80, 24, |_| true));
+        let starting = tokio::spawn(start_shell_output(
+            id,
+            80,
+            24,
+            ShellOutput {
+                core: Box::new(TerminalCore::new(80, 24, 100)),
+                emit: Box::new(|_| true),
+            },
+        ));
         assert_eq!(
             next_terminal_event(&mut events).await,
             TerminalEvent::Opening

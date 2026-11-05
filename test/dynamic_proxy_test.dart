@@ -60,7 +60,7 @@ class _Engine implements SshEngine, DynamicProxyEngine {
   final configs = <ProxyConfig>[];
   Completer<void>? startGate;
   bool cancelled = false;
-  SshEngineException? failure;
+  Object? failure;
 
   @override
   Future<DynamicProxySession> startProxy(
@@ -877,6 +877,20 @@ void main() {
       sessions.onClose();
     });
   }
+
+  test('未知代理启动异常显示通用提示，不回显平台原文', () async {
+    final engine = _Engine()
+      ..failure = StateError(
+        '/Users/test/private/proxy.sock: platform failure',
+      );
+    final sessions = SessionController(engine: engine);
+    final id = sessions.openProxy(autoHost);
+    await sessions.startProxy(id, autoHost, gateway: route(autoHost));
+    expect(sessions.sessions.single.phase, SessionPhase.failed);
+    expect(sessions.sessions.single.error, '动态代理启动失败，请检查网关配置和网络');
+    await sessions.closeAll();
+    sessions.onClose();
+  });
 
   test('监听启动失败不设置系统代理，设置失败回滚并关闭已启动监听', () async {
     final engine = _Engine()..failure = const SshEngineException('bind failed');

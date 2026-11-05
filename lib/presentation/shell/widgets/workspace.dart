@@ -39,6 +39,29 @@ class _WorkspaceState extends State<Workspace> {
   // sessions, frame subscriptions and decoded surfaces keep their lifetime.
   final _contentKey = GlobalKey();
 
+  // 按会话缓存视图实例。外层 Obx 订阅整个会话列表，任一标签变化都会重跑；
+  // 会话快照与激活状态都没变时返回同一个 widget 实例，Flutter 会跳过该子树，
+  // 避免后台终端、SFTP 目录与代理面板随别的标签一起重建。
+  final Map<String, ({Session session, bool active, Widget view})> _views = {};
+
+  Widget _viewFor(Session session, bool active) {
+    final cached = _views[session.id];
+    if (cached != null &&
+        identical(cached.session, session) &&
+        cached.active == active) {
+      return cached.view;
+    }
+    final view = TickerMode(
+      enabled: active,
+      child: ExcludeFocus(
+        excluding: !active,
+        child: _SessionView(session: session, active: active),
+      ),
+    );
+    _views[session.id] = (session: session, active: active, view: view);
+    return view;
+  }
+
   @override
   Widget build(BuildContext context) {
     final controller = Get.find<SessionController>();
@@ -51,6 +74,9 @@ class _WorkspaceState extends State<Workspace> {
 
         var index = sessions.indexWhere((s) => s.id == activeId);
         if (index < 0) index = 0;
+        // 会话数量不变时也可能发生替换，始终按 ID 清理已关闭会话的缓存。
+        final ids = {for (final s in sessions) s.id};
+        _views.removeWhere((id, _) => !ids.contains(id));
 
         return RdpCertificatePrompts(
           sessions: sessions,
@@ -70,13 +96,7 @@ class _WorkspaceState extends State<Workspace> {
                           Offstage(
                             key: ValueKey(sessions[i].id),
                             offstage: i != index,
-                            child: ExcludeFocus(
-                              excluding: i != index,
-                              child: _SessionView(
-                                session: sessions[i],
-                                active: i == index,
-                              ),
-                            ),
+                            child: _viewFor(sessions[i], i == index),
                           ),
                       ],
                     ),

@@ -50,7 +50,7 @@ SSH、SFTP、RDP 和 VNC 会话可以分别打开标签。主机、凭据和网�
 
 发布页附带 `checksums.txt`，可用于 SHA-256 校验。macOS 版本尚未经过 Apple 公证，Windows 版本未使用代码签名证书。
 
-Windows 首次运行可能出现 SmartScreen 的“无法识别的应用”提示。当前处于测试阶段，确认下载来源并核对校验和后，可点击 **更多信息 → 仍要运行**。签名现状和后续可选方案见 [Code signing policy](docs/windows-code-signing.md)。
+Windows 首次运行可能出现 SmartScreen 的“无法识别的应用”提示。当前处于测试阶段，确认下载来源并核对校验和后，可点击 **更多信息 → 仍要运行**。
 
 ### 软件更新
 
@@ -69,6 +69,12 @@ Windows 首次运行可能出现 SmartScreen 的“无法识别的应用”提�
 ## 反馈与贡献
 
 问题和建议请提交到 [Issues](https://github.com/mingdraw/PagaShell/issues)。参与开发请阅读 [贡献指南](CONTRIBUTING.md)。
+
+### 终端组件
+
+内部终端组件 [paga_terminal](docs/terminal-component.md) 位于 `lib/terminal/`，负责 Flutter 显示、输入和滚动选区。Rust 内核位于项目的 `rust/src/terminal/`，通过 crates.io 引入官方 `alacritty_terminal 0.26.0`，负责 ANSI 解析、屏幕、回滚与重排。
+
+Flutter 部分参考并改造自 [TerminalStudio/xterm.dart 4.0.0](https://github.com/TerminalStudio/xterm.dart/tree/25bc19e49d9e948ba45bdb185d534c26bb3df9b2)。终端复用项目现有的原生桥接，接入方式与参考来源见[终端组件说明](docs/terminal-component.md)。
 
 ## 许可证
 

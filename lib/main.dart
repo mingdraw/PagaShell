@@ -11,16 +11,20 @@ import 'src/rust/frb_generated.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // 加载 Rust 引擎动态库并初始化 FFI 桥。
-  await RustLib.init();
-  await windowManager.ensureInitialized();
-  // 交给 ShellPage 等待本地对话写入后再关闭原生窗口。
-  await windowManager.setPreventClose(true);
-  // 沙盒内 HOME 是容器目录；由系统账号记录取得真实用户目录。
-  final homeDirectory = Platform.isMacOS
-      ? await const MethodChannel('pagashell/files')
-            .invokeMethod<String>('getUserHomeDirectory')
-      : null;
+  // 三项初始化互不依赖，并行执行以缩短首帧前的等待。
+  final (_, _, homeDirectory) = await (
+    // 加载 Rust 引擎动态库并初始化 FFI 桥。
+    RustLib.init(),
+    // 交给 ShellPage 等待本地对话写入后再关闭原生窗口。
+    windowManager.ensureInitialized().then(
+      (_) => windowManager.setPreventClose(true),
+    ),
+    // 沙盒内 HOME 是容器目录；由系统账号记录取得真实用户目录。
+    Platform.isMacOS
+        ? const MethodChannel('pagashell/files')
+              .invokeMethod<String>('getUserHomeDirectory')
+        : Future<String?>.value(),
+  ).wait;
 
   const windowOptions = WindowOptions(
     size: Size(1200, 760),

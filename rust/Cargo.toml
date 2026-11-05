@@ -6,7 +6,11 @@ edition = "2021"
 [lib]
 crate-type = ["cdylib", "staticlib"]
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(frb_expand)"] }
+
 [dependencies]
+alacritty_terminal = { version = "=0.26.0", default-features = false }
 anyhow = "1.0.104"
 flutter_rust_bridge = "=2.13.0"
 russh = "0.62.4"
@@ -32,6 +36,7 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 ipnet = "2"
 tokio-util = { version = "0.7", features = ["rt"] }
+unicode-width = "0.2"
 
 [dev-dependencies]
 openh264 = "0.9.9"

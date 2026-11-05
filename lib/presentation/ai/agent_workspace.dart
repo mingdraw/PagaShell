@@ -79,7 +79,7 @@ class _AgentWorkspaceState extends State<AgentWorkspace> {
         : AppTheme.sidebarTransitionDuration;
     return Obx(() {
       final state = settings.state.value;
-      final sidebarVisible = generalSettings.sidebarState.value.visible;
+      final sidebarVisible = generalSettings.sidebarVisible.value;
       return LayoutBuilder(
         builder: (context, constraints) {
           final visible = state.panelVisible && !fullscreen;

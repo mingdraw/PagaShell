@@ -125,6 +125,10 @@ class AgentSessionInput extends StatefulWidget {
 }
 
 class _AgentSessionInputState extends State<AgentSessionInput> {
+  static final _mentionPattern = RegExp(r'@([^\r\n@]*)$');
+  static final _whitespacePattern = RegExp(r'\s');
+  static final _termsPattern = RegExp(r'\s+');
+
   final _popover = shadcn.OverlayController();
   final _groups = ValueNotifier<List<_MentionGroup>>([]);
   final _highlight = ValueNotifier<int>(-1);
@@ -198,13 +202,12 @@ class _AgentSessionInputState extends State<AgentSessionInput> {
       return null;
     }
     final caret = value.selection.baseOffset;
-    final match = RegExp(r'@([^\r\n@]*)$')
-        .firstMatch(value.text.substring(0, caret));
+    final match = _mentionPattern.firstMatch(value.text.substring(0, caret));
     if (match == null ||
         // 已选引用后的空格和普通文本不继续当作搜索词。
         widget.controller.containsMentionAt(match.start + 1) ||
         (match.start > 0 &&
-            !RegExp(r'\s').hasMatch(value.text[match.start - 1]))) {
+            !_whitespacePattern.hasMatch(value.text[match.start - 1]))) {
       return null;
     }
     return (
@@ -410,7 +413,7 @@ class _AgentSessionInputState extends State<AgentSessionInput> {
       final agent = widget.agent;
       final query = _query(value);
       final terms = (query?.query ?? '')
-          .split(RegExp(r'\s+'))
+          .split(_termsPattern)
           .where((term) => term.isNotEmpty)
           .toList();
       final byButton = _requestedByButton(value);

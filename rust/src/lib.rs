@@ -10,4 +10,5 @@ mod page;
 mod proxy;
 mod rdp;
 mod rdp_connection;
+mod terminal;
 mod vnc;

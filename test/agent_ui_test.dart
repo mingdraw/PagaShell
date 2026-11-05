@@ -27,9 +27,9 @@ import 'package:pagashell/presentation/shell/widgets/workspace.dart';
 import 'package:pagashell/presentation/terminal/server_status_panel.dart';
 import 'package:pagashell/presentation/theme/app_theme.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
-import 'package:xterm/xterm.dart';
 
 import 'support/fake_ai_connect.dart';
+import 'support/fixture_terminal.dart';
 import 'support/in_memory_binding.dart';
 import 'support/shadcn_test_app.dart';
 
@@ -1049,7 +1049,7 @@ ss -lntp
 
   testWidgets('Agent 收起后主区域恢复全部宽度，窗口切换保留终端及聊天草稿', (tester) async {
     await pump(tester);
-    final terminal = Terminal()..write('preserved terminal output');
+    final terminal = Terminal()..writeText('preserved terminal output');
     final sessions = Get.find<SessionController>();
     sessions.sessions.add(
       Session(
@@ -1410,7 +1410,7 @@ ss -lntp
       host: Host(id: id, name: name, hostname: '$id.test'),
       phase: SessionPhase.ready,
       engineSession: _SshSession(),
-      terminal: Terminal()..write('$id-terminal-output\r\n'),
+      terminal: Terminal()..writeText('$id-terminal-output\r\n'),
     );
     final alpha = session('alpha', '服务甲');
     final beta = session('beta', '服务乙');
@@ -1643,7 +1643,7 @@ ss -lntp
     final terminal = Terminal();
     terminal.onOutput = (input) {
       written.add(input);
-      terminal.write('nginx LISTEN :80\r\n');
+      terminal.writeText('nginx LISTEN :80\r\n');
     };
     Get.find<SessionController>().sessions.add(
       Session(
@@ -1707,7 +1707,7 @@ ss -lntp
     final terminal = Terminal();
     terminal.onOutput = (input) {
       written.add(input);
-      terminal.write('\r\ndisk-observed-output\r\n');
+      terminal.writeText('\r\ndisk-observed-output\r\n');
     };
     sessions.sessions.add(
       Session(

@@ -861,22 +861,26 @@ class _TransferStripState extends State<_TransferStrip> {
                                 ),
                               ),
                               const SizedBox(width: 12),
+                              // 速率每次采样都会变化，单独订阅，避免重建
+                              // 整个传输条与任务列表。
                               Flexible(
-                                child: Text(
-                                  '总速率 @speed'.trParams({
-                                    'speed': formatTransferRate(
-                                      controller.totalBytesPerSecond(
-                                        widget.sessionId,
+                                child: Obx(
+                                  () => Text(
+                                    '总速率 @speed'.trParams({
+                                      'speed': formatTransferRate(
+                                        controller.totalBytesPerSecond(
+                                          widget.sessionId,
+                                        ),
                                       ),
+                                    }),
+                                    key: const ValueKey(
+                                      'sftp-total-transfer-rate',
                                     ),
-                                  }),
-                                  key: const ValueKey(
-                                    'sftp-total-transfer-rate',
-                                  ),
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                    fontSize: 11,
-                                    color: colors.mutedForeground,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color: colors.mutedForeground,
+                                    ),
                                   ),
                                 ),
                               ),

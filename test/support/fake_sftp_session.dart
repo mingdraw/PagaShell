@@ -2,9 +2,10 @@ import 'dart:async';
 
 import 'package:pagashell/domain/ssh/ssh_engine.dart';
 
+import 'fixture_terminal.dart';
 import 'in_memory_local_file_repository.dart';
 
-class FakeSftpSession implements SshEngineSession {
+class FakeSftpSession implements SshEngineSession, TerminalScreenSource {
   FakeSftpSession({this.localFiles});
 
   final InMemoryLocalFileRepository? localFiles;
@@ -23,6 +24,23 @@ class FakeSftpSession implements SshEngineSession {
   final StreamController<String> _shell = StreamController<String>();
   int closes = 0;
   int shellStarts = 0;
+
+  @override
+  Future<void> acknowledgeTerminalFrame(int frameId) async {}
+
+  @override
+  Stream<TerminalFrame> startTerminalShell({
+    required int cols,
+    required int rows,
+    int scrollback = 10000,
+  }) {
+    shellStarts++;
+    return TerminalFrameFixture(
+      columns: cols,
+      rows: rows,
+      scrollback: scrollback,
+    ).decode(_shell.stream);
+  }
 
   @override
   Future<String> canonicalize(String path) async => '/home/test';
@@ -74,12 +92,6 @@ class FakeSftpSession implements SshEngineSession {
     parent.removeWhere((entry) => entry.name == name);
     parent.add(SftpDirEntry(name: name, isDir: false, size: 100));
     yield const SftpTransferProgress(transferred: 100, total: 100);
-  }
-
-  @override
-  Stream<String> startShell({required int cols, required int rows}) {
-    shellStarts++;
-    return _shell.stream;
   }
 
   @override

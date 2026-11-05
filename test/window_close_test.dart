@@ -15,7 +15,8 @@ import 'package:pagashell/domain/proxy/system_proxy.dart';
 import 'package:pagashell/domain/ssh/ssh_engine.dart';
 import 'package:pagashell/domain/vault/secret_store.dart';
 import 'package:pagashell/presentation/shell/shell_page.dart';
-import 'package:xterm/xterm.dart';
+
+import 'support/fixture_terminal.dart';
 
 import 'support/in_memory_agent_conversation_repository.dart';
 import 'support/in_memory_binding.dart';

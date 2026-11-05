@@ -8,10 +8,12 @@ import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 import 'page.dart';
+import 'terminal.dart';
 
-// These functions are ignored because they are not marked as `pub`: `authenticate_inner`, `authenticate`, `bind_forward_ports`, `desktop_tunnel`, `download_inner`, `forward_listener`, `handshake`, `is_closed`, `load_private_key`, `open_sftp_inner`, `open_sftp`, `register_transfer`, `remove_dir_recursive`, `shell_tx`, `spawn_port_forwards`, `start_page_port_forwards`, `start_port_forwards`, `start_shell`, `transfer_cleanup`, `transfer_io`, `unregister_transfer`, `upload_inner`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Credentials`, `ForwardTransport`, `PageForwardEntry`, `PendingSession`, `PinningHandler`, `SessionEntry`, `ShellCmd`, `TransferTimeout`
+// These functions are ignored because they are not marked as `pub`: `ack`, `attempted`, `authenticate_inner`, `authenticate`, `begin_frame`, `bind_forward_ports`, `desktop_tunnel`, `disconnect_handle`, `download_inner`, `due`, `expire_sync`, `feed`, `finish`, `flush`, `forward_listener`, `handshake`, `is_closed`, `load_private_key`, `new`, `open_sftp_inner`, `open_sftp`, `pending`, `register_transfer`, `remove_dir_recursive`, `resize`, `server_status_command`, `shell_tx`, `spawn_port_forwards`, `start_page_port_forwards`, `start_port_forwards`, `start_shell_output`, `transfer_cleanup`, `transfer_io`, `unregister_transfer`, `upload_inner`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Credentials`, `ForwardTransport`, `FrameAcks`, `FramePacer`, `PageForwardEntry`, `PendingSession`, `PinningHandler`, `SessionEntry`, `ShellCmd`, `ShellOutput`, `TransferTimeout`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `check_server_key`, `clone`, `clone`, `fmt`, `fmt`
+// These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
 
 /// 只进行 SSH 握手并返回服务器指纹。此阶段不接收或发送密码。
 Future<SshHandshake> sshHandshake({required String host, required int port}) =>
@@ -77,15 +79,17 @@ Future<int> sshAuthenticatePrivateKey({
   passphrase: passphrase,
 );
 
-/// 打开带 PTY 的 shell 通道，输出通过 [output] 流回 Dart。
-Stream<Uint8List> sshStartShell({
+/// Open a shell whose raw bytes are parsed and retained entirely in Rust.
+Stream<TerminalFrame> sshStartTerminal({
   required int sessionId,
   required int cols,
   required int rows,
-}) => RustLib.instance.api.crateApiSshSshStartShell(
+  required int scrollback,
+}) => RustLib.instance.api.crateApiSshSshStartTerminal(
   sessionId: sessionId,
   cols: cols,
   rows: rows,
+  scrollback: scrollback,
 );
 
 /// 向终端写入用户输入。
@@ -102,6 +106,13 @@ Future<void> sshResize({
   cols: cols,
   rows: rows,
 );
+
+/// Dart 已应用指定帧，放行下一帧。关闭会话、重复或迟到的 ack 静默忽略。
+Future<void> sshTerminalAck({required int sessionId, required int frameId}) =>
+    RustLib.instance.api.crateApiSshSshTerminalAck(
+      sessionId: sessionId,
+      frameId: frameId,
+    );
 
 /// 用独立、无 PTY 的 exec 通道执行固定只读采集脚本，不影响交互终端。
 Future<String> sshReadServerStatus({required int sessionId}) =>

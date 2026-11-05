@@ -20,7 +20,8 @@ import 'package:pagashell/presentation/shell/widgets/workspace.dart';
 import 'package:pagashell/presentation/theme/app_theme.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 import 'package:window_manager/window_manager.dart';
-import 'package:xterm/xterm.dart';
+
+import 'support/fixture_terminal.dart';
 
 import 'support/in_memory_binding.dart';
 import 'support/in_memory_settings_repository.dart';
@@ -46,7 +47,7 @@ void main() {
     }
 
     await launch();
-    final terminal = Terminal()..write('Preserved terminal output');
+    final terminal = Terminal()..writeText('Preserved terminal output');
     final sessions = Get.find<SessionController>();
     sessions.sessions.add(
       Session(

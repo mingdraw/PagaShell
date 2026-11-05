@@ -20,19 +20,30 @@ class IdentityTreeSnapshot {
   final Map<String, Folder> _folders;
   final Map<IdentityTreeItem, IdentityTreeNode> _nodes;
 
-  List<IdentityTreeNode> childrenOf(String? parentId) {
-    final children = _nodes.values
-        .where((node) => node.parentId == parentId)
-        .toList();
-    children.sort((a, b) {
-      final order = a.sortOrder.compareTo(b.sortOrder);
-      if (order != 0) return order;
-      if (a.isFolder != b.isFolder) return a.isFolder ? -1 : 1;
-      final name = a.name.compareTo(b.name);
-      return name != 0 ? name : a.item.id.compareTo(b.item.id);
-    });
-    return children;
-  }
+  /// 父 ID → 已排序子节点，首次查询时一次建好（见 HostTreeSnapshot）。
+  late final Map<String?, List<IdentityTreeNode>> _children = () {
+    final index = <String?, List<IdentityTreeNode>>{};
+    for (final node in _nodes.values) {
+      (index[node.parentId] ??= []).add(node);
+    }
+    for (final children in index.values) {
+      children.sort((a, b) {
+        final order = a.sortOrder.compareTo(b.sortOrder);
+        if (order != 0) return order;
+        if (a.isFolder != b.isFolder) return a.isFolder ? -1 : 1;
+        final name = a.name.compareTo(b.name);
+        return name != 0 ? name : a.item.id.compareTo(b.item.id);
+      });
+    }
+    return index;
+  }();
+
+  /// 返回可修改的副本，调用方可直接在结果上增删。
+  List<IdentityTreeNode> childrenOf(String? parentId) =>
+      List.of(_children[parentId] ?? const <IdentityTreeNode>[]);
+
+  /// 子节点数量，不复制列表。
+  int childCount(String? parentId) => _children[parentId]?.length ?? 0;
 
   int _nextOrder(String? parentId) {
     var largest = -1;

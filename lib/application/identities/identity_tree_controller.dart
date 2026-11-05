@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:get/get.dart';
 
 import '../../domain/entities/identity_tree_item.dart';
@@ -15,10 +17,33 @@ class IdentityTreeController extends GetxController {
   final IdentityTreeRepository repository;
   final IdentityFolderController folders;
   final IdentityController identities;
-  IdentityTreeSnapshot get snapshot => IdentityTreeSnapshot(
-    folders: folders.folders.toList(),
-    identities: identities.identities.toList(),
-  );
+  // 与 HostTreeController 相同：按列表内容缓存，任何变更清空。
+  IdentityTreeSnapshot? _snapshot;
+  List<StreamSubscription<Object?>>? _watchers;
+
+  IdentityTreeSnapshot get snapshot {
+    // 读取列表让调用方所在的 Obx 订阅它们的变化。
+    folders.folders.length;
+    identities.identities.length;
+    _watchers ??= [
+      folders.folders.listen((_) => _snapshot = null),
+      identities.identities.listen((_) => _snapshot = null),
+    ];
+    return _snapshot ??= IdentityTreeSnapshot(
+      folders: folders.folders.toList(),
+      identities: identities.identities.toList(),
+    );
+  }
+
+  @override
+  void onClose() {
+    for (final watcher in _watchers ?? const <StreamSubscription<Object?>>[]) {
+      unawaited(watcher.cancel());
+    }
+    _watchers = null;
+    super.onClose();
+  }
+
   List<IdentityTreeNode> childrenOf(String? parentId) =>
       snapshot.childrenOf(parentId);
   bool canMove(IdentityTreeItem item, IdentityTreePlacement placement) =>

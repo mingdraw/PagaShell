@@ -7,6 +7,7 @@ import 'api/desktop.dart';
 import 'api/page.dart';
 import 'api/proxy.dart';
 import 'api/ssh.dart';
+import 'api/terminal.dart';
 import 'api/vnc.dart';
 
 import 'dart:async';
@@ -71,7 +72,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0';
 
   @override
-  int get rustContentHash => -125682706;
+  int get rustContentHash => -1016295253;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -256,10 +257,16 @@ abstract class RustLibApi extends BaseApi {
     required List<ForwardPortSpec> ports,
   });
 
-  Stream<Uint8List> crateApiSshSshStartShell({
+  Stream<TerminalFrame> crateApiSshSshStartTerminal({
     required int sessionId,
     required int cols,
     required int rows,
+    required int scrollback,
+  });
+
+  Future<void> crateApiSshSshTerminalAck({
+    required int sessionId,
+    required int frameId,
   });
 
   Future<void> crateApiSshSshValidatePrivateKey({
@@ -1578,12 +1585,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Stream<Uint8List> crateApiSshSshStartShell({
+  Stream<TerminalFrame> crateApiSshSshStartTerminal({
     required int sessionId,
     required int cols,
     required int rows,
+    required int scrollback,
   }) {
-    final output = RustStreamSink<Uint8List>();
+    final output = RustStreamSink<TerminalFrame>();
     unawaited(
       handler.executeNormal(
         NormalTask(
@@ -1592,7 +1600,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             sse_encode_u_32(sessionId, serializer);
             sse_encode_u_32(cols, serializer);
             sse_encode_u_32(rows, serializer);
-            sse_encode_StreamSink_list_prim_u_8_strict_Sse(output, serializer);
+            sse_encode_u_32(scrollback, serializer);
+            sse_encode_StreamSink_terminal_frame_Sse(output, serializer);
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
@@ -1604,8 +1613,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             decodeSuccessData: sse_decode_unit,
             decodeErrorData: sse_decode_AnyhowException,
           ),
-          constMeta: kCrateApiSshSshStartShellConstMeta,
-          argValues: [sessionId, cols, rows, output],
+          constMeta: kCrateApiSshSshStartTerminalConstMeta,
+          argValues: [sessionId, cols, rows, scrollback, output],
           apiImpl: this,
         ),
       ),
@@ -1613,9 +1622,44 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     return output.stream;
   }
 
-  TaskConstMeta get kCrateApiSshSshStartShellConstMeta => const TaskConstMeta(
-    debugName: "ssh_start_shell",
-    argNames: ["sessionId", "cols", "rows", "output"],
+  TaskConstMeta get kCrateApiSshSshStartTerminalConstMeta =>
+      const TaskConstMeta(
+        debugName: "ssh_start_terminal",
+        argNames: ["sessionId", "cols", "rows", "scrollback", "output"],
+      );
+
+  @override
+  Future<void> crateApiSshSshTerminalAck({
+    required int sessionId,
+    required int frameId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_32(sessionId, serializer);
+          sse_encode_u_32(frameId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 37,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiSshSshTerminalAckConstMeta,
+        argValues: [sessionId, frameId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiSshSshTerminalAckConstMeta => const TaskConstMeta(
+    debugName: "ssh_terminal_ack",
+    argNames: ["sessionId", "frameId"],
   );
 
   @override
@@ -1632,7 +1676,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 37,
+            funcId: 38,
             port: port_,
           );
         },
@@ -1667,7 +1711,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 38,
+            funcId: 39,
             port: port_,
           );
         },
@@ -1707,7 +1751,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 39,
+            funcId: 40,
             port: port_,
           );
         },
@@ -1737,7 +1781,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 40,
+            funcId: 41,
             port: port_,
           );
         },
@@ -1769,7 +1813,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 41,
+            funcId: 42,
             port: port_,
           );
         },
@@ -1813,7 +1857,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 42,
+            funcId: 43,
             port: port_,
           );
         },
@@ -1840,7 +1884,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  RustStreamSink<Uint8List> dco_decode_StreamSink_list_prim_u_8_strict_Sse(
+  RustStreamSink<PortForwardEvent> dco_decode_StreamSink_port_forward_event_Sse(
     dynamic raw,
   ) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
@@ -1848,7 +1892,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  RustStreamSink<PortForwardEvent> dco_decode_StreamSink_port_forward_event_Sse(
+  RustStreamSink<TerminalFrame> dco_decode_StreamSink_terminal_frame_Sse(
     dynamic raw,
   ) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
@@ -2025,6 +2069,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  Uint32List dco_decode_list_prim_u_32_strict(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as Uint32List;
+  }
+
+  @protected
   List<int> dco_decode_list_prim_u_8_loose(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as List<int>;
@@ -2040,6 +2090,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   List<SftpEntry> dco_decode_list_sftp_entry(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return (raw as List<dynamic>).map(dco_decode_sftp_entry).toList();
+  }
+
+  @protected
+  List<TerminalCluster> dco_decode_list_terminal_cluster(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_terminal_cluster).toList();
+  }
+
+  @protected
+  List<TerminalLine> dco_decode_list_terminal_line(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_terminal_line).toList();
   }
 
   @protected
@@ -2143,6 +2205,56 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  TerminalCluster dco_decode_terminal_cluster(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return TerminalCluster(
+      column: dco_decode_u_32(arr[0]),
+      text: dco_decode_String(arr[1]),
+    );
+  }
+
+  @protected
+  TerminalFrame dco_decode_terminal_frame(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 14)
+      throw Exception('unexpected arr length: expect 14 but see ${arr.length}');
+    return TerminalFrame(
+      frameId: dco_decode_u_32(arr[0]),
+      columns: dco_decode_u_32(arr[1]),
+      rows: dco_decode_u_32(arr[2]),
+      alternate: dco_decode_bool(arr[3]),
+      cursorX: dco_decode_u_32(arr[4]),
+      cursorY: dco_decode_u_32(arr[5]),
+      modes: dco_decode_u_32(arr[6]),
+      cursorBlink: dco_decode_bool(arr[7]),
+      trimFront: dco_decode_u_32(arr[8]),
+      keepRows: dco_decode_u_32(arr[9]),
+      appendRows: dco_decode_list_prim_u_32_strict(arr[10]),
+      lines: dco_decode_list_terminal_line(arr[11]),
+      title: dco_decode_opt_String(arr[12]),
+      bell: dco_decode_bool(arr[13]),
+    );
+  }
+
+  @protected
+  TerminalLine dco_decode_terminal_line(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return TerminalLine(
+      id: dco_decode_u_32(arr[0]),
+      wrapped: dco_decode_bool(arr[1]),
+      cells: dco_decode_list_prim_u_32_strict(arr[2]),
+      clusters: dco_decode_list_terminal_cluster(arr[3]),
+    );
+  }
+
+  @protected
   TransferProgress dco_decode_transfer_progress(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
@@ -2193,7 +2305,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  RustStreamSink<Uint8List> sse_decode_StreamSink_list_prim_u_8_strict_Sse(
+  RustStreamSink<PortForwardEvent> sse_decode_StreamSink_port_forward_event_Sse(
     SseDeserializer deserializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -2201,7 +2313,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  RustStreamSink<PortForwardEvent> sse_decode_StreamSink_port_forward_event_Sse(
+  RustStreamSink<TerminalFrame> sse_decode_StreamSink_terminal_frame_Sse(
     SseDeserializer deserializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -2422,6 +2534,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  Uint32List sse_decode_list_prim_u_32_strict(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var len_ = sse_decode_i_32(deserializer);
+    return deserializer.buffer.getUint32List(len_);
+  }
+
+  @protected
   List<int> sse_decode_list_prim_u_8_loose(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var len_ = sse_decode_i_32(deserializer);
@@ -2443,6 +2562,34 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var ans_ = <SftpEntry>[];
     for (var idx_ = 0; idx_ < len_; ++idx_) {
       ans_.add(sse_decode_sftp_entry(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<TerminalCluster> sse_decode_list_terminal_cluster(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <TerminalCluster>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_terminal_cluster(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<TerminalLine> sse_decode_list_terminal_line(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <TerminalLine>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_terminal_line(deserializer));
     }
     return ans_;
   }
@@ -2586,6 +2733,64 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  TerminalCluster sse_decode_terminal_cluster(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_column = sse_decode_u_32(deserializer);
+    var var_text = sse_decode_String(deserializer);
+    return TerminalCluster(column: var_column, text: var_text);
+  }
+
+  @protected
+  TerminalFrame sse_decode_terminal_frame(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_frameId = sse_decode_u_32(deserializer);
+    var var_columns = sse_decode_u_32(deserializer);
+    var var_rows = sse_decode_u_32(deserializer);
+    var var_alternate = sse_decode_bool(deserializer);
+    var var_cursorX = sse_decode_u_32(deserializer);
+    var var_cursorY = sse_decode_u_32(deserializer);
+    var var_modes = sse_decode_u_32(deserializer);
+    var var_cursorBlink = sse_decode_bool(deserializer);
+    var var_trimFront = sse_decode_u_32(deserializer);
+    var var_keepRows = sse_decode_u_32(deserializer);
+    var var_appendRows = sse_decode_list_prim_u_32_strict(deserializer);
+    var var_lines = sse_decode_list_terminal_line(deserializer);
+    var var_title = sse_decode_opt_String(deserializer);
+    var var_bell = sse_decode_bool(deserializer);
+    return TerminalFrame(
+      frameId: var_frameId,
+      columns: var_columns,
+      rows: var_rows,
+      alternate: var_alternate,
+      cursorX: var_cursorX,
+      cursorY: var_cursorY,
+      modes: var_modes,
+      cursorBlink: var_cursorBlink,
+      trimFront: var_trimFront,
+      keepRows: var_keepRows,
+      appendRows: var_appendRows,
+      lines: var_lines,
+      title: var_title,
+      bell: var_bell,
+    );
+  }
+
+  @protected
+  TerminalLine sse_decode_terminal_line(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_id = sse_decode_u_32(deserializer);
+    var var_wrapped = sse_decode_bool(deserializer);
+    var var_cells = sse_decode_list_prim_u_32_strict(deserializer);
+    var var_clusters = sse_decode_list_terminal_cluster(deserializer);
+    return TerminalLine(
+      id: var_id,
+      wrapped: var_wrapped,
+      cells: var_cells,
+      clusters: var_clusters,
+    );
+  }
+
+  @protected
   TransferProgress sse_decode_transfer_progress(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_transferred = sse_decode_u_64(deserializer);
@@ -2643,23 +2848,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_StreamSink_list_prim_u_8_strict_Sse(
-    RustStreamSink<Uint8List> self,
-    SseSerializer serializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_String(
-      self.setupAndSerialize(
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_list_prim_u_8_strict,
-          decodeErrorData: sse_decode_AnyhowException,
-        ),
-      ),
-      serializer,
-    );
-  }
-
-  @protected
   void sse_encode_StreamSink_port_forward_event_Sse(
     RustStreamSink<PortForwardEvent> self,
     SseSerializer serializer,
@@ -2669,6 +2857,23 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       self.setupAndSerialize(
         codec: SseCodec(
           decodeSuccessData: sse_decode_port_forward_event,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+      ),
+      serializer,
+    );
+  }
+
+  @protected
+  void sse_encode_StreamSink_terminal_frame_Sse(
+    RustStreamSink<TerminalFrame> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(
+      self.setupAndSerialize(
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_terminal_frame,
           decodeErrorData: sse_decode_AnyhowException,
         ),
       ),
@@ -2859,6 +3064,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_list_prim_u_32_strict(
+    Uint32List self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    serializer.buffer.putUint32List(self);
+  }
+
+  @protected
   void sse_encode_list_prim_u_8_loose(
     List<int> self,
     SseSerializer serializer,
@@ -2889,6 +3104,30 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_i_32(self.length, serializer);
     for (final item in self) {
       sse_encode_sftp_entry(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_terminal_cluster(
+    List<TerminalCluster> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_terminal_cluster(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_terminal_line(
+    List<TerminalLine> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_terminal_line(item, serializer);
     }
   }
 
@@ -3009,6 +3248,44 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_u_32(self.sessionId, serializer);
     sse_encode_String(self.keyType, serializer);
     sse_encode_String(self.fingerprint, serializer);
+  }
+
+  @protected
+  void sse_encode_terminal_cluster(
+    TerminalCluster self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_u_32(self.column, serializer);
+    sse_encode_String(self.text, serializer);
+  }
+
+  @protected
+  void sse_encode_terminal_frame(TerminalFrame self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_u_32(self.frameId, serializer);
+    sse_encode_u_32(self.columns, serializer);
+    sse_encode_u_32(self.rows, serializer);
+    sse_encode_bool(self.alternate, serializer);
+    sse_encode_u_32(self.cursorX, serializer);
+    sse_encode_u_32(self.cursorY, serializer);
+    sse_encode_u_32(self.modes, serializer);
+    sse_encode_bool(self.cursorBlink, serializer);
+    sse_encode_u_32(self.trimFront, serializer);
+    sse_encode_u_32(self.keepRows, serializer);
+    sse_encode_list_prim_u_32_strict(self.appendRows, serializer);
+    sse_encode_list_terminal_line(self.lines, serializer);
+    sse_encode_opt_String(self.title, serializer);
+    sse_encode_bool(self.bell, serializer);
+  }
+
+  @protected
+  void sse_encode_terminal_line(TerminalLine self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_u_32(self.id, serializer);
+    sse_encode_bool(self.wrapped, serializer);
+    sse_encode_list_prim_u_32_strict(self.cells, serializer);
+    sse_encode_list_terminal_cluster(self.clusters, serializer);
   }
 
   @protected

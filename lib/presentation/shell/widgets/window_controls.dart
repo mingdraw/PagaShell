@@ -24,7 +24,7 @@ class SidebarToggleButton extends StatelessWidget {
     final agentSidebar = AgentSidebarScope.maybeOf(context);
     return Obx(() {
       final visible =
-          settings.sidebarState.value.visible &&
+          settings.sidebarVisible.value &&
           !(agentSidebar?.sidebarHiddenForSpace ?? false);
       return AppIconButton(
         key: const ValueKey('sidebar-toggle'),

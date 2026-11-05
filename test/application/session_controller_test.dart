@@ -11,11 +11,13 @@ import 'package:pagashell/domain/entities/host.dart';
 import 'package:pagashell/domain/repositories/known_host_repository.dart';
 import 'package:pagashell/domain/ssh/host_key.dart';
 import 'package:pagashell/domain/ssh/ssh_engine.dart';
-import 'package:xterm/xterm.dart';
+
+import '../support/fixture_terminal.dart';
 
 import '../support/in_memory_binding.dart';
+import '../support/native_terminal_frames.dart';
 
-class _FakeEngineSession implements SshEngineSession {
+class _FakeEngineSession implements SshEngineSession, TerminalScreenSource {
   _FakeEngineSession({this.throwOnClose = false});
 
   final bool throwOnClose;
@@ -28,12 +30,25 @@ class _FakeEngineSession implements SshEngineSession {
   Completer<void>? outputCancelGate;
   (int, int)? initialSize;
   final List<(int, int)> resized = [];
+  TerminalFrameFixture? _terminalFixture;
 
   @override
-  Stream<String> startShell({required int cols, required int rows}) {
+  Future<void> acknowledgeTerminalFrame(int frameId) async {}
+
+  @override
+  Stream<TerminalFrame> startTerminalShell({
+    required int cols,
+    required int rows,
+    int scrollback = 10000,
+  }) {
+    final fixture = _terminalFixture = TerminalFrameFixture(
+      columns: cols,
+      rows: rows,
+      scrollback: scrollback,
+    );
     shellStarts++;
     initialSize = (cols, rows);
-    return _output.stream;
+    return fixture.decode(_output.stream);
   }
 
   @override
@@ -43,7 +58,14 @@ class _FakeEngineSession implements SshEngineSession {
   }
 
   @override
-  void resizeTerminal(int width, int height) => resized.add((width, height));
+  void resizeTerminal(int width, int height) {
+    resized.add((width, height));
+    final fixture = _terminalFixture;
+    if (fixture != null && !_output.isClosed) {
+      fixture.resize(width, height);
+      _output.add('');
+    }
+  }
 
   @override
   Future<List<SftpDirEntry>> listDir(String path) async => const [];
@@ -88,12 +110,16 @@ class _FakeEngine implements SshEngine {
     this.throwOnSessionClose = false,
     this.hostKey,
     this.waitForCancellation = false,
+    this.nativeTerminal = false,
+    this.connectionFailure,
   });
 
   final int failuresBeforeSuccess;
   final bool throwOnSessionClose;
   final SshHostKey? hostKey;
   final bool waitForCancellation;
+  final bool nativeTerminal;
+  final Object? connectionFailure;
   int calls = 0;
   int authentications = 0;
   final List<_FakeEngineSession> created = [];
@@ -110,6 +136,7 @@ class _FakeEngine implements SshEngine {
   }) async {
     gateways.add(gateway);
     logins.add(credentials);
+    if (connectionFailure != null) throw connectionFailure!;
     if (calls++ < failuresBeforeSuccess) {
       throw const SshEngineException('认证失败');
     }
@@ -121,9 +148,42 @@ class _FakeEngine implements SshEngine {
       throw const SshEngineException('连接已取消');
     }
     authentications++;
-    final session = _FakeEngineSession(throwOnClose: throwOnSessionClose);
+    final session = nativeTerminal
+        ? _NativeEngineSession()
+        : _FakeEngineSession(throwOnClose: throwOnSessionClose);
     created.add(session);
     return session;
+  }
+}
+
+class _NativeEngineSession extends _FakeEngineSession
+    implements TerminalScreenSource {
+  int frameStarts = 0;
+  final frames = StreamController<TerminalFrame>();
+  final acknowledged = <int>[];
+  Future<void> Function(int)? onAcknowledge;
+
+  @override
+  Future<void> acknowledgeTerminalFrame(int frameId) async {
+    acknowledged.add(frameId);
+    await onAcknowledge?.call(frameId);
+  }
+
+  @override
+  Stream<TerminalFrame> startTerminalShell({
+    required int cols,
+    required int rows,
+    int scrollback = 10000,
+  }) {
+    frameStarts++;
+    initialSize = (cols, rows);
+    return frames.stream;
+  }
+
+  @override
+  Future<void> close() async {
+    await super.close();
+    unawaited(frames.close());
   }
 }
 
@@ -189,6 +249,23 @@ class _KnownHosts implements KnownHostRepository {
 }
 
 Future<void> _flush() => Future<void>.delayed(Duration.zero);
+
+TerminalFrame _withFrameId(TerminalFrame frame, int frameId) => TerminalFrame(
+  frameId: frameId,
+  columns: frame.columns,
+  rows: frame.rows,
+  alternate: frame.alternate,
+  cursorX: frame.cursorX,
+  cursorY: frame.cursorY,
+  modes: frame.modes,
+  cursorBlink: frame.cursorBlink,
+  trimFront: frame.trimFront,
+  keepRows: frame.keepRows,
+  appendRows: frame.appendRows,
+  lines: frame.lines,
+  title: frame.title,
+  bell: frame.bell,
+);
 
 Future<String> _rejectChangedKey(
   SessionController controller, {
@@ -638,6 +715,195 @@ void main() {
       expect(engine.created.single.written, ['ls\n']);
     });
 
+    test('原生会话使用 Rust 帧流、同步输入模式并在关闭时释放显示状态', () async {
+      final engine = _FakeEngine(nativeTerminal: true);
+      final controller = SessionController(engine: engine);
+      addTearDown(controller.onClose);
+      final id = await controller.open(_host, _credentials);
+      final remote = engine.created.single as _NativeEngineSession;
+      final terminal = controller.sessions.single.terminal!;
+      expect(terminal, isA<Terminal>());
+      expect(remote.shellStarts, 0);
+      expect(remote.frameStarts, 1);
+      expect(remote.initialSize, (80, 24));
+      for (final frame in nativeTerminalFrames().take(3)) {
+        remote.frames.add(frame);
+      }
+      await Future<void>.delayed(Duration.zero);
+      expect(terminal.isUsingAltBuffer, isTrue);
+      terminal.textInput('echo 中文\r');
+      controller.sendCommandToSessions([id], 'pwd');
+      expect(remote.written, ['echo 中文\r', '\x1b[200~pwd\x1b[201~\r']);
+      terminal.resize(100, 30);
+      expect(remote.resized.last, (100, 30));
+      await controller.close(id);
+      expect(remote.frames.hasListener, isFalse);
+      expect(remote.closed, isTrue);
+      expect(terminal.onOutput, isNull);
+      expect(terminal.lines.length, 0);
+    });
+
+    test('原生帧流结束时关闭对应终端页签', () async {
+      final engine = _FakeEngine(nativeTerminal: true);
+      final controller = SessionController(engine: engine);
+      addTearDown(controller.onClose);
+      await controller.open(_host, _credentials);
+      final remote = engine.created.single as _NativeEngineSession;
+      await remote.frames.close();
+      await Future<void>.delayed(Duration.zero);
+      expect(controller.sessions, isEmpty);
+      expect(remote.closed, isTrue);
+    });
+
+    test('整帧及同步监听器应用完成才 ack，确认完成前串行消费后续帧', () async {
+      final engine = _FakeEngine(nativeTerminal: true);
+      final controller = SessionController(engine: engine);
+      addTearDown(controller.onClose);
+      await controller.open(_host, _credentials);
+      final remote = engine.created.single as _NativeEngineSession;
+      final terminal = controller.sessions.single.terminal!;
+      final fixture = TerminalFrameFixture();
+      final first = _withFrameId(fixture.writeText('first'), 11);
+      fixture.writeText(' second');
+      final second = _withFrameId(fixture.setBracketedPaste(true), 12);
+      final ack = Completer<void>();
+      var applied = 0;
+      terminal.addListener(() => applied++);
+      remote.onAcknowledge = (frameId) async {
+        expect(applied, frameId == 11 ? 1 : 2);
+        expect(terminal.bracketedPasteMode, frameId == 12);
+        expect(
+          terminal.lines[0].getText(),
+          frameId == 11 ? 'first' : 'first second',
+        );
+        if (frameId == 11) await ack.future;
+      };
+
+      // 没有挂载视图也应确认，后台页签不能依赖绘制回调。
+      remote.frames
+        ..add(first)
+        ..add(second);
+      await _flush();
+      expect(remote.acknowledged, [11]);
+      expect(applied, 1);
+      expect(terminal.lines[0].getText(), 'first');
+
+      ack.complete();
+      await _flush();
+      expect(remote.acknowledged, [11, 12]);
+      expect(applied, 2);
+      await controller.close(controller.sessions.single.id);
+    });
+
+    test('帧应用失败不 ack，并关闭对应原生会话', () async {
+      final engine = _FakeEngine(nativeTerminal: true);
+      final controller = SessionController(engine: engine);
+      addTearDown(controller.onClose);
+      await controller.open(_host, _credentials);
+      final remote = engine.created.single as _NativeEngineSession;
+      controller.sessions.single.terminal!.addListener(
+        () => throw StateError('frame application failed'),
+      );
+
+      remote.frames.add(
+        _withFrameId(TerminalFrameFixture().writeText('output'), 21),
+      );
+      await _flush();
+      expect(remote.acknowledged, isEmpty);
+      expect(controller.sessions, isEmpty);
+      expect(remote.closed, isTrue);
+    });
+
+    test('ack 失败关闭对应原生会话并接住异步错误', () async {
+      final engine = _FakeEngine(nativeTerminal: true);
+      final controller = SessionController(engine: engine);
+      addTearDown(controller.onClose);
+      await controller.open(_host, _credentials);
+      final remote = engine.created.single as _NativeEngineSession;
+      remote.onAcknowledge = (_) async => throw StateError('ack failed');
+      remote.frames.add(
+        _withFrameId(TerminalFrameFixture().writeText('output'), 31),
+      );
+      await _flush();
+      expect(remote.acknowledged, [31]);
+      expect(controller.sessions, isEmpty);
+      expect(remote.closed, isTrue);
+    });
+
+    test('同步监听器关闭终端后不再 ack', () async {
+      final engine = _FakeEngine(nativeTerminal: true);
+      final controller = SessionController(engine: engine);
+      addTearDown(controller.onClose);
+      final id = await controller.open(_host, _credentials);
+      final remote = engine.created.single as _NativeEngineSession;
+      controller.sessions.single.terminal!.addListener(
+        () => unawaited(controller.close(id)),
+      );
+      remote.frames.add(
+        _withFrameId(TerminalFrameFixture().writeText('exit'), 41),
+      );
+      await _flush();
+      expect(remote.acknowledged, isEmpty);
+      expect(controller.sessions, isEmpty);
+      expect(remote.closed, isTrue);
+    });
+
+    test('末帧应用和确认完成后才处理流结束', () async {
+      final engine = _FakeEngine(nativeTerminal: true);
+      final controller = SessionController(engine: engine);
+      addTearDown(controller.onClose);
+      await controller.open(_host, _credentials);
+      final remote = engine.created.single as _NativeEngineSession;
+      final ack = Completer<void>();
+      remote.onAcknowledge = (_) => ack.future;
+      remote.frames.add(
+        _withFrameId(TerminalFrameFixture().writeText('last output'), 51),
+      );
+      final ended = remote.frames.close();
+      await _flush();
+      expect(remote.acknowledged, [51]);
+      expect(
+        controller.sessions.single.terminal!.lines[0].getText(),
+        'last output',
+      );
+      expect(remote.closed, isFalse);
+
+      ack.complete();
+      await ended;
+      await _flush();
+      expect(controller.sessions, isEmpty);
+      expect(remote.closed, isTrue);
+    });
+
+    test('ack 未返回也能关闭，排队帧及迟到 ack 错误不影响新终端', () async {
+      final engine = _FakeEngine(nativeTerminal: true);
+      final controller = SessionController(engine: engine);
+      addTearDown(controller.onClose);
+      final id = await controller.open(_host, _credentials);
+      final remote = engine.created.single as _NativeEngineSession;
+      final terminal = controller.sessions.single.terminal!;
+      final ack = Completer<void>();
+      remote.onAcknowledge = (_) => ack.future;
+      final fixture = TerminalFrameFixture();
+      remote.frames
+        ..add(_withFrameId(fixture.writeText('first'), 61))
+        ..add(_withFrameId(fixture.writeText(' queued'), 62));
+      await _flush();
+      expect(remote.acknowledged, [61]);
+
+      await controller.close(id).timeout(const Duration(seconds: 1));
+      expect(remote.closed, isTrue);
+      expect(remote.frames.hasListener, isFalse);
+      expect(terminal.isDisposed, isTrue);
+      final replacement = await controller.open(_host, _credentials);
+      ack.completeError(StateError('late ack failure'));
+      await _flush();
+      expect(remote.acknowledged, [61]);
+      expect(terminal.lines.length, 0);
+      expect(controller.sessions.single.id, replacement);
+      expect(controller.sessions.single.phase, SessionPhase.ready);
+    });
+
     test('批量命令仅发送到所选 SSH 终端，去重并排除传输和转发', () async {
       final engine = _FakeEngine();
       final controller = SessionController(engine: engine);
@@ -680,7 +946,7 @@ void main() {
       addTearDown(controller.onClose);
       final first = await controller.open(_host, _credentials);
       final second = await controller.open(_host, _credentials);
-      controller.sessions[1].terminal!.write('\x1b[?2004h');
+      controller.sessions[1].terminal!.setBracketedPaste(true);
       const command = "cat <<'EOF'\r\n  hello\rworld\r\nEOF";
       final result = controller.sendCommandToSessions([first, second], command);
       expect(result.sent, 2);
@@ -845,20 +1111,34 @@ void main() {
         engine: engine,
         transfers: transfers,
       );
+      final otherId = await controller.open(
+        _host,
+        _credentials,
+        kind: SessionKind.fileTransfer,
+      );
       final id = await controller.open(
         _host,
         _credentials,
         kind: SessionKind.fileTransfer,
       );
+      final other = transfers.startDownload(
+        sessionId: otherId,
+        engineSession: engine.created.first,
+        remotePath: '/b.txt',
+        localPath: '/tmp/b.txt',
+      );
       final task = transfers.startDownload(
         sessionId: id,
-        engineSession: engine.created.single,
+        engineSession: engine.created.last,
         remotePath: '/a.txt',
         localPath: '/tmp/a.txt',
       );
       await controller.close(id);
       expect(task.status.value, TransferStatus.cancelled);
-      expect(engine.created.single.closed, isTrue);
+      expect(engine.created.last.closed, isTrue);
+      // 标签关闭后其传输记录一并移除，其他标签的任务不受影响。
+      expect(transfers.tasks, [other]);
+      await controller.close(otherId);
       transfers.onClose();
     });
 
@@ -872,6 +1152,20 @@ void main() {
       final session = controller.sessions.single;
       expect(session.phase, SessionPhase.failed);
       expect(session.error, '认证失败');
+    });
+
+    test('未知连接异常显示通用提示，不回显本地路径和平台原文', () async {
+      final controller = SessionController(
+        engine: _FakeEngine(
+          connectionFailure: StateError(
+            '/Users/test/private/session.sock: platform failure',
+          ),
+        ),
+      );
+      final id = await controller.open(_host, _credentials);
+      expect(controller.sessions.single.phase, SessionPhase.failed);
+      expect(controller.sessions.single.error, '连接失败，请检查连接配置和网络后重试');
+      await controller.close(id);
     });
 
     test('failed 会话可以用原凭据 retry 成功', () async {

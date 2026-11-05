@@ -26,6 +26,7 @@ import '../../../domain/ssh/ssh_engine.dart';
 import '../../../domain/vault/secret_store.dart';
 import '../../components/app_list_row.dart';
 import '../../components/app_menu.dart';
+import '../../components/app_tree_drag.dart';
 import '../../components/app_tree_expansion.dart';
 import '../../folders/folder_dialogs.dart';
 import '../../hosts/host_edit_dialog.dart';
@@ -51,9 +52,9 @@ class _SidebarState extends State<Sidebar> {
       _settings.sidebarState.value.isSectionExpanded(SidebarSection.identities);
   bool get _gatewaysExpanded =>
       _settings.sidebarState.value.isSectionExpanded(SidebarSection.gateways);
-  final _dragAnchor = HostTreeDragAnchor();
-  final _identityDragAnchor = HostTreeDragAnchor();
-  final _gatewayDragAnchor = HostTreeDragAnchor();
+  final _dragAnchor = TreeDragAnchor();
+  final _identityDragAnchor = TreeDragAnchor();
+  final _gatewayDragAnchor = TreeDragAnchor();
 
   void _setGroupExpanded(SidebarSection section, bool expanded) {
     unawaited(
@@ -353,9 +354,9 @@ class _SidebarState extends State<Sidebar> {
 List<Widget> _hostGroupChildren(
   FolderController folderController,
   HostTreeSnapshot snapshot,
-  HostTreeDragAnchor dragAnchor,
+  TreeDragAnchor dragAnchor,
 ) {
-  if (snapshot.childrenOf(null).isEmpty) {
+  if (snapshot.childCount(null) == 0) {
     return const [_EmptyHostsHint()];
   }
   return _buildTreeNodes(folderController, snapshot, null, 1, dragAnchor);
@@ -365,9 +366,9 @@ List<Widget> _hostGroupChildren(
 List<Widget> _identityGroupChildren(
   IdentityFolderController folders,
   IdentityTreeSnapshot snapshot,
-  HostTreeDragAnchor dragAnchor,
+  TreeDragAnchor dragAnchor,
 ) {
-  if (snapshot.childrenOf(null).isEmpty) return const [_EmptyIdentitiesHint()];
+  if (snapshot.childCount(null) == 0) return const [_EmptyIdentitiesHint()];
   return _buildIdentityTreeNodes(folders, snapshot, null, 1, dragAnchor);
 }
 
@@ -376,7 +377,7 @@ List<Widget> _buildIdentityTreeNodes(
   IdentityTreeSnapshot snapshot,
   String? parentId,
   int depth,
-  HostTreeDragAnchor dragAnchor,
+  TreeDragAnchor dragAnchor,
 ) {
   final widgets = <Widget>[];
   for (final node in snapshot.childrenOf(parentId)) {
@@ -390,7 +391,7 @@ List<Widget> _buildIdentityTreeNodes(
           containsIdentities: true,
           depth: depth,
           expanded: expanded,
-          childCount: snapshot.childrenOf(folder.id).length,
+          childCount: snapshot.childCount(folder.id),
           dragAnchor: dragAnchor,
         ),
       );
@@ -501,7 +502,7 @@ List<Widget> _buildTreeNodes(
   HostTreeSnapshot snapshot,
   String? parentId,
   int depth,
-  HostTreeDragAnchor dragAnchor, {
+  TreeDragAnchor dragAnchor, {
   bool gateway = false,
 }) {
   final widgets = <Widget>[];
@@ -516,7 +517,7 @@ List<Widget> _buildTreeNodes(
           containsGateways: gateway,
           depth: depth,
           expanded: expanded,
-          childCount: snapshot.childrenOf(folder.id).length,
+          childCount: snapshot.childCount(folder.id),
           dragAnchor: dragAnchor,
         ),
       );
@@ -567,7 +568,7 @@ class _FolderTile extends StatelessWidget {
   final int depth;
   final bool expanded;
   final int childCount;
-  final HostTreeDragAnchor dragAnchor;
+  final TreeDragAnchor dragAnchor;
   final bool containsIdentities;
   final bool containsGateways;
 
@@ -785,7 +786,7 @@ class _IdentityTile extends StatelessWidget {
 
   final Identity identity;
   final int depth;
-  final HostTreeDragAnchor dragAnchor;
+  final TreeDragAnchor dragAnchor;
 
   Future<void> _onAction(BuildContext context, String action) async {
     switch (action) {
@@ -857,7 +858,7 @@ class _HostTile extends StatefulWidget {
 
   final Host host;
   final int depth;
-  final HostTreeDragAnchor dragAnchor;
+  final TreeDragAnchor dragAnchor;
   final bool reorderable;
   final bool gateway;
 

@@ -32,10 +32,6 @@ class _FakeTransferSession implements SshEngineSession {
   }
 
   @override
-  Stream<String> startShell({required int cols, required int rows}) =>
-      const Stream.empty();
-
-  @override
   void write(String data) {}
 
   @override
@@ -402,6 +398,57 @@ void main() {
 
       await session.progress.close();
       await pump();
+      expect(task.status.value, TransferStatus.done);
+    });
+
+    test('高频进度合并写入，结束时落最后进度', () async {
+      final task = controller.startDownload(
+        sessionId: 's1',
+        engineSession: session,
+        remotePath: '/big.bin',
+        localPath: '/tmp/big.bin',
+      );
+      final writes = <int>[];
+      final sub = task.transferred.listen(writes.add);
+      addTearDown(sub.cancel);
+
+      for (var i = 1; i <= 50; i++) {
+        session.progress.add(
+          SftpTransferProgress(transferred: i * 10, total: 500),
+        );
+      }
+      await pump();
+      // 首个事件立即生效，其余合并等待下一个间隔。
+      expect(task.transferred.value, 10);
+
+      await Future<void>.delayed(
+        TransferController.progressInterval + const Duration(milliseconds: 50),
+      );
+      expect(task.transferred.value, 500);
+      expect(writes, [10, 500]);
+
+      session.progress.add(
+        const SftpTransferProgress(transferred: 500, total: 500),
+      );
+      await session.progress.close();
+      await pump();
+      expect(task.status.value, TransferStatus.done);
+      expect(task.fraction, 1.0);
+    });
+
+    test('流结束时立即写入尚未合并的进度', () async {
+      final task = controller.startDownload(
+        sessionId: 's1',
+        engineSession: session,
+        remotePath: '/b.bin',
+        localPath: '/tmp/b.bin',
+      );
+      session.progress
+        ..add(const SftpTransferProgress(transferred: 1, total: 4))
+        ..add(const SftpTransferProgress(transferred: 4, total: 4));
+      await session.progress.close();
+      await pump();
+      expect(task.transferred.value, 4);
       expect(task.status.value, TransferStatus.done);
     });
 

@@ -14,9 +14,9 @@ import 'package:pagashell/domain/entities/host.dart';
 import 'package:pagashell/domain/ssh/server_status.dart';
 import 'package:pagashell/domain/ssh/ssh_engine.dart';
 import 'package:pagashell/infrastructure/vault/in_memory_secret_store.dart';
-import 'package:xterm/xterm.dart';
 
 import '../support/fake_ai_connect.dart';
+import '../support/fixture_terminal.dart';
 import '../support/in_memory_agent_conversation_repository.dart';
 import '../support/in_memory_ai_settings_repository.dart';
 
@@ -40,6 +40,16 @@ class _ControlledHistory extends InMemoryAgentConversationRepository {
   Future<void> remove(String id) async {
     await pendingDelete;
     await super.remove(id);
+  }
+}
+
+class _CountingHistory extends _ControlledHistory {
+  int saves = 0;
+
+  @override
+  Future<void> save(AgentConversation conversation) async {
+    saves++;
+    await super.save(conversation);
   }
 }
 
@@ -875,7 +885,7 @@ void main() {
     expect(second, isEmpty);
     expect(app.agent.approveCommand(proposal), isFalse);
     expect(first, hasLength(1));
-    app.sessions.sessions.first.terminal!.write('disk output\r\n');
+    app.sessions.sessions.first.terminal!.writeText('disk output\r\n');
     await run;
     expect(jsonEncode(connect.requests.last.body), contains('disk output'));
     expect(app.agent.waitingForApproval.value, isFalse);
@@ -953,7 +963,7 @@ void main() {
     var count = 0;
     final connect = FakeAiConnect((_) {
       if (++count == 1) {
-        selected.terminal!.write('\r\nnew-port-listener');
+        selected.terminal!.writeText('\r\nnew-port-listener');
         return openAiReply(
           '',
           calls: [
@@ -966,9 +976,12 @@ void main() {
     final app = await setup(connect);
     final written = <String>[];
     selected = terminal('selected', written);
-    selected.terminal!.write('\x1b[31mnginx LISTEN :80\x1b[0m\r\n');
+    selected.terminal!.writeText(
+      'nginx LISTEN :80\r\n',
+      foreground: (1 << 25) | 1,
+    );
     final other = terminal('other', [])
-      ..terminal!.write('unselected-private-output');
+      ..terminal!.writeText('unselected-private-output');
     app.sessions.sessions.addAll([selected, other]);
     app.sessions.activeSessionId.value = other.id;
     app.agent.setReferencedSessions([selected]);
@@ -994,7 +1007,7 @@ void main() {
     );
     final app = await setup(connect);
     final selected = terminal('one', []);
-    selected.terminal!.write('unshared-only-output');
+    selected.terminal!.writeText('unshared-only-output');
     app.sessions.sessions.add(selected);
     app.sessions.activeSessionId.value = selected.id;
     await app.agent.send('Read output');
@@ -1005,7 +1018,7 @@ void main() {
     app.agent.setReferencedSessions([selected]);
     selected.terminal!.resize(240, 24);
     for (var index = 0; index < 400; index++) {
-      selected.terminal!.write('line-$index ${'x' * 180}\r\n');
+      selected.terminal!.writeText('line-$index ${'x' * 180}\r\n');
     }
     await app.agent.send('Read latest output');
     final messages = connect.requests.last.body['messages'] as List<dynamic>;
@@ -1024,8 +1037,8 @@ void main() {
     var count = 0;
     final connect = FakeAiConnect((_) {
       if (++count > 1) return openAiReply('Compared.');
-      first.terminal!.write('alpha-new-output\r\n');
-      second.terminal!.write('beta-new-output\r\n');
+      first.terminal!.writeText('alpha-new-output\r\n');
+      second.terminal!.writeText('beta-new-output\r\n');
       return openAiReply(
         '',
         calls: [
@@ -1044,13 +1057,14 @@ void main() {
     final alphaEngine = _SshSession();
     final betaEngine = _SshSession();
     first = terminal('alpha', [], engine: alphaEngine)
-      ..terminal!.write('alpha-initial-output\r\n');
+      ..terminal!.writeText('alpha-initial-output\r\n');
     second = terminal('beta', [], engine: betaEngine)
-      ..terminal!.write('beta-initial-output\r\n');
+      ..terminal!.writeText('beta-initial-output\r\n');
     app.sessions.sessions.addAll([
       first,
       second,
-      terminal('private', [])..terminal!.write('unreferenced-private-output'),
+      terminal('private', [])
+        ..terminal!.writeText('unreferenced-private-output'),
     ]);
     app.sessions.activeSessionId.value = 'private';
     app.agent.setReferencedSessions([first, second, first]);
@@ -1148,7 +1162,7 @@ void main() {
     final second = terminal('beta', secondWrites);
     second.terminal!.onOutput = (input) {
       secondWrites.add(input);
-      second.terminal!.write('beta-user\r\n');
+      second.terminal!.writeText('beta-user\r\n');
     };
     app.sessions.sessions.addAll([first, second]);
     app.agent.setReferencedSessions([first, second]);
@@ -1218,7 +1232,7 @@ void main() {
       final target = terminal('one', written);
       target.terminal!.onOutput = (input) {
         written.add(input);
-        target.terminal!.write('\r\nnginx LISTEN 0.0.0.0:80\r\n');
+        target.terminal!.writeText('\r\nnginx LISTEN 0.0.0.0:80\r\n');
       };
       final second = terminal('two', otherWrites);
       app.sessions.sessions.addAll([target, second]);
@@ -1341,7 +1355,7 @@ void main() {
     await sent.future;
     app.agent.stop();
     await run;
-    target.terminal!.write('late-output');
+    target.terminal!.writeText('late-output');
     expect(connect.requests, hasLength(1));
     expect(app.agent.busy.value, isFalse);
     expect(target.terminal!.listeners, isEmpty);
@@ -1403,7 +1417,7 @@ void main() {
     app.agent.setReferencedSessions([target]);
     final run = app.agent.send('Read more output');
     await tester.pump();
-    target.terminal!.write('later-output\r\n');
+    target.terminal!.writeText('later-output\r\n');
     await tester.pump(const Duration(milliseconds: 700));
     await run;
     expect(jsonEncode(connect.requests.last.body), contains('later-output'));
@@ -1825,6 +1839,29 @@ void main() {
     history.failSave = false;
     expect(await app.agent.prepareForExit(), isTrue);
     expect(history.items.values.single.messages.first.text, 'Unsaved request');
+  });
+
+  test('写入排队期间的多次快照合并为最新一份落库', () async {
+    final history = _CountingHistory();
+    final saving = Completer<void>();
+    history.pendingSave = saving.future;
+    final app = await setup(
+      FakeAiConnect((_) => openAiReply('Coalesced')),
+      history: history,
+    );
+    var snapshots = 0;
+    final sub = app.agent.conversations.listen((_) => snapshots++);
+    addTearDown(sub.cancel);
+    await app.agent.send('Queue several snapshots');
+    saving.complete();
+    await app.agent.historySaved;
+    // 首个任务在门闩前已取走当时的快照，之后排队的快照只写最新一份。
+    expect(snapshots, greaterThanOrEqualTo(3));
+    expect(history.saves, 2);
+    expect(
+      history.items.values.single.messages.map((m) => m.text),
+      contains('Coalesced'),
+    );
   });
 
   test('保存失败重试与删除并发时，不把删除中的旧快照重新排入保存', () async {

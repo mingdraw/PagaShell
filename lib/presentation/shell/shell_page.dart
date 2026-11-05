@@ -455,7 +455,7 @@ class _AnimatedSidebar extends StatelessWidget {
         ? Duration.zero
         : AppTheme.sidebarTransitionDuration;
     return Obx(() {
-      final visible = settings.sidebarState.value.visible && !hiddenForSpace;
+      final visible = settings.sidebarVisible.value && !hiddenForSpace;
       return TweenAnimationBuilder<double>(
         tween: Tween(begin: visible ? 1 : 0, end: visible ? 1 : 0),
         duration: duration,
@@ -505,8 +505,7 @@ class _SidebarPanel extends StatelessWidget {
                   Obx(
                     () => Offstage(
                       offstage:
-                          !settings.sidebarState.value.visible ||
-                          hiddenForSpace,
+                          !settings.sidebarVisible.value || hiddenForSpace,
                       child: const WindowHeaderButton(
                         child: SidebarToggleButton(),
                       ),
@@ -526,8 +525,7 @@ class _SidebarPanel extends StatelessWidget {
                   child: Obx(
                     () => Offstage(
                       offstage:
-                          !settings.sidebarState.value.visible ||
-                          hiddenForSpace,
+                          !settings.sidebarVisible.value || hiddenForSpace,
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [

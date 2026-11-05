@@ -42,9 +42,6 @@ class _Session implements SshEngineSession {
   @override
   Future<void> close() async => operations.add('close');
   @override
-  Stream<String> startShell({required int cols, required int rows}) =>
-      const Stream.empty();
-  @override
   void write(String data) {}
   @override
   void resizeTerminal(int width, int height) {}

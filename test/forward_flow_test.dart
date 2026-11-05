@@ -29,6 +29,7 @@ import 'package:pagashell/presentation/localization/app_translations.dart';
 import 'package:pagashell/presentation/shell/connect_flow.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
+import 'support/fixture_terminal.dart';
 import 'support/in_memory_binding.dart';
 import 'support/shadcn_test_app.dart';
 
@@ -41,13 +42,31 @@ class _Secrets extends InMemorySecretStore {
   }
 }
 
-class _ForwardSession implements SshEngineSession, PortForwardSession {
+class _ForwardSession
+    implements SshEngineSession, PortForwardSession, TerminalScreenSource {
   bool closed = false;
   int shellStarts = 0;
   List<ForwardPort>? ports;
   Completer<void>? closeGate;
   final events = StreamController<PortForwardEvent>();
   final shell = StreamController<String>();
+
+  @override
+  Future<void> acknowledgeTerminalFrame(int frameId) async {}
+
+  @override
+  Stream<TerminalFrame> startTerminalShell({
+    required int cols,
+    required int rows,
+    int scrollback = 10000,
+  }) {
+    shellStarts++;
+    return TerminalFrameFixture(
+      columns: cols,
+      rows: rows,
+      scrollback: scrollback,
+    ).decode(shell.stream);
+  }
 
   @override
   Stream<PortForwardEvent> startPortForwards(List<ForwardPort> ports) async* {
@@ -57,12 +76,6 @@ class _ForwardSession implements SshEngineSession, PortForwardSession {
     await for (final event in events.stream) {
       yield event;
     }
-  }
-
-  @override
-  Stream<String> startShell({required int cols, required int rows}) {
-    shellStarts++;
-    return shell.stream;
   }
 
   @override
@@ -869,6 +882,47 @@ void main() {
     expect(engine.sessions, hasLength(2));
     expect(sessions.sessions.single.phase, SessionPhase.ready);
     expect(sessions.sessions.single.error, isNull);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('未知转发流异常显示断开提示，不回显本地路径', (tester) async {
+    final (engine, _) = await pump(tester);
+    await open(tester);
+    await start(tester);
+    engine.sessions.single.events.addError(
+      StateError('/Users/test/private/forward.sock: platform failure'),
+    );
+    await settleCleanup(tester);
+    final sessions = Get.find<SessionController>();
+    expect(sessions.sessions.single.phase, SessionPhase.failed);
+    expect(sessions.sessions.single.error, '端口转发已断开');
+    expect(engine.sessions.single.closed, isTrue);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('重复的转发事件不改变会话快照时不通知会话列表', (tester) async {
+    final (engine, _) = await pump(tester);
+    await open(tester);
+    await start(tester);
+    final sessions = Get.find<SessionController>();
+    expect(sessions.sessions.single.phase, SessionPhase.ready);
+    var notifications = 0;
+    final sub = sessions.sessions.listen((_) => notifications++);
+    addTearDown(sub.cancel);
+
+    final forward = engine.sessions.single;
+    forward.events.add(const PortForwardEvent(kind: 'ready'));
+    await tester.pumpAndSettle();
+    expect(notifications, 0);
+
+    for (var i = 0; i < 5; i++) {
+      forward.events.add(
+        const PortForwardEvent(kind: 'connectionError', localPort: 13306),
+      );
+    }
+    await tester.pumpAndSettle();
+    expect(notifications, 1);
+    expect(sessions.sessions.single.error, contains('13306'));
     expect(tester.takeException(), isNull);
   });
 

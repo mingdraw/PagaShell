@@ -10,6 +10,7 @@ import 'api/desktop.dart';
 import 'api/page.dart';
 import 'api/proxy.dart';
 import 'api/ssh.dart';
+import 'api/terminal.dart';
 import 'api/vnc.dart';
 
 import 'dart:async';
@@ -31,12 +32,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AnyhowException dco_decode_AnyhowException(dynamic raw);
 
   @protected
-  RustStreamSink<Uint8List> dco_decode_StreamSink_list_prim_u_8_strict_Sse(
+  RustStreamSink<PortForwardEvent> dco_decode_StreamSink_port_forward_event_Sse(
     dynamic raw,
   );
 
   @protected
-  RustStreamSink<PortForwardEvent> dco_decode_StreamSink_port_forward_event_Sse(
+  RustStreamSink<TerminalFrame> dco_decode_StreamSink_terminal_frame_Sse(
     dynamic raw,
   );
 
@@ -99,6 +100,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<ForwardPortSpec> dco_decode_list_forward_port_spec(dynamic raw);
 
   @protected
+  Uint32List dco_decode_list_prim_u_32_strict(dynamic raw);
+
+  @protected
   List<int> dco_decode_list_prim_u_8_loose(dynamic raw);
 
   @protected
@@ -106,6 +110,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<SftpEntry> dco_decode_list_sftp_entry(dynamic raw);
+
+  @protected
+  List<TerminalCluster> dco_decode_list_terminal_cluster(dynamic raw);
+
+  @protected
+  List<TerminalLine> dco_decode_list_terminal_line(dynamic raw);
 
   @protected
   String? dco_decode_opt_String(dynamic raw);
@@ -143,6 +153,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   SshHandshake dco_decode_ssh_handshake(dynamic raw);
 
   @protected
+  TerminalCluster dco_decode_terminal_cluster(dynamic raw);
+
+  @protected
+  TerminalFrame dco_decode_terminal_frame(dynamic raw);
+
+  @protected
+  TerminalLine dco_decode_terminal_line(dynamic raw);
+
+  @protected
   TransferProgress dco_decode_transfer_progress(dynamic raw);
 
   @protected
@@ -164,12 +183,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
 
   @protected
-  RustStreamSink<Uint8List> sse_decode_StreamSink_list_prim_u_8_strict_Sse(
+  RustStreamSink<PortForwardEvent> sse_decode_StreamSink_port_forward_event_Sse(
     SseDeserializer deserializer,
   );
 
   @protected
-  RustStreamSink<PortForwardEvent> sse_decode_StreamSink_port_forward_event_Sse(
+  RustStreamSink<TerminalFrame> sse_decode_StreamSink_terminal_frame_Sse(
     SseDeserializer deserializer,
   );
 
@@ -240,6 +259,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  Uint32List sse_decode_list_prim_u_32_strict(SseDeserializer deserializer);
+
+  @protected
   List<int> sse_decode_list_prim_u_8_loose(SseDeserializer deserializer);
 
   @protected
@@ -247,6 +269,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<SftpEntry> sse_decode_list_sftp_entry(SseDeserializer deserializer);
+
+  @protected
+  List<TerminalCluster> sse_decode_list_terminal_cluster(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<TerminalLine> sse_decode_list_terminal_line(
+    SseDeserializer deserializer,
+  );
 
   @protected
   String? sse_decode_opt_String(SseDeserializer deserializer);
@@ -290,6 +322,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   SshHandshake sse_decode_ssh_handshake(SseDeserializer deserializer);
 
   @protected
+  TerminalCluster sse_decode_terminal_cluster(SseDeserializer deserializer);
+
+  @protected
+  TerminalFrame sse_decode_terminal_frame(SseDeserializer deserializer);
+
+  @protected
+  TerminalLine sse_decode_terminal_line(SseDeserializer deserializer);
+
+  @protected
   TransferProgress sse_decode_transfer_progress(SseDeserializer deserializer);
 
   @protected
@@ -317,14 +358,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  void sse_encode_StreamSink_list_prim_u_8_strict_Sse(
-    RustStreamSink<Uint8List> self,
+  void sse_encode_StreamSink_port_forward_event_Sse(
+    RustStreamSink<PortForwardEvent> self,
     SseSerializer serializer,
   );
 
   @protected
-  void sse_encode_StreamSink_port_forward_event_Sse(
-    RustStreamSink<PortForwardEvent> self,
+  void sse_encode_StreamSink_terminal_frame_Sse(
+    RustStreamSink<TerminalFrame> self,
     SseSerializer serializer,
   );
 
@@ -413,6 +454,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_prim_u_32_strict(
+    Uint32List self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_prim_u_8_loose(List<int> self, SseSerializer serializer);
 
   @protected
@@ -424,6 +471,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_sftp_entry(
     List<SftpEntry> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_terminal_cluster(
+    List<TerminalCluster> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_terminal_line(
+    List<TerminalLine> self,
     SseSerializer serializer,
   );
 
@@ -474,6 +533,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_ssh_handshake(SshHandshake self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_terminal_cluster(
+    TerminalCluster self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_terminal_frame(TerminalFrame self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_terminal_line(TerminalLine self, SseSerializer serializer);
 
   @protected
   void sse_encode_transfer_progress(

@@ -19,7 +19,8 @@ import 'package:pagashell/presentation/shell/widgets/sidebar.dart';
 import 'package:pagashell/presentation/shell/widgets/workspace.dart';
 import 'package:pagashell/presentation/theme/app_theme.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
-import 'package:xterm/xterm.dart';
+
+import 'support/fixture_terminal.dart';
 
 import 'support/in_memory_binding.dart';
 import 'support/in_memory_settings_repository.dart';
@@ -215,7 +216,7 @@ void main() {
 
   testWidgets('浅色外壳下终端保持可读底色，切换主题保留终端实例', (tester) async {
     await pumpApp(tester);
-    final terminal = Terminal()..write('preserved output');
+    final terminal = Terminal()..writeText('preserved output');
     final sessions = Get.find<SessionController>();
     sessions.sessions.add(
       Session(

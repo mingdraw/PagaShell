@@ -22,7 +22,8 @@ import 'package:pagashell/presentation/identities/identity_edit_dialog.dart';
 import 'package:pagashell/presentation/localization/app_translations.dart';
 import 'package:pagashell/presentation/shell/shell_page.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
-import 'package:xterm/xterm.dart';
+
+import 'support/fixture_terminal.dart';
 
 import 'support/in_memory_binding.dart';
 import 'support/shadcn_test_app.dart';
@@ -127,7 +128,10 @@ void main() {
       final terminal = Terminal();
       for (var line = 0; line < 200; line++) {
         // 使用独特的单元格底色检查实际绘制范围，不依赖字体或字形位置。
-        terminal.write('\x1b[48;2;252;25;161moutput row $line\x1b[0m\r\n');
+        terminal.writeText(
+          'output row $line\r\n',
+          background: (3 << 25) | 0xfc19a1,
+        );
       }
       final sessions = Get.find<SessionController>();
       sessions.sessions.add(

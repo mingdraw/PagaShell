@@ -5,7 +5,7 @@
 - `ShellPage` 的外层 `AgentWorkspace` 将左侧服务栏、完整会话工作区与 Agent 分成独立区域，Agent 不再嵌入中间 `TabPane` 的内容或圆角外框。右栏有独立顶部拖窗区、开关和拖宽分隔条，使用与左侧服务栏相同的宽度过渡、时长与曲线；动画只裁剪固定宽度的聊天，避免反复换行。窄窗口不足以容纳三栏时临时收起左栏，保持中间工作区与右栏并排，不覆盖主区域，也不改写左栏显隐偏好；关闭 Agent 或加宽窗口后恢复。此时点击左栏展开入口会收起 Agent 并恢复服务栏。收起后右栏不占宽度，通过顶部 Agent 按钮重新展开。聊天和会话子树均保持挂载，RDP 全屏立即隐藏右栏。Windows/Linux 窗口按钮固定在窗口右上角，不跟随右栏动画移动。
 - `SettingsDialog` 使用 shadcn Tabs 提供通用和 AI 两类设置；AI Tab 直接填写一组 API 协议、地址、Key 和默认模型 ID，底部提供测试连接与保存。长表单滚动，底部按钮和结果反馈固定可见，不再通过模型卡片进入第二层编辑弹窗。
 - `AiSettingsController` 串行提交配置快照。`DriftAiSettingsRepository` 复用 `app_settings.ai_settings`，不修改 Drift schema。API Key 经现有 SecretStore 加密；替换前先记录待清理引用，再写新密文和提交引用，保存失败保留旧引用。新旧密文删除失败的引用持久化，后续编辑或重载重试。
-- `AgentController` 构造注入 GetConnect、配置控制器、SecretStore、SessionController 和对话仓库，直接发 HTTP；`AgentApiCodec` 仅做 JSON 映射。AI 独立 HTTP 客户端超时 90 秒，不跟随重定向，不调用 SDK 云服务、不引入遥测。
+- `AgentController` 构造注入 GetConnect、配置控制器、SecretStore、SessionController 和对话仓库，保留运行编排与生命周期。同一 Dart library 的 `agent_history.dart`、`agent_api.dart`、`agent_tools.dart` 分别管理历史持久化、模型 API 与工具执行，API 部分直接使用注入的 GetConnect；`AgentApiCodec` 仅做 JSON 映射。AI 使用的 GetConnect 超时 90 秒，不跟随重定向，不调用 SDK 云服务、不引入遥测。
 - 内置技能位于 `domain/ai/agent_skill.dart`，仅三项，模型通过 `read_skill` 按需加载。没有外部技能市场或通用插件框架。
 - Agent 回复通过纯 Dart `markdown` 解析 GitHub Flavored Markdown，再映射为原生组件，支持标题、粗体/斜体/删除线、行内代码、嵌套有序/无序列表、任务列表、引用、分隔线及表格。正文可选择，宽表格横向滚动，代码块保留语言、原文复制和横向滚动；用户消息保留原文。历史存储仍保存原始消息，恢复时重新渲染。链接与图片显示可复制的标签和地址，不自动跳转或加载远程图片，HTML 作为文本显示。
 
@@ -39,7 +39,7 @@ Agent 只使用设置中的默认模型 ID，在标题旁显示该 ID；面板�
 
 Enter 直接发送消息，Shift+Enter 在光标或选区插入换行；保留 Cmd/Ctrl+Enter 发送。候选 Popover 打开时 Enter/Tab 先选择候选；中文等输入法仍在组词时 Enter 不触发发送。
 
-引用会话后发送白名单元数据（会话 ID、引用名称、hostname、port、协议、页签、连接状态、是否经网关），并分别从各 SSH 会话的 xterm 当前屏幕和近期回滚读取输出；每个会话默认最近 120 行，工具最多 200 行、16000 字符。`read_terminal_output` 可重新读取，或最多等候 5 秒获取新输出，不注入任何探测命令，也不重复订阅 SSH 输出流。切入 alternate screen 时读取当前屏幕。输出作为不可信数据处理，可能包含后台活动或用户自行显示的内容；仅引用的会话输出会发送到配置的 API。不读取凭据保险库中的密码、私钥、主机备注或 RDP 图像。SSH 状态通过现有只读状态通道采集；单次 Linux CPU 无百分比，不能解释成 0%。已发送的上下文仍在当前对话中，点击新对话后不再用于新的请求，旧记录保留在历史管理中。
+引用会话后发送白名单元数据（会话 ID、引用名称、hostname、port、协议、页签、连接状态、是否经网关），并分别从各 SSH 会话的 paga_terminal 当前屏幕镜像和近期回滚读取输出；每个会话默认最近 120 行，工具最多 200 行、16000 字符。`read_terminal_output` 可重新读取，或最多等候 5 秒获取新输出，不注入任何探测命令，也不重复订阅 SSH 输出流。切入 alternate screen 时读取当前屏幕。输出作为不可信数据处理，可能包含后台活动或用户自行显示的内容；仅引用的会话输出会发送到配置的 API。不读取凭据保险库中的密码、私钥、主机备注或 RDP 图像。SSH 状态通过现有只读状态通道采集；单次 Linux CPU 无百分比，不能解释成 0%。已发送的上下文仍在当前对话中，点击新对话后不再用于新的请求，旧记录保留在历史管理中。
 
 思考强度旁提供「请求批准 / 完全访问」。`propose_ssh_command` 在默认「请求批准」下暂停工具循环，用户审阅固定目标、命令和用途，确认后才发送命令及回车，拒绝结果也返回模型；「完全访问」直接发送到指定引用的 SSH 终端。读取与命令工具用 `session_id` 指定本轮引用集合中的一个会话，多引用时省略目标会拒绝操作，单引用时可省略；命令不广播到所有引用。两种模式发送前均重新验证原会话、终端及引擎身份，已关闭、重连、停止、已发送或已拒绝的请求不能发送。引用集合以外的目标 ID 不能操作。
 

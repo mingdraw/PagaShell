@@ -7,7 +7,8 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:get/get.dart';
 import 'package:pagashell/presentation/terminal/app_terminal_view.dart';
-import 'package:xterm/xterm.dart';
+
+import 'support/fixture_terminal.dart';
 
 import 'support/shadcn_test_app.dart';
 
@@ -33,7 +34,7 @@ Future<Terminal> _openTerminal(
   WidgetTester tester, {
   GlobalKey? captureKey,
 }) async {
-  final terminal = Terminal(maxLines: 1000);
+  final terminal = Terminal(maxLines: 1000)..writeText('');
   final focus = FocusNode();
   addTearDown(focus.dispose);
   await tester.pumpWidget(
@@ -41,7 +42,7 @@ Future<Terminal> _openTerminal(
   );
   await tester.pumpAndSettle();
   for (var row = 0; row < 200; row++) {
-    terminal.write(
+    terminal.writeText(
       'row-${row.toString().padLeft(3, '0')} abcdefghijklmnop\r\n',
     );
   }
@@ -401,7 +402,7 @@ void main() {
     final terminal = await _openTerminal(tester);
     final output = <String>[];
     terminal.onOutput = output.add;
-    terminal.write('\x1b[?1049h');
+    terminal.showAlternateScreen();
     await tester.pumpAndSettle();
     expect(terminal.isUsingAltBuffer, isTrue);
     final rect = tester.getRect(find.byType(TerminalView));

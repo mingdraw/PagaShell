@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge.dart'
     show AnyhowException;
@@ -16,6 +17,7 @@ import '../../domain/rdp/rdp_engine.dart';
 import '../../domain/ssh/host_key.dart';
 import '../../domain/ssh/server_status.dart';
 import '../../domain/ssh/ssh_engine.dart';
+import '../../domain/terminal/terminal_frame.dart';
 import '../../domain/vnc/vnc_engine.dart';
 import '../../src/rust/api/desktop.dart' as desktop;
 import '../../src/rust/api/page.dart' as page;
@@ -670,11 +672,21 @@ class _RustDesktopSession implements RdpEngineSession {
 }
 
 class _RustEngineSession
-    implements SshEngineSession, ServerStatusSource, PortForwardSession {
+    implements
+        SshEngineSession,
+        ServerStatusSource,
+        PortForwardSession,
+        TerminalScreenSource {
   _RustEngineSession(this._sessionId);
 
   final int _sessionId;
   bool _closed = false;
+
+  // 终端输入串行发送：同时只有一个 sshWrite 在途，期间的输入合并为下一次
+  // 调用。各自独立的异步 FFI 调用在多线程运行时上不保证执行顺序，快速输入
+  // 或分片粘贴可能乱序；合并也减少了逐键的跨语言调用与全局会话锁竞争。
+  final _pendingInput = BytesBuilder(copy: false);
+  bool _writingInput = false;
 
   @override
   Stream<PortForwardEvent> startPortForwards(List<ForwardPort> ports) async* {
@@ -707,22 +719,80 @@ class _RustEngineSession
   });
 
   @override
-  Stream<String> startShell({required int cols, required int rows}) {
-    // 流式 UTF-8 解码：正确处理跨分片的多字节字符（CJK/emoji）。
+  Stream<TerminalFrame> startTerminalShell({
+    required int cols,
+    required int rows,
+    int scrollback = 10000,
+  }) {
+    if (_closed) throw const SshEngineException('终端已关闭');
     return rust
-        .sshStartShell(sessionId: _sessionId, cols: cols, rows: rows)
-        .cast<List<int>>()
-        .transform(const Utf8Decoder(allowMalformed: true));
+        .sshStartTerminal(
+          sessionId: _sessionId,
+          cols: cols,
+          rows: rows,
+          scrollback: scrollback,
+        )
+        .map(
+          (frame) => TerminalFrame(
+            frameId: frame.frameId,
+            columns: frame.columns,
+            rows: frame.rows,
+            alternate: frame.alternate,
+            cursorX: frame.cursorX,
+            cursorY: frame.cursorY,
+            modes: frame.modes,
+            cursorBlink: frame.cursorBlink,
+            trimFront: frame.trimFront,
+            keepRows: frame.keepRows,
+            appendRows: frame.appendRows,
+            lines: [
+              for (final line in frame.lines)
+                TerminalLine(
+                  id: line.id,
+                  wrapped: line.wrapped,
+                  cells: line.cells,
+                  // 绝大多数行没有组合字符，避免每行分配一个空 Map。
+                  clusters: line.clusters.isEmpty
+                      ? const {}
+                      : {
+                          for (final cluster in line.clusters)
+                            cluster.column: cluster.text,
+                        },
+                ),
+            ],
+            title: frame.title,
+            bell: frame.bell,
+          ),
+        );
   }
 
   @override
-  void write(String data) {
+  Future<void> acknowledgeTerminalFrame(int frameId) => _guard(() async {
     if (_closed) return;
-    unawaited(
-      rust
-          .sshWrite(sessionId: _sessionId, data: utf8.encode(data))
-          .catchError((Object _) {}),
-    );
+    await rust.sshTerminalAck(sessionId: _sessionId, frameId: frameId);
+  });
+
+  @override
+  void write(String data) {
+    if (_closed || data.isEmpty) return;
+    _pendingInput.add(utf8.encode(data));
+    if (!_writingInput) unawaited(_drainInput());
+  }
+
+  Future<void> _drainInput() async {
+    _writingInput = true;
+    try {
+      while (!_closed && _pendingInput.isNotEmpty) {
+        final bytes = _pendingInput.takeBytes();
+        try {
+          await rust.sshWrite(sessionId: _sessionId, data: bytes);
+        } on Object {
+          // 与此前一致：终端关闭等写入失败由会话生命周期处理，不向输入方抛出。
+        }
+      }
+    } finally {
+      _writingInput = false;
+    }
   }
 
   @override

@@ -16,20 +16,32 @@ class HostTreeSnapshot {
   final Map<String, Folder> _folders;
   final Map<HostTreeItem, HostTreeNode> _nodes;
 
-  List<HostTreeNode> childrenOf(String? parentId) {
-    final children = _nodes.values
-        .where((node) => node.parentId == parentId)
-        .toList();
-    children.sort((a, b) {
-      final order = a.sortOrder.compareTo(b.sortOrder);
-      if (order != 0) return order;
-      // 旧数据的 sortOrder 均为 0 时保持原来的文件夹/名称顺序。
-      if (a.isFolder != b.isFolder) return a.isFolder ? -1 : 1;
-      final name = a.name.compareTo(b.name);
-      return name != 0 ? name : a.item.id.compareTo(b.item.id);
-    });
-    return children;
-  }
+  /// 父 ID → 已排序子节点，首次查询时一次建好。树渲染对每个文件夹都要
+  /// 查询子节点，逐次全量过滤加排序会让整棵树的构建退化为 O(文件夹×节点)。
+  late final Map<String?, List<HostTreeNode>> _children = () {
+    final index = <String?, List<HostTreeNode>>{};
+    for (final node in _nodes.values) {
+      (index[node.parentId] ??= []).add(node);
+    }
+    for (final children in index.values) {
+      children.sort((a, b) {
+        final order = a.sortOrder.compareTo(b.sortOrder);
+        if (order != 0) return order;
+        // 旧数据的 sortOrder 均为 0 时保持原来的文件夹/名称顺序。
+        if (a.isFolder != b.isFolder) return a.isFolder ? -1 : 1;
+        final name = a.name.compareTo(b.name);
+        return name != 0 ? name : a.item.id.compareTo(b.item.id);
+      });
+    }
+    return index;
+  }();
+
+  /// 返回可修改的副本，调用方可直接在结果上增删。
+  List<HostTreeNode> childrenOf(String? parentId) =>
+      List.of(_children[parentId] ?? const <HostTreeNode>[]);
+
+  /// 子节点数量，不复制列表。
+  int childCount(String? parentId) => _children[parentId]?.length ?? 0;
 
   int _nextOrder(String? parentId) {
     var largest = -1;

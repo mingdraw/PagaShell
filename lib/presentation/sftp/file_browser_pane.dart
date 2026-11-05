@@ -105,6 +105,8 @@ class FileBrowserPane extends StatefulWidget {
 }
 
 class _FileBrowserPaneState extends State<FileBrowserPane> {
+  static const _rowHeight = 34.0;
+
   final _selected = <String>{};
   final _focus = FocusNode();
   final _scroll = ScrollController();
@@ -140,9 +142,13 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
   @override
   void didUpdateWidget(FileBrowserPane oldWidget) {
     super.didUpdateWidget(oldWidget);
-    _directoryDropKeys.removeWhere(
-      (path, _) => !entries.any((entry) => entry.isDir && entry.path == path),
-    );
+    if (_directoryDropKeys.isNotEmpty) {
+      final directories = {
+        for (final entry in entries)
+          if (entry.isDir) entry.path,
+      };
+      _directoryDropKeys.removeWhere((path, _) => !directories.contains(path));
+    }
     if (!widget.active || loading || error != null || oldWidget.cwd != cwd) {
       _externalHoverPath = null;
     }
@@ -202,9 +208,9 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_scroll.hasClients) return;
-      final top = _focusedIndex * 34.0;
+      final top = _focusedIndex * _rowHeight;
       final position = _scroll.position;
-      final bottom = top + 34;
+      final bottom = top + _rowHeight;
       final offset = top < position.pixels
           ? top
           : bottom > position.pixels + position.viewportDimension
@@ -498,6 +504,8 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
                         )
                       : ListView.builder(
                           controller: _scroll,
+                          // 固定行高：大目录滚动时无需逐行测量即可定位。
+                          itemExtent: _rowHeight,
                           itemCount: entries.length,
                           itemBuilder: (context, index) =>
                               _entry(context, entries[index]),
@@ -619,7 +627,7 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
             selectedColor: AppTheme.fileSelectionBackground(context),
             disableTransition: true,
             child: SizedBox(
-              height: 34,
+              height: _rowHeight,
               child: Row(
                 children: [
                   const SizedBox(width: 12),

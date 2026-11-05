@@ -39,7 +39,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.13.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -125682706;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1016295253;
 
 // Section: executor
 
@@ -1489,7 +1489,7 @@ fn wire__crate__api__ssh__ssh_start_port_forwards_impl(
         },
     )
 }
-fn wire__crate__api__ssh__ssh_start_shell_impl(
+fn wire__crate__api__ssh__ssh_start_terminal_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
@@ -1497,7 +1497,7 @@ fn wire__crate__api__ssh__ssh_start_shell_impl(
 ) {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "ssh_start_shell",
+            debug_name: "ssh_start_terminal",
             port: Some(port_),
             mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
         },
@@ -1514,21 +1514,61 @@ fn wire__crate__api__ssh__ssh_start_shell_impl(
             let api_session_id = <u32>::sse_decode(&mut deserializer);
             let api_cols = <u32>::sse_decode(&mut deserializer);
             let api_rows = <u32>::sse_decode(&mut deserializer);
-            let api_output =
-                <StreamSink<Vec<u8>, flutter_rust_bridge::for_generated::SseCodec>>::sse_decode(
-                    &mut deserializer,
-                );
+            let api_scrollback = <u32>::sse_decode(&mut deserializer);
+            let api_output = <StreamSink<
+                crate::api::terminal::TerminalFrame,
+                flutter_rust_bridge::for_generated::SseCodec,
+            >>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
                     (move || async move {
-                        let output_ok = crate::api::ssh::ssh_start_shell(
+                        let output_ok = crate::api::ssh::ssh_start_terminal(
                             api_session_id,
                             api_cols,
                             api_rows,
+                            api_scrollback,
                             api_output,
                         )
                         .await?;
+                        std::result::Result::Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__ssh__ssh_terminal_ack_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "ssh_terminal_ack",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_session_id = <u32>::sse_decode(&mut deserializer);
+            let api_frame_id = <u32>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || async move {
+                        let output_ok =
+                            crate::api::ssh::ssh_terminal_ack(api_session_id, api_frame_id).await?;
                         std::result::Result::Ok(output_ok)
                     })()
                     .await,
@@ -1800,7 +1840,9 @@ impl SseDecode for flutter_rust_bridge::for_generated::anyhow::Error {
     }
 }
 
-impl SseDecode for StreamSink<Vec<u8>, flutter_rust_bridge::for_generated::SseCodec> {
+impl SseDecode
+    for StreamSink<crate::api::ssh::PortForwardEvent, flutter_rust_bridge::for_generated::SseCodec>
+{
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut inner = <String>::sse_decode(deserializer);
@@ -1809,7 +1851,10 @@ impl SseDecode for StreamSink<Vec<u8>, flutter_rust_bridge::for_generated::SseCo
 }
 
 impl SseDecode
-    for StreamSink<crate::api::ssh::PortForwardEvent, flutter_rust_bridge::for_generated::SseCodec>
+    for StreamSink<
+        crate::api::terminal::TerminalFrame,
+        flutter_rust_bridge::for_generated::SseCodec,
+    >
 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1993,6 +2038,18 @@ impl SseDecode for Vec<crate::api::ssh::ForwardPortSpec> {
     }
 }
 
+impl SseDecode for Vec<u32> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<u32>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
 impl SseDecode for Vec<u8> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -2012,6 +2069,34 @@ impl SseDecode for Vec<crate::api::ssh::SftpEntry> {
         let mut ans_ = Vec::with_capacity(len_ as usize);
         for idx_ in 0..len_ {
             ans_.push(<crate::api::ssh::SftpEntry>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::terminal::TerminalCluster> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::terminal::TerminalCluster>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::terminal::TerminalLine> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::terminal::TerminalLine>::sse_decode(
+                deserializer,
+            ));
         }
         return ans_;
     }
@@ -2160,6 +2245,71 @@ impl SseDecode for crate::api::ssh::SshHandshake {
     }
 }
 
+impl SseDecode for crate::api::terminal::TerminalCluster {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_column = <u32>::sse_decode(deserializer);
+        let mut var_text = <String>::sse_decode(deserializer);
+        return crate::api::terminal::TerminalCluster {
+            column: var_column,
+            text: var_text,
+        };
+    }
+}
+
+impl SseDecode for crate::api::terminal::TerminalFrame {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_frameId = <u32>::sse_decode(deserializer);
+        let mut var_columns = <u32>::sse_decode(deserializer);
+        let mut var_rows = <u32>::sse_decode(deserializer);
+        let mut var_alternate = <bool>::sse_decode(deserializer);
+        let mut var_cursorX = <u32>::sse_decode(deserializer);
+        let mut var_cursorY = <u32>::sse_decode(deserializer);
+        let mut var_modes = <u32>::sse_decode(deserializer);
+        let mut var_cursorBlink = <bool>::sse_decode(deserializer);
+        let mut var_trimFront = <u32>::sse_decode(deserializer);
+        let mut var_keepRows = <u32>::sse_decode(deserializer);
+        let mut var_appendRows = <Vec<u32>>::sse_decode(deserializer);
+        let mut var_lines = <Vec<crate::api::terminal::TerminalLine>>::sse_decode(deserializer);
+        let mut var_title = <Option<String>>::sse_decode(deserializer);
+        let mut var_bell = <bool>::sse_decode(deserializer);
+        return crate::api::terminal::TerminalFrame {
+            frame_id: var_frameId,
+            columns: var_columns,
+            rows: var_rows,
+            alternate: var_alternate,
+            cursor_x: var_cursorX,
+            cursor_y: var_cursorY,
+            modes: var_modes,
+            cursor_blink: var_cursorBlink,
+            trim_front: var_trimFront,
+            keep_rows: var_keepRows,
+            append_rows: var_appendRows,
+            lines: var_lines,
+            title: var_title,
+            bell: var_bell,
+        };
+    }
+}
+
+impl SseDecode for crate::api::terminal::TerminalLine {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_id = <u32>::sse_decode(deserializer);
+        let mut var_wrapped = <bool>::sse_decode(deserializer);
+        let mut var_cells = <Vec<u32>>::sse_decode(deserializer);
+        let mut var_clusters =
+            <Vec<crate::api::terminal::TerminalCluster>>::sse_decode(deserializer);
+        return crate::api::terminal::TerminalLine {
+            id: var_id,
+            wrapped: var_wrapped,
+            cells: var_cells,
+            clusters: var_clusters,
+        };
+    }
+}
+
 impl SseDecode for crate::api::ssh::TransferProgress {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -2303,15 +2453,16 @@ fn pde_ffi_dispatcher_primary_impl(
         35 => {
             wire__crate__api__ssh__ssh_start_port_forwards_impl(port, ptr, rust_vec_len, data_len)
         }
-        36 => wire__crate__api__ssh__ssh_start_shell_impl(port, ptr, rust_vec_len, data_len),
-        37 => {
+        36 => wire__crate__api__ssh__ssh_start_terminal_impl(port, ptr, rust_vec_len, data_len),
+        37 => wire__crate__api__ssh__ssh_terminal_ack_impl(port, ptr, rust_vec_len, data_len),
+        38 => {
             wire__crate__api__ssh__ssh_validate_private_key_impl(port, ptr, rust_vec_len, data_len)
         }
-        38 => wire__crate__api__ssh__ssh_write_impl(port, ptr, rust_vec_len, data_len),
-        39 => wire__crate__api__vnc__vnc_connect_impl(port, ptr, rust_vec_len, data_len),
-        40 => wire__crate__api__vnc__vnc_disconnect_impl(port, ptr, rust_vec_len, data_len),
-        41 => wire__crate__api__vnc__vnc_frame_impl(port, ptr, rust_vec_len, data_len),
-        42 => wire__crate__api__vnc__vnc_input_impl(port, ptr, rust_vec_len, data_len),
+        39 => wire__crate__api__ssh__ssh_write_impl(port, ptr, rust_vec_len, data_len),
+        40 => wire__crate__api__vnc__vnc_connect_impl(port, ptr, rust_vec_len, data_len),
+        41 => wire__crate__api__vnc__vnc_disconnect_impl(port, ptr, rust_vec_len, data_len),
+        42 => wire__crate__api__vnc__vnc_frame_impl(port, ptr, rust_vec_len, data_len),
+        43 => wire__crate__api__vnc__vnc_input_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -2557,6 +2708,83 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::ssh::SshHandshake>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::terminal::TerminalCluster {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.column.into_into_dart().into_dart(),
+            self.text.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::terminal::TerminalCluster
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::terminal::TerminalCluster>
+    for crate::api::terminal::TerminalCluster
+{
+    fn into_into_dart(self) -> crate::api::terminal::TerminalCluster {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::terminal::TerminalFrame {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.frame_id.into_into_dart().into_dart(),
+            self.columns.into_into_dart().into_dart(),
+            self.rows.into_into_dart().into_dart(),
+            self.alternate.into_into_dart().into_dart(),
+            self.cursor_x.into_into_dart().into_dart(),
+            self.cursor_y.into_into_dart().into_dart(),
+            self.modes.into_into_dart().into_dart(),
+            self.cursor_blink.into_into_dart().into_dart(),
+            self.trim_front.into_into_dart().into_dart(),
+            self.keep_rows.into_into_dart().into_dart(),
+            self.append_rows.into_into_dart().into_dart(),
+            self.lines.into_into_dart().into_dart(),
+            self.title.into_into_dart().into_dart(),
+            self.bell.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::terminal::TerminalFrame
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::terminal::TerminalFrame>
+    for crate::api::terminal::TerminalFrame
+{
+    fn into_into_dart(self) -> crate::api::terminal::TerminalFrame {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::terminal::TerminalLine {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.id.into_into_dart().into_dart(),
+            self.wrapped.into_into_dart().into_dart(),
+            self.cells.into_into_dart().into_dart(),
+            self.clusters.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::terminal::TerminalLine
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::terminal::TerminalLine>
+    for crate::api::terminal::TerminalLine
+{
+    fn into_into_dart(self) -> crate::api::terminal::TerminalLine {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::ssh::TransferProgress {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -2586,7 +2814,9 @@ impl SseEncode for flutter_rust_bridge::for_generated::anyhow::Error {
     }
 }
 
-impl SseEncode for StreamSink<Vec<u8>, flutter_rust_bridge::for_generated::SseCodec> {
+impl SseEncode
+    for StreamSink<crate::api::ssh::PortForwardEvent, flutter_rust_bridge::for_generated::SseCodec>
+{
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         unimplemented!("")
@@ -2594,7 +2824,10 @@ impl SseEncode for StreamSink<Vec<u8>, flutter_rust_bridge::for_generated::SseCo
 }
 
 impl SseEncode
-    for StreamSink<crate::api::ssh::PortForwardEvent, flutter_rust_bridge::for_generated::SseCodec>
+    for StreamSink<
+        crate::api::terminal::TerminalFrame,
+        flutter_rust_bridge::for_generated::SseCodec,
+    >
 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -2724,6 +2957,16 @@ impl SseEncode for Vec<crate::api::ssh::ForwardPortSpec> {
     }
 }
 
+impl SseEncode for Vec<u32> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <u32>::sse_encode(item, serializer);
+        }
+    }
+}
+
 impl SseEncode for Vec<u8> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -2740,6 +2983,26 @@ impl SseEncode for Vec<crate::api::ssh::SftpEntry> {
         <i32>::sse_encode(self.len() as _, serializer);
         for item in self {
             <crate::api::ssh::SftpEntry>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::terminal::TerminalCluster> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::terminal::TerminalCluster>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::terminal::TerminalLine> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::terminal::TerminalLine>::sse_encode(item, serializer);
         }
     }
 }
@@ -2849,6 +3112,44 @@ impl SseEncode for crate::api::ssh::SshHandshake {
         <u32>::sse_encode(self.session_id, serializer);
         <String>::sse_encode(self.key_type, serializer);
         <String>::sse_encode(self.fingerprint, serializer);
+    }
+}
+
+impl SseEncode for crate::api::terminal::TerminalCluster {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <u32>::sse_encode(self.column, serializer);
+        <String>::sse_encode(self.text, serializer);
+    }
+}
+
+impl SseEncode for crate::api::terminal::TerminalFrame {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <u32>::sse_encode(self.frame_id, serializer);
+        <u32>::sse_encode(self.columns, serializer);
+        <u32>::sse_encode(self.rows, serializer);
+        <bool>::sse_encode(self.alternate, serializer);
+        <u32>::sse_encode(self.cursor_x, serializer);
+        <u32>::sse_encode(self.cursor_y, serializer);
+        <u32>::sse_encode(self.modes, serializer);
+        <bool>::sse_encode(self.cursor_blink, serializer);
+        <u32>::sse_encode(self.trim_front, serializer);
+        <u32>::sse_encode(self.keep_rows, serializer);
+        <Vec<u32>>::sse_encode(self.append_rows, serializer);
+        <Vec<crate::api::terminal::TerminalLine>>::sse_encode(self.lines, serializer);
+        <Option<String>>::sse_encode(self.title, serializer);
+        <bool>::sse_encode(self.bell, serializer);
+    }
+}
+
+impl SseEncode for crate::api::terminal::TerminalLine {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <u32>::sse_encode(self.id, serializer);
+        <bool>::sse_encode(self.wrapped, serializer);
+        <Vec<u32>>::sse_encode(self.cells, serializer);
+        <Vec<crate::api::terminal::TerminalCluster>>::sse_encode(self.clusters, serializer);
     }
 }
 

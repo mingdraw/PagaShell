@@ -8,7 +8,8 @@ import 'package:pagashell/application/session/session_controller.dart';
 import 'package:pagashell/domain/entities/host.dart';
 import 'package:pagashell/presentation/navigation/app_navigation.dart';
 import 'package:pagashell/presentation/settings/settings_dialog.dart';
-import 'package:xterm/xterm.dart';
+
+import 'support/fixture_terminal.dart';
 
 import 'support/in_memory_binding.dart';
 

@@ -14,9 +14,9 @@ import 'package:pagashell/domain/ssh/host_key.dart';
 import 'package:pagashell/domain/ssh/server_status.dart';
 import 'package:pagashell/domain/ssh/ssh_engine.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
-import 'package:xterm/xterm.dart';
 
 import 'support/fake_sftp_session.dart';
+import 'support/fixture_terminal.dart';
 import 'support/in_memory_binding.dart';
 import 'support/server_status_fixture.dart';
 import 'support/shadcn_test_app.dart';
@@ -141,7 +141,7 @@ void main() {
       );
       await tester.pumpAndSettle();
       final terminal = sessions.activeSession!.terminal!;
-      terminal.write('user@linux:~\$ vim example.sql\r\n');
+      terminal.writeText('user@linux:~\$ vim example.sql\r\n');
       final fullWidth = terminal.viewWidth;
       final fullHeight = terminal.viewHeight;
       expect(engine.sessions.first.samples, 0);

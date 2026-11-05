@@ -19,9 +19,9 @@ import 'package:pagashell/presentation/sftp/sftp_panel.dart';
 import 'package:pagashell/presentation/shell/connect_flow.dart';
 import 'package:pagashell/presentation/theme/app_theme.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
-import 'package:xterm/xterm.dart';
 
 import 'support/fake_sftp_session.dart';
+import 'support/fixture_terminal.dart';
 import 'support/in_memory_binding.dart';
 import 'support/in_memory_local_file_repository.dart';
 import 'support/shadcn_test_app.dart';

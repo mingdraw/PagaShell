@@ -1,4 +1,4 @@
-import 'package:xterm/xterm.dart';
+import 'package:pagashell/terminal/core.dart';
 
 import '../../domain/entities/host.dart';
 import '../../domain/proxy/dynamic_proxy_engine.dart';
@@ -96,7 +96,7 @@ class Session {
   final DynamicProxySession? proxySession;
   final RdpEngineSession? desktopSession;
 
-  /// ready 后与 [engineSession] 双向绑定的 xterm 终端（跨快照复用同一实例）。
+  /// Flutter 终端视图/输入接口；真实 SSH 使用 Rust 内核的显示适配器。
   final Terminal? terminal;
 
   Session copyWith({

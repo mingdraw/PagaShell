@@ -53,7 +53,7 @@
 - 网关支持 SSH / Page。SSH 使用账号密码或密码/私钥凭证，通过 `direct-tcpip` 跳转；Page 通过独立 Go 项目 PagaGateway 的 Server / Client 进行可选 TLS 的 TCP 中转，Client 从内网主动连接 Server。指纹为空时使用未加密 TCP，英文风险提示仅由 PagaGateway Server 在启动时输出。SSH/RDP 目标独立核验身份并认证，VNC 按服务端提供的标准认证方式连接。服务表单「高级选项」可选网关或恢复直连；SSH 终端、SFTP、状态、端口转发及 RDP/VNC 桌面按标签独立持有和释放连接。网关不可用时拒绝连接；被引用网关需先解除绑定再删除。部署和信任模型见 [Page 网关](page-gateway.md)。
 
 **SSH 终端**
-- 基于 xterm.dart 的完整终端模拟（VT100/xterm-256color、CJK、emoji）
+- 内部终端组件 paga_terminal 位于 `lib/terminal/`，负责 Flutter 绘制、输入法与滚动选择（VT100/xterm-256color、CJK、emoji）；项目 `rust/src/terminal/` 使用官方 alacritty_terminal 处理终端解析、屏幕、回滚和重排，见 [Rust 终端内核](terminal-rust-core.md) 与 [终端组件及参考来源](terminal-component.md)
 - 多标签 + 同一窗口内水平/垂直分屏
 - 标签策略：默认每台主机一个标签；双击主机聚焦已有标签（无则新建连接）；同一主机多开会话走右键菜单「新建会话」；shell 结束（exit/断网）自动关闭标签
 - 复制粘贴（右键/快捷键/选中即复制可选）、查找、滚动回放、字体字号调节
@@ -132,7 +132,7 @@
 | 框架 | Flutter 3.47+ (stable) / Dart 3.13+ | 三平台单代码库，满足 shadcn_flutter 工具链要求 |
 | UI 组件 | shadcn_flutter | ShadcnApp 直接提供 Zinc 浅色/深色主题、Geist 字体、Lucide 图标及页面/弹窗组件；移除 Material 兼容层 |
 | SSH/SFTP 引擎 | Rust：[russh](https://crates.io/crates/russh) + [russh-sftp](https://crates.io/crates/russh-sftp)，经 [flutter_rust_bridge](https://pub.dev/packages/flutter_rust_bridge) FFI 接入（cargokit 随 flutter build 自动编译） | 内存安全、性能强、协议实现活跃维护；密集 IO 在 Rust 侧 tokio 运行时处理，不占用 Dart isolate；域接口 `SshEngine` 隔离，UI/应用层零感知 |
-| 终端模拟 | [xterm](https://pub.dev/packages/xterm) ^3.2+ | 与 dartssh2 同团队，60fps、CJK/emoji、可换主题，官方有 SSH 示例 |
+| 终端模拟 | `lib/terminal/` 内部组件 paga_terminal + `rust/src/terminal/` 内核（官方 alacritty_terminal 0.26.0） | Rust 解析与缓冲，增量行推送；Flutter 绘制、输入法、键鼠和选区参考 xterm.dart 4.0.0；参考来源见[组件说明](terminal-component.md) |
 | 本地终端 | flutter_pty | 同团队的 PTY 封装 |
 | 状态管理 | GetX (get) | Rx/Obx 响应式状态与 Bindings 依赖装配；SFTP 浏览按面板生命周期创建控制器。控制器通过构造函数注入依赖，不在内部 Get.find |
 | HTTP 网络请求 | GetX GetConnect | 直接使用原生 HTTP 方法、JSON 和 `Response<T>`；`AppConnect` 仅负责超时、重定向配置与释放，延迟注册、构造注入，无默认远程端点，SSH/SFTP 仍由 Rust 处理 |
@@ -152,7 +152,7 @@
 |---|---|
 | Rust FFI 增加构建链复杂度（三平台交叉编译、贡献者需装 Rust） | cargokit 已把 Rust 编译并入 flutter build；CI 缓存 cargo 产物；CONTRIBUTING 写明工具链要求 |
 | 首次连接的主机身份需用户独立核验 | 同一条连接先握手获取指纹，经用户确认并持久化后才发送密码；后续严格匹配，重协商拒绝替换密钥 |
-| xterm.dart 大量输出时性能 | 限制 scrollback 行数（默认 10k 可调）；输出节流合并渲染 |
+| 终端大量输出时性能 | Rust 最多保留 10k 行回滚，约 16 ms 合并增量行更新；实际收益须通过 Profile/Release 测量 |
 | Linux 无桌面钥匙串（headless/精简发行版） | 回退到主密码派生密钥的纯文件加密方案 |
 | PPK / OpenSSH 新格式私钥解析 | 内置格式转换层，必要时引导用户用 ssh-keygen 转换并给出确切命令 |
 
@@ -187,6 +187,7 @@
 ### 4.1 核心运行时对象
 
 - **`SessionController`**：全局 GetX 控制器，持有所有活动会话。以 `SessionKind` 区分终端、文件传输、端口转发与远程桌面标签；只有 SSH 终端启动 shell。RDP / VNC 服务分别使用 `RdpEngine` / `VncEngine`，共享桌面帧、指针与显示组件，VNC 键盘使用 X11 keysym。双击聚焦已有桌面、右键「新建会话」新开标签。SSH 文件传输与网关端口转发保持独立连接；端口转发由 `GatewayForwardEngine` 创建网关连接，桌面服务不提供 SSH 文件传输入口。所有标签统一关闭、取消与释放资源。
+- **`_SessionRuntime`**：每个会话集中持有凭据、待确认操作、流订阅、清理任务和代理资源；界面继续读取不可变的 `Session` 快照。按网关主机共享的端口清理队列独立保留，避免重开时抢占尚未释放的端口。
 - **`Session` 状态机**：`connecting → authenticating → hostkeyPending → ready → reconnecting → closed`，UI 按状态渲染（指纹确认弹窗即 `hostkeyPending`）。
 - **`TransferQueue`**：全局传输队列，任务持久化（应用崩溃后可恢复未完成任务），并发 worker 数可配，单任务支持进度流、暂停、重试。
 - **`GatewayController`**：网关的端口映射经网关树仓库事务保存，只更新最新网关记录中的映射字段；运行连接及启停清理由 `SessionController` 管理，本地端口绑定和 TCP 转发由 Rust 执行。
@@ -257,7 +258,7 @@ Settings(theme, terminalFont, fontSize, scrollback, keepaliveSec,
 
 单窗口左中右布局：左侧为无外层圆角和留白、直接填满窗口高度的侧栏，中间为会话工作区，右侧为可折叠 Agent，不显示独立标题栏和底部状态栏（window_manager 隐藏系统标题）：
 
-当前界面直接使用 ShadcnApp 与 shadcn_flutter Zinc 浅色/深色风格，使用细边框、紧凑间距和绿色连接状态。欢迎页提供快速连接、新建主机与快捷键卡片；侧边栏搜索、会话操作、SFTP 工具栏以及主机/凭证表单使用统一组件。`AppTheme` 管理令牌，`AppTextFormField` 与 `AppSelectField` 对接 Flutter 核心 Form 校验，`AppDialog` 固定操作区并滚动长内容。选择框、单选/复选、菜单与 Toast 使用 shadcn 组件；GetX 继续负责路由和业务翻译，窗口管理与 xterm 终端独立于 UI 组件库。
+当前界面直接使用 ShadcnApp 与 shadcn_flutter Zinc 浅色/深色风格，使用细边框、紧凑间距和绿色连接状态。欢迎页提供快速连接、新建主机与快捷键卡片；侧边栏搜索、会话操作、SFTP 工具栏以及主机/凭证表单使用统一组件。`AppTheme` 管理令牌，`AppTextFormField` 与 `AppSelectField` 对接 Flutter 核心 Form 校验，`AppDialog` 固定操作区并滚动长内容。选择框、单选/复选、菜单与 Toast 使用 shadcn 组件；GetX 继续负责路由和业务翻译，窗口管理与 paga_terminal 终端独立于 UI 组件库。
 
 SSH/SFTP 与端口转发会话在右侧工作区使用 shadcn `TabPane`，采用组件默认标签栏高度（当前桌面主题为 32），提供圆角标签、切换、关闭、会话列表与快速连接入口。没有会话时保留标签栏，在下方显示欢迎页。内容继续通过带稳定会话 key 的 `IndexedStack` 保持挂载。主机嵌套使用自定义树形列表，展开状态由 `FolderController` 管理；混合同级顺序、边缘排序、移入文件夹与拖动预览由应用的树控制器和拖放组件负责。应用图标统一采用 shadcn 自带的 Lucide 图标。
 
@@ -297,8 +298,10 @@ PagaShell/
 │   ├── main.dart
 │   ├── app.dart                 # 根 Widget、主题、路由
 │   ├── core/                    # 通用工具、常量、扩展、日志
+│   ├── terminal/                # 内部 paga_terminal 组件：显示、输入、选区
 │   ├── domain/
 │   │   ├── entities/            # Host, Identity, Snippet ...
+│   │   ├── terminal/            # 纯 Dart 帧协议与终端帧流接口
 │   │   └── repositories/        # 抽象接口
 │   ├── infrastructure/
 │   │   ├── ssh/                 # DartSsh2Engine、known_hosts、密钥解析
@@ -317,6 +320,7 @@ PagaShell/
 │       └── settings/
 ├── test/                        # 单测（domain/application 层为主）
 ├── integration_test/
+├── rust/src/terminal/            # 终端解析、屏幕、回滚、重排及帧生成
 ├── docs/                        # 本文档、截图、架构图
 ├── .github/workflows/           # ci.yaml, release.yaml
 ├── linux/ macos/ windows/       # 平台壳工程

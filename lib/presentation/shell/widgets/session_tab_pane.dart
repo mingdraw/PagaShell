@@ -156,7 +156,7 @@ class _SessionTabPaneState extends State<SessionTabPane> {
     final settings = Get.find<SettingsController>();
     return Obx(() {
       final sidebarVisible =
-          settings.sidebarState.value.visible &&
+          settings.sidebarVisible.value &&
           !(AgentSidebarScope.maybeOf(context)?.sidebarHiddenForSpace ?? false);
       return LayoutBuilder(
         builder: (context, constraints) {

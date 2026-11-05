@@ -15,7 +15,7 @@ class TitleBar extends StatelessWidget {
     final isMac = shadcn.Theme.of(context).platform == TargetPlatform.macOS;
     final settings = Get.find<SettingsController>();
     return Obx(() {
-      final sidebarVisible = settings.sidebarState.value.visible;
+      final sidebarVisible = settings.sidebarVisible.value;
       return ColoredBox(
         color: AppTheme.sidebar(context),
         child: SizedBox(

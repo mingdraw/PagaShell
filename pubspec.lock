@@ -5,18 +5,18 @@ packages:
     dependency: transitive
     description:
       name: _fe_analyzer_shared
-      sha256: "9bfb8122e2505aca17219018593c384a87166cfe860d11c7ae927e7f978eb05f"
+      sha256: "1c5591cc6f252d5f440d96ab87c03e43504be552a3fa49d7cb7563f04c51fb0a"
       url: "https://pub.flutter-io.cn"
     source: hosted
-    version: "110.0.0"
+    version: "111.0.0"
   analyzer:
     dependency: transitive
     description:
       name: analyzer
-      sha256: "74c36179c4de542efea24c9dff78324375e4b118a2c1e14e8a7659f457947f8d"
+      sha256: "6c39bd5486a310e56217bed7cb1691377959f31be4227e41750107db7e6dd55c"
       url: "https://pub.flutter-io.cn"
     source: hosted
-    version: "14.6.0"
+    version: "14.7.0"
   animation_kit:
     dependency: transitive
     description:
@@ -249,14 +249,6 @@ packages:
       url: "https://pub.flutter-io.cn"
     source: hosted
     version: "0.3.1"
-  equatable:
-    dependency: transitive
-    description:
-      name: equatable
-      sha256: "3bce007a596ff8b3119c45d68aaef631272537c03d30e5d4534dd24bf4c5eaa2"
-      url: "https://pub.flutter-io.cn"
-    source: hosted
-    version: "2.1.0"
   fake_async:
     dependency: transitive
     description:
@@ -792,7 +784,7 @@ packages:
     source: hosted
     version: "1.7.0"
   quiver:
-    dependency: transitive
+    dependency: "direct main"
     description:
       name: quiver
       sha256: ea0b925899e64ecdfbf9c7becb60d5b50e706ade44a85b2363be2a22d88117d2
@@ -1099,15 +1091,6 @@ packages:
       url: "https://pub.flutter-io.cn"
     source: hosted
     version: "7.1.0"
-  xterm:
-    dependency: "direct main"
-    description:
-      path: "."
-      ref: "25bc19e49d9e948ba45bdb185d534c26bb3df9b2"
-      resolved-ref: "25bc19e49d9e948ba45bdb185d534c26bb3df9b2"
-      url: "https://github.com/TerminalStudio/xterm.dart.git"
-    source: git
-    version: "4.0.0"
   yaml:
     dependency: transitive
     description:
@@ -1124,14 +1107,6 @@ packages:
       url: "https://pub.flutter-io.cn"
     source: hosted
     version: "2.2.4"
-  zmodem:
-    dependency: transitive
-    description:
-      name: zmodem
-      sha256: "3b7e5b29f3a7d8aee472029b05165a68438eff2f3f7766edf13daba1e297adbf"
-      url: "https://pub.flutter-io.cn"
-    source: hosted
-    version: "0.0.6"
 sdks:
   dart: ">=3.13.0 <4.0.0"
   flutter: ">=3.47.0"

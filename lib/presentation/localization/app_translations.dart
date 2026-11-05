@@ -62,7 +62,8 @@ class AppTranslations extends Translations {
   static const Map<String, String> _english = {
     '软件更新': 'Software updates',
     '自动更新': 'Automatic updates',
-    '启动时检查新版本，下载和安装前会询问你。': 'Check for updates at startup. Ask before downloading and installing.',
+    '启动时检查新版本，下载和安装前会询问你。':
+        'Check for updates at startup. Ask before downloading and installing.',
     '当前版本：@version': 'Current version: @version',
     '检查更新': 'Check for updates',
     '正在检查更新…': 'Checking for updates…',
@@ -79,18 +80,21 @@ class AppTranslations extends Translations {
     '正在准备安装…': 'Preparing installation…',
     '正在关闭会话并安装更新…': 'Closing sessions and installing the update…',
     '无法读取当前版本，请重试': 'Could not read the installed version. Try again.',
-    '检查更新失败，请检查网络后重试': 'Could not check for updates. Check your connection and try again.',
+    '检查更新失败，请检查网络后重试':
+        'Could not check for updates. Check your connection and try again.',
     '当前已是最新版本': 'You’re up to date.',
     '安装包校验失败，请重新下载': 'Package verification failed. Download the update again.',
     '更新已取消': 'Update cancelled.',
     '下载或安装更新失败，请重试': 'Could not download or install the update. Try again.',
     '更新下载地址无效': 'The update download URL is invalid.',
-    '下载更新失败，请检查网络后重试': 'Could not download the update. Check your connection and try again.',
+    '下载更新失败，请检查网络后重试':
+        'Could not download the update. Check your connection and try again.',
     '安装包大小不匹配，请重新下载': 'Package size does not match. Download the update again.',
     '安装包下载不完整，请重新下载': 'The download is incomplete. Download the update again.',
     '当前处理器架构不支持自动更新': 'Automatic installation is not available for this processor architecture.',
     '开发版本不支持自动安装，请使用发布版': 'Automatic installation requires a release build.',
-    '应用安装目录无效，请重新安装后重试': 'The installation folder is invalid. Reinstall the app and try again.',
+    '应用安装目录无效，请重新安装后重试':
+        'The installation folder is invalid. Reinstall the app and try again.',
     '更新安装包无效': 'The update package is invalid.',
     '请先将应用移到可写目录后再更新': 'Move the app to a writable folder before updating.',
     '安装目录需要管理员权限，但系统未提供授权工具': 'The installation folder requires administrator access, but no authorization tool is available.',
@@ -118,6 +122,9 @@ class AppTranslations extends Translations {
     '协议端口': 'Protocol ports',
     '监听端口': 'Listen port',
     '代理失败': 'Proxy failed',
+    '动态代理启动失败，请检查网关配置和网络':
+        'Could not start the proxy. Check the gateway settings and connection.',
+    '连接失败，请检查连接配置和网络后重试': 'Could not connect. Check the connection settings and network, then try again.',
     '添加规则': 'Add rule',
     '移除规则': 'Remove rule',
     '匹配方式': 'Match type',
@@ -637,6 +644,7 @@ class AppTranslations extends Translations {
     '已发送至 @sent 个终端，@skipped 个已断开，@failed 个发送失败': 'Sent to @sent terminals; @skipped disconnected, @failed failed to send',
     '命令已发送至 @count 个终端': 'Command sent to @count terminals',
     '终端': 'Terminal',
+    '终端引擎不支持屏幕帧': 'The terminal engine does not support screen frames',
     '服务状态': 'Service status',
     '展开服务状态': 'Expand service status',
     '折叠服务状态': 'Collapse service status',
