@@ -8,7 +8,7 @@ on:
       tag:
         description: Existing version tag to build and publish
         required: true
-        default: v0.2.2
+        default: v0.3.0
 
 permissions:
   contents: read
