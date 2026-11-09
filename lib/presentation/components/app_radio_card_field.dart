@@ -2,6 +2,7 @@ import 'package:flutter/widgets.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import '../theme/app_theme.dart';
+import 'app_icon.dart';
 
 class AppRadioCardOption<T> {
   const AppRadioCardOption({
@@ -12,7 +13,7 @@ class AppRadioCardOption<T> {
 
   final T value;
   final Widget child;
-  final IconData? icon;
+  final AppIcons? icon;
 }
 
 /// 等宽的 shadcn Radio Card 选项，与 Flutter 核心 Form 校验互通。
@@ -71,7 +72,7 @@ class AppRadioCardField<T> extends FormField<T> {
                                  mainAxisSize: MainAxisSize.min,
                                  children: [
                                    if (items[i].icon case final icon?) ...[
-                                     Icon(icon, size: AppTheme.inputIconSize),
+                                     AppIcon(icon, size: AppTheme.inputIconSize),
                                      const SizedBox(width: 6),
                                    ],
                                    items[i].child,

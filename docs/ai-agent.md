@@ -5,7 +5,7 @@
 - `ShellPage` 的外层 `AgentWorkspace` 将左侧服务栏、完整会话工作区与 Agent 分成独立区域，Agent 不再嵌入中间 `TabPane` 的内容或圆角外框。右栏有独立顶部拖窗区、开关和拖宽分隔条，使用与左侧服务栏相同的宽度过渡、时长与曲线；动画只裁剪固定宽度的聊天，避免反复换行。窄窗口不足以容纳三栏时临时收起左栏，保持中间工作区与右栏并排，不覆盖主区域，也不改写左栏显隐偏好；关闭 Agent 或加宽窗口后恢复。此时点击左栏展开入口会收起 Agent 并恢复服务栏。收起后右栏不占宽度，通过顶部 Agent 按钮重新展开。聊天和会话子树均保持挂载，RDP 全屏立即隐藏右栏。Windows/Linux 窗口按钮固定在窗口右上角，不跟随右栏动画移动。
 - `SettingsDialog` 使用 shadcn Tabs 提供通用和 AI 两类设置；AI Tab 直接填写一组 API 协议、地址、Key 和默认模型 ID，底部提供测试连接与保存。长表单滚动，底部按钮和结果反馈固定可见，不再通过模型卡片进入第二层编辑弹窗。
 - `AiSettingsController` 串行提交配置快照。`DriftAiSettingsRepository` 复用 `app_settings.ai_settings`，不修改 Drift schema。API Key 经现有 SecretStore 加密；替换前先记录待清理引用，再写新密文和提交引用，保存失败保留旧引用。新旧密文删除失败的引用持久化，后续编辑或重载重试。
-- `AgentController` 构造注入 GetConnect、配置控制器、SecretStore、SessionController 和对话仓库，保留运行编排与生命周期。同一 Dart library 的 `agent_history.dart`、`agent_api.dart`、`agent_tools.dart` 分别管理历史持久化、模型 API 与工具执行，API 部分直接使用注入的 GetConnect；`AgentApiCodec` 仅做 JSON 映射。AI 使用的 GetConnect 超时 90 秒，不跟随重定向，不调用 SDK 云服务、不引入遥测。
+- `AgentController` 构造注入 GetConnect、配置控制器、SecretStore、SessionController 和对话仓库，保留运行编排与生命周期。同一 Dart library 的 `agent_history.dart`、`agent_api.dart`、`agent_tools.dart`、`agent_queue.dart` 分别管理历史持久化、模型 API、工具执行与消息队列，API 部分直接使用注入的 GetConnect；`AgentApiCodec` 仅做 JSON 映射。AI 使用的 GetConnect 超时 90 秒，不跟随重定向，不调用 SDK 云服务、不引入遥测。
 - 内置技能位于 `domain/ai/agent_skill.dart`，仅三项，模型通过 `read_skill` 按需加载。没有外部技能市场或通用插件框架。
 - Agent 回复通过纯 Dart `markdown` 解析 GitHub Flavored Markdown，再映射为原生组件，支持标题、粗体/斜体/删除线、行内代码、嵌套有序/无序列表、任务列表、引用、分隔线及表格。正文可选择，宽表格横向滚动，代码块保留语言、原文复制和横向滚动；用户消息保留原文。历史存储仍保存原始消息，恢复时重新渲染。链接与图片显示可复制的标签和地址，不自动跳转或加载远程图片，HTML 作为文本显示。
 
@@ -21,7 +21,7 @@
 
 刷新按钮位于默认模型 ID 标签行最右侧，输入框与其他字段等高。弹窗底部「测试连接」使用尚未保存的配置发起模型请求；Key 留空时复用已保存的保险库引用。测试不保存配置或 Key、不写入聊天记录，也不执行返回的工具调用。测试期间显示进行状态并禁用重复测试与保存，仍可关闭弹窗；修改连接字段后清除旧测试结果。保存后保留表单，显示结果并清空 Key 输入。旧多配置数据以原先选中项作为当前 API，其他配置和密钥引用保留，继续使用原有密钥提交和清理事务。
 
-Agent 只使用设置中的默认模型 ID，在标题旁显示该 ID；面板不提供模型下拉或刷新入口，展开时不自动拉取目录。模型目录刷新和选择均在 AI 设置中完成。保存新的 API、Key 或默认 ID 后，后续请求使用新配置并沿用思考强度；模型能力缓存随配置更新失效，旧配置的迟到目录结果不污染新配置。
+Agent 只使用设置中的默认模型 ID，在标题旁显示该 ID；面板不提供模型下拉或刷新入口，展开时不自动拉取目录。模型目录刷新和选择均在 AI 设置中完成。保存新的 API、Key 或默认 ID 后，后续提交的消息使用新配置并沿用思考强度；模型能力缓存随配置更新失效，旧配置的迟到目录结果不污染新配置。
 
 输入框内可选择思考强度，默认「自动」省略所有思考控制参数。OpenAI Chat Completions 使用 `reasoning_effort`，Responses 使用 `reasoning.effort`。Anthropic 根据模型目录的 `capabilities.effort` 和 `capabilities.thinking.types` 限定档位，自适应模式发送 `thinking.type: adaptive` 与 `output_config.effort`；仅支持旧式 `enabled` 的模型将低/中/高映射为内部预算 1024/8192/32768，且始终小于服务商返回的输出上限，不要求用户配置 Token。未报告能力的兼容服务提供协议档位，由服务商校验；不支持时提示改用自动或其他档位，不猜测模型名称。
 
@@ -39,13 +39,17 @@ Agent 只使用设置中的默认模型 ID，在标题旁显示该 ID；面板�
 
 Enter 直接发送消息，Shift+Enter 在光标或选区插入换行；保留 Cmd/Ctrl+Enter 发送。候选 Popover 打开时 Enter/Tab 先选择候选；中文等输入法仍在组词时 Enter 不触发发送。
 
+运行模型请求、调用工具或等待命令批准时仍可继续发送，消息按 FIFO 排队。每次发送立即清空草稿并展示用户消息，分别标记处理中、排队中、请求失败或已取消，回复和工具记录放在对应用户消息之后；输入框上方显示排队数量及停止按钮，底部始终保留发送按钮。一条消息的完整工具轮次结束后才执行下一条；未来消息不提前进入当前模型上下文。单条失败保留脱敏错误，后续排队消息继续执行。
+
+每条消息在提交时固定文本、引用标签、会话连接、模型配置与密钥引用、思考强度和审核模式。排队期间仍可编辑下一条草稿、选择会话及修改模式，已提交的请求不随之变化；改为完全访问也不会自动批准之前的命令。轮到执行时重新校验原连接并读取最新终端输出；排队会话已关闭或同 ID 重连时该条失败，需重新选择后发送。
+
 引用会话后发送白名单元数据（会话 ID、引用名称、hostname、port、协议、页签、连接状态、是否经网关），并分别从各 SSH 会话的 paga_terminal 当前屏幕镜像和近期回滚读取输出；每个会话默认最近 120 行，工具最多 200 行、16000 字符。`read_terminal_output` 可重新读取，或最多等候 5 秒获取新输出，不注入任何探测命令，也不重复订阅 SSH 输出流。切入 alternate screen 时读取当前屏幕。输出作为不可信数据处理，可能包含后台活动或用户自行显示的内容；仅引用的会话输出会发送到配置的 API。不读取凭据保险库中的密码、私钥、主机备注或 RDP 图像。SSH 状态通过现有只读状态通道采集；单次 Linux CPU 无百分比，不能解释成 0%。已发送的上下文仍在当前对话中，点击新对话后不再用于新的请求，旧记录保留在历史管理中。
 
 思考强度旁提供「请求批准 / 完全访问」。`propose_ssh_command` 在默认「请求批准」下暂停工具循环，用户审阅固定目标、命令和用途，确认后才发送命令及回车，拒绝结果也返回模型；「完全访问」直接发送到指定引用的 SSH 终端。读取与命令工具用 `session_id` 指定本轮引用集合中的一个会话，多引用时省略目标会拒绝操作，单引用时可省略；命令不广播到所有引用。两种模式发送前均重新验证原会话、终端及引擎身份，已关闭、重连、停止、已发送或已拒绝的请求不能发送。引用集合以外的目标 ID 不能操作。
 
 发送输入前开始观察终端变化，输出安静 600ms 或观察达到 8 秒后将近期输出返回模型继续分析；超时无新输出也明确记录，不自动重复发送。输出变化、安静或超时均不证明命令完成或成功，长任务可由读取工具继续观察。停止、清空或原会话失效会解除批准/输出等待并丢弃迟到回复，不撤销已排入终端的输入。RDP 仅提供上下文、建议和复制，不执行 PowerShell 或发送键鼠。
 
-停止、新建、切换或删除当前对话使运行代次失效，迟到响应不追加消息或调用工具。当前 GetConnect 不提供逐请求取消句柄，已发出的请求可能仍在服务商运行。
+停止、新建、切换或删除当前对话、退出以及正在运行的目标会话失效，都会取消当前消息及全部待执行消息，使运行代次失效；迟到响应不追加消息或调用工具。当前 GetConnect 不提供逐请求取消句柄，已发出的请求可能仍在服务商运行。
 
 ## 历史对话
 
@@ -53,13 +57,15 @@ Enter 直接发送消息，Shift+Enter 在光标或选区插入换行；保留 C
 
 `DriftAgentConversationRepository` 按对话复用 `app_settings` 记录，无 schema 变更。标题、可见消息、已提交的模型上下文与协议原始思考块整体使用 AES-256-GCM 加密；独立数据密钥存 SecretStore，记录 ID 用作认证数据。重启后可找回旧对话；未完成轮次仅保存可见内容，不把未配对的工具调用放入续聊上下文。保存和删除串行执行，快照在排队前捕获，防止切换串写或删除后复活。保存失败保留内存记录并提供重试；密文损坏或密钥缺失时报错并保留原记录。
 
+请求状态及脱敏错误随用户消息保存。未完成和待执行消息恢复为已取消，保留提交原文；不持久化队列中的连接句柄和执行授权，打开历史或重启均不会自动重发。
+
 窗口关闭和系统退出先停止当前 Agent 轮次并等待对话、模式偏好的本地写入队列完成，不等待服务商的迟到请求。保存失败时保留窗口，可取消退出后重试，也可明确选择丢弃未保存数据退出。已成功删除的 ID 会过滤迟到读取和重试快照，避免重新出现在列表或数据库中。
 
 ## 验证入口
 
 ```bash
 flutter analyze --no-pub
-flutter test --no-pub test/application/ai_settings_controller_test.dart test/application/agent_controller_test.dart test/infrastructure/agent_http_test.dart test/infrastructure/agent_conversation_repository_test.dart test/agent_input_controller_test.dart test/agent_message_body_test.dart test/agent_ui_test.dart test/theme_mode_test.dart
+flutter test --no-pub test/application/ai_settings_controller_test.dart test/application/agent_controller_test.dart test/application/agent_queue_test.dart test/infrastructure/agent_http_test.dart test/infrastructure/agent_conversation_repository_test.dart test/agent_input_controller_test.dart test/agent_message_body_test.dart test/agent_ui_test.dart test/theme_mode_test.dart
 ```
 
-本机 HTTP 契约测试真实经过 GetConnect，覆盖三种协议的模型目录、设置默认模型、思考参数、技能往返及后续聊天。控制器和组件测试还覆盖 `@` 分组 Popover 的独立宽度、会话命名、同名会话引用与目标 ID 映射、输入框内多引用高亮、删改解除关联、整段删除、输入法组词和重连失效、中英文长列表键盘定位、反复开关、模式持久化及保存失败重试、Enter/Shift+Enter 和输入法组词、审核模式切换、目标固定、批准/拒绝/停止、完全访问与输出返回模型、输出限额、重连失效，以及直接设置表单、复用 Key、迟到目录结果、思考签名回传、聊天、折叠保留输入、拖宽、800×600 macOS/Windows/Linux 主题布局及语言切换。历史测试覆盖新建保留、恢复续聊、删除当前和旧对话、保存失败重试、迟到响应隔离、只读命令恢复、数据库关闭重开及密文/密钥异常。它们不代表真实第三方服务商、Windows/Linux 原生运行或真实远程命令执行验收。实际服务商需在设置中提供用户自己的 URL、模型 ID 和 API Key 后测试连接。
+本机 HTTP 契约测试真实经过 GetConnect，覆盖三种协议的模型目录、设置默认模型、思考参数、技能往返及后续聊天。队列控制器与组件测试覆盖三协议连续发送、完整轮次顺序、上下文隔离、每条配置和会话快照、审批等待期间排队、单条失败后继续、取消整队、同步状态通知取消、同 ID 重连、迟到响应隔离及历史恢复不重发。控制器和组件测试还覆盖 `@` 分组 Popover 的独立宽度、会话命名、同名会话引用与目标 ID 映射、输入框内多引用高亮、删改解除关联、整段删除、输入法组词和重连失效、中英文长列表键盘定位、反复开关、模式持久化及保存失败重试、Enter/Shift+Enter 和输入法组词、审核模式切换、目标固定、批准/拒绝/停止、完全访问与输出返回模型、输出限额、重连失效，以及直接设置表单、复用 Key、迟到目录结果、思考签名回传、聊天、折叠保留输入、拖宽、800×600 macOS/Windows/Linux 主题布局及语言切换。历史测试覆盖新建保留、恢复续聊、删除当前和旧对话、保存失败重试、迟到响应隔离、只读命令恢复、数据库关闭重开及密文/密钥异常。它们不代表真实第三方服务商、Windows/Linux 原生运行或真实远程命令执行验收。实际服务商需在设置中提供用户自己的 URL、模型 ID 和 API Key 后测试连接。

@@ -43,7 +43,7 @@ void main() {
     TargetPlatform.windows,
     TargetPlatform.linux,
   ]) {
-    testWidgets('$platform 配置按钮位于侧栏左下角设置旁，收起隐藏且不触发拖窗', (tester) async {
+    testWidgets('$platform 配置按钮与 Agent 位于右上角，侧栏收起仍可用且不触发拖窗', (tester) async {
       final calls = <String>[];
       const nativeChannel = MethodChannel('pagashell/window');
       tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
@@ -63,27 +63,30 @@ void main() {
       final settingsButton = find.byKey(const ValueKey('app-settings-button'));
       final importButton = find.byKey(const ValueKey('import-configuration'));
       final exportButton = find.byKey(const ValueKey('export-configuration'));
-      expect(settingsButton, findsOneWidget);
-      for (final button in [importButton, exportButton]) {
+      final agentButton = find.byKey(const ValueKey('agent-toggle'));
+      final agentBounds = tester.getRect(agentButton);
+      for (final button in [settingsButton, importButton, exportButton]) {
         expect(button, findsOneWidget);
+        expect(tester.getCenter(button).dy, agentBounds.center.dy);
+        expect(tester.getSize(button), agentBounds.size);
         expect(
-          tester.getCenter(button).dy,
-          tester.getCenter(settingsButton).dy,
+          tester.getRect(button).bottom,
+          lessThanOrEqualTo(AppTheme.windowHeaderHeight),
         );
-        expect(
-          tester.getRect(button).top,
-          greaterThanOrEqualTo(800 - AppTheme.sidebarFooterHeight),
-        );
-        expect(tester.getRect(button).right, lessThan(AppTheme.sidebarWidth));
         await tester.drag(button, const Offset(40, 0));
       }
+      expect(agentBounds.left, greaterThan(1280 / 2));
       expect(
         tester.getRect(importButton).left,
-        greaterThanOrEqualTo(tester.getRect(settingsButton).right),
+        greaterThanOrEqualTo(agentBounds.right),
       );
       expect(
         tester.getRect(exportButton).left,
         greaterThanOrEqualTo(tester.getRect(importButton).right),
+      );
+      expect(
+        tester.getRect(settingsButton).left,
+        greaterThanOrEqualTo(tester.getRect(exportButton).right),
       );
       await tester.pumpAndSettle();
       expect(calls, isEmpty);
@@ -97,13 +100,9 @@ void main() {
       }.entries) {
         final iconButton = find.descendant(
           of: entry.key,
-          matching: find.byType(shadcn.IconButton),
+          matching: find.byType(shadcn.GhostButton),
         );
         expect(iconButton, findsOneWidget);
-        expect(
-          tester.widget<shadcn.IconButton>(iconButton).variance,
-          shadcn.ButtonVariance.ghost,
-        );
         await mouse.moveTo(tester.getCenter(entry.key));
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 600));
@@ -120,14 +119,83 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const ValueKey('sidebar-toggle')));
       await tester.pumpAndSettle();
-      expect(settingsButton, findsNothing);
-      expect(importButton, findsNothing);
-      expect(exportButton, findsNothing);
+      expect(settingsButton.hitTestable(), findsOneWidget);
+      expect(importButton.hitTestable(), findsOneWidget);
+      expect(exportButton.hitTestable(), findsOneWidget);
       await tester.tap(find.byKey(const ValueKey('sidebar-toggle')));
       await tester.pumpAndSettle();
       expect(settingsButton, findsOneWidget);
       expect(importButton, findsOneWidget);
       expect(exportButton, findsOneWidget);
+      await tester.tap(agentButton);
+      await tester.pumpAndSettle();
+      expect(tester.getRect(agentButton), agentBounds);
+      for (final button in [settingsButton, importButton, exportButton]) {
+        expect(button.hitTestable(), findsOneWidget);
+        expect(tester.getCenter(button).dy, agentBounds.center.dy);
+      }
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('$platform 侧栏开关平滑移动和渐变，连续切换不重建且避让标签', (tester) async {
+      await pumpApp(tester, platform);
+      final sessions = Get.find<SessionController>();
+      sessions.sessions.add(
+        Session(
+          id: 'animated-sidebar',
+          host: const Host(id: 'animated', name: 'Header', hostname: 'test'),
+          phase: SessionPhase.failed,
+          error: 'fixture',
+        ),
+      );
+      sessions.activate('animated-sidebar');
+      await tester.pumpAndSettle();
+      final toggle = find.byKey(const ValueKey('sidebar-toggle'));
+      final fill = find.byKey(const ValueKey('sidebar-toggle-fill'));
+      final fade = find.descendant(
+        of: fill,
+        matching: find.byType(FadeTransition),
+      );
+      double opacity() => tester.widget<FadeTransition>(fade).opacity.value;
+      final fillState = tester.state(fill);
+      final expandedLeft = tester.getRect(toggle).left;
+      final collapsedLeft = platform == TargetPlatform.macOS
+          ? AppTheme.macWindowControlsWidth
+          : 0.0;
+      expect(opacity(), 0);
+      for (final expanded in [false, true]) {
+        await tester.tap(toggle);
+        await tester.pump();
+        await tester.pump(AppTheme.sidebarTransitionDuration ~/ 2);
+        final moving = tester.getRect(toggle);
+        expect(moving.left, greaterThan(collapsedLeft));
+        expect(moving.left, lessThan(expandedLeft));
+        expect(opacity(), greaterThan(0));
+        expect(opacity(), lessThan(1));
+        expect(tester.state(fill), same(fillState));
+        expect(
+          tester.getRect(find.byType(shadcn.KeyedTabItem<String>)).left,
+          greaterThanOrEqualTo(moving.right - 0.5),
+        );
+        await tester.pumpAndSettle();
+        expect(opacity(), expanded ? 0 : 1);
+        expect(
+          tester.getRect(toggle).left,
+          expanded ? expandedLeft : collapsedLeft,
+        );
+      }
+      await tester.tap(toggle);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 80));
+      final reversingOpacity = opacity();
+      final reversingLeft = tester.getRect(toggle).left;
+      await tester.tap(toggle);
+      await tester.pump();
+      expect(opacity(), closeTo(reversingOpacity, 0.001));
+      expect(tester.getRect(toggle).left, closeTo(reversingLeft, 0.001));
+      await tester.pumpAndSettle();
+      expect(opacity(), 0);
+      expect(tester.state(fill), same(fillState));
       expect(tester.takeException(), isNull);
     });
 
@@ -284,6 +352,9 @@ void main() {
         );
         final agentToggleFinder = find.byKey(const ValueKey('agent-toggle'));
         final agentToggle = tester.getRect(agentToggleFinder);
+        final settingsButton = tester.getRect(
+          find.byKey(const ValueKey('app-settings-button')),
+        );
         expect(
           leftToggle.left,
           platform == TargetPlatform.macOS
@@ -294,17 +365,17 @@ void main() {
         expect(
           find.descendant(
             of: agentToggleFinder,
-            matching: find.byIcon(shadcn.LucideIcons.bot),
+            matching: findAppIcon(AppIcons.bot),
           ),
           findsOneWidget,
         );
         if (platform == TargetPlatform.macOS) {
-          expect(agentToggle.right, width);
+          expect(settingsButton.right, width);
           expect(find.byType(WindowButtons), findsNothing);
         } else {
           final windowButtons = tester.getRect(find.byType(WindowButtons));
           expect(windowButtons.right, width);
-          expect(agentToggle.right, windowButtons.left);
+          expect(settingsButton.right, windowButtons.left);
           expect(agentToggle.center.dy, windowButtons.center.dy);
         }
         final tab = tester.getRect(find.byType(shadcn.KeyedTabItem<String>));
@@ -316,6 +387,32 @@ void main() {
       }
     });
   }
+
+  testWidgets('系统减少动画时侧栏开关立即切换，无过渡残留', (tester) async {
+    tester.platformDispatcher.accessibilityFeaturesTestValue =
+        const FakeAccessibilityFeatures(disableAnimations: true);
+    addTearDown(tester.platformDispatcher.clearAccessibilityFeaturesTestValue);
+    await pumpApp(tester, TargetPlatform.macOS);
+    final toggle = find.byKey(const ValueKey('sidebar-toggle'));
+    final expandedLeft = tester.getRect(toggle).left;
+    final fade = find.descendant(
+      of: find.byKey(const ValueKey('sidebar-toggle-fill')),
+      matching: find.byType(FadeTransition),
+    );
+    for (final expanded in [false, true]) {
+      await tester.tap(toggle);
+      await tester.pump();
+      expect(
+        tester.widget<FadeTransition>(fade).opacity.value,
+        expanded ? 0 : 1,
+      );
+      expect(
+        tester.getRect(toggle).left,
+        expanded ? expandedLeft : AppTheme.macWindowControlsWidth,
+      );
+    }
+    expect(tester.takeException(), isNull);
+  });
 
   for (final platform in [
     TargetPlatform.macOS,

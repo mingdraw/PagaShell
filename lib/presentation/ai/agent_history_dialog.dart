@@ -5,8 +5,10 @@ import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 import '../../application/ai/agent_controller.dart';
 import '../../domain/ai/agent_conversation.dart';
 import '../components/app_dialog.dart';
+import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
 import '../navigation/app_navigation.dart';
+import '../theme/app_theme.dart';
 
 Future<bool?> showAgentHistory(AgentController agent) =>
     AppNavigation.dialog<bool>(_AgentHistoryDialog(agent: agent));
@@ -92,6 +94,8 @@ class _AgentHistoryDialogState extends State<_AgentHistoryDialog> {
                     ? Center(child: Text('暂无历史对话'.tr))
                     : ListView.separated(
                         key: const ValueKey('agent-history-list'),
+                        // 滚动条覆盖列表边缘，为整行及删除按钮预留独立空间。
+                        padding: AppTheme.dialogScrollPadding(context),
                         itemCount: conversations.length,
                         separatorBuilder: (_, _) => const SizedBox(height: 6),
                         itemBuilder: (_, index) {
@@ -174,8 +178,8 @@ class _AgentHistoryDialogState extends State<_AgentHistoryDialog> {
                                 ),
                                 semanticLabel: '删除对话'.tr,
                                 tooltip: '删除对话'.tr,
-                                icon: const Icon(
-                                  shadcn.LucideIcons.trash2,
+                                icon: const AppIcon(
+                                  AppIcons.trash2,
                                   size: 15,
                                 ),
                                 onPressed: deleting

@@ -60,12 +60,12 @@ void main() {
       password: 'test',
     );
     await tester.pumpAndSettle();
-    expect(find.byIcon(shadcn.LucideIcons.server), findsOneWidget);
-    expect(find.byIcon(shadcn.LucideIcons.fileTerminal), findsOneWidget);
-    expect(find.byIcon(shadcn.LucideIcons.bookKey), findsOneWidget);
-    expect(find.byIcon(shadcn.LucideIcons.fileKey), findsOneWidget);
-    expect(find.byIcon(shadcn.LucideIcons.folderKey), findsOneWidget);
-    expect(find.byIcon(shadcn.LucideIcons.ellipsis), findsNWidgets(2));
+    expect(findAppIcon(AppIcons.server), findsOneWidget);
+    expect(findAppIcon(AppIcons.fileTerminal), findsOneWidget);
+    expect(findAppIcon(AppIcons.bookKey), findsOneWidget);
+    expect(findAppIcon(AppIcons.fileKey), findsOneWidget);
+    expect(findAppIcon(AppIcons.folder), findsNWidgets(2));
+    expect(findAppIcon(AppIcons.ellipsis), findsNWidgets(2));
     for (final label in ['新建文件夹', '凭证管理', '端口转发（v1.0）', '新建服务  ⌘N']) {
       expect(findAppIconButton(label), findsNothing);
     }
@@ -77,7 +77,7 @@ void main() {
     expect(
       find.descendant(
         of: find.widgetWithText(shadcn.MenuButton, '文件传输'),
-        matching: find.byIcon(shadcn.LucideIcons.folderOpen),
+        matching: findAppIcon(AppIcons.folderOpen),
       ),
       findsOneWidget,
     );
@@ -111,7 +111,7 @@ void main() {
     expect(find.text('CI 部署'), findsOneWidget);
     // 侧边栏只显示凭证名字，不显示用户名副标题。
     expect(find.text('deploy'), findsNothing);
-    expect(find.byIcon(shadcn.LucideIcons.ellipsis), findsNothing);
+    expect(findAppIcon(AppIcons.ellipsis), findsNothing);
 
     await tester.tap(find.text('CI 部署'), buttons: kSecondaryButton);
     await tester.pumpAndSettle();

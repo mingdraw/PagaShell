@@ -1,9 +1,43 @@
 import 'package:flutter/widgets.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
-/// 应用外壳使用 shadcn Zinc 主题；终端配色独立。
+/// 应用外壳使用 shadcn Neutral 主题；终端配色独立。
 abstract final class AppTheme {
   static const Color terminalBackground = Color(0xFF09090B);
+  static const Color terminalForeground = Color(0xFFCDD2DA);
+  static const Color terminalMutedForeground = Color(0xFF8B939F);
+  static const Color terminalBorder = Color(0xFF24282F);
+  static const Color terminalSelectedBorder = Color(0xFF536A80);
+  static const Color terminalControlBackground = Color(0xFF181C22);
+  static const Color serverStatusCpuColor = Color(0xFF69CBA5);
+  static const Color serverStatusLoadColor = Color(0xFFE2A66D);
+  static const Color serverStatusMemoryColor = Color(0xFF83A9ED);
+  static const Color serverStatusDiskColor = Color(0xFFB59BE3);
+  static const Color serverStatusWarningColor = Color(0xFFE3B76A);
+
+  static final shadcn.ColorScheme terminalColors = shadcn.ColorSchemes.darkZinc
+      .copyWith(
+        background: () => terminalBackground,
+        foreground: () => terminalForeground,
+        card: () => terminalBackground,
+        cardForeground: () => terminalForeground,
+        popover: () => terminalControlBackground,
+        popoverForeground: () => terminalForeground,
+        primary: () => terminalForeground,
+        primaryForeground: () => terminalBackground,
+        secondary: () => terminalControlBackground,
+        secondaryForeground: () => terminalForeground,
+        muted: () => terminalControlBackground,
+        mutedForeground: () => terminalMutedForeground,
+        accent: () => terminalControlBackground,
+        accentForeground: () => terminalForeground,
+        border: () => terminalBorder,
+        destructive: () => StatusColors.failed,
+      );
+
+  /// 终端工作区只继承平台、字体与缩放，配色固定为终端深色。
+  static shadcn.ThemeData terminalTheme(BuildContext context) =>
+      shadcn.Theme.of(context).copyWith(colorScheme: () => terminalColors);
 
   static Color background(BuildContext context) =>
       shadcn.Theme.of(context).colorScheme.background;
@@ -67,12 +101,20 @@ abstract final class AppTheme {
   static const double statusBarHeight = 28;
   static const double statusBarIconSize = 14;
   static const double toolbarIconSize = 15;
+  static const double terminalToolbarHeight = 36;
+  static const double terminalToolbarButtonSize = 28;
+  static const double terminalPaneCloseSize = 24;
+  static const double terminalPaneMinWidth = 160;
+  static const double terminalPaneMinHeight = 100;
   static const double terminalSelectionEdgeExtent = 24;
   static const Duration terminalSelectionScrollInterval = Duration(
     milliseconds: 40,
   );
   static const double serverStatusCoreLabelWidth = 48;
   static const double serverStatusCoreValueWidth = 44;
+  static const double serverStatusDefaultWidth = 320;
+  static const double serverStatusMinWidth = 220;
+  static const double serverStatusMaxWidth = 520;
   static const double fileSizeColumnWidth = 64;
   static const double fileModifiedColumnWidth = 140;
   static const double fileBrowserMinHeight = 180;
@@ -126,9 +168,16 @@ abstract final class AppTheme {
   );
   static const double fileConflictDialogMaxWidth = 400;
   static const double folderDialogMaxWidth = 320;
+  static const double processDetailsDialogMaxWidth = 560;
   static const double inputIconSize = 16;
   static const double inputFontSize = 13;
   static const double inputMinHeight = 34;
+  static const double inputCompactMinHeight = 28;
+  static const double inputCompactFontSize = 11;
+  static const EdgeInsets inputCompactPadding = EdgeInsets.symmetric(
+    horizontal: 8,
+    vertical: 4,
+  );
   static const EdgeInsets typeRadioCardPadding = EdgeInsets.symmetric(
     horizontal: 10,
     vertical: 6,
@@ -149,10 +198,10 @@ abstract final class AppTheme {
     vertical: 12,
   );
 
-  static const shadcn.ThemeData shadcnDark = shadcn.ThemeData(
-    colorScheme: shadcn.ColorSchemes.darkZinc,
+  static final shadcn.ThemeData shadcnDark = shadcn.ThemeData(
+    colorScheme: shadcn.ColorSchemes.darkNeutral.neutral,
     radius: 0.5,
-    typography: shadcn.Typography.geist(
+    typography: const shadcn.Typography.geist(
       // 使用完整字体名，避免 package 属性给系统中文回退字体也加上包名前缀。
       sans: TextStyle(fontFamily: 'packages/shadcn_flutter/GeistSans'),
       mono: TextStyle(fontFamily: 'packages/shadcn_flutter/GeistMono'),
@@ -164,7 +213,7 @@ abstract final class AppTheme {
   );
 
   static final shadcn.ThemeData shadcnLight = shadcnDark.copyWith(
-    colorScheme: () => shadcn.ColorSchemes.lightZinc,
+    colorScheme: () => shadcn.ColorSchemes.lightNeutral.neutral,
   );
 }
 

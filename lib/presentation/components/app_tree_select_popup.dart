@@ -3,6 +3,7 @@ import 'package:get/get.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import '../theme/app_theme.dart';
+import 'app_icon.dart';
 
 class AppTreeSelectNode {
   const AppTreeSelectNode({
@@ -30,7 +31,7 @@ class AppTreeSelectPopup extends StatelessWidget {
   });
 
   final String keyPrefix;
-  final IconData folderIcon;
+  final AppIcons folderIcon;
   final Iterable<String> initialExpanded;
   final String? selectedFolderId;
   final String? Function(String id) parentOfFolder;
@@ -128,7 +129,7 @@ class _FolderOption extends StatelessWidget {
   });
 
   final Widget child;
-  final IconData icon;
+  final AppIcons icon;
   final int depth;
   final bool expanded;
   final VoidCallback onToggle;
@@ -161,14 +162,14 @@ class _FolderOption extends StatelessWidget {
               padding: EdgeInsets.only(left: depth * 14.0),
               child: Row(
                 children: [
-                  Icon(
+                  AppIcon(
                     expanded
-                        ? shadcn.LucideIcons.chevronDown
-                        : shadcn.LucideIcons.chevronRight,
+                        ? AppIcons.chevronDown
+                        : AppIcons.chevronRight,
                     size: 16,
                   ),
                   const SizedBox(width: 2),
-                  Icon(icon, size: AppTheme.sidebarIconSize),
+                  AppIcon(icon, size: AppTheme.sidebarIconSize),
                   const SizedBox(width: 6),
                   Expanded(child: child),
                 ],

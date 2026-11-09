@@ -10,8 +10,8 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'page.dart';
 import 'terminal.dart';
 
-// These functions are ignored because they are not marked as `pub`: `ack`, `attempted`, `authenticate_inner`, `authenticate`, `begin_frame`, `bind_forward_ports`, `desktop_tunnel`, `disconnect_handle`, `download_inner`, `due`, `expire_sync`, `feed`, `finish`, `flush`, `forward_listener`, `handshake`, `is_closed`, `load_private_key`, `new`, `open_sftp_inner`, `open_sftp`, `pending`, `register_transfer`, `remove_dir_recursive`, `resize`, `server_status_command`, `shell_tx`, `spawn_port_forwards`, `start_page_port_forwards`, `start_port_forwards`, `start_shell_output`, `transfer_cleanup`, `transfer_io`, `unregister_transfer`, `upload_inner`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Credentials`, `ForwardTransport`, `FrameAcks`, `FramePacer`, `PageForwardEntry`, `PendingSession`, `PinningHandler`, `SessionEntry`, `ShellCmd`, `ShellOutput`, `TransferTimeout`
+// These functions are ignored because they are not marked as `pub`: `ack`, `attempted`, `authenticate_inner`, `authenticate`, `begin_frame`, `bind_forward_ports`, `desktop_tunnel`, `disconnect_handle`, `docker_api_channel`, `download_inner`, `due`, `expire_sync`, `feed`, `finish`, `flush`, `forward_listener`, `handshake`, `is_closed`, `load_private_key`, `new`, `open_sftp_inner`, `open_sftp`, `pending`, `process_exec`, `process_target_command`, `read_only_exec`, `register_transfer`, `remove_dir_recursive`, `resize`, `server_status_command`, `shell_tx`, `spawn_port_forwards`, `start_docker_terminal_output`, `start_page_port_forwards`, `start_port_forwards`, `start_shell_output_with_command`, `start_shell_output`, `terminate_process_command`, `transfer_cleanup`, `transfer_io`, `unregister_transfer`, `upload_inner`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Credentials`, `ForwardTransport`, `FrameAcks`, `FramePacer`, `PageForwardEntry`, `PendingSession`, `PinningHandler`, `ReadOnlyExecPolicy`, `SessionEntry`, `ShellCmd`, `ShellOutput`, `TransferTimeout`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `check_server_key`, `clone`, `clone`, `fmt`, `fmt`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
 
@@ -92,6 +92,21 @@ Stream<TerminalFrame> sshStartTerminal({
   scrollback: scrollback,
 );
 
+/// Start a fixed Docker exec command on a dedicated SSH PTY.
+Stream<TerminalFrame> sshStartDockerTerminal({
+  required int sessionId,
+  required String containerId,
+  required int cols,
+  required int rows,
+  required int scrollback,
+}) => RustLib.instance.api.crateApiSshSshStartDockerTerminal(
+  sessionId: sessionId,
+  containerId: containerId,
+  cols: cols,
+  rows: rows,
+  scrollback: scrollback,
+);
+
 /// 向终端写入用户输入。
 Future<void> sshWrite({required int sessionId, required List<int> data}) =>
     RustLib.instance.api.crateApiSshSshWrite(sessionId: sessionId, data: data);
@@ -117,6 +132,32 @@ Future<void> sshTerminalAck({required int sessionId, required int frameId}) =>
 /// 用独立、无 PTY 的 exec 通道执行固定只读采集脚本，不影响交互终端。
 Future<String> sshReadServerStatus({required int sessionId}) =>
     RustLib.instance.api.crateApiSshSshReadServerStatus(sessionId: sessionId);
+
+/// 列举进程，不分配 PTY，也不读取进程的命令行参数。
+Future<String> sshReadProcesses({required int sessionId}) =>
+    RustLib.instance.api.crateApiSshSshReadProcesses(sessionId: sessionId);
+
+/// 按需只读查询单个进程，采集前后核对 PID 与启动时间。
+Future<String> sshReadProcessDetails({
+  required int sessionId,
+  required int pid,
+  required String startedAt,
+}) => RustLib.instance.api.crateApiSshSshReadProcessDetails(
+  sessionId: sessionId,
+  pid: pid,
+  startedAt: startedAt,
+);
+
+/// 只向单个有效 PID 发送 TERM；执行前核对启动时间，不自动提升权限或重试。
+Future<void> sshTerminateProcess({
+  required int sessionId,
+  required int pid,
+  required String startedAt,
+}) => RustLib.instance.api.crateApiSshSshTerminateProcess(
+  sessionId: sessionId,
+  pid: pid,
+  startedAt: startedAt,
+);
 
 /// 关闭会话：结束 shell 通道并断开连接。
 Future<void> sshDisconnect({required int sessionId}) =>

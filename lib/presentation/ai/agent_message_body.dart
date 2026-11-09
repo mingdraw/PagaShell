@@ -4,6 +4,7 @@ import 'package:get/get.dart';
 import 'package:markdown/markdown.dart' as md;
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
+import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
 import '../theme/app_theme.dart';
 
@@ -351,7 +352,7 @@ class AgentCodeBlock extends StatelessWidget {
               ),
               AppIconButton(
                 semanticLabel: '复制'.tr,
-                icon: const Icon(shadcn.LucideIcons.copy, size: 13),
+                icon: const AppIcon(AppIcons.copy, size: 13),
                 onPressed: () => Clipboard.setData(ClipboardData(text: code)),
               ),
             ],

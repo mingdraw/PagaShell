@@ -11,6 +11,7 @@ import '../../application/session/session.dart';
 import '../../application/session/session_controller.dart';
 import '../../domain/entities/host.dart';
 import '../../domain/entities/proxy_config.dart';
+import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
 import '../components/app_select_field.dart';
 import '../components/app_text_form_field.dart';
@@ -451,7 +452,7 @@ class _DynamicProxyPanelState extends State<DynamicProxyPanel> {
               const SizedBox(width: 8),
               AppIconButton(
                 semanticLabel: '移除规则'.tr,
-                icon: const Icon(shadcn.LucideIcons.trash2, size: 16),
+                icon: const AppIcon(AppIcons.trash2, size: 16),
                 onPressed: editable
                     ? () {
                         setState(() {
@@ -496,7 +497,7 @@ class _DynamicProxyPanelState extends State<DynamicProxyPanel> {
             runSpacing: 8,
             crossAxisAlignment: WrapCrossAlignment.center,
             children: [
-              const Icon(shadcn.LucideIcons.network, size: 22),
+              const AppIcon(AppIcons.proxy, size: 22),
               Text(
                 '动态代理'.tr,
                 style: const TextStyle(
@@ -580,8 +581,8 @@ class _DynamicProxyPanelState extends State<DynamicProxyPanel> {
                                   _changed();
                                 }
                               : null,
-                          leading: const Icon(
-                            shadcn.LucideIcons.plus,
+                          leading: const AppIcon(
+                            AppIcons.plus,
                             size: 16,
                           ),
                           child: Text('添加规则'.tr),
@@ -617,12 +618,12 @@ class _DynamicProxyPanelState extends State<DynamicProxyPanel> {
                       onPressed: session.phase == SessionPhase.stopping
                           ? null
                           : () => controller.stopProxy(session.id),
-                      leading: const Icon(shadcn.LucideIcons.square, size: 16),
+                      leading: const AppIcon(AppIcons.square, size: 16),
                       child: Text('停止代理'.tr),
                     )
                   : shadcn.PrimaryButton(
                       onPressed: busy ? null : _start,
-                      leading: const Icon(shadcn.LucideIcons.play, size: 16),
+                      leading: const AppIcon(AppIcons.play, size: 16),
                       child: Text((busy ? '正在连接' : '启动代理').tr),
                     );
               final error =
@@ -640,7 +641,7 @@ class _DynamicProxyPanelState extends State<DynamicProxyPanel> {
                     shadcn.OutlineButton(
                       key: const ValueKey('proxy-clash-script'),
                       onPressed: _showClashScript,
-                      leading: const Icon(shadcn.LucideIcons.code, size: 16),
+                      leading: const AppIcon(AppIcons.code, size: 16),
                       child: Text('Clash 扩展脚本'.tr),
                     ),
                   if (error != null)

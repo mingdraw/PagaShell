@@ -17,23 +17,40 @@ import 'agent_api_codec.dart';
 import 'ai_settings_controller.dart';
 
 export '../../domain/ai/agent_conversation.dart'
-    show AgentEntryKind, AgentCommandState;
+    show AgentEntryKind, AgentCommandState, AgentRequestState;
 export '../../domain/ai/ai_model.dart' show AgentAccessMode;
 
 part 'agent_history.dart';
 part 'agent_api.dart';
 part 'agent_tools.dart';
+part 'agent_queue.dart';
 
 class AgentEntry {
-  AgentEntry(this.kind, this.text, {this.command, this.archivedCommand});
+  AgentEntry(
+    this.kind,
+    this.text, {
+    this.command,
+    this.archivedCommand,
+    AgentRequestState? requestState,
+    String? requestError,
+  }) : requestState = Rxn<AgentRequestState>(requestState),
+       requestError = RxnString(requestError);
   final AgentEntryKind kind;
   final String text;
   final AgentCommandProposal? command;
   final AgentArchivedCommand? archivedCommand;
+  final Rxn<AgentRequestState> requestState;
+  final RxnString requestError;
 
   AgentMessage toMessage() => AgentMessage(
     kind,
     text,
+    requestState: switch (requestState.value) {
+      AgentRequestState.queued ||
+      AgentRequestState.running => AgentRequestState.cancelled,
+      final state => state,
+    },
+    requestError: requestError.value,
     command: command == null
         ? archivedCommand
         : AgentArchivedCommand(
@@ -65,6 +82,8 @@ class AgentController extends GetxController {
   final _storage = _AgentHistoryState();
   final _api = _AgentApiState();
   final _tools = _AgentToolState();
+  final _queue = _AgentQueueState();
+  int get queuedCount => _queue.pending.length;
   RxList<AgentConversation> get conversations => _storage.conversations;
   RxnString get currentConversationId => _storage.currentConversationId;
   RxBool get loadingHistory => _storage.loadingHistory;
@@ -124,7 +143,7 @@ class AgentController extends GetxController {
   }
 
   void selectReasoningEffort(AiReasoningEffort value) {
-    if (modesLoaded && !busy.value && reasoningOptions.contains(value)) {
+    if (modesLoaded && reasoningOptions.contains(value)) {
       _syncModes();
       reasoningEffort.value = value;
       _saveModes();
@@ -222,7 +241,7 @@ class AgentController extends GetxController {
   }
 
   void selectAccessMode(AgentAccessMode mode) {
-    if (!modesLoaded || busy.value) return;
+    if (!modesLoaded) return;
     _syncModes();
     accessMode.value = mode;
     _saveModes();
@@ -250,26 +269,16 @@ class AgentController extends GetxController {
     String input, {
     List<Session>? referencedSessions,
     Map<String, String> referenceLabels = const {},
-  }) async {
-    final text = input.trim();
-    if (busy.value || text.isEmpty || isClosed) return;
-    if (text.length > 20000) {
-      error.value = '消息过长，请缩短后发送';
-      return;
-    }
-    final generation = ++_generation;
-    busy.value = true;
-    error.value = null;
-    activity.value = '正在思考';
-    // 在任何异步操作前绑定会话，避免标签切换后命令目标漂移。
-    final targets = List<Session>.unmodifiable(
-      {
-        for (final session in referencedSessions ?? selectedSessions)
-          if (_boundSession(session) != null) session.id: session,
-      }.values,
-    );
-    _tools.activeTargets = targets;
-    final labels = Map<String, String>.unmodifiable(referenceLabels);
+  }) => _enqueue(
+    input,
+    referencedSessions: referencedSessions,
+    referenceLabels: referenceLabels,
+  );
+
+  Future<void> _runRequest(_AgentQueuedRequest request, int generation) async {
+    final text = request.entry.text;
+    final targets = request.targets;
+    final labels = request.labels;
     var committed = false;
     try {
       await _settings.ready;
@@ -279,12 +288,14 @@ class AgentController extends GetxController {
       if (_settings.loadFailed.value) {
         throw const AgentApiException('AI 设置读取失败，请重试');
       }
-      final model = currentModel;
+      if (targets.any((target) => _boundSession(target) == null)) {
+        throw const AgentApiException('排队消息引用的会话已关闭或重连，请重新选择会话后发送');
+      }
+      final model = request.model ?? currentModel;
       if (model == null) throw const AgentApiException('请先在设置中配置 AI API');
-      final mode = accessMode.value;
+      final mode = request.accessMode ?? accessMode.value;
       _conversationModel = model.model;
-      _addEntry(AgentEntry(AgentEntryKind.user, text));
-      final effort = reasoningEffort.value;
+      final effort = request.reasoningEffort ?? reasoningEffort.value;
       final key = await _secretStore.read(model.secretRef);
       if (!_live(generation)) return;
       if (key == null || key.trim().isEmpty) {
@@ -294,6 +305,7 @@ class AgentController extends GetxController {
       if (!_live(generation)) return;
       final turns = [..._history, AgentTurn('user', text)];
       _trimHistory(turns);
+      if (!_live(generation)) return;
       final capabilities = _api.modelDetails[_capabilityScope(model)];
       final system = _system(targets, mode, labels);
       final anthropicScope =
@@ -317,9 +329,11 @@ class AgentController extends GetxController {
         turns.add(turn);
         if (turn.text.isNotEmpty) {
           _addEntry(AgentEntry(AgentEntryKind.assistant, turn.text));
+          if (!_live(generation)) return;
         }
         if (turn.calls.isEmpty) {
           _trimHistory(turns);
+          if (!_live(generation)) return;
           _history = turns;
           committed = true;
           if (reply.truncated) error.value = 'AI 回复达到服务商长度上限，请缩小问题或继续提问';
@@ -343,12 +357,8 @@ class AgentController extends GetxController {
       // 不展示平台/服务端异常原文，以免其中带入请求头或密钥。
       if (_live(generation)) error.value = 'AI 请求失败，请检查模型配置或凭据存储';
     } finally {
-      if (_live(generation)) {
-        if (!committed) _rejectPending();
-        _tools.activeTargets = const [];
-        busy.value = false;
-        _saveConversation();
-      }
+      _finishRequest(request, generation, committed: committed);
+      if (!request.done.isCompleted) request.done.complete();
     }
   }
 
@@ -364,6 +374,7 @@ class AgentController extends GetxController {
     waitingForApproval.value = false;
     busy.value = false;
     _rejectPending();
+    _cancelQueuedRequests();
     if (wasBusy) _saveConversation();
   }
 

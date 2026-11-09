@@ -8,6 +8,7 @@ import '../../domain/entities/identity.dart';
 import '../../domain/ssh/ssh_engine.dart';
 import '../../domain/vault/secret_store.dart';
 import '../components/app_dialog.dart';
+import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
 import '../components/app_radio_card_field.dart';
 import '../components/app_select_field.dart';
@@ -280,11 +281,7 @@ class _IdentityEditDialogState extends State<_IdentityEditDialog> {
                     for (final type in ServiceType.values)
                       AppRadioCardOption(
                         value: type,
-                        icon: switch (type) {
-                          ServiceType.ssh => shadcn.LucideIcons.terminal,
-                          ServiceType.rdp => shadcn.LucideIcons.monitor,
-                          ServiceType.vnc => shadcn.LucideIcons.screenShare,
-                        },
+                        icon: AppIcons.forServiceType(type),
                         child: Text(type.label),
                       ),
                   ],
@@ -381,10 +378,8 @@ class _IdentityEditDialogState extends State<_IdentityEditDialog> {
                       hintText: _isEdit ? '留空则保持不变'.tr : null,
                       suffixIcon: AppIconButton(
                         density: shadcn.ButtonDensity.compact,
-                        icon: Icon(
-                          _obscure
-                              ? shadcn.LucideIcons.eyeOff
-                              : shadcn.LucideIcons.eye,
+                        icon: AppIcon(
+                          _obscure ? AppIcons.eyeOff : AppIcons.eye,
                           size: AppTheme.inputIconSize,
                         ),
                         onPressed: () => setState(() => _obscure = !_obscure),

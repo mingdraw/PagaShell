@@ -15,6 +15,7 @@ class AppTextFormField extends FormField<String> {
     bool enableSuggestions = true,
     bool autocorrect = true,
     bool smartPunctuation = true,
+    bool compact = false,
     int? maxLines = 1,
     int? minLines,
     ValueChanged<String>? onFieldSubmitted,
@@ -27,17 +28,23 @@ class AppTextFormField extends FormField<String> {
          validator: (_) => validator?.call(controller.text),
          builder: (state) {
            final colors = shadcn.Theme.of(state.context).colorScheme;
+           final fontSize = compact
+               ? AppTheme.inputCompactFontSize
+               : AppTheme.inputFontSize;
            final input = Column(
              crossAxisAlignment: CrossAxisAlignment.start,
              children: [
                Semantics(
                  label: decoration.labelText,
                  child: ConstrainedBox(
-                   constraints: const BoxConstraints(
-                     minHeight: AppTheme.inputMinHeight,
+                   constraints: BoxConstraints(
+                     minHeight: compact
+                         ? AppTheme.inputCompactMinHeight
+                         : AppTheme.inputMinHeight,
                    ),
                    child: shadcn.TextField(
                      controller: controller,
+                     padding: compact ? AppTheme.inputCompactPadding : null,
                      enabled: enabled,
                      autofocus: autofocus,
                      focusNode: focusNode,
@@ -63,11 +70,9 @@ class AppTextFormField extends FormField<String> {
                          ? null
                          : Text(
                              decoration.hintText!,
-                             style: const TextStyle(
-                               fontSize: AppTheme.inputFontSize,
-                             ),
+                             style: TextStyle(fontSize: fontSize),
                            ),
-                     style: const TextStyle(fontSize: AppTheme.inputFontSize),
+                     style: TextStyle(fontSize: fontSize),
                      onChanged: (value) {
                        // shadcn 0.0.55 retains an external controller listener
                        // after disposal when conditional form fields are removed.

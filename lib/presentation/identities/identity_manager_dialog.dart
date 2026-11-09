@@ -5,6 +5,7 @@ import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 import '../../application/identities/identity_controller.dart';
 import '../../domain/entities/identity.dart';
 import '../components/app_dialog.dart';
+import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
 import '../components/app_list_row.dart';
 import '../navigation/app_navigation.dart';
@@ -50,8 +51,8 @@ class _IdentityManagerDialog extends StatelessWidget {
                 _ => '暂不支持'.tr,
               };
               return AppListRow(
-                leading: const Icon(
-                  shadcn.LucideIcons.fileKey,
+                leading: const AppIcon(
+                  AppIcons.fileKey,
                   size: AppTheme.sidebarIconSize,
                 ),
                 title: Text(
@@ -66,7 +67,7 @@ class _IdentityManagerDialog extends StatelessWidget {
                     showIdentityEditDialog(context, identity: identity),
                 trailing: AppIconButton(
                   semanticLabel: '删除凭证'.tr,
-                  icon: const Icon(shadcn.LucideIcons.trash2, size: 18),
+                  icon: const AppIcon(AppIcons.trash2, size: 18),
                   onPressed: () => confirmDeleteIdentity(context, identity),
                 ),
               );
@@ -77,7 +78,7 @@ class _IdentityManagerDialog extends StatelessWidget {
       actions: [
         shadcn.OutlineButton(
           onPressed: () => showIdentityEditDialog(context),
-          leading: const Icon(shadcn.LucideIcons.plus, size: 16),
+          leading: const AppIcon(AppIcons.plus, size: 16),
           child: Text('新建凭证'.tr),
         ),
         shadcn.OutlineButton(

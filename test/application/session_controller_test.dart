@@ -6,23 +6,46 @@ import 'package:get/get.dart';
 import 'package:pagashell/app.dart';
 import 'package:pagashell/application/session/session.dart';
 import 'package:pagashell/application/session/session_controller.dart';
+import 'package:pagashell/application/session/session_layout.dart';
 import 'package:pagashell/application/transfer/transfer_controller.dart';
 import 'package:pagashell/domain/entities/host.dart';
 import 'package:pagashell/domain/repositories/known_host_repository.dart';
+import 'package:pagashell/domain/ssh/docker_manager.dart';
 import 'package:pagashell/domain/ssh/host_key.dart';
 import 'package:pagashell/domain/ssh/ssh_engine.dart';
 
+import '../support/docker_fixture.dart';
 import '../support/fixture_terminal.dart';
-
 import '../support/in_memory_binding.dart';
 import '../support/native_terminal_frames.dart';
 
-class _FakeEngineSession implements SshEngineSession, TerminalScreenSource {
+class _FakeEngineSession
+    implements SshEngineSession, TerminalScreenSource, DockerTerminalSource {
   _FakeEngineSession({this.throwOnClose = false});
 
   final bool throwOnClose;
   bool closed = false;
+  int closes = 0;
   int shellStarts = 0;
+  final dockerShellStarts = <DockerTerminalTarget>[];
+  Object? dockerShellFailure;
+  bool throwOnDockerStart = false;
+
+  @override
+  Stream<TerminalFrame> startDockerTerminalShell({
+    required DockerTerminalTarget target,
+    required int cols,
+    required int rows,
+    int scrollback = 10000,
+  }) {
+    dockerShellStarts.add(target);
+    if (dockerShellFailure case final failure?) {
+      if (throwOnDockerStart) throw failure;
+      return Stream<TerminalFrame>.error(failure);
+    }
+    return startTerminalShell(cols: cols, rows: rows, scrollback: scrollback);
+  }
+
   final StreamController<String> _output = StreamController<String>();
   final List<String> written = [];
   bool failWrites = false;
@@ -92,6 +115,7 @@ class _FakeEngineSession implements SshEngineSession, TerminalScreenSource {
 
   @override
   Future<void> close() async {
+    closes++;
     final cancellation = outputCancelGate;
     if (cancellation != null && !cancellation.isCompleted) {
       cancellation.complete();
@@ -125,6 +149,11 @@ class _FakeEngine implements SshEngine {
   final List<_FakeEngineSession> created = [];
   final List<SshGateway?> gateways = [];
   final List<SshCredentials> logins = [];
+  Completer<void>? connectGate;
+  Object? nextConnectionFailure;
+  Object? nextDockerShellFailure;
+  bool nextDockerShellThrows = false;
+  Completer<void>? nextCloseGate;
 
   @override
   Future<SshEngineSession> connect(
@@ -136,6 +165,12 @@ class _FakeEngine implements SshEngine {
   }) async {
     gateways.add(gateway);
     logins.add(credentials);
+    final gate = connectGate;
+    connectGate = null;
+    if (gate != null) await gate.future;
+    final failure = nextConnectionFailure;
+    nextConnectionFailure = null;
+    if (failure != null) throw failure;
     if (connectionFailure != null) throw connectionFailure!;
     if (calls++ < failuresBeforeSuccess) {
       throw const SshEngineException('认证失败');
@@ -151,6 +186,13 @@ class _FakeEngine implements SshEngine {
     final session = nativeTerminal
         ? _NativeEngineSession()
         : _FakeEngineSession(throwOnClose: throwOnSessionClose);
+    session
+      ..dockerShellFailure = nextDockerShellFailure
+      ..throwOnDockerStart = nextDockerShellThrows
+      ..closeGate = nextCloseGate;
+    nextDockerShellFailure = null;
+    nextDockerShellThrows = false;
+    nextCloseGate = null;
     created.add(session);
     return session;
   }
@@ -1072,6 +1114,84 @@ void main() {
       expect(engine.created.single.closed, isTrue);
     });
 
+    test('从分屏终端打开文件传输复用实际登录凭据和网关，不启动 shell', () async {
+      final engine = _FakeEngine();
+      final controller = SessionController(engine: engine);
+      const credentials = SshCredentials.password(
+        'session-only',
+        username: 'rocky',
+      );
+      const gateway = SshGateway(
+        host: Host(id: 'gateway', name: 'Jump', hostname: 'jump.test'),
+        credentials: SshCredentials.password('gateway-only'),
+      );
+      final host = _host.copyWith(username: 'configured', gatewayId: 'gateway');
+      final terminal = await controller.open(
+        host,
+        credentials,
+        gateway: gateway,
+      );
+      final split = (await controller.splitTerminal(
+        terminal,
+        SessionSplitAxis.vertical,
+      ))!;
+      expect(controller.canOpenFileTransfer(split), isTrue);
+      final transfer = (await controller.openFileTransfer(split))!;
+      final session = controller.activeSession!;
+      expect(session.id, transfer);
+      expect(session.kind, SessionKind.fileTransfer);
+      expect(session.host, same(host));
+      expect(session.loginUsername, 'rocky');
+      expect(session.phase, SessionPhase.ready);
+      expect(session.terminal, isNull);
+      expect(engine.logins, everyElement(same(credentials)));
+      expect(engine.gateways, everyElement(same(gateway)));
+      expect(engine.created.map((session) => session.shellStarts), [1, 1, 0]);
+      expect(controller.tabs, hasLength(2));
+      expect(controller.tabs.first.sessionIds, [terminal, split]);
+      await controller.closeAll();
+    });
+
+    test('终端重复打开文件传输聚焦连接中的原标签', () async {
+      final engine = _FakeEngine();
+      final controller = SessionController(engine: engine);
+      final terminal = await controller.open(_host, _credentials);
+      final gate = engine.connectGate = Completer<void>();
+      final opening = controller.openFileTransfer(terminal);
+      final transfer = controller.activeSessionId.value!;
+      expect(controller.activeSession!.phase, SessionPhase.connecting);
+      controller.activate(terminal);
+      expect(await controller.openFileTransfer(terminal), transfer);
+      expect(controller.activeSessionId.value, transfer);
+      expect(controller.sessions, hasLength(2));
+      expect(engine.logins, hasLength(2));
+      gate.complete();
+      expect(await opening, transfer);
+      expect(engine.created, hasLength(2));
+      await controller.closeAll();
+    });
+
+    test('未就绪终端不能新建文件传输，已有传输标签仍可聚焦', () async {
+      final engine = _FakeEngine(failuresBeforeSuccess: 1);
+      final controller = SessionController(engine: engine);
+      final terminal = await controller.open(_host, _credentials);
+      expect(controller.canOpenFileTransfer(terminal), isFalse);
+      expect(await controller.openFileTransfer(terminal), isNull);
+      expect(await controller.openFileTransfer('missing'), isNull);
+      final transfer = await controller.open(
+        _host,
+        _credentials,
+        kind: SessionKind.fileTransfer,
+      );
+      expect(controller.canOpenFileTransfer(transfer), isFalse);
+      expect(await controller.openFileTransfer(transfer), isNull);
+      controller.activate(terminal);
+      expect(controller.canOpenFileTransfer(terminal), isTrue);
+      expect(await controller.openFileTransfer(terminal), transfer);
+      expect(engine.calls, 2);
+      await controller.closeAll();
+    });
+
     test('文件传输连接重试保留标签类型', () async {
       final engine = _FakeEngine(failuresBeforeSuccess: 1);
       final controller = SessionController(engine: engine);
@@ -1290,6 +1410,451 @@ void main() {
         isTrue,
       );
       await controller.closeAll();
+    });
+
+    group('容器终端', () {
+      test('新标签复用实际登录和网关，输入、尺寸与关闭相互独立', () async {
+        final engine = _FakeEngine();
+        final controller = SessionController(engine: engine);
+        const credentials = SshCredentials.password(
+          'temporary',
+          username: 'rocky',
+        );
+        const gateway = SshGateway(
+          host: Host(id: 'jump', name: 'jump', hostname: 'jump.test'),
+          credentials: SshCredentials.password('jump-only'),
+        );
+        final host = _host.copyWith(gatewayId: gateway.host.id);
+        final hostId = await controller.open(
+          host,
+          credentials,
+          gateway: gateway,
+        );
+        final resource = dockerResource();
+        final id = (await controller.openDockerTerminal(hostId, resource))!;
+        final container = controller.activeSession!;
+        expect(container.kind, SessionKind.containerTerminal);
+        expect(controller.tabs.map((tab) => tab.sessionIds), [
+          [hostId],
+          [id],
+        ]);
+        expect(container.title, resource.name);
+        expect(
+          container.dockerTarget,
+          DockerTerminalTarget(id: resource.id, name: resource.name),
+        );
+        expect(container.address, 'rocky@10.0.0.5');
+        expect(engine.logins, [same(credentials), same(credentials)]);
+        expect(engine.gateways, [same(gateway), same(gateway)]);
+        expect(engine.created.first.dockerShellStarts, isEmpty);
+        expect(engine.created.last.dockerShellStarts, [container.dockerTarget]);
+        container.terminal!.textInput('echo 中文\r\x03');
+        container.terminal!.resize(100, 30);
+        expect(engine.created.first.written, isEmpty);
+        expect(engine.created.last.written, ['echo 中文\r\x03']);
+        expect(engine.created.last.resized.last, (100, 30));
+        await engine.created.last._output.close();
+        await _flush();
+        expect(controller.sessions.single.id, hostId);
+        expect(controller.sessions.single.phase, SessionPhase.ready);
+        expect(engine.created.last.closes, 1);
+        expect(engine.created.first.closed, isFalse);
+        await controller.closeAll();
+      });
+
+      test('容器分屏保留目标，禁止宿主 SFTP，主机查找排除容器标签', () async {
+        final engine = _FakeEngine();
+        final controller = SessionController(engine: engine);
+        final hostId = await controller.open(_host, _credentials);
+        final id = (await controller.openDockerTerminal(
+          hostId,
+          dockerResource(),
+        ))!;
+        final pane = (await controller.splitTerminal(
+          id,
+          SessionSplitAxis.vertical,
+        ))!;
+        final target = controller.activeSession!.dockerTarget;
+        expect(controller.tabs, hasLength(2));
+        expect(controller.tabForSession(id)!.sessionIds, [id, pane]);
+        expect(engine.created.last.dockerShellStarts, [target]);
+        expect(controller.canOpenFileTransfer(id), isFalse);
+        expect(await controller.openFileTransfer(pane), isNull);
+        expect(controller.findByHost(_host.id)!.id, hostId);
+        await controller.close(hostId);
+        expect(controller.findByHost(_host.id), isNull);
+        expect(controller.focusExisting(_host.id), isFalse);
+        await controller.close(id);
+        expect(engine.created.last.closed, isFalse);
+        await controller.closeAll();
+      });
+
+      test('停止容器、无效 ID 和其他资源不会建立连接', () async {
+        final engine = _FakeEngine();
+        final controller = SessionController(engine: engine);
+        final id = await controller.open(_host, _credentials);
+        for (final resource in [
+          dockerResource(fields: {DockerField.state: 'exited'}),
+          dockerResource(id: r'$(id)'),
+          dockerResource(kind: DockerResourceKind.image),
+        ]) {
+          expect(await controller.openDockerTerminal(id, resource), isNull);
+        }
+        expect(engine.created, hasLength(1));
+        await controller.closeAll();
+      });
+
+      for (final synchronous in [false, true]) {
+        test('启动失败保留可重试标签，等待旧连接清理（同步=$synchronous）', () async {
+          final engine = _FakeEngine();
+          final controller = SessionController(engine: engine);
+          final hostId = await controller.open(_host, _credentials);
+          final cleanup = Completer<void>();
+          engine
+            ..nextDockerShellFailure = const SshEngineException(
+              '容器中未找到可用的 bash 或 sh',
+            )
+            ..nextDockerShellThrows = synchronous
+            ..nextCloseGate = cleanup;
+          final opening = controller.openDockerTerminal(
+            hostId,
+            dockerResource(),
+          );
+          await _flush();
+          final failed = controller.sessions.last;
+          expect(failed.phase, SessionPhase.failed);
+          expect(failed.error, '容器中未找到可用的 bash 或 sh');
+          expect(failed.terminal!.isDisposed, isTrue);
+          expect(controller.sessions.first.phase, SessionPhase.ready);
+          final retry = controller.retry(failed.id);
+          await _flush();
+          expect(engine.created, hasLength(2));
+          cleanup.complete();
+          expect(await opening, failed.id);
+          await retry;
+          expect(engine.created, hasLength(3));
+          expect(engine.created[1].closes, 1);
+          expect(controller.activeSession!.phase, SessionPhase.ready);
+          expect(controller.activeSession!.dockerTarget, failed.dockerTarget);
+          expect(engine.created.last.dockerShellStarts, [failed.dockerTarget]);
+          await controller.closeAll();
+          expect(engine.created[1].closes, 1);
+        });
+      }
+
+      test('连续启动失败后可再次重试成功，每次释放旧连接', () async {
+        final engine = _FakeEngine();
+        final controller = SessionController(engine: engine);
+        final hostId = await controller.open(_host, _credentials);
+        engine.nextDockerShellFailure = const SshEngineException(
+          '容器中未找到可用的 bash 或 sh',
+        );
+        final id = (await controller.openDockerTerminal(
+          hostId,
+          dockerResource(),
+        ))!;
+        await _flush();
+        for (var attempt = 0; attempt < 2; attempt++) {
+          expect(controller.activeSession!.phase, SessionPhase.failed);
+          expect(engine.created.last.closes, 1);
+          if (attempt == 0) {
+            engine.nextDockerShellFailure = const SshEngineException(
+              '容器中未找到可用的 bash 或 sh',
+            );
+          }
+          await controller.retry(id).timeout(const Duration(seconds: 1));
+          await _flush();
+        }
+        expect(controller.activeSession!.phase, SessionPhase.ready);
+        expect(engine.created.skip(1).map((session) => session.closes), [
+          1,
+          1,
+          0,
+        ]);
+        await controller.closeAll();
+      });
+
+      test('连接期间关闭容器标签，迟到的连接被回收且不启动 shell', () async {
+        final engine = _FakeEngine();
+        final controller = SessionController(engine: engine);
+        final hostId = await controller.open(_host, _credentials);
+        final gate = engine.connectGate = Completer<void>();
+        final opening = controller.openDockerTerminal(hostId, dockerResource());
+        await _flush();
+        final id = controller.sessions.last.id;
+        await controller.close(id);
+        gate.complete();
+        await opening;
+        expect(engine.created.last.closed, isTrue);
+        expect(engine.created.last.dockerShellStarts, isEmpty);
+        expect(controller.sessions.single.id, hostId);
+        await controller.closeAll();
+      });
+
+      test('容器屏幕应用完成后才 ACK，关闭不会放行排队帧', () async {
+        final engine = _FakeEngine(nativeTerminal: true);
+        final controller = SessionController(engine: engine);
+        final hostId = await controller.open(_host, _credentials);
+        final id = (await controller.openDockerTerminal(
+          hostId,
+          dockerResource(),
+        ))!;
+        final remote = engine.created.last as _NativeEngineSession;
+        final terminal = controller.activeSession!.terminal!;
+        final ack = Completer<void>();
+        remote.onAcknowledge = (_) {
+          expect(terminal.lines[0].getText(), 'container');
+          return ack.future;
+        };
+        final fixture = TerminalFrameFixture();
+        remote.frames
+          ..add(_withFrameId(fixture.writeText('container'), 71))
+          ..add(_withFrameId(fixture.writeText(' queued'), 72));
+        await _flush();
+        expect(remote.acknowledged, [71]);
+        await controller.close(id);
+        ack.complete();
+        await _flush();
+        expect(remote.acknowledged, [71]);
+        expect(controller.sessions.single.id, hostId);
+        await controller.closeAll();
+      });
+    });
+
+    group('终端分屏', () {
+      test('同一标签建立独立连接并复用实际用户名、临时凭据和网关', () async {
+        final engine = _FakeEngine();
+        final controller = SessionController(engine: engine);
+        const credentials = SshCredentials.password(
+          'temporary',
+          username: 'rocky',
+        );
+        const gateway = SshGateway(
+          host: Host(id: 'jump', name: 'jump', hostname: 'jump.test'),
+          credentials: SshCredentials.password('jump-only'),
+        );
+        final host = _host.copyWith(gatewayId: gateway.host.id);
+        final first = await controller.open(
+          host,
+          credentials,
+          gateway: gateway,
+        );
+        final original = controller.activeSession!;
+        final second = (await controller.splitTerminal(
+          first,
+          SessionSplitAxis.horizontal,
+        ))!;
+
+        expect(controller.tabs, hasLength(1));
+        expect(controller.tabs.single.id, first);
+        expect(controller.tabs.single.sessionIds, [first, second]);
+        expect(controller.activeTabId, first);
+        expect(controller.activeSessionId.value, second);
+        expect(controller.activeSession!.address, 'rocky@10.0.0.5');
+        expect(
+          controller.activeSession!.terminal,
+          isNot(same(original.terminal)),
+        );
+        expect(
+          controller.activeSession!.engineSession,
+          isNot(same(original.engineSession)),
+        );
+        expect(engine.logins, [same(credentials), same(credentials)]);
+        expect(engine.gateways, [same(gateway), same(gateway)]);
+        expect(engine.created.map((session) => session.shellStarts), [1, 1]);
+        controller.activeSession!.terminal!.textInput('pwd\r');
+        expect(engine.created.first.written, isEmpty);
+        expect(engine.created.last.written, ['pwd\r']);
+        await controller.closeAll();
+      });
+
+      test('左右和上下可嵌套，激活窗格保留标签身份与布局', () async {
+        final controller = SessionController(engine: _FakeEngine());
+        final first = await controller.open(_host, _credentials);
+        final second = (await controller.splitTerminal(
+          first,
+          SessionSplitAxis.horizontal,
+        ))!;
+        final third = (await controller.splitTerminal(
+          first,
+          SessionSplitAxis.vertical,
+        ))!;
+        final layout = controller.tabs.single.layout as SessionSplit;
+        expect(layout.axis, SessionSplitAxis.horizontal);
+        expect(layout.second, SessionPane(second));
+        final nested = layout.first as SessionSplit;
+        expect(nested.axis, SessionSplitAxis.vertical);
+        expect(nested.sessionIds, [first, third]);
+        expect(controller.tabs.single.sessionIds, [first, third, second]);
+        expect(controller.sessions.map((session) => session.id), [
+          first,
+          third,
+          second,
+        ]);
+
+        controller.activate(second);
+        expect(controller.activeTabId, first);
+        expect(controller.tabs.single.selectedSessionId, second);
+        expect(controller.tabs.single.layout, same(layout));
+        await controller.open(_host, _credentials);
+        controller.activateTab(first);
+        expect(controller.activeSessionId.value, second);
+        final other = await controller.open(
+          const Host(id: 'other', name: 'other', hostname: 'other.test'),
+          _credentials,
+        );
+        expect(controller.activeSessionId.value, other);
+        expect(controller.focusExisting(_host.id), isTrue);
+        expect(controller.activeSessionId.value, second);
+        await controller.closeAll();
+      });
+
+      test('关闭首个窗格只释放该连接，保留标签 ID 后仍能关闭整个标签', () async {
+        final engine = _FakeEngine();
+        final controller = SessionController(engine: engine);
+        final first = await controller.open(_host, _credentials);
+        final second = (await controller.splitTerminal(
+          first,
+          SessionSplitAxis.horizontal,
+        ))!;
+        final third = (await controller.splitTerminal(
+          second,
+          SessionSplitAxis.vertical,
+        ))!;
+        controller.activate(first);
+
+        await controller.close(first);
+        expect(controller.tabs.single.id, first);
+        expect(controller.tabs.single.sessionIds, [second, third]);
+        expect(controller.activeTabId, first);
+        expect(controller.activeSessionId.value, second);
+        expect(engine.created.map((session) => session.closed), [
+          true,
+          false,
+          false,
+        ]);
+        await controller.requestTabClose([
+          first,
+        ], confirm: (_) async => fail('SSH 标签不需要关闭确认'));
+        expect(controller.tabs, isEmpty);
+        expect(controller.sessions, isEmpty);
+        expect(engine.created.every((session) => session.closed), isTrue);
+      });
+
+      test('标签排序移动完整分屏组，关闭其他标签保留完整组', () async {
+        final engine = _FakeEngine();
+        final controller = SessionController(engine: engine);
+        final first = await controller.open(_host, _credentials);
+        final firstPane = (await controller.splitTerminal(
+          first,
+          SessionSplitAxis.horizontal,
+        ))!;
+        final second = await controller.open(_host, _credentials);
+        final secondPane = (await controller.splitTerminal(
+          second,
+          SessionSplitAxis.vertical,
+        ))!;
+        final third = await controller.open(_host, _credentials);
+        controller.reorder([third, second, first]);
+        expect(controller.tabs.map((tab) => tab.id), [third, second, first]);
+        expect(controller.sessions.map((session) => session.id), [
+          third,
+          second,
+          secondPane,
+          first,
+          firstPane,
+        ]);
+        expect(controller.activeSessionId.value, third);
+        await controller.requestTabClose(
+          [firstPane, secondPane, third],
+          keepSessionId: second,
+          confirm: (_) async => fail('SSH 标签不需要关闭确认'),
+        );
+        expect(controller.tabs.single.id, second);
+        expect(controller.tabs.single.sessionIds, [second, secondPane]);
+        expect(controller.activeSessionId.value, secondPane);
+        final other = await controller.open(_host, _credentials);
+        await controller.closeOthers(secondPane);
+        expect(controller.tabs.single.sessionIds, [second, secondPane]);
+        expect(
+          controller.sessions.any((session) => session.id == other),
+          isFalse,
+        );
+        await controller.closeActive();
+        expect(controller.tabs, isEmpty);
+        expect(engine.created.every((session) => session.closed), isTrue);
+      });
+
+      test('SFTP、已关闭和失败的会话不能分屏', () async {
+        final engine = _FakeEngine();
+        final controller = SessionController(engine: engine);
+        final files = await controller.open(
+          _host,
+          _credentials,
+          kind: SessionKind.fileTransfer,
+        );
+        expect(
+          await controller.splitTerminal(files, SessionSplitAxis.horizontal),
+          isNull,
+        );
+        final terminal = await controller.open(_host, _credentials);
+        controller.sessions[1] = controller.sessions[1].copyWith(
+          phase: SessionPhase.failed,
+        );
+        expect(
+          await controller.splitTerminal(terminal, SessionSplitAxis.vertical),
+          isNull,
+        );
+        await controller.close(terminal);
+        expect(
+          await controller.splitTerminal(terminal, SessionSplitAxis.horizontal),
+          isNull,
+        );
+        expect(engine.created, hasLength(2));
+        await controller.closeAll();
+      });
+
+      test('新窗格连接失败不影响原终端，关闭失败窗格合并布局', () async {
+        final engine = _FakeEngine();
+        final controller = SessionController(engine: engine);
+        final first = await controller.open(_host, _credentials);
+        final terminal = controller.activeSession!.terminal;
+        engine.nextConnectionFailure = const SshEngineException('认证失败');
+        final failed = (await controller.splitTerminal(
+          first,
+          SessionSplitAxis.horizontal,
+        ))!;
+        expect(controller.activeSession!.phase, SessionPhase.failed);
+        expect(controller.tabs.single.sessionIds, [first, failed]);
+        expect(engine.created.single.closed, isFalse);
+        await controller.close(failed);
+        expect(controller.tabs.single.layout, SessionPane(first));
+        expect(controller.activeSession!.terminal, same(terminal));
+        expect(controller.activeSession!.phase, SessionPhase.ready);
+        await controller.closeAll();
+      });
+
+      test('连接中关闭新窗格后，迟到连接会释放且不重新插入布局', () async {
+        final engine = _FakeEngine();
+        final controller = SessionController(engine: engine);
+        final first = await controller.open(_host, _credentials);
+        final gate = Completer<void>();
+        engine.connectGate = gate;
+        final opening = controller.splitTerminal(
+          first,
+          SessionSplitAxis.horizontal,
+        );
+        final pending = controller.tabs.single.selectedSessionId;
+        expect(controller.canSplitTerminal(pending), isFalse);
+        await controller.close(pending);
+        expect(controller.tabs.single.layout, SessionPane(first));
+        gate.complete();
+        expect(await opening, pending);
+        expect(controller.sessions.single.id, first);
+        expect(engine.created.map((session) => session.closed), [false, true]);
+        expect(engine.created.last.shellStarts, 0);
+        await controller.closeAll();
+      });
     });
 
     test('focusExisting：已有标签则聚焦并返回 true，无则返回 false', () async {

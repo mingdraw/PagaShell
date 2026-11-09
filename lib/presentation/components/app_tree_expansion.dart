@@ -2,6 +2,7 @@ import 'package:flutter/widgets.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import '../theme/app_theme.dart';
+import 'app_icon.dart';
 
 /// 展开时逐步显示子项，收起动画结束后移除子项及其拖放目标。
 class AppTreeExpansion extends StatefulWidget {
@@ -85,8 +86,8 @@ class AppTreeChevron extends StatelessWidget {
         ? Duration.zero
         : AppTheme.sidebarTransitionDuration,
     curve: Curves.easeInOutCubic,
-    child: Icon(
-      shadcn.LucideIcons.chevronRight,
+    child: AppIcon(
+      AppIcons.chevronRight,
       size: 16,
       color: shadcn.Theme.of(context).colorScheme.mutedForeground,
     ),

@@ -9,6 +9,7 @@ import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 import 'package:window_manager/window_manager.dart';
 
 import '../../../application/settings/settings_controller.dart';
+import '../../components/app_icon.dart';
 import '../../components/app_icon_button.dart';
 import '../../components/app_list_row.dart';
 import '../../navigation/app_notice.dart';
@@ -30,11 +31,23 @@ class SidebarToggleButton extends StatelessWidget {
         key: const ValueKey('sidebar-toggle'),
         semanticLabel: (visible ? '隐藏侧边栏' : '显示侧边栏').tr,
         tooltip: (visible ? '隐藏侧边栏' : '显示侧边栏').tr,
-        icon: Icon(
-          visible
-              ? shadcn.LucideIcons.panelLeftClose
-              : shadcn.LucideIcons.panelLeftOpen,
-          size: 16,
+        icon: SizedBox.square(
+          dimension: AppTheme.sidebarIconSize,
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              const AppIcon(AppIcons.panelLeftClose, size: 16),
+              AnimatedOpacity(
+                key: const ValueKey('sidebar-toggle-fill'),
+                opacity: visible ? 0 : 1,
+                duration: MediaQuery.disableAnimationsOf(context)
+                    ? Duration.zero
+                    : AppTheme.sidebarTransitionDuration,
+                curve: Curves.easeInOutCubic,
+                child: const AppIcon(AppIcons.panelLeftOpen, size: 16),
+              ),
+            ],
+          ),
         ),
         onPressed: () async {
           try {
@@ -209,12 +222,12 @@ class WindowButtons extends StatelessWidget {
     mainAxisSize: MainAxisSize.min,
     children: [
       _CaptionButton(
-        icon: shadcn.LucideIcons.minus,
+        icon: AppIcons.minus,
         semanticLabel: '最小化'.tr,
         onPressed: windowManager.minimize,
       ),
       _CaptionButton(
-        icon: shadcn.LucideIcons.square,
+        icon: AppIcons.windowMaximize,
         semanticLabel: '最大化 / 还原'.tr,
         onPressed: () async {
           if (await windowManager.isMaximized()) {
@@ -225,7 +238,7 @@ class WindowButtons extends StatelessWidget {
         },
       ),
       _CaptionButton(
-        icon: shadcn.LucideIcons.x,
+        icon: AppIcons.x,
         semanticLabel: '关闭'.tr,
         hoverColor: const Color(0xFFE81123),
         onPressed: windowManager.close,
@@ -242,7 +255,7 @@ class _CaptionButton extends StatelessWidget {
     this.hoverColor,
   });
 
-  final IconData icon;
+  final AppIcons icon;
   final String semanticLabel;
   final Future<void> Function() onPressed;
   final Color? hoverColor;
@@ -257,7 +270,7 @@ class _CaptionButton extends StatelessWidget {
       child: SizedBox(
         width: AppTheme.windowButtonWidth,
         height: double.infinity,
-        child: Icon(icon, size: 15),
+        child: AppIcon(icon, size: 15),
       ),
     ),
   );

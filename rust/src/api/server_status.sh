@@ -7,6 +7,8 @@ status_os=$(uname -s)
 printf '%s\n' "$status_os"
 case "$status_os" in Linux|Darwin) ;; *) exit 0 ;; esac
 set -e
+printf 'PAGASHELL_STATUS_ARCHITECTURE\n'
+uname -m 2>/dev/null || true
 if [ "$status_os" = Darwin ]; then
   printf 'PAGASHELL_STATUS_MAC_VERSION\n'
   /usr/bin/sw_vers -productVersion 2>/dev/null || true
@@ -43,16 +45,25 @@ PAGASHELL_CPU_JXA
   printf 'PAGASHELL_STATUS_MAC_MEMORY\n'
   /usr/sbin/sysctl -n hw.memsize
   /usr/bin/vm_stat
+  printf 'PAGASHELL_STATUS_MAC_SWAP\n'
+  /usr/sbin/sysctl -n vm.swapusage 2>/dev/null || true
+  printf 'PAGASHELL_STATUS_LOAD\n'
+  /usr/sbin/sysctl -n vm.loadavg 2>/dev/null || true
   printf 'PAGASHELL_STATUS_MAC_NETWORK\n'
   /usr/sbin/netstat -ibn
   printf 'PAGASHELL_STATUS_MAC_DISKS\n'
   /usr/sbin/ioreg -r -c IOBlockStorageDriver -l -w 0 -d 2
   printf 'PAGASHELL_STATUS_FILESYSTEMS\n'
-  # Only the startup filesystem; APFS helper volumes share its free space.
-  /bin/df -Pk / 2>/dev/null || true
-  printf 'PAGASHELL_STATUS_MAC_DISK_NAME\n'
-  /usr/sbin/diskutil info -plist / 2>/dev/null |
-    /usr/bin/plutil -extract VolumeName raw -o - - 2>/dev/null || true
+  /bin/df -Pkl 2>/dev/null || true
+  printf 'PAGASHELL_STATUS_MAC_STORAGE\n'
+  # Physical devices exclude mounted disk images. APFS containers retain shared
+  # free space separately from each volume's own usage.
+  /usr/sbin/diskutil list -plist physical 2>/dev/null |
+    /usr/bin/plutil -convert json -o - - 2>/dev/null || true
+  printf '\nPAGASHELL_STATUS_MAC_APFS\n'
+  /usr/sbin/diskutil apfs list -plist 2>/dev/null |
+    /usr/bin/plutil -convert json -o - - 2>/dev/null || true
+  printf '\n'
   printf 'PAGASHELL_STATUS_END\n'
   exit 0
 fi
@@ -64,6 +75,8 @@ elif [ -r /usr/lib/os-release ]; then
 fi
 printf 'PAGASHELL_STATUS_UPTIME\n'
 cat /proc/uptime
+printf 'PAGASHELL_STATUS_LOAD\n'
+cat /proc/loadavg 2>/dev/null || true
 printf 'PAGASHELL_STATUS_CPU\n'
 awk '/^cpu[0-9]*[[:space:]]/ { print }' /proc/stat
 printf 'PAGASHELL_STATUS_MEMORY\n'
@@ -79,6 +92,19 @@ for device in /sys/block/*; do
   printf '%s ' "$name"
   cat "$device/stat"
 done
+printf 'PAGASHELL_STATUS_LINUX_STORAGE\n'
+# Optional topology; older/minimal hosts still report df data if unavailable.
+if ! lsblk -b -J -p -o NAME,KNAME,PKNAME,TYPE,SIZE,LABEL,UUID 2>/dev/null; then
+  printf '\nPAGASHELL_STATUS_LINUX_DEVICE_ALIASES\n'
+  # Minimal hosts may lack lsblk JSON support; still resolve mapper aliases so
+  # one filesystem is not counted again under its dm-N device name.
+  for status_alias in /dev/root /dev/mapper/* /dev/disk/by-uuid/* /dev/disk/by-label/*; do
+    [ -b "$status_alias" ] || continue
+    status_target=$(readlink -f "$status_alias" 2>/dev/null) || continue
+    printf '%s\t%s\n' "$status_alias" "$status_target"
+  done
+fi
+printf '\n'
 printf 'PAGASHELL_STATUS_FILESYSTEMS\n'
 df -Pk -l -x tmpfs -x devtmpfs -x squashfs 2>/dev/null || true
 printf 'PAGASHELL_STATUS_END\n'

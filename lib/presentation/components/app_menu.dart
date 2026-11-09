@@ -2,45 +2,50 @@ import 'package:flutter/widgets.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import '../theme/app_theme.dart';
+import 'app_icon.dart';
 import 'app_icon_button.dart';
 
 List<shadcn.MenuItem> appMenuItems<T>(
   List<(T, String)> items,
   ValueChanged<T> onSelected, {
   T? selectedValue,
+  Set<T> disabledValues = const {},
 }) => [
   for (var index = 0; index < items.length; index++) ...[
     if (index > 0 && items[index].$1 == 'delete') const shadcn.MenuDivider(),
     _AppMenuItem(
       label: items[index].$2,
       icon: items[index].$1 == selectedValue
-          ? shadcn.LucideIcons.check
+          ? AppIcons.check
           : _menuIcon(items[index].$1),
       destructive: items[index].$1 == 'delete',
+      enabled: !disabledValues.contains(items[index].$1),
       onPressed: () => onSelected(items[index].$1),
     ),
   ],
 ];
 
-IconData? _menuIcon(Object? action) => switch (action) {
-  'new-session' => shadcn.LucideIcons.terminal,
-  'batch-command' => shadcn.LucideIcons.send,
-  'open-transfer' => shadcn.LucideIcons.folderOpen,
-  'new-host' => shadcn.LucideIcons.fileTerminal,
-  'new-gateway' => shadcn.LucideIcons.network,
-  'dynamic-proxy' => shadcn.LucideIcons.network,
+AppIcons? _menuIcon(Object? action) => switch (action) {
+  'new-session' => AppIcons.terminal,
+  'container-terminal' => AppIcons.terminal,
+  'container-upgrade' => AppIcons.circleArrowUp,
+  'batch-command' => AppIcons.send,
+  'open-transfer' => AppIcons.folderOpen,
+  'new-host' => AppIcons.fileTerminal,
+  'new-gateway' => AppIcons.network,
+  'dynamic-proxy' => AppIcons.proxy,
   'port-forward' ||
   'new-forward' ||
-  'start' => shadcn.LucideIcons.arrowLeftRight,
-  'stop' => shadcn.LucideIcons.square,
-  'new-folder' || 'new-subfolder' => shadcn.LucideIcons.folderPlus,
-  'new-identity' => shadcn.LucideIcons.fileKey,
-  'edit' || 'rename' => shadcn.LucideIcons.pencil,
-  'copy' => shadcn.LucideIcons.copy,
-  'delete' => shadcn.LucideIcons.trash2,
-  'download' => shadcn.LucideIcons.download,
-  'upload' => shadcn.LucideIcons.upload,
-  'open' => shadcn.LucideIcons.folderOpen,
+  'start' => AppIcons.arrowLeftRight,
+  'stop' => AppIcons.square,
+  'new-folder' || 'new-subfolder' => AppIcons.folderPlus,
+  'new-identity' => AppIcons.fileKey,
+  'edit' || 'rename' => AppIcons.pencil,
+  'copy' => AppIcons.copy,
+  'delete' => AppIcons.trash2,
+  'download' => AppIcons.download,
+  'upload' => AppIcons.upload,
+  'open' => AppIcons.folderOpen,
   _ => null,
 };
 
@@ -51,12 +56,14 @@ class _AppMenuItem extends StatelessWidget implements shadcn.MenuItem {
     required this.icon,
     required this.destructive,
     required this.onPressed,
+    required this.enabled,
   });
 
   final String label;
-  final IconData? icon;
+  final AppIcons? icon;
   final bool destructive;
   final VoidCallback onPressed;
+  final bool enabled;
 
   @override
   bool get hasLeading => icon != null;
@@ -67,9 +74,12 @@ class _AppMenuItem extends StatelessWidget implements shadcn.MenuItem {
   @override
   Widget build(BuildContext context) {
     final colors = shadcn.Theme.of(context).colorScheme;
-    final foreground = destructive
+    final baseForeground = destructive
         ? AppTheme.menuDanger(context)
         : colors.foreground;
+    final foreground = enabled
+        ? baseForeground
+        : baseForeground.withValues(alpha: .4);
     return shadcn.WidgetStatesProvider.boundary(
       child: shadcn.ButtonStyleOverride(
         padding: (_, _, _) => AppTheme.menuItemPadding,
@@ -98,8 +108,8 @@ class _AppMenuItem extends StatelessWidget implements shadcn.MenuItem {
           );
         },
         child: shadcn.MenuButton(
-          leading: icon == null ? null : Icon(icon),
-          onPressed: (_) => onPressed(),
+          leading: icon == null ? null : AppIcon(icon!),
+          onPressed: enabled ? (_) => onPressed() : null,
           child: Text(label),
         ),
       ),
@@ -114,13 +124,21 @@ class AppMenuButton<T> extends StatelessWidget {
     this.actions = const [],
     this.semanticLabel = '',
     this.selectedValue,
-    this.icon = const Icon(shadcn.LucideIcons.ellipsis, size: 16),
+    this.disabledValues = const {},
+    this.enabled = true,
+    this.tooltip,
+    this.density = shadcn.ButtonDensity.icon,
+    this.icon = const AppIcon(AppIcons.ellipsis, size: 16),
     super.key,
   });
   final List<(T, String)> items;
   final List<(T, String)> actions;
   final ValueChanged<T> onSelected;
   final T? selectedValue;
+  final Set<T> disabledValues;
+  final bool enabled;
+  final String? tooltip;
+  final shadcn.ButtonDensity density;
   final String semanticLabel;
   final Widget icon;
 
@@ -129,18 +147,27 @@ class AppMenuButton<T> extends StatelessWidget {
     builder: (anchorContext) => AppIconButton(
       icon: icon,
       semanticLabel: semanticLabel,
-      onPressed: () => shadcn.showDropdown<void>(
-        context: anchorContext,
-        builder: (_) => shadcn.DropdownMenu(
-          children: [
-            ...appMenuItems(items, onSelected, selectedValue: selectedValue),
-            if (actions.isNotEmpty) ...[
-              const shadcn.MenuDivider(),
-              ...appMenuItems(actions, onSelected),
-            ],
-          ],
-        ),
-      ),
+      tooltip: tooltip,
+      density: density,
+      onPressed: !enabled
+          ? null
+          : () => shadcn.showDropdown<void>(
+              context: anchorContext,
+              builder: (_) => shadcn.DropdownMenu(
+                children: [
+                  ...appMenuItems(
+                    items,
+                    onSelected,
+                    selectedValue: selectedValue,
+                    disabledValues: disabledValues,
+                  ),
+                  if (actions.isNotEmpty) ...[
+                    const shadcn.MenuDivider(),
+                    ...appMenuItems(actions, onSelected),
+                  ],
+                ],
+              ),
+            ),
     ),
   );
 }

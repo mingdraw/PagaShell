@@ -12,6 +12,7 @@ import '../../application/updates/app_update_controller.dart';
 import '../../domain/ai/ai_model.dart';
 import '../../domain/entities/app_theme_mode.dart';
 import '../components/app_dialog.dart';
+import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
 import '../components/app_select_field.dart';
 import '../components/app_text_form_field.dart';
@@ -302,8 +303,8 @@ class _SettingsDialogState extends State<SettingsDialog> {
     if (_success == null) return null;
     return Row(
       children: [
-        const Icon(
-          shadcn.LucideIcons.circleCheck,
+        const AppIcon(
+          AppIcons.circleCheck,
           size: AppTheme.inputIconSize,
           color: StatusColors.ready,
         ),
@@ -374,10 +375,10 @@ class _SettingsDialogState extends State<SettingsDialog> {
             suffixIcon: AppIconButton(
               key: const ValueKey('ai-model-key-visibility'),
               density: shadcn.ButtonDensity.compact,
-              icon: Icon(
+              icon: AppIcon(
                 _obscureKey
-                    ? shadcn.LucideIcons.eyeOff
-                    : shadcn.LucideIcons.eye,
+                    ? AppIcons.eyeOff
+                    : AppIcons.eye,
                 size: AppTheme.inputIconSize,
               ),
               semanticLabel: (_obscureKey ? '显示 API Key' : '隐藏 API Key').tr,
@@ -423,8 +424,8 @@ class _SettingsDialogState extends State<SettingsDialog> {
                         dimension: AppTheme.inputIconSize,
                         child: shadcn.CircularProgressIndicator(),
                       )
-                    : const Icon(
-                        shadcn.LucideIcons.refreshCw,
+                    : const AppIcon(
+                        AppIcons.refreshCw,
                         size: AppTheme.inputIconSize,
                       ),
                 semanticLabel: (_refreshing ? '正在获取模型' : '刷新模型列表').tr,
@@ -434,8 +435,8 @@ class _SettingsDialogState extends State<SettingsDialog> {
               suffixIcon: AppIconButton(
                 key: const ValueKey('ai-model-options'),
                 density: shadcn.ButtonDensity.compact,
-                icon: const Icon(
-                  shadcn.LucideIcons.chevronDown,
+                icon: const AppIcon(
+                  AppIcons.chevronDown,
                   size: AppTheme.inputIconSize,
                 ),
                 semanticLabel: '选择模型'.tr,

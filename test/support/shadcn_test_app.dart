@@ -1,10 +1,13 @@
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:get/get.dart';
+import 'package:pagashell/presentation/components/app_icon.dart';
 import 'package:pagashell/presentation/components/app_icon_button.dart';
 import 'package:pagashell/presentation/localization/app_translations.dart';
 import 'package:pagashell/presentation/theme/app_theme.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
+
+export 'package:pagashell/presentation/components/app_icon.dart';
 
 /// 与生产应用相同的纯 shadcn 宿主；测试自行装配需要的依赖。
 class ShadcnTestApp extends StatefulWidget {
@@ -43,4 +46,9 @@ class _ShadcnTestAppState extends State<ShadcnTestApp> {
 
 Finder findAppIconButton(String label) => find.byWidgetPredicate(
   (widget) => widget is AppIconButton && widget.semanticLabel == label,
+);
+
+Finder findAppIcon(AppIcons icon) => find.byWidgetPredicate(
+  (widget) => widget is AppIcon && widget.icon == icon,
+  description: 'AppIcon(${icon.name})',
 );

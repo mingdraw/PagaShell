@@ -32,7 +32,7 @@ void main() {
     await createFolder(tester, '生产环境');
 
     expect(find.text('生产环境'), findsOneWidget);
-    expect(find.byIcon(shadcn.LucideIcons.ellipsis), findsOneWidget);
+    expect(findAppIcon(AppIcons.ellipsis), findsOneWidget);
 
     await tester.tap(find.text('生产环境'), buttons: kSecondaryMouseButton);
     await tester.pumpAndSettle();
@@ -41,7 +41,7 @@ void main() {
     expect(find.text('删除'), findsOneWidget);
     await tester.tap(find.text('生产环境'));
     await tester.pumpAndSettle();
-    await tester.tap(find.byIcon(shadcn.LucideIcons.ellipsis));
+    await tester.tap(findAppIcon(AppIcons.ellipsis));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
     await tester.tap(find.text('重命名'));

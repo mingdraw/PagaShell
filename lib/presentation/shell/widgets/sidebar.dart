@@ -24,6 +24,7 @@ import '../../../domain/services/host_tree.dart';
 import '../../../domain/services/identity_tree.dart';
 import '../../../domain/ssh/ssh_engine.dart';
 import '../../../domain/vault/secret_store.dart';
+import '../../components/app_icon.dart';
 import '../../components/app_list_row.dart';
 import '../../components/app_menu.dart';
 import '../../components/app_tree_drag.dart';
@@ -117,8 +118,8 @@ class _SidebarState extends State<Sidebar> {
                 placeholder: Text('搜索服务'.tr),
                 features: const [
                   shadcn.InputFeature.leading(
-                    Icon(
-                      shadcn.LucideIcons.search,
+                    AppIcon(
+                      AppIcons.search,
                       size: AppTheme.sidebarSearchIconSize,
                     ),
                   ),
@@ -176,7 +177,7 @@ class _SidebarState extends State<Sidebar> {
                             : shadcn.Theme.of(context).colorScheme.primary
                                   .withValues(alpha: 0.12),
                         child: _SectionHeader(
-                          icon: shadcn.LucideIcons.server,
+                          icon: AppIcons.server,
                           title: '服务'.tr,
                           count: hostController.hosts.length,
                           expanded: _hostsExpanded,
@@ -226,7 +227,7 @@ class _SidebarState extends State<Sidebar> {
                             : shadcn.Theme.of(context).colorScheme.primary
                                   .withValues(alpha: 0.12),
                         child: _SectionHeader(
-                          icon: shadcn.LucideIcons.bookKey,
+                          icon: AppIcons.bookKey,
                           title: '凭证'.tr,
                           count: identityController.identities.length,
                           expanded: _identitiesExpanded,
@@ -323,7 +324,7 @@ class _SidebarState extends State<Sidebar> {
             : shadcn.Theme.of(context).colorScheme.primary
                   .withValues(alpha: 0.12),
         child: _SectionHeader(
-          icon: shadcn.LucideIcons.network,
+          icon: AppIcons.network,
           title: '网关'.tr,
           count: tree.hosts.hosts.length,
           expanded: _gatewaysExpanded,
@@ -437,7 +438,7 @@ class _SectionHeader extends StatelessWidget {
     required this.onAction,
   });
 
-  final IconData icon;
+  final AppIcons icon;
   final String title;
   final int count;
   final bool expanded;
@@ -463,7 +464,7 @@ class _SectionHeader extends StatelessWidget {
               children: [
                 AppTreeChevron(expanded: expanded),
                 const SizedBox(width: 2),
-                Icon(
+                AppIcon(
                   icon,
                   size: AppTheme.sidebarIconSize,
                   color: colors.primary,
@@ -483,7 +484,7 @@ class _SectionHeader extends StatelessWidget {
                   child: Text('$count', style: const TextStyle(fontSize: 10)),
                 ),
                 AppMenuButton<String>(
-                  icon: const Icon(shadcn.LucideIcons.plus, size: 16),
+                  icon: const AppIcon(AppIcons.plus, size: 16),
                   semanticLabel: menuSemanticLabel,
                   onSelected: onAction,
                   items: actions,
@@ -644,12 +645,8 @@ class _FolderTile extends StatelessWidget {
             children: [
               AppTreeChevron(expanded: expanded),
               const SizedBox(width: 2),
-              Icon(
-                containsIdentities
-                    ? shadcn.LucideIcons.folderKey
-                    : expanded
-                    ? shadcn.LucideIcons.folderOpen
-                    : shadcn.LucideIcons.folder,
+              AppIcon(
+                expanded ? AppIcons.folderOpen : AppIcons.folder,
                 size: AppTheme.sidebarIconSize,
                 color: colors.primary,
               ),
@@ -806,8 +803,8 @@ class _IdentityTile extends StatelessWidget {
     final row = AppListRow(
       minHeight: AppTheme.sidebarItemHeight,
       contentPadding: EdgeInsets.only(left: 14.0 + depth * 14, right: 4),
-      leading: Icon(
-        shadcn.LucideIcons.fileKey,
+      leading: AppIcon(
+        AppIcons.fileKey,
         size: AppTheme.sidebarIconSize,
         color: colors.primary,
       ),
@@ -950,12 +947,10 @@ class _HostTileState extends State<_HostTile> {
       ('copy', '复制'.tr),
       ('delete', '删除'.tr),
     ];
-    final leading = Icon(
+    final leading = AppIcon(
       widget.gateway
-          ? shadcn.LucideIcons.network
-          : host.isDesktop
-          ? shadcn.LucideIcons.monitor
-          : shadcn.LucideIcons.fileTerminal,
+          ? AppIcons.network
+          : AppIcons.forServiceType(host.serviceType),
       size: AppTheme.sidebarIconSize,
       color: host.colorValue != null ? Color(host.colorValue!) : colors.primary,
     );

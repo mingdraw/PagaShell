@@ -5,6 +5,7 @@ import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
+import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
 import '../components/app_list_row.dart';
 import '../components/app_menu.dart';
@@ -320,10 +321,10 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
                   padding: const EdgeInsets.symmetric(horizontal: 12),
                   child: Row(
                     children: [
-                      Icon(
+                      AppIcon(
                         side == FileBrowserSide.local
-                            ? shadcn.LucideIcons.monitor
-                            : shadcn.LucideIcons.server,
+                            ? AppIcons.monitor
+                            : AppIcons.server,
                         size: 15,
                         color: colors.mutedForeground,
                       ),
@@ -376,10 +377,10 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
                       semanticLabel:
                           (side == FileBrowserSide.local ? '上传所选文件' : '下载所选文件')
                               .tr,
-                      icon: Icon(
+                      icon: AppIcon(
                         side == FileBrowserSide.local
-                            ? shadcn.LucideIcons.upload
-                            : shadcn.LucideIcons.download,
+                            ? AppIcons.upload
+                            : AppIcons.download,
                         size: 16,
                       ),
                       onPressed:
@@ -389,14 +390,14 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
                     ),
                     AppIconButton(
                       semanticLabel: '刷新'.tr,
-                      icon: const Icon(shadcn.LucideIcons.refreshCw, size: 16),
+                      icon: const AppIcon(AppIcons.refreshCw, size: 16),
                       onPressed: onRefresh,
                     ),
                     if (onBrowse != null)
                       AppIconButton(
                         semanticLabel: '选择本地目录'.tr,
-                        icon: const Icon(
-                          shadcn.LucideIcons.folderOpen,
+                        icon: const AppIcon(
+                          AppIcons.folderOpen,
                           size: 16,
                         ),
                         onPressed: onBrowse,
@@ -404,8 +405,8 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
                     if (onMkdir != null)
                       AppIconButton(
                         semanticLabel: '新建目录'.tr,
-                        icon: const Icon(
-                          shadcn.LucideIcons.folderPlus,
+                        icon: const AppIcon(
+                          AppIcons.folderPlus,
                           size: 16,
                         ),
                         onPressed: loading || error != null ? null : onMkdir,
@@ -413,7 +414,7 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
                     if (onUpload != null)
                       AppIconButton(
                         semanticLabel: '上传文件'.tr,
-                        icon: const Icon(shadcn.LucideIcons.fileUp, size: 16),
+                        icon: const AppIcon(AppIcons.fileUp, size: 16),
                         onPressed: loading || error != null ? null : onUpload,
                       ),
                     const SizedBox(width: 4),
@@ -631,10 +632,10 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
               child: Row(
                 children: [
                   const SizedBox(width: 12),
-                  Icon(
+                  AppIcon(
                     entry.isDir
-                        ? shadcn.LucideIcons.folder
-                        : shadcn.LucideIcons.file,
+                        ? AppIcons.folder
+                        : AppIcons.file,
                     size: 15,
                     color: selected
                         ? selectedForeground

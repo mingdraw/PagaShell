@@ -10,8 +10,10 @@ import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 import '../../../application/ai/ai_settings_controller.dart';
 import '../../../application/session/session.dart';
 import '../../../application/session/session_controller.dart';
+import '../../../application/session/session_layout.dart';
 import '../../../application/settings/settings_controller.dart';
 import '../../ai/agent_workspace.dart';
+import '../../components/app_icon.dart';
 import '../../components/app_icon_button.dart';
 import '../../components/app_menu.dart';
 import '../../navigation/app_navigation.dart';
@@ -21,11 +23,13 @@ import '../../theme/app_theme.dart';
 import '../agent_sidebar_scope.dart';
 import '../session_close_confirmation.dart';
 import 'window_controls.dart';
+import 'workspace_header_actions.dart';
 
 /// 会话标签与内容容器；内容的生命周期由工作区管理。
 class SessionTabPane extends StatefulWidget {
   const SessionTabPane({
     required this.sessions,
+    required this.tabs,
     required this.activeId,
     required this.child,
     this.fullscreen = false,
@@ -33,6 +37,7 @@ class SessionTabPane extends StatefulWidget {
   });
 
   final List<Session> sessions;
+  final List<SessionTab> tabs;
   final String? activeId;
   final Widget child;
   final bool fullscreen;
@@ -59,15 +64,12 @@ class _SessionTabPaneState extends State<SessionTabPane> {
   @override
   void didUpdateWidget(SessionTabPane oldWidget) {
     super.didUpdateWidget(oldWidget);
-    final ids = widget.sessions.map((session) => session.id).toList();
+    final ids = widget.tabs.map((tab) => tab.id).toList();
     _tabKeys.removeWhere((id, _) => !ids.contains(id));
     _tabItems.removeWhere((id, _) => !ids.contains(id));
     if (oldWidget.activeId != widget.activeId ||
         oldWidget.fullscreen != widget.fullscreen ||
-        !listEquals(
-          oldWidget.sessions.map((session) => session.id).toList(),
-          ids,
-        )) {
+        !listEquals(oldWidget.tabs.map((tab) => tab.id).toList(), ids)) {
       _scheduleReveal();
     }
   }
@@ -82,15 +84,15 @@ class _SessionTabPaneState extends State<SessionTabPane> {
   }
 
   void _revealActiveTab() {
-    final activeIndex = widget.sessions.indexWhere(
-      (session) => session.id == widget.activeId,
+    final activeIndex = widget.tabs.indexWhere(
+      (tab) => tab.id == widget.activeId,
     );
     if (activeIndex < 0) return;
 
     BuildContext? tabContext;
     var nearestIndex = -1;
-    for (var index = 0; index < widget.sessions.length; index++) {
-      final context = _tabKeys[widget.sessions[index].id]?.currentContext;
+    for (var index = 0; index < widget.tabs.length; index++) {
+      final context = _tabKeys[widget.tabs[index].id]?.currentContext;
       if (context != null &&
           (nearestIndex < 0 ||
               (index - activeIndex).abs() <
@@ -174,17 +176,20 @@ class _SessionTabPaneState extends State<SessionTabPane> {
 
   Widget _buildPane(BuildContext context, bool sidebarVisible) {
     if (widget.fullscreen) return widget.child;
-    final sessions = widget.sessions;
-    final sessionsById = {for (final session in sessions) session.id: session};
+    final tabs = widget.tabs;
+    final sessionsById = {
+      for (final tab in tabs)
+        tab.id: widget.sessions.firstWhere(
+          (session) => session.id == tab.selectedSessionId,
+        ),
+    };
     final activeId = widget.activeId;
     final isMac = shadcn.Theme.of(context).platform == TargetPlatform.macOS;
     final agentSidebar = AgentSidebarScope.maybeOf(context);
     final headerControlSize = AppTheme.windowHeaderControlSize(context);
     final paneRadius = AppTheme.sessionPaneRadius(context);
     final controller = Get.find<SessionController>();
-    final activeIndex = sessions.indexWhere(
-      (session) => session.id == activeId,
-    );
+    final activeIndex = tabs.indexWhere((tab) => tab.id == activeId);
     return ColoredBox(
       color: AppTheme.sidebar(context),
       child: WindowDragRegion(
@@ -194,17 +199,14 @@ class _SessionTabPaneState extends State<SessionTabPane> {
           child: shadcn.TabPane<String>(
             borderRadius: AppTheme.sessionPaneRadius(context),
             items: [
-              for (final session in sessions)
-                _tabItems.putIfAbsent(
-                  session.id,
-                  () => shadcn.TabPaneData(session.id),
-                ),
+              for (final tab in tabs)
+                _tabItems.putIfAbsent(tab.id, () => shadcn.TabPaneData(tab.id)),
             ],
             focused: activeIndex < 0 ? 0 : activeIndex,
             onFocused: (index) {
               if (_ignoreSortFocus) return;
-              if (index >= 0 && index < sessions.length) {
-                controller.activate(sessions[index].id);
+              if (index >= 0 && index < tabs.length) {
+                controller.activateTab(tabs[index].id);
                 _scheduleReveal();
               }
             },
@@ -219,14 +221,20 @@ class _SessionTabPaneState extends State<SessionTabPane> {
             },
             backgroundColor: AppTheme.background(context),
             leading: [
-              if (agentSidebar != null && !sidebarVisible)
-                SizedBox(
-                  width: math.max(
-                    0,
-                    (isMac ? AppTheme.macWindowControlsWidth : 0) +
-                        headerControlSize -
-                        paneRadius.bottomLeft.x,
-                  ),
+              if (agentSidebar != null)
+                AnimatedContainer(
+                  duration: MediaQuery.disableAnimationsOf(context)
+                      ? Duration.zero
+                      : AppTheme.sidebarTransitionDuration,
+                  curve: Curves.easeInOutCubic,
+                  width: sidebarVisible
+                      ? 0
+                      : math.max(
+                          0,
+                          (isMac ? AppTheme.macWindowControlsWidth : 0) +
+                              headerControlSize -
+                              paneRadius.bottomLeft.x,
+                        ),
                 ),
               if (agentSidebar == null && isMac && !sidebarVisible)
                 const SizedBox(
@@ -235,18 +243,19 @@ class _SessionTabPaneState extends State<SessionTabPane> {
                 ),
               if (agentSidebar == null && !sidebarVisible)
                 const WindowDragBlocker(child: SidebarToggleButton()),
-              if (sessions.isNotEmpty)
+              if (tabs.isNotEmpty)
                 WindowDragBlocker(
                   child: AppMenuButton<String>(
-                    icon: const Icon(shadcn.LucideIcons.chevronDown, size: 16),
+                    icon: const AppIcon(AppIcons.chevronDown, size: 16),
                     semanticLabel: '会话列表'.tr,
                     selectedValue: activeId,
                     items: [
-                      for (final session in sessions)
+                      for (final tab in tabs)
                         (
-                          session.id,
-                          '${session.title} · ${switch (session.kind) {
+                          tab.id,
+                          '${sessionsById[tab.id]!.title} · ${switch (sessionsById[tab.id]!.kind) {
                             SessionKind.terminal => '终端'.tr,
+                            SessionKind.containerTerminal => '容器终端'.tr,
                             SessionKind.fileTransfer => '文件传输'.tr,
                             SessionKind.portForward => '端口转发'.tr,
                             SessionKind.dynamicProxy => '动态代理'.tr,
@@ -257,7 +266,7 @@ class _SessionTabPaneState extends State<SessionTabPane> {
                     actions: [('batch-command', '批量执行命令'.tr)],
                     onSelected: (value) async {
                       if (value != 'batch-command') {
-                        controller.activate(value);
+                        controller.activateTab(value);
                         _scheduleReveal();
                         return;
                       }
@@ -292,9 +301,12 @@ class _SessionTabPaneState extends State<SessionTabPane> {
                 width: AppTheme.windowDragWidth,
                 child: WindowDragArea(),
               ),
-              if (agentSidebar == null &&
-                  Get.isRegistered<AiSettingsController>())
-                const WindowHeaderButton(child: AgentToggleButton()),
+              if (agentSidebar == null)
+                WorkspaceHeaderActions(
+                  agentButton: Get.isRegistered<AiSettingsController>()
+                      ? const AgentToggleButton()
+                      : null,
+                ),
               if (!isMac && agentSidebar == null)
                 const WindowDragBlocker(child: WindowButtons()),
               if (agentSidebar?.visible == false)
@@ -302,13 +314,14 @@ class _SessionTabPaneState extends State<SessionTabPane> {
                   width: math.max(
                     0,
                     (isMac ? 0 : AppTheme.windowButtonWidth * 3) +
-                        headerControlSize -
+                        headerControlSize * 4 -
                         paneRadius.bottomRight.x,
                   ),
                 ),
             ],
             itemBuilder: (context, item, index) {
               final session = sessionsById[item.data]!;
+              final tab = tabs.firstWhere((tab) => tab.id == item.data);
               return shadcn.TabChildWidget(
                 indexed: true,
                 child: WindowDragBlocker(
@@ -319,7 +332,7 @@ class _SessionTabPaneState extends State<SessionTabPane> {
                           Scrollable.maybeOf(context, axis: Axis.horizontal) ==
                               null
                           ? null
-                          : _tabKeys.putIfAbsent(session.id, GlobalKey.new),
+                          : _tabKeys.putIfAbsent(tab.id, GlobalKey.new),
                       child: shadcn.ContextMenu(
                         items: appMenuItems<String>(
                           [
@@ -330,26 +343,27 @@ class _SessionTabPaneState extends State<SessionTabPane> {
                           (action) => unawaited(switch (action) {
                             'close-current' => requestSessionTabClose(
                               controller,
-                              [session.id],
+                              [tab.id],
                             ),
                             'close-others' => requestSessionTabClose(
                               controller,
-                              controller.sessions
-                                  .where((s) => s.id != session.id)
-                                  .map((s) => s.id),
-                              keepSessionId: session.id,
+                              controller.tabs
+                                  .where((other) => other.id != tab.id)
+                                  .map((other) => other.id),
+                              keepSessionId: tab.id,
                             ),
                             'close-all' => requestSessionTabClose(
                               controller,
-                              controller.sessions.map((s) => s.id),
+                              controller.tabs.map((tab) => tab.id),
                             ),
                             _ => Future<void>.value(),
                           }),
                         ),
                         child: shadcn.KeyedTabItem<String>(
-                          key: session.id,
+                          key: tab.id,
                           child: _SessionTab(
                             session: session,
+                            tab: tab,
                             active: index == activeIndex,
                           ),
                         ),
@@ -368,9 +382,14 @@ class _SessionTabPaneState extends State<SessionTabPane> {
 }
 
 class _SessionTab extends StatelessWidget {
-  const _SessionTab({required this.session, required this.active});
+  const _SessionTab({
+    required this.session,
+    required this.tab,
+    required this.active,
+  });
 
   final Session session;
+  final SessionTab tab;
   final bool active;
 
   Color get _statusColor => switch (session.phase) {
@@ -386,31 +405,34 @@ class _SessionTab extends StatelessWidget {
     return ConstrainedBox(
       constraints: const BoxConstraints(minWidth: AppTheme.sessionTabMinWidth),
       child: shadcn.Label(
-        leading: Icon(
+        leading: AppIcon(
           switch (session.kind) {
-            SessionKind.fileTransfer => shadcn.LucideIcons.folderOpen,
-            SessionKind.portForward => shadcn.LucideIcons.arrowLeftRight,
-            SessionKind.dynamicProxy => shadcn.LucideIcons.network,
-            SessionKind.terminal => shadcn.LucideIcons.terminal,
-            SessionKind.remoteDesktop => shadcn.LucideIcons.monitor,
+            SessionKind.fileTransfer => AppIcons.folderOpen,
+            SessionKind.portForward => AppIcons.arrowLeftRight,
+            SessionKind.dynamicProxy => AppIcons.proxy,
+            SessionKind.terminal => AppIcons.terminal,
+            SessionKind.containerTerminal => AppIcons.container,
+            SessionKind.remoteDesktop => AppIcons.forServiceType(
+              session.host.serviceType,
+            ),
           },
           size: 14,
           color: _statusColor,
         ),
         trailing: AppIconButton(
-          key: ValueKey('session-tab-close-${session.id}'),
+          key: ValueKey('session-tab-close-${tab.id}'),
           semanticLabel: '关闭标签'.tr,
           density: shadcn.ButtonDensity.compact,
-          onPressed: () => requestSessionTabClose(
-            Get.find<SessionController>(),
-            [session.id],
-          ),
-          icon: const Icon(shadcn.LucideIcons.x, size: 12),
+          onPressed: () =>
+              requestSessionTabClose(Get.find<SessionController>(), [tab.id]),
+          icon: const AppIcon(AppIcons.x, size: 12),
         ),
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 140),
           child: Text(
-            session.title,
+            tab.sessionIds.length > 1
+                ? '${session.title} · ${tab.sessionIds.length}'
+                : session.title,
             overflow: TextOverflow.ellipsis,
             style: TextStyle(
               color: active ? colors.foreground : colors.mutedForeground,

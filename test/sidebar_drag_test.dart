@@ -8,9 +8,9 @@ import 'package:pagashell/application/folders/folder_controller.dart';
 import 'package:pagashell/application/hosts/host_controller.dart';
 import 'package:pagashell/domain/entities/host.dart';
 import 'package:pagashell/domain/entities/host_tree_item.dart';
-import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import 'support/in_memory_binding.dart';
+import 'support/shadcn_test_app.dart';
 
 void main() {
   tearDown(Get.reset);
@@ -68,7 +68,7 @@ void main() {
       final sourceText = find.descendant(of: source, matching: find.text('a'));
       final sourceIcon = find.descendant(
         of: source,
-        matching: find.byIcon(shadcn.LucideIcons.fileTerminal),
+        matching: findAppIcon(AppIcons.fileTerminal),
       );
       final sourceRect = tester.getRect(source);
       final textRect = tester.getRect(sourceText);
@@ -87,7 +87,7 @@ void main() {
       );
       final feedbackIcon = find.descendant(
         of: feedback,
-        matching: find.byIcon(shadcn.LucideIcons.fileTerminal),
+        matching: findAppIcon(AppIcons.fileTerminal),
       );
       for (final (original, preview) in [
         (sourceRect, tester.getRect(feedback)),

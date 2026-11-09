@@ -301,7 +301,7 @@ void main() {
     await mouse.addPointer(location: tester.getCenter(find.text('web-01')));
     addTearDown(mouse.removePointer);
     await tester.pump();
-    expect(find.byIcon(shadcn.LucideIcons.ellipsis), findsNothing);
+    expect(findAppIcon(AppIcons.ellipsis), findsNothing);
     await mouse.down(tester.getCenter(find.text('web-01')));
     await mouse.up();
     await tester.pump();

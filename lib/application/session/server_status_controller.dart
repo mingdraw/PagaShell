@@ -5,7 +5,7 @@ import 'package:get/get.dart';
 import '../../domain/ssh/server_status.dart';
 import '../../domain/ssh/ssh_engine.dart';
 
-/// 每个终端独立持有；展开且处于活动页签时采样，不并发执行采集。
+/// 每个页签独立持有；展开且处于活动页签时采样，不并发执行采集。
 class ServerStatusController extends GetxController {
   ServerStatusController({
     required this.source,

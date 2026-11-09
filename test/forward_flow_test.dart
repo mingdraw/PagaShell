@@ -319,7 +319,7 @@ void main() {
     expect(
       find.descendant(
         of: find.widgetWithText(shadcn.MenuButton, '端口转发'),
-        matching: find.byIcon(shadcn.LucideIcons.arrowLeftRight),
+        matching: findAppIcon(AppIcons.arrowLeftRight),
       ),
       findsOneWidget,
     );
@@ -575,8 +575,8 @@ void main() {
     final (engine, _) = await pump(tester);
     final sessions = Get.find<SessionController>();
     final id = await open(tester);
-    final sidebarIcon = find.byIcon(shadcn.LucideIcons.network).first;
-    final iconColor = tester.widget<Icon>(sidebarIcon).color;
+    final sidebarIcon = findAppIcon(AppIcons.network).first;
+    final iconColor = tester.widget<AppIcon>(sidebarIcon).color;
     engine.connectGate = Completer<void>();
     await tester.tap(find.text('启动转发'));
     await tester.pump();
@@ -598,7 +598,7 @@ void main() {
     expect(engine.sessions.single.ports, _ports);
     expect(engine.sessions.single.shellStarts, 0);
     expect(engine.gateways.single!.host.id, _gateway.id);
-    expect(tester.widget<Icon>(sidebarIcon).color, iconColor);
+    expect(tester.widget<AppIcon>(sidebarIcon).color, iconColor);
     expect(
       tester
           .widget<AppTextFormField>(

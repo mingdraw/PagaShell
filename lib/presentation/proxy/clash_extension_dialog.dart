@@ -6,6 +6,7 @@ import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 import '../../application/proxy/clash_extension_script.dart';
 import '../../domain/entities/proxy_config.dart';
 import '../components/app_dialog.dart';
+import '../components/app_icon.dart';
 import '../navigation/app_navigation.dart';
 import '../navigation/app_notice.dart';
 import '../theme/app_theme.dart';
@@ -80,8 +81,8 @@ class _ClashExtensionDialogState extends State<ClashExtensionDialog> {
       shadcn.PrimaryButton(
         key: const ValueKey('clash-extension-copy'),
         onPressed: _copy,
-        leading: Icon(
-          _copied ? shadcn.LucideIcons.check : shadcn.LucideIcons.copy,
+        leading: AppIcon(
+          _copied ? AppIcons.check : AppIcons.copy,
           size: 16,
         ),
         child: Text((_copied ? '已复制' : '复制脚本').tr),

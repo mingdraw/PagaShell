@@ -2,6 +2,8 @@ enum AgentEntryKind { user, assistant, tool, command }
 
 enum AgentCommandState { pending, sent, rejected, unavailable }
 
+enum AgentRequestState { queued, running, completed, failed, cancelled }
+
 /// 历史命令仅保存展示信息，不包含会话句柄或执行授权。
 class AgentArchivedCommand {
   const AgentArchivedCommand({
@@ -37,16 +39,26 @@ class AgentArchivedCommand {
 }
 
 class AgentMessage {
-  const AgentMessage(this.kind, this.text, {this.command});
+  const AgentMessage(
+    this.kind,
+    this.text, {
+    this.command,
+    this.requestState,
+    this.requestError,
+  });
 
   final AgentEntryKind kind;
   final String text;
   final AgentArchivedCommand? command;
+  final AgentRequestState? requestState;
+  final String? requestError;
 
   Map<String, dynamic> toJson() => {
     'kind': kind.name,
     'text': text,
     if (command != null) 'command': command!.toJson(),
+    if (requestState != null) 'requestState': requestState!.name,
+    if (requestError != null) 'requestError': requestError,
   };
 
   factory AgentMessage.fromJson(Map<String, dynamic> json) => AgentMessage(
@@ -57,6 +69,14 @@ class AgentMessage {
         : AgentArchivedCommand.fromJson(
             json['command'] as Map<String, dynamic>,
           ),
+    // 队列和连接授权只在运行内存中存在，恢复历史不能自动重发消息。
+    requestState: switch (json['requestState']) {
+      'completed' => AgentRequestState.completed,
+      'failed' => AgentRequestState.failed,
+      'queued' || 'running' || 'cancelled' => AgentRequestState.cancelled,
+      _ => null,
+    },
+    requestError: json['requestError'] as String?,
   );
 }
 

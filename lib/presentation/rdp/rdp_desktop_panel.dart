@@ -14,6 +14,7 @@ import '../../domain/rdp/rdp_engine.dart';
 import '../../domain/rdp/rdp_resolution.dart';
 import '../../domain/ssh/ssh_engine.dart';
 import '../../domain/vnc/vnc_engine.dart';
+import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
 import '../components/app_menu.dart';
 import '../navigation/app_notice.dart';
@@ -627,8 +628,8 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
                                     child: shadcn.CircularProgressIndicator(),
                                   )
                                 else
-                                  const Icon(
-                                    shadcn.LucideIcons.monitor,
+                                  const AppIcon(
+                                    AppIcons.monitor,
                                     size: 16,
                                   ),
                                 const SizedBox(width: 6),
@@ -636,8 +637,8 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
                                   _resolution == null ? '自适应窗口'.tr : '分辨率'.tr,
                                 ),
                                 const SizedBox(width: 4),
-                                const Icon(
-                                  shadcn.LucideIcons.chevronDown,
+                                const AppIcon(
+                                  AppIcons.chevronDown,
                                   size: 14,
                                 ),
                               ],
@@ -653,7 +654,7 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
                       key: const ValueKey('rdp-enter-fullscreen'),
                       semanticLabel: '全屏（Ctrl+Alt+Enter）'.tr,
                       tooltip: '全屏（Ctrl+Alt+Enter）'.tr,
-                      icon: const Icon(shadcn.LucideIcons.maximize, size: 16),
+                      icon: const AppIcon(AppIcons.maximize, size: 16),
                       onPressed: widget.fullscreenBusy
                           ? null
                           : widget.onToggleFullscreen,
@@ -806,7 +807,7 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
                         semanticLabel: '取消剪贴板传输'.tr,
                         onPressed: () =>
                             unawaited(_clipboard!.cancelTransfer()),
-                        icon: const Icon(shadcn.LucideIcons.x, size: 16),
+                        icon: const AppIcon(AppIcons.x, size: 16),
                       ),
                     ],
                   ),

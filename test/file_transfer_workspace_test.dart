@@ -354,7 +354,7 @@ void main() {
 
   testWidgets('各类标签拖动中刷新仍能排序，后续可选中和右键关闭', (tester) async {
     await pumpApp(tester);
-    tester.view.physicalSize = const Size(1600, 800);
+    tester.view.physicalSize = Size(SessionKind.values.length * 320.0, 800);
     final controller = Get.find<SessionController>();
     final ids = [for (final kind in SessionKind.values) kind.name];
     controller.sessions.addAll([

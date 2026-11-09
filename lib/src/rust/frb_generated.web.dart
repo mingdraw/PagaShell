@@ -7,6 +7,7 @@
 // ignore_for_file: argument_type_not_assignable
 
 import 'api/desktop.dart';
+import 'api/docker.dart';
 import 'api/page.dart';
 import 'api/proxy.dart';
 import 'api/ssh.dart';
@@ -88,7 +89,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DesktopTile dco_decode_desktop_tile(dynamic raw);
 
   @protected
+  DockerContainerAction dco_decode_docker_container_action(dynamic raw);
+
+  @protected
+  DockerImageAction dco_decode_docker_image_action(dynamic raw);
+
+  @protected
+  DockerResourceKind dco_decode_docker_resource_kind(dynamic raw);
+
+  @protected
   ForwardPortSpec dco_decode_forward_port_spec(dynamic raw);
+
+  @protected
+  int dco_decode_i_32(dynamic raw);
 
   @protected
   List<String> dco_decode_list_String(dynamic raw);
@@ -245,7 +258,25 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DesktopTile sse_decode_desktop_tile(SseDeserializer deserializer);
 
   @protected
+  DockerContainerAction sse_decode_docker_container_action(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  DockerImageAction sse_decode_docker_image_action(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  DockerResourceKind sse_decode_docker_resource_kind(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   ForwardPortSpec sse_decode_forward_port_spec(SseDeserializer deserializer);
+
+  @protected
+  int sse_decode_i_32(SseDeserializer deserializer);
 
   @protected
   List<String> sse_decode_list_String(SseDeserializer deserializer);
@@ -349,9 +380,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_decode_unit(SseDeserializer deserializer);
 
   @protected
-  int sse_decode_i_32(SseDeserializer deserializer);
-
-  @protected
   void sse_encode_AnyhowException(
     AnyhowException self,
     SseSerializer serializer,
@@ -433,10 +461,31 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_desktop_tile(DesktopTile self, SseSerializer serializer);
 
   @protected
+  void sse_encode_docker_container_action(
+    DockerContainerAction self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_docker_image_action(
+    DockerImageAction self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_docker_resource_kind(
+    DockerResourceKind self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_forward_port_spec(
     ForwardPortSpec self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_i_32(int self, SseSerializer serializer);
 
   @protected
   void sse_encode_list_String(List<String> self, SseSerializer serializer);
@@ -566,9 +615,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_unit(void self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_i_32(int self, SseSerializer serializer);
 }
 
 // Section: wire_class

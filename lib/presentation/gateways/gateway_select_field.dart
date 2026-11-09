@@ -4,6 +4,7 @@ import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import '../../application/gateways/gateway_controller.dart';
 import '../../domain/entities/host.dart';
+import '../components/app_icon.dart';
 import '../components/app_select_field.dart';
 import '../components/app_tree_select_popup.dart';
 import '../theme/app_theme.dart';
@@ -41,7 +42,7 @@ class GatewaySelectField extends StatelessWidget {
         final folders = Get.find<GatewayFolderController>();
         return AppTreeSelectPopup(
           keyPrefix: 'gateway',
-          folderIcon: shadcn.LucideIcons.folder,
+          folderIcon: AppIcons.folder,
           initialExpanded: folders.expanded,
           selectedFolderId: Get.find<GatewayController>().hosts
               .where((gateway) => gateway.id == value)
@@ -95,7 +96,7 @@ class _GatewayLabel extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Row(
     children: [
-      const Icon(shadcn.LucideIcons.network, size: AppTheme.sidebarIconSize),
+      const AppIcon(AppIcons.network, size: AppTheme.sidebarIconSize),
       const SizedBox(width: 6),
       Expanded(
         child: Text(

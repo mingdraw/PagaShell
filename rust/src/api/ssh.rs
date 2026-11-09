@@ -576,6 +576,70 @@ pub async fn ssh_start_terminal(
     .await
 }
 
+/// Start a fixed Docker exec command on a dedicated SSH PTY.
+pub async fn ssh_start_docker_terminal(
+    session_id: u32,
+    container_id: String,
+    cols: u32,
+    rows: u32,
+    scrollback: u32,
+    output: StreamSink<TerminalFrame>,
+) {
+    let frames = output.clone();
+    start_docker_terminal_output(
+        session_id,
+        &container_id,
+        cols,
+        rows,
+        ShellOutput {
+            core: Box::new(TerminalCore::new(cols, rows, scrollback)),
+            emit: Box::new(move |frame| frames.add(frame).is_ok()),
+        },
+        Arc::new(move |error| {
+            let _ = output.add_error(error);
+        }),
+    )
+    .await;
+}
+
+async fn start_docker_terminal_output(
+    session_id: u32,
+    container_id: &str,
+    cols: u32,
+    rows: u32,
+    output: ShellOutput,
+    report_error: Arc<dyn Fn(anyhow::Error) + Send + Sync>,
+) {
+    let errors = report_error.clone();
+    let result = async {
+        let command = super::docker::docker_terminal_command(session_id, container_id).await?;
+        tokio::time::timeout(
+            Duration::from_secs(8),
+            start_shell_output_with_command(
+                session_id,
+                cols,
+                rows,
+                output,
+                Some(command),
+                Some(Box::new(move |code, diagnostic| {
+                    errors(anyhow!(super::docker::docker_terminal_exec_error(
+                        code,
+                        &diagnostic
+                    )));
+                })),
+            ),
+        )
+        .await
+        .map_err(|_| anyhow!("容器终端连接超时，请重试"))?
+    }
+    .await;
+    // FRB 的 StreamSink API 不会把返回 Future 的 Err 转入输出流。
+    // 所有可预期的启动失败必须通过同一错误流送达 Dart。
+    if let Err(error) = result {
+        report_error(error);
+    }
+}
+
 struct ShellOutput {
     core: Box<TerminalCore>,
     emit: Box<dyn Fn(TerminalFrame) -> bool + Send>,
@@ -622,7 +686,20 @@ async fn start_shell_output(
     session_id: u32,
     cols: u32,
     rows: u32,
+    output: ShellOutput,
+) -> Result<()> {
+    start_shell_output_with_command(session_id, cols, rows, output, None, None).await
+}
+
+type ShellExitReporter = Box<dyn FnOnce(u32, Vec<u8>) + Send>;
+
+async fn start_shell_output_with_command(
+    session_id: u32,
+    cols: u32,
+    rows: u32,
     mut output: ShellOutput,
+    command: Option<String>,
+    report_exit: Option<ShellExitReporter>,
 ) -> Result<()> {
     let (handle, (cols, rows)) = {
         let sessions = SESSIONS.lock().await;
@@ -642,7 +719,11 @@ async fn start_shell_output(
     channel
         .request_pty(false, "xterm-256color", cols, rows, 0, 0, &[])
         .await?;
-    channel.request_shell(false).await?;
+    if let Some(command) = command {
+        channel.exec(true, command).await?;
+    } else {
+        channel.request_shell(false).await?;
+    }
     output.resize(cols, rows);
 
     let (tx, mut rx) = mpsc::channel::<ShellCmd>(64);
@@ -664,6 +745,9 @@ async fn start_shell_output(
     // 不必把 Close 排在可能已经填满的输入队列后面。
     entry.shell_task = Some(tokio::spawn(async move {
         let mut channel_closed = false;
+        let mut exit_code = None;
+        // Only container terminals retain a bounded startup diagnostic for classification.
+        let mut startup_diagnostic = Vec::new();
         loop {
             if channel_closed && !output.pending() {
                 break;
@@ -671,6 +755,10 @@ async fn start_shell_output(
             tokio::select! {
                 msg = channel.wait(), if !channel_closed => match msg {
                     Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => {
+                        if report_exit.is_some() {
+                            let length = data.len().min(8192 - startup_diagnostic.len());
+                            startup_diagnostic.extend_from_slice(&data[..length]);
+                        }
                         let replies = output.feed(&data);
                         // Device/cursor queries are answered in Rust, in order on
                         // this same channel. They never round-trip through Dart.
@@ -679,6 +767,12 @@ async fn start_shell_output(
                         }
                     }
                     Some(ChannelMsg::Close) | None => {
+                        channel_closed = true;
+                        output.finish();
+                    },
+                    Some(ChannelMsg::ExitStatus { exit_status }) => exit_code = Some(exit_status),
+                    Some(ChannelMsg::Failure) if report_exit.is_some() => {
+                        exit_code = Some(75);
                         channel_closed = true;
                         output.finish();
                     },
@@ -709,6 +803,9 @@ async fn start_shell_output(
                     }
                 },
             }
+        }
+        if let (Some(report), Some(code)) = (report_exit, exit_code.filter(|code| *code != 0)) {
+            report(code, startup_diagnostic);
         }
     }));
     entry.shell_tx = Some(tx);
@@ -807,10 +904,209 @@ pub async fn ssh_read_server_status(session_id: u32) -> Result<String> {
     result
 }
 
-fn server_status_command(script: &str) -> String {
+#[flutter_rust_bridge::frb(ignore)]
+pub(crate) fn server_status_command(script: &str) -> String {
     // include_str! 保留检出文件的换行；Windows 构建也必须发送 POSIX 换行。
     let script = script.replace("\r\n", "\n").replace('\'', "'\\''");
     format!("sh -c '{script}'")
+}
+
+/// 列举进程，不分配 PTY，也不读取进程的命令行参数。
+pub async fn ssh_read_processes(session_id: u32) -> Result<String> {
+    let (output, code) = process_exec(
+        session_id,
+        server_status_command(include_str!("processes.sh")),
+    )
+    .await?;
+    if code != 0 {
+        return Err(anyhow!("无法读取进程列表，请检查远端系统及权限"));
+    }
+    // Unix 的进程名不保证是 UTF-8；无效字节仅替换在显示名称中。
+    Ok(String::from_utf8_lossy(&output).into_owned())
+}
+
+/// 按需只读查询单个进程，采集前后核对 PID 与启动时间。
+pub async fn ssh_read_process_details(
+    session_id: u32,
+    pid: u32,
+    started_at: String,
+) -> Result<String> {
+    let command = process_target_command(include_str!("process_details.sh"), pid, &started_at)?;
+    let (output, code) = process_exec(session_id, command).await?;
+    match code {
+        0 => Ok(String::from_utf8_lossy(&output).into_owned()),
+        64 => Err(anyhow!("进程管理仅支持 Linux 和 macOS")),
+        65 => Err(anyhow!("进程已退出，请刷新列表")),
+        66 => Err(anyhow!("进程已变化，请刷新后重试")),
+        _ => Err(anyhow!("无法读取进程详情，请检查进程状态和读取权限")),
+    }
+}
+
+/// 只向单个有效 PID 发送 TERM；执行前核对启动时间，不自动提升权限或重试。
+pub async fn ssh_terminate_process(session_id: u32, pid: u32, started_at: String) -> Result<()> {
+    let command = terminate_process_command(pid, &started_at)?;
+    let (_, code) = process_exec(session_id, command).await?;
+    match code {
+        0 => Ok(()),
+        64 => Err(anyhow!("进程管理仅支持 Linux 和 macOS")),
+        65 => Err(anyhow!("进程已退出，请刷新列表")),
+        66 => Err(anyhow!("进程已变化，请刷新后重试")),
+        67 => Err(anyhow!("无法结束进程，进程可能已退出或权限不足")),
+        _ => Err(anyhow!("结束进程失败，请检查连接和操作权限")),
+    }
+}
+
+fn terminate_process_command(pid: u32, started_at: &str) -> Result<String> {
+    if pid <= 1 || pid > i32::MAX as u32 {
+        return Err(anyhow!("不能结束此进程"));
+    }
+    process_target_command(include_str!("terminate_process.sh"), pid, started_at)
+}
+
+fn process_target_command(script: &str, pid: u32, started_at: &str) -> Result<String> {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return Err(anyhow!("进程编号无效，请刷新列表"));
+    }
+    // lstart 只允许 C locale 的日期字段，绝不把名称或自由命令拼进脚本。
+    if started_at.is_empty()
+        || started_at.len() > 64
+        || started_at.split_whitespace().count() != 5
+        || !started_at
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b' ' || byte == b':')
+    {
+        return Err(anyhow!("进程启动时间无效，请刷新列表"));
+    }
+    let started_at = started_at.split_whitespace().collect::<Vec<_>>().join(" ");
+    Ok(format!(
+        "{} paga-process {pid} '{started_at}'",
+        server_status_command(script)
+    ))
+}
+
+async fn process_exec(session_id: u32, command: String) -> Result<(Vec<u8>, u32)> {
+    read_only_exec(session_id, command, &PROCESS_EXEC_POLICY, 4 * 1024 * 1024).await
+}
+
+#[flutter_rust_bridge::frb(ignore)]
+pub(crate) struct ReadOnlyExecPolicy {
+    pub overall_timeout: Option<Duration>,
+    pub closed: &'static str,
+    pub timeout: &'static str,
+    pub connection: &'static str,
+    pub denied: &'static str,
+    pub too_large: &'static str,
+    pub incomplete: &'static str,
+}
+
+const PROCESS_EXEC_POLICY: ReadOnlyExecPolicy = ReadOnlyExecPolicy {
+    overall_timeout: None,
+    closed: "进程管理连接已关闭",
+    timeout: "进程操作超时",
+    connection: "无法执行进程操作，请检查连接",
+    denied: "此连接不允许进程管理",
+    too_large: "进程数据过大",
+    incomplete: "进程操作未完成，请刷新后检查",
+};
+
+#[flutter_rust_bridge::frb(ignore)]
+pub(crate) async fn read_only_exec(
+    session_id: u32,
+    command: String,
+    policy: &ReadOnlyExecPolicy,
+    max_bytes: usize,
+) -> Result<(Vec<u8>, u32)> {
+    let deadline = policy
+        .overall_timeout
+        .map(|limit| tokio::time::Instant::now() + limit);
+    let get_handle = async {
+        let sessions = SESSIONS.lock().await;
+        Ok::<_, anyhow::Error>(
+            sessions
+                .get(&session_id)
+                .ok_or_else(|| anyhow!(policy.closed))?
+                .handle
+                .clone(),
+        )
+    };
+    let handle = if let Some(deadline) = deadline {
+        tokio::time::timeout_at(deadline, get_handle)
+            .await
+            .map_err(|_| anyhow!(policy.timeout))??
+    } else {
+        get_handle.await?
+    };
+    let mut channel = tokio::time::timeout_at(
+        deadline.unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(8)),
+        async { handle.read().await.channel_open_session().await },
+    )
+    .await
+    .map_err(|_| anyhow!(policy.timeout))?
+    .map_err(|_| anyhow!(policy.connection))?;
+    let result = tokio::time::timeout_at(
+        deadline.unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(8)),
+        async {
+            channel
+                .exec(true, command)
+                .await
+                .map_err(|_| anyhow!(policy.connection))?;
+            let mut output = Vec::new();
+            let mut received = 0;
+            let mut exit_status = None;
+            while let Some(message) = channel.wait().await {
+                match message {
+                    ChannelMsg::Data { data } => {
+                        received += data.len();
+                        if received > max_bytes {
+                            return Err(anyhow!(policy.too_large));
+                        }
+                        output.extend_from_slice(&data);
+                    }
+                    ChannelMsg::ExtendedData { data, .. } => received += data.len(),
+                    ChannelMsg::Failure => return Err(anyhow!(policy.denied)),
+                    ChannelMsg::ExitStatus { exit_status: code } => exit_status = Some(code),
+                    ChannelMsg::Close => break,
+                    _ => {}
+                }
+                if received > max_bytes {
+                    return Err(anyhow!(policy.too_large));
+                }
+            }
+            let code = exit_status.ok_or_else(|| anyhow!(policy.incomplete))?;
+            Ok((output, code))
+        },
+    )
+    .await
+    .map_err(|_| anyhow!(policy.timeout))
+    .and_then(|value| value);
+    let _ = tokio::time::timeout(SSH_CLEANUP_TIMEOUT, channel.close()).await;
+    result
+}
+
+/// Docker HTTP 使用独立无 PTY 通道，HTTP body 不进入 shell 参数或终端。
+#[flutter_rust_bridge::frb(ignore)]
+pub(crate) async fn docker_api_channel(
+    session_id: u32,
+    command: String,
+) -> Result<russh::Channel<russh::client::Msg>> {
+    let handle = SESSIONS
+        .lock()
+        .await
+        .get(&session_id)
+        .ok_or_else(|| anyhow!("Docker 操作连接已关闭"))?
+        .handle
+        .clone();
+    let channel = handle
+        .read()
+        .await
+        .channel_open_session()
+        .await
+        .map_err(|_| anyhow!("无法连接 Docker API，请检查连接"))?;
+    if channel.exec(true, command).await.is_err() {
+        let _ = tokio::time::timeout(SSH_CLEANUP_TIMEOUT, channel.close()).await;
+        return Err(anyhow!("无法连接 Docker API，请检查连接"));
+    }
+    Ok(channel)
 }
 
 async fn disconnect_handle(handle: &RwLock<Handle<PinningHandler>>) {
@@ -2702,11 +2998,126 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
         Resize(u32, u32),
         Data(Vec<u8>),
         Exec,
+        DockerExec(String),
     }
 
     struct TerminalServer {
         events: mpsc::UnboundedSender<TerminalEvent>,
         allow_open: Arc<Notify>,
+    }
+
+    struct DockerTerminalServer {
+        terminal: TerminalServer,
+        exit_code: u32,
+        startup_failure: Option<(bool, Vec<u8>)>,
+    }
+
+    impl server::Handler for DockerTerminalServer {
+        type Error = russh::Error;
+
+        async fn auth_password(
+            &mut self,
+            user: &str,
+            password: &str,
+        ) -> Result<server::Auth, Self::Error> {
+            self.terminal.auth_password(user, password).await
+        }
+
+        async fn channel_open_session(
+            &mut self,
+            channel: russh::Channel<server::Msg>,
+            reply: server::ChannelOpenHandle,
+            session: &mut server::Session,
+        ) -> Result<(), Self::Error> {
+            self.terminal
+                .channel_open_session(channel, reply, session)
+                .await
+        }
+
+        async fn pty_request(
+            &mut self,
+            channel: russh::ChannelId,
+            term: &str,
+            cols: u32,
+            rows: u32,
+            width: u32,
+            height: u32,
+            modes: &[(russh::Pty, u32)],
+            session: &mut server::Session,
+        ) -> Result<(), Self::Error> {
+            self.terminal
+                .pty_request(channel, term, cols, rows, width, height, modes, session)
+                .await
+        }
+
+        async fn shell_request(
+            &mut self,
+            channel: russh::ChannelId,
+            session: &mut server::Session,
+        ) -> Result<(), Self::Error> {
+            self.terminal.shell_request(channel, session).await
+        }
+
+        async fn exec_request(
+            &mut self,
+            channel: russh::ChannelId,
+            data: &[u8],
+            session: &mut server::Session,
+        ) -> Result<(), Self::Error> {
+            let command = String::from_utf8(data.to_vec()).unwrap();
+            self.terminal
+                .events
+                .send(TerminalEvent::DockerExec(command.clone()))
+                .unwrap();
+            session.channel_success(channel)?;
+            if command.contains("PAGA_DOCKER_TERMINAL_V1") {
+                session.data(
+                    channel,
+                    b"PAGA_DOCKER_TERMINAL_V1\n/usr/bin/docker\n/bin/sh\n\n0\n".to_vec(),
+                )?;
+                session.exit_status_request(channel, 0)?;
+                session.eof(channel)?;
+                session.close(channel)?;
+            } else if let Some((stderr, diagnostic)) = &self.startup_failure {
+                if *stderr {
+                    session.extended_data(channel, 1, diagnostic.clone())?;
+                } else {
+                    session.data(channel, diagnostic.clone())?;
+                }
+                session.exit_status_request(channel, self.exit_code)?;
+                session.eof(channel)?;
+                session.close(channel)?;
+            } else {
+                session.data(channel, b"container$ ".to_vec())?;
+            }
+            Ok(())
+        }
+
+        async fn data(
+            &mut self,
+            channel: russh::ChannelId,
+            data: &[u8],
+            session: &mut server::Session,
+        ) -> Result<(), Self::Error> {
+            if data == b"\x04" {
+                session.exit_status_request(channel, self.exit_code)?;
+            }
+            self.terminal.data(channel, data, session).await
+        }
+
+        async fn window_change_request(
+            &mut self,
+            channel: russh::ChannelId,
+            cols: u32,
+            rows: u32,
+            width: u32,
+            height: u32,
+            session: &mut server::Session,
+        ) -> Result<(), Self::Error> {
+            self.terminal
+                .window_change_request(channel, cols, rows, width, height, session)
+                .await
+        }
     }
 
     impl server::Handler for TerminalServer {
@@ -2834,6 +3245,8 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
     struct StatusServer {
         output: Vec<u8>,
         exit_code: u32,
+        command: String,
+        hang: bool,
     }
 
     impl server::Handler for StatusServer {
@@ -2859,11 +3272,11 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
             command: &[u8],
             session: &mut server::Session,
         ) -> Result<(), Self::Error> {
-            let script = include_str!("server_status.sh")
-                .replace("\r\n", "\n")
-                .replace('\'', "'\\''");
-            assert_eq!(command, format!("sh -c '{script}'").as_bytes());
+            assert_eq!(command, self.command.as_bytes());
             session.channel_success(channel)?;
+            if self.hang {
+                return Ok(());
+            }
             session.data(channel, self.output.clone())?;
             session.exit_status_request(channel, self.exit_code)?;
             session.eof(channel)?;
@@ -2908,10 +3321,18 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
             let expected = output.clone();
             let task = tokio::spawn(async move {
                 let (socket, _) = listener.accept().await.unwrap();
-                let session =
-                    server::run_stream(config, socket, StatusServer { output, exit_code })
-                        .await
-                        .unwrap();
+                let session = server::run_stream(
+                    config,
+                    socket,
+                    StatusServer {
+                        output,
+                        exit_code,
+                        command: server_status_command(include_str!("server_status.sh")),
+                        hang: false,
+                    },
+                )
+                .await
+                .unwrap();
                 let _ = session.await;
             });
             let handshake = ssh_handshake("127.0.0.1".into(), port).await.unwrap();
@@ -2942,6 +3363,683 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
             assert!(matches!(rx.recv().await, Some(ShellCmd::Data(data)) if data == b"vim\n"));
             ssh_disconnect(id).await.unwrap();
             task.abort();
+        }
+    }
+
+    async fn process_test_connection(
+        handler: impl server::Handler<Error = russh::Error> + Send + 'static,
+    ) -> (u32, JoinHandle<()>) {
+        let config = Arc::new(server::Config {
+            keys: vec![test_key(42)],
+            ..Default::default()
+        });
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let task = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let session = server::run_stream(config, socket, handler).await.unwrap();
+            let _ = session.await;
+        });
+        let handshake = ssh_handshake("127.0.0.1".into(), port).await.unwrap();
+        let id = ssh_authenticate(
+            handshake.session_id,
+            handshake.fingerprint,
+            "test".into(),
+            "test-only".into(),
+        )
+        .await
+        .unwrap();
+        (id, task)
+    }
+
+    #[tokio::test]
+    async fn docker_terminal_preflight_failures_are_reported_through_the_output_error_channel() {
+        for (code, output, message) in [
+            (80, "", "容器中未找到可用的 bash 或 sh"),
+            (77, "", "没有权限获取 Docker 信息"),
+            (75, "", "Docker 执行容器终端失败（退出码 75）"),
+            (75, "PAGA_DOCKER_TERMINAL_FAILURE_V1\n127\n", "容器内命令未找到，无法启动 bash 或 sh（退出码 127）"),
+            (75, "PAGA_DOCKER_TERMINAL_FAILURE_V1\n127\nprivate runtime failure", "容器内命令未找到，无法启动 bash 或 sh（退出码 127）"),
+            (75, "PAGA_DOCKER_TERMINAL_FAILURE_V1\n126\nOCI runtime exec failed: exec: \"/bin/sh\": stat /bin/sh: no such file or directory", "容器中未找到可用的 bash 或 sh"),
+            (77, "PAGA_DOCKER_TERMINAL_FAILURE_V1\n126\nOCI runtime exec failed: exec: \"/bin/sh\": permission denied", "容器中的 bash 或 sh 没有执行权限"),
+        ] {
+            let (id, task) = process_test_connection(StatusServer {
+                output: output.as_bytes().to_vec(),
+                exit_code: code,
+                command: format!(
+                    "{} paga-docker-terminal 'aabbccddeeff'",
+                    server_status_command(include_str!("docker_terminal_prepare.sh"))
+                ),
+                hang: false,
+            })
+            .await;
+            let (frames_tx, mut frames) = mpsc::unbounded_channel();
+            let (errors_tx, mut errors) = mpsc::unbounded_channel();
+            start_docker_terminal_output(
+                id,
+                "aabbccddeeff",
+                80,
+                24,
+                ShellOutput {
+                    core: Box::new(TerminalCore::new(80, 24, 100)),
+                    emit: Box::new(move |frame| frames_tx.send(frame).is_ok()),
+                },
+                Arc::new(move |error| {
+                    errors_tx.send(error.to_string()).unwrap();
+                }),
+            )
+            .await;
+            assert_eq!(errors.recv().await.as_deref(), Some(message));
+            assert!(
+                errors.recv().await.is_none(),
+                "one failure must produce one error event"
+            );
+            assert!(
+                frames.recv().await.is_none(),
+                "preflight failure must not emit terminal frames"
+            );
+            assert!(SESSIONS.lock().await.get(&id).unwrap().shell_task.is_none());
+            ssh_disconnect(id).await.unwrap();
+            task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn docker_queries_use_separate_channels_for_all_resources_and_details() {
+        use crate::api::docker::{
+            docker_command, ssh_read_docker_details, ssh_read_docker_resources, DockerResourceKind,
+        };
+        for kind in [
+            DockerResourceKind::Container,
+            DockerResourceKind::Image,
+            DockerResourceKind::Network,
+            DockerResourceKind::Volume,
+        ] {
+            for details in [false, true] {
+                let resource_id = if matches!(kind, DockerResourceKind::Volume) {
+                    "app_data".to_owned()
+                } else {
+                    "a".repeat(64)
+                };
+                let (id, task) = process_test_connection(StatusServer {
+                    output: b"{\"id\":\"test\"}".to_vec(),
+                    exit_code: 0,
+                    command: docker_command(kind, details.then_some(resource_id.as_str())).unwrap(),
+                    hang: false,
+                })
+                .await;
+                let (tx, mut rx) = mpsc::channel(4);
+                SESSIONS.lock().await.get_mut(&id).unwrap().shell_tx = Some(tx);
+                for _ in 0..2 {
+                    let output = if details {
+                        ssh_read_docker_details(id, kind, resource_id.clone()).await
+                    } else {
+                        ssh_read_docker_resources(id, kind).await
+                    };
+                    assert_eq!(output.unwrap(), "{\"id\":\"test\"}");
+                }
+                assert!(rx.try_recv().is_err());
+                ssh_write(id, b"vim\n".to_vec()).await.unwrap();
+                assert!(matches!(rx.recv().await, Some(ShellCmd::Data(data)) if data == b"vim\n"));
+                ssh_disconnect(id).await.unwrap();
+                task.abort();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn docker_errors_and_output_limits_do_not_close_the_authenticated_session() {
+        use crate::api::docker::{
+            docker_command, ssh_read_docker_details, ssh_read_docker_resources, DockerResourceKind,
+        };
+        for (details, code, size, error) in [
+            (false, 64, 10, "Docker 管理仅支持 Linux 和 macOS"),
+            (false, 70, 10, "Docker 未运行"),
+            (true, 70, 10, "Docker 未运行"),
+            (false, 77, 10, "没有权限获取 Docker 信息"),
+            (true, 77, 10, "没有权限获取 Docker 信息"),
+            (false, 75, 10, "无法读取 Docker，请重试"),
+            (false, 74, 10, "Docker 数据过大，请减少远端资源后重试"),
+            (true, 78, 10, "Docker 资源可能已移除，请刷新后重试"),
+            (true, 1, 10, "无法读取 Docker 详情，请重试"),
+            (
+                false,
+                0,
+                2 * 1024 * 1024 + 1,
+                "Docker 数据过大，请减少远端资源后重试",
+            ),
+            (
+                true,
+                0,
+                256 * 1024 + 1,
+                "Docker 数据过大，请减少远端资源后重试",
+            ),
+        ] {
+            let kind = DockerResourceKind::Container;
+            let resource_id = "a".repeat(64);
+            let (id, task) = process_test_connection(StatusServer {
+                output: vec![b'x'; size],
+                exit_code: code,
+                command: docker_command(kind, details.then_some(resource_id.as_str())).unwrap(),
+                hang: false,
+            })
+            .await;
+            let result = if details {
+                ssh_read_docker_details(id, kind, resource_id).await
+            } else {
+                ssh_read_docker_resources(id, kind).await
+            };
+            assert_eq!(result.unwrap_err().to_string(), error);
+            assert!(SESSIONS.lock().await.contains_key(&id));
+            ssh_disconnect(id).await.unwrap();
+            task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn docker_query_timeout_keeps_the_authenticated_session() {
+        use crate::api::docker::{docker_command, ssh_read_docker_resources, DockerResourceKind};
+        let kind = DockerResourceKind::Container;
+        let (id, task) = process_test_connection(StatusServer {
+            output: Vec::new(),
+            exit_code: 0,
+            command: docker_command(kind, None).unwrap(),
+            hang: true,
+        })
+        .await;
+        assert_eq!(
+            ssh_read_docker_resources(id, kind)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "Docker 查询超时，请重试"
+        );
+        assert!(SESSIONS.lock().await.contains_key(&id));
+        ssh_disconnect(id).await.unwrap();
+        task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn docker_query_deadline_includes_waiting_for_the_session_registry() {
+        use crate::api::docker::{ssh_read_docker_resources, DockerResourceKind};
+        let registry = SESSIONS.lock().await;
+        let entered = Arc::new(Notify::new());
+        let ready = entered.clone();
+        let query = tokio::spawn(async move {
+            ready.notify_one();
+            ssh_read_docker_resources(u32::MAX, DockerResourceKind::Container).await
+        });
+        entered.notified().await;
+        tokio::time::advance(Duration::from_secs(8)).await;
+        assert_eq!(
+            query.await.unwrap().unwrap_err().to_string(),
+            "Docker 查询超时，请重试"
+        );
+        drop(registry);
+    }
+
+    struct DelayedStatusServer {
+        delay: Duration,
+        inner: StatusServer,
+    }
+
+    impl server::Handler for DelayedStatusServer {
+        type Error = russh::Error;
+
+        async fn auth_password(&mut self, _: &str, _: &str) -> Result<server::Auth, Self::Error> {
+            Ok(server::Auth::Accept)
+        }
+
+        async fn channel_open_session(
+            &mut self,
+            _: russh::Channel<server::Msg>,
+            reply: server::ChannelOpenHandle,
+            _: &mut server::Session,
+        ) -> Result<(), Self::Error> {
+            tokio::time::sleep(self.delay).await;
+            reply.accept().await;
+            Ok(())
+        }
+
+        async fn exec_request(
+            &mut self,
+            channel: russh::ChannelId,
+            command: &[u8],
+            session: &mut server::Session,
+        ) -> Result<(), Self::Error> {
+            server::Handler::exec_request(&mut self.inner, channel, command, session).await
+        }
+    }
+
+    #[tokio::test]
+    async fn docker_channel_open_and_read_share_one_total_deadline() {
+        use crate::api::docker::{docker_command, ssh_read_docker_resources, DockerResourceKind};
+        let kind = DockerResourceKind::Container;
+        let (id, task) = process_test_connection(DelayedStatusServer {
+            delay: Duration::from_secs(6),
+            inner: StatusServer {
+                output: Vec::new(),
+                exit_code: 0,
+                command: docker_command(kind, None).unwrap(),
+                hang: true,
+            },
+        })
+        .await;
+        let started = std::time::Instant::now();
+        let result = ssh_read_docker_resources(id, kind).await;
+        let elapsed = started.elapsed();
+        assert_eq!(result.unwrap_err().to_string(), "Docker 查询超时，请重试");
+        assert!(
+            elapsed < Duration::from_secs(11),
+            "query reset its deadline after opening: {elapsed:?}"
+        );
+        assert!(SESSIONS.lock().await.contains_key(&id));
+        ssh_disconnect(id).await.unwrap();
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn process_commands_use_separate_exec_channels_and_check_limits_and_exit_status() {
+        for (terminate, output, code, error) in [
+            (false, b"PAGA_PROCESSES_V1\n".to_vec(), 0, None),
+            (
+                false,
+                b"private platform diagnostic".to_vec(),
+                1,
+                Some("无法读取进程列表，请检查远端系统及权限"),
+            ),
+            (
+                false,
+                vec![b'x'; 4 * 1024 * 1024 + 1],
+                0,
+                Some("进程数据过大"),
+            ),
+            (true, Vec::new(), 0, None),
+            (true, Vec::new(), 65, Some("进程已退出，请刷新列表")),
+            (true, Vec::new(), 66, Some("进程已变化，请刷新后重试")),
+            (
+                true,
+                b"private stderr".to_vec(),
+                67,
+                Some("无法结束进程，进程可能已退出或权限不足"),
+            ),
+        ] {
+            let start = "Fri Nov 6 14:20:00 2026";
+            let command = if terminate {
+                terminate_process_command(42, start).unwrap()
+            } else {
+                server_status_command(include_str!("processes.sh"))
+            };
+            let expected = output.clone();
+            let (id, task) = process_test_connection(StatusServer {
+                output,
+                exit_code: code,
+                command,
+                hang: false,
+            })
+            .await;
+            let (tx, mut rx) = mpsc::channel(4);
+            SESSIONS.lock().await.get_mut(&id).unwrap().shell_tx = Some(tx);
+            let result = if terminate {
+                ssh_terminate_process(id, 42, start.into())
+                    .await
+                    .map(|_| String::new())
+            } else {
+                ssh_read_processes(id).await
+            };
+            if let Some(message) = error {
+                assert_eq!(result.unwrap_err().to_string(), message);
+            } else if terminate {
+                assert!(result.is_ok());
+            } else {
+                assert_eq!(result.unwrap().as_bytes(), expected);
+                assert_eq!(ssh_read_processes(id).await.unwrap().as_bytes(), expected);
+            }
+            assert!(rx.try_recv().is_err());
+            ssh_write(id, b"echo terminal-still-open\n".to_vec())
+                .await
+                .unwrap();
+            assert!(matches!(rx.recv().await, Some(ShellCmd::Data(_))));
+            ssh_disconnect(id).await.unwrap();
+            task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn process_details_use_a_separate_readonly_channel_and_report_target_errors() {
+        let start = "Fri Nov 6 14:20:00 2026";
+        for (code, expected_error) in [
+            (0, None),
+            (64, Some("进程管理仅支持 Linux 和 macOS")),
+            (65, Some("进程已退出，请刷新列表")),
+            (66, Some("进程已变化，请刷新后重试")),
+            (68, Some("无法读取进程详情，请检查进程状态和读取权限")),
+        ] {
+            let output = b"PAGA_PROCESS_DETAILS_V1\nPAGA_PROCESS_PATH\0/bin/worker\0\nPAGA_PROCESS_DETAILS_END\n".to_vec();
+            let (id, task) = process_test_connection(StatusServer {
+                output: output.clone(),
+                exit_code: code,
+                command: process_target_command(include_str!("process_details.sh"), 1, start)
+                    .unwrap(),
+                hang: false,
+            })
+            .await;
+            let (tx, mut rx) = mpsc::channel(4);
+            SESSIONS.lock().await.get_mut(&id).unwrap().shell_tx = Some(tx);
+            let result = ssh_read_process_details(id, 1, start.into()).await;
+            if let Some(message) = expected_error {
+                assert_eq!(result.unwrap_err().to_string(), message);
+            } else {
+                assert_eq!(result.unwrap().as_bytes(), output);
+            }
+            assert!(rx.try_recv().is_err());
+            assert!(SESSIONS.lock().await.contains_key(&id));
+            ssh_disconnect(id).await.unwrap();
+            task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn process_channel_timeout_does_not_close_the_authenticated_session() {
+        let (id, task) = process_test_connection(StatusServer {
+            output: Vec::new(),
+            exit_code: 0,
+            command: server_status_command(include_str!("processes.sh")),
+            hang: true,
+        })
+        .await;
+        assert_eq!(
+            ssh_read_processes(id).await.unwrap_err().to_string(),
+            "进程操作超时"
+        );
+        assert!(SESSIONS.lock().await.contains_key(&id));
+        ssh_disconnect(id).await.unwrap();
+        task.abort();
+    }
+
+    #[test]
+    fn process_termination_rejects_groups_system_pid_and_shell_input() {
+        let start = "Fri Nov 6 14:20:00 2026";
+        for pid in [0, 1, u32::MAX] {
+            assert!(terminate_process_command(pid, start).is_err());
+        }
+        for pid in [0, u32::MAX] {
+            assert!(
+                process_target_command(include_str!("process_details.sh"), pid, start).is_err()
+            );
+        }
+        assert!(process_target_command(include_str!("process_details.sh"), 1, start).is_ok());
+        for input in [
+            "",
+            "Fri Nov 6 14:20:00 2026;id",
+            "$(id)",
+            "Fri Nov 6 'x' 2026",
+            "Fri Nov 6 14:20:00 2026\n",
+        ] {
+            assert!(terminate_process_command(42, input).is_err());
+            assert!(process_target_command(include_str!("process_details.sh"), 42, input).is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_termination_checks_start_time_before_signalling_only_the_target_child() {
+        struct ChildGuard(std::process::Child);
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut child = ChildGuard(
+            std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .unwrap(),
+        );
+        let pid = child.0.id();
+        let output = std::process::Command::new("ps")
+            .env("LC_ALL", "C")
+            .args(["-p", &pid.to_string(), "-o", "lstart="])
+            .output()
+            .unwrap();
+        let start = String::from_utf8(output.stdout)
+            .unwrap()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let wrong = terminate_process_command(pid, "Fri Nov 6 14:20:00 1900").unwrap();
+        let details_wrong = process_target_command(
+            include_str!("process_details.sh"),
+            pid,
+            "Fri Nov 6 14:20:00 1900",
+        )
+        .unwrap();
+        let mismatch = std::process::Command::new("sh")
+            .args(["-c", &details_wrong])
+            .output()
+            .unwrap();
+        assert_eq!(mismatch.status.code(), Some(66));
+        let details =
+            process_target_command(include_str!("process_details.sh"), pid, &start).unwrap();
+        let sampled = std::process::Command::new("sh")
+            .args(["-c", &details])
+            .output()
+            .unwrap();
+        assert!(sampled.status.success());
+        assert!(sampled
+            .stdout
+            .windows(b"PAGA_PROCESS_PATH\0/".len())
+            .any(|part| part == b"PAGA_PROCESS_PATH\0/"));
+        assert!(child.0.try_wait().unwrap().is_none());
+        let mismatch = std::process::Command::new("sh")
+            .args(["-c", &wrong])
+            .output()
+            .unwrap();
+        assert_eq!(mismatch.status.code(), Some(66));
+        assert!(child.0.try_wait().unwrap().is_none());
+        let correct = terminate_process_command(pid, &start).unwrap();
+        assert!(std::process::Command::new("sh")
+            .args(["-c", &correct])
+            .status()
+            .unwrap()
+            .success());
+        assert!(!child.0.wait().unwrap().success());
+    }
+
+    #[tokio::test]
+    async fn docker_terminal_startup_errors_keep_reasons_with_both_outputs_or_only_exit_code() {
+        for (stderr, code, diagnostic, message) in [
+            (false, 126, "OCI runtime exec failed: exec: \"/bin/sh\": stat /bin/sh: no such file or directory", "容器中未找到可用的 bash 或 sh"),
+            (true, 126, "OCI runtime exec failed: exec: \"/bin/sh\": stat /bin/sh: no such file or directory", "容器中未找到可用的 bash 或 sh"),
+            (false, 127, "", "容器内命令未找到，无法启动 bash 或 sh（退出码 127）"),
+            (true, 127, "private runtime failure", "容器内命令未找到，无法启动 bash 或 sh（退出码 127）"),
+        ] {
+            let (events, _events_rx) = mpsc::unbounded_channel();
+            let allow_open = Arc::new(Notify::new());
+            let (id, server_task) = process_test_connection(DockerTerminalServer {
+                terminal: TerminalServer {
+                    events,
+                    allow_open: allow_open.clone(),
+                },
+                exit_code: code,
+                startup_failure: Some((stderr, diagnostic.as_bytes().to_vec())),
+            })
+            .await;
+            let (frames_tx, mut frames) = mpsc::unbounded_channel();
+            let (errors_tx, mut errors) = mpsc::unbounded_channel();
+            allow_open.notify_one();
+            start_shell_output_with_command(
+                id,
+                80,
+                24,
+                ShellOutput {
+                    core: Box::new(TerminalCore::new(80, 24, 100)),
+                    emit: Box::new(move |frame| frames_tx.send(frame).is_ok()),
+                },
+                Some("fixed-docker-terminal-command".into()),
+                Some(Box::new(move |code, diagnostic| {
+                    errors_tx
+                        .send(super::super::docker::docker_terminal_exec_error(
+                            code,
+                            &diagnostic,
+                        ))
+                        .unwrap();
+                })),
+            )
+            .await
+            .unwrap();
+            let mut saw_diagnostic = false;
+            let diagnostic_prefix: String = diagnostic.chars().take(24).collect();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while let Some(frame) = frames.recv().await {
+                    saw_diagnostic |= !diagnostic_prefix.is_empty() && frame_text(&frame).contains(&diagnostic_prefix);
+                    ssh_terminal_ack(id, frame.frame_id).await.unwrap();
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(saw_diagnostic, !diagnostic.is_empty());
+            assert_eq!(
+                errors.recv().await.as_deref(),
+                Some(message)
+            );
+            assert!(errors.recv().await.is_none());
+            ssh_disconnect(id).await.unwrap();
+            server_task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn docker_terminal_uses_pty_exec_and_preserves_frames_input_resize_and_exit_errors() {
+        for exit_code in [0, 80] {
+            let (events_tx, mut events) = mpsc::unbounded_channel();
+            let allow_open = Arc::new(Notify::new());
+            let (id, server_task) = process_test_connection(DockerTerminalServer {
+                terminal: TerminalServer {
+                    events: events_tx,
+                    allow_open: allow_open.clone(),
+                },
+                exit_code,
+                startup_failure: None,
+            })
+            .await;
+            allow_open.notify_one();
+            let command = super::super::docker::docker_terminal_command(id, "aabbccddeeff")
+                .await
+                .unwrap();
+            assert_eq!(
+                next_terminal_event(&mut events).await,
+                TerminalEvent::Opening
+            );
+            let TerminalEvent::DockerExec(preflight) = next_terminal_event(&mut events).await
+            else {
+                panic!("expected a preflight exec");
+            };
+            assert!(preflight.contains("PAGA_DOCKER_TERMINAL_V1"));
+            assert!(preflight.ends_with("paga-docker-terminal 'aabbccddeeff'"));
+            let (output_tx, mut output) = mpsc::unbounded_channel();
+            let (errors_tx, mut errors) = mpsc::unbounded_channel();
+            allow_open.notify_one();
+            start_shell_output_with_command(
+                id,
+                80,
+                24,
+                ShellOutput {
+                    core: Box::new(TerminalCore::new(80, 24, 100)),
+                    emit: Box::new(move |frame| output_tx.send(frame).is_ok()),
+                },
+                Some(command.clone()),
+                Some(Box::new(move |code, _diagnostic| {
+                    errors_tx.send(code).unwrap();
+                })),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                next_terminal_event(&mut events).await,
+                TerminalEvent::Opening
+            );
+            assert_eq!(
+                next_terminal_event(&mut events).await,
+                TerminalEvent::Pty(80, 24)
+            );
+            assert_eq!(
+                next_terminal_event(&mut events).await,
+                TerminalEvent::DockerExec(command)
+            );
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let frame = output.recv().await.unwrap();
+                    ssh_terminal_ack(id, frame.frame_id).await.unwrap();
+                    if frame_text(&frame).contains("container$") {
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            let input = "中文\r\x03".as_bytes().to_vec();
+            ssh_write(id, input.clone()).await.unwrap();
+            assert_eq!(
+                next_terminal_event(&mut events).await,
+                TerminalEvent::Data(input)
+            );
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let frame = output.recv().await.unwrap();
+                    ssh_terminal_ack(id, frame.frame_id).await.unwrap();
+                    if frame_has_char(&frame, '中') {
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            ssh_resize(id, 110, 35).await.unwrap();
+            assert_eq!(
+                next_terminal_event(&mut events).await,
+                TerminalEvent::Resize(110, 35)
+            );
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let frame = output.recv().await.unwrap();
+                    ssh_terminal_ack(id, frame.frame_id).await.unwrap();
+                    if (frame.columns, frame.rows) == (110, 35) {
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            ssh_write(id, b"\x04".to_vec()).await.unwrap();
+            assert_eq!(
+                next_terminal_event(&mut events).await,
+                TerminalEvent::Data(b"\x04".to_vec())
+            );
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while let Some(frame) = output.recv().await {
+                    ssh_terminal_ack(id, frame.frame_id).await.unwrap();
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                errors.recv().await,
+                if exit_code == 0 {
+                    None
+                } else {
+                    Some(exit_code)
+                }
+            );
+            assert!(
+                events.try_recv().is_err(),
+                "must never request a host shell"
+            );
+            ssh_disconnect(id).await.unwrap();
+            server_task.abort();
         }
     }
 

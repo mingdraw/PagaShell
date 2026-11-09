@@ -220,12 +220,13 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
     markNeedsPaint();
   }
 
-  /// 上次布局时的行数。布局只依赖行数（滚动范围、贴底）与尺寸，
-  /// 行数不变的帧只需重绘。
+  /// 行数和已应用的原生网格高度决定滚动范围；仅内容变化时只需重绘。
   int _layoutLineCount = -1;
+  int _layoutViewHeight = -1;
 
   void _onTerminalChange() {
-    if (_terminal.buffer.lines.length != _layoutLineCount) {
+    if (_terminal.buffer.lines.length != _layoutLineCount ||
+        _terminal.viewHeight != _layoutViewHeight) {
       markNeedsLayout();
     } else {
       markNeedsPaint();
@@ -278,27 +279,16 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
   void performLayout() {
     size = constraints.biggest;
     _layoutLineCount = _terminal.buffer.lines.length;
+    _layoutViewHeight = _terminal.viewHeight;
 
     _updateViewportSize();
 
     _updateScrollOffset();
-
-    if (_stickToBottom) {
-      _offset.correctBy(_maxScrollExtent - _scrollOffset);
-    }
     _scheduleEditableRect();
   }
 
-  /// Total height of the terminal in pixels. Includes scrollback buffer.
-  double get _terminalHeight =>
-      _terminal.buffer.lines.length * _painter.cellSize.height;
-
   /// The distance from the top of the terminal to the top of the viewport.
-  // double get _scrollOffset => _offset.pixels;
-  double get _scrollOffset {
-    // return _offset.pixels ~/ _painter.cellSize.height * _painter.cellSize.height;
-    return _offset.pixels;
-  }
+  double get _scrollOffset => _offset.pixels;
 
   /// The height of a terminal line in pixels. This includes the line spacing.
   /// Height of the entire terminal is expected to be a multiple of this value.
@@ -463,7 +453,18 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
   /// be called in [performLayout] after the viewport size has been updated.
   void _updateScrollOffset() {
     _offset.applyViewportDimension(_viewportHeight);
-    _offset.applyContentDimensions(0, _maxScrollExtent);
+    final maxScrollExtent = _maxScrollExtent;
+    // 先校正贴底，再提交滚动范围，否则尺寸变化时旧位置可能越界，
+    // ScrollPosition 会启动回弹；其后续帧又会覆盖这里的贴底位置。
+    for (var attempt = 0; attempt < 10; attempt++) {
+      if (_stickToBottom) {
+        final correction = maxScrollExtent - _scrollOffset;
+        if (correction != 0) _offset.correctBy(correction);
+      }
+      if (_offset.applyContentDimensions(0, maxScrollExtent)) return;
+      // 滚动范围收缩时 physics 可能校正历史浏览位置，需按新位置重试。
+    }
+    assert(false, 'Terminal scroll dimensions did not settle.');
   }
 
   bool get _isComposingText {
@@ -479,7 +480,16 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
   }
 
   double get _maxScrollExtent {
-    return max(_terminalHeight - _viewportHeight, 0.0);
+    // PTY 尺寸只容纳完整行，贴底也须使用相同的行数。按物理高度相减
+    // 会把不足一行的余量变成滚动偏移，拖动分屏时首行因而被裁掉一截。
+    // 余量留在末行下方；回看历史时仍保留原有的像素滚动位置。
+    final visibleRows = max(_viewportHeight ~/ lineHeight, 1);
+    // 缩小视口后，旧帧仍可能包含原网格底部的空行。等待原生尺寸帧
+    // 应用后再增加回滚范围，避免先把欢迎信息和提示符滚出视口。
+    final layoutRows = _autoResize
+        ? max(visibleRows, _terminal.viewHeight)
+        : visibleRows;
+    return max(_terminal.buffer.lines.length - layoutRows, 0) * lineHeight;
   }
 
   double get _lineOffset {

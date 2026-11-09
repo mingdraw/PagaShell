@@ -9,13 +9,19 @@ import '../../domain/proxy/dynamic_proxy_engine.dart';
 import '../../domain/proxy/system_proxy.dart';
 import '../../domain/rdp/rdp_engine.dart';
 import '../../domain/repositories/known_host_repository.dart';
+import '../../domain/ssh/docker_manager.dart';
 import '../../domain/ssh/host_key.dart';
+import '../../domain/ssh/process_manager.dart';
+import '../../domain/ssh/server_status.dart';
 import '../../domain/ssh/ssh_engine.dart';
 import '../../domain/vnc/vnc_engine.dart';
 import '../transfer/transfer_controller.dart';
+import 'server_status_connection.dart';
 import 'session.dart';
+import 'session_layout.dart';
 
 part 'session_runtime.dart';
+part 'session_tabs.dart';
 
 /// 全局会话控制器：负责终端、文件传输与端口转发标签的创建、激活与关闭。
 ///
@@ -41,8 +47,170 @@ class SessionController extends GetxController {
 
   final RxList<Session> sessions = <Session>[].obs;
   final RxnString activeSessionId = RxnString();
+  final _tabState = _SessionTabs();
+
+  List<SessionTab> get tabs => _tabState.list(sessions);
+  String? get activeTabId => tabForSession(activeSessionId.value)?.id;
+
+  SessionTab? tabForSession(String? id) =>
+      tabs.where((tab) => tab.sessionIds.contains(id)).firstOrNull;
+
+  SessionTab? tabById(String id) =>
+      tabs.where((tab) => tab.id == id).firstOrNull;
+
+  bool _canReuseTerminalConnection(String id) =>
+      !_disposed &&
+      _find(id)?.kind.isInteractiveTerminal == true &&
+      _find(id)?.phase == SessionPhase.ready &&
+      _runtimes[id]?.credentials != null;
+
+  bool canSplitTerminal(String id) => _canReuseTerminalConnection(id);
+
+  /// 同一页签所有窗格共用一条独立采集连接，选中窗格变化不替换数据源。
+  ServerStatusSource? serverStatusSource(String tabId) =>
+      _monitoringConnection(tabId, (session) => session is ServerStatusSource);
+
+  ProcessManagerSource? processManagerSource(String tabId) =>
+      _monitoringConnection(
+        tabId,
+        (session) => session is ProcessManagerSource,
+      );
+
+  DockerManagerSource? dockerManagerSource(String tabId) =>
+      _monitoringConnection(tabId, (session) => session is DockerManagerSource);
+
+  ServerStatusConnection? _monitoringConnection(
+    String tabId,
+    bool Function(SshEngineSession?) supports,
+  ) {
+    if (_disposed) return null;
+    final tab = tabById(tabId);
+    if (tab == null ||
+        _find(tab.sessionIds.first)?.kind != SessionKind.terminal) {
+      return null;
+    }
+    final existing = _serverStatusConnections[tabId];
+    if (existing != null) return existing;
+    for (final id in tab.sessionIds) {
+      if (!_canReuseTerminalConnection(id)) continue;
+      final session = _find(id)!;
+      if (!supports(session.engineSession)) continue;
+      final runtime = _runtimes[id]!;
+      final host = session.host;
+      final credentials = runtime.credentials!;
+      final gateway = runtime.gateway;
+      return _serverStatusConnections[tabId] = ServerStatusConnection(
+        connect: (cancelled) => _engine.connect(
+          host,
+          credentials,
+          gateway: gateway,
+          cancelled: cancelled,
+          verifyHostKey: (key) => _verifyStatusHostKey(tabId, key),
+        ),
+      );
+    }
+    return null;
+  }
+
+  Future<bool> _verifyStatusHostKey(String tabId, SshHostKey key) async {
+    final repository = _knownHosts;
+    bool cancelled() => _disposed || tabById(tabId) == null;
+    if (repository == null || cancelled()) return false;
+    final trusted = await repository.find(
+      key.hostname,
+      key.port,
+      protocol: key.protocol,
+    );
+    if (cancelled()) return false;
+    if (trusted == null) return false;
+    if (!trusted.matches(key)) {
+      throw HostKeyChangedException(
+        HostKeyReview(presented: key, trusted: trusted),
+        '主机指纹已变更，已拒绝连接；请通过可信渠道核验服务器密钥',
+      );
+    }
+    return true;
+  }
+
+  /// 使用当前连接的运行时凭据和网关，为同一主机建立独立 SSH 连接。
+  Future<String?> splitTerminal(String id, SessionSplitAxis axis) async {
+    if (!canSplitTerminal(id)) return null;
+    final session = _find(id)!;
+    final runtime = _runtimes[id]!;
+    return _openSession(
+      session.host,
+      runtime.credentials!,
+      kind: session.kind,
+      gateway: runtime.gateway,
+      splitFrom: id,
+      splitAxis: axis,
+      dockerTarget: session.dockerTarget,
+    );
+  }
+
+  bool canOpenDockerTerminal(String id) =>
+      _find(id)?.kind == SessionKind.terminal &&
+      _canReuseTerminalConnection(id) &&
+      _find(id)?.engineSession is DockerTerminalSource;
+
+  static final _dockerContainerId = RegExp(r'^[a-fA-F0-9]{12,64}$');
+
+  Future<String?> openDockerTerminal(
+    String id,
+    DockerResource container,
+  ) async {
+    if (!canOpenDockerTerminal(id) ||
+        container.kind != DockerResourceKind.container ||
+        container.fields[DockerField.state] != 'running' ||
+        !_dockerContainerId.hasMatch(container.id)) {
+      return null;
+    }
+    final source = _find(id)!;
+    final runtime = _runtimes[id]!;
+    return _openSession(
+      source.host,
+      runtime.credentials!,
+      kind: SessionKind.containerTerminal,
+      gateway: runtime.gateway,
+      dockerTarget: DockerTerminalTarget(
+        id: container.id,
+        name: container.name,
+      ),
+    );
+  }
+
+  bool canOpenFileTransfer(String id) {
+    final source = _find(id);
+    if (_disposed ||
+        source == null ||
+        source.kind != SessionKind.terminal ||
+        source.dockerTarget != null) {
+      return false;
+    }
+    return findByHost(source.host.id, kind: SessionKind.fileTransfer) != null ||
+        _canReuseTerminalConnection(id);
+  }
+
+  /// 聚焦同主机已有传输标签，或复用终端的实际登录信息建立独立 SFTP 连接。
+  Future<String?> openFileTransfer(String id) async {
+    if (!canOpenFileTransfer(id)) return null;
+    final source = _find(id)!;
+    final existing = findByHost(source.host.id, kind: SessionKind.fileTransfer);
+    if (existing != null) {
+      activate(existing.id);
+      return existing.id;
+    }
+    final runtime = _runtimes[id]!;
+    return _openSession(
+      source.host,
+      runtime.credentials!,
+      kind: SessionKind.fileTransfer,
+      gateway: runtime.gateway,
+    );
+  }
 
   final Map<String, _SessionRuntime> _runtimes = {};
+  final Map<String, ServerStatusConnection> _serverStatusConnections = {};
   // 跨标签共享的网关清理队列；重新启动必须等旧监听端口释放。
   final Map<String, Future<void>> _forwardHostCleanup = {};
   final Map<String, Future<void>> _proxyHostCleanup = {};
@@ -63,7 +231,7 @@ class SessionController extends GetxController {
   List<Session> get commandSessions => sessions.where(_canSendCommand).toList();
 
   static bool _canSendCommand(Session session) =>
-      session.kind == SessionKind.terminal &&
+      session.kind.isInteractiveTerminal &&
       session.phase == SessionPhase.ready &&
       session.engineSession != null &&
       session.terminal?.onOutput != null;
@@ -108,9 +276,22 @@ class SessionController extends GetxController {
     SshCredentials credentials, {
     SessionKind kind = SessionKind.terminal,
     SshGateway? gateway,
+  }) => _openSession(host, credentials, kind: kind, gateway: gateway);
+
+  Future<String> _openSession(
+    Host host,
+    SshCredentials credentials, {
+    SessionKind kind = SessionKind.terminal,
+    SshGateway? gateway,
+    String? splitFrom,
+    SessionSplitAxis splitAxis = SessionSplitAxis.horizontal,
+    DockerTerminalTarget? dockerTarget,
   }) async {
     if (kind == SessionKind.portForward || kind == SessionKind.dynamicProxy) {
       throw ArgumentError('请通过端口转发页签手动启动');
+    }
+    if (kind == SessionKind.containerTerminal && dockerTarget == null) {
+      throw ArgumentError('Container terminal requires a container target');
     }
     if (host.isDesktop) {
       if (kind == SessionKind.fileTransfer) {
@@ -120,14 +301,21 @@ class SessionController extends GetxController {
     }
     final id = 'ssn-${_nextId++}';
     _runtimes[id] = _SessionRuntime();
-    sessions.add(
-      Session(
-        id: id,
-        host: host,
-        kind: kind,
-        loginUsername: credentials.username ?? host.username,
-      ),
+    final session = Session(
+      id: id,
+      host: host,
+      kind: kind,
+      loginUsername: credentials.username ?? host.username,
+      dockerTarget: dockerTarget,
     );
+    final targetTab = tabForSession(splitFrom);
+    if (targetTab != null) {
+      _tabState.split(targetTab, splitFrom!, id, splitAxis);
+      final index = sessions.indexWhere((item) => item.id == splitFrom);
+      sessions.insert(index + 1, session);
+    } else {
+      sessions.add(session);
+    }
     activeSessionId.value = id;
     _runtimes[id]?.credentials = credentials;
     if (gateway != null) _runtimes[id]?.gateway = gateway;
@@ -478,8 +666,11 @@ class SessionController extends GetxController {
         host: s.host,
         kind: s.kind,
         loginUsername: s.loginUsername,
+        dockerTarget: s.dockerTarget,
       ),
     );
+    await _runtimes[id]?.shellCleanup;
+    if (_disposed || _find(id) == null) return;
     await _connect(
       id,
       session.host,
@@ -517,6 +708,7 @@ class SessionController extends GetxController {
         kind: s.kind,
         phase: SessionPhase.reconnecting,
         loginUsername: s.loginUsername,
+        dockerTarget: s.dockerTarget,
       ),
     );
     try {
@@ -740,7 +932,7 @@ class SessionController extends GetxController {
 
       // 文件传输标签持有独立连接，不启动 shell，也不依赖终端退出事件。
       Terminal? terminal;
-      if (_find(id)!.kind == SessionKind.terminal) {
+      if (_find(id)!.kind.isInteractiveTerminal) {
         if (engineSession is! TerminalScreenSource) {
           await engineSession.close();
           throw SshEngineException('终端引擎不支持屏幕帧'.tr);
@@ -748,6 +940,22 @@ class SessionController extends GetxController {
         final display = Terminal();
         terminal = display;
         final source = engineSession as TerminalScreenSource;
+        final dockerTarget = _find(id)!.dockerTarget;
+        if (dockerTarget != null && engineSession is! DockerTerminalSource) {
+          display.dispose();
+          await engineSession.close();
+          throw const SshEngineException('此连接不支持容器终端');
+        }
+        display.onOutput = engineSession.write;
+        display.onResize = (w, h, _, _) => engineSession.resizeTerminal(w, h);
+        _update(
+          id,
+          (s) => s.copyWith(
+            phase: SessionPhase.ready,
+            engineSession: engineSession,
+            terminal: display,
+          ),
+        );
         bool canApplyFrame() =>
             !_disposed &&
             !display.isDisposed &&
@@ -756,11 +964,17 @@ class SessionController extends GetxController {
           if (identical(_find(id)?.terminal, display)) _onShellEnded(id);
         }
 
-        _runtimes[id]?.outputSubscription = source
-            .startTerminalShell(
-              cols: display.viewWidth,
-              rows: display.viewHeight,
-            )
+        final frames = dockerTarget == null
+            ? source.startTerminalShell(
+                cols: display.viewWidth,
+                rows: display.viewHeight,
+              )
+            : (engineSession as DockerTerminalSource).startDockerTerminalShell(
+                target: dockerTarget,
+                cols: display.viewWidth,
+                rows: display.viewHeight,
+              );
+        _runtimes[id]?.outputSubscription = frames
             .asyncMap((frame) async {
               if (!canApplyFrame()) return frame;
               display.applyFrame(frame);
@@ -773,26 +987,34 @@ class SessionController extends GetxController {
             .listen(
               (_) {},
               onDone: shellEnded,
-              onError: (Object _) => shellEnded(),
+              onError: (Object error) {
+                if (dockerTarget == null) {
+                  shellEnded();
+                } else {
+                  _onDockerShellFailed(id, display, error);
+                }
+              },
             );
-        terminal.onOutput = engineSession.write;
-        terminal.onResize = (w, h, _, _) => engineSession.resizeTerminal(w, h);
       }
 
-      _update(
-        id,
-        (s) => s.copyWith(
-          phase: SessionPhase.ready,
-          engineSession: engineSession,
-          terminal: terminal,
-        ),
-      );
+      if (terminal == null) {
+        _update(
+          id,
+          (s) => s.copyWith(
+            phase: SessionPhase.ready,
+            engineSession: engineSession,
+          ),
+        );
+      }
     } on DesktopAuthenticationException catch (e) {
       return e;
     } on Object catch (e) {
       final message = _displayFailure(e, '连接失败，请检查连接配置和网络后重试');
       if (_find(id)?.kind == SessionKind.portForward) {
         await _forwardFailed(id, message);
+      } else if (_find(id) case final session?
+          when session.dockerTarget != null && session.terminal != null) {
+        _onDockerShellFailed(id, session.terminal!, e);
       } else {
         _update(
           id,
@@ -892,6 +1114,32 @@ class SessionController extends GetxController {
     unawaited(close(id));
   }
 
+  void _onDockerShellFailed(String id, Terminal terminal, Object error) {
+    final session = _find(id);
+    if (_disposed ||
+        session == null ||
+        session.phase == SessionPhase.failed ||
+        !identical(session.terminal, terminal)) {
+      return;
+    }
+    _update(
+      id,
+      (current) => current.copyWith(
+        phase: SessionPhase.failed,
+        error: _displayFailure(error, '无法打开容器终端，请重试'),
+      ),
+    );
+    final cleanup = _releaseResources(session).catchError((Object _) {});
+    _runtimes[id]?.shellCleanup = cleanup;
+    unawaited(
+      cleanup.whenComplete(() {
+        if (identical(_runtimes[id]?.shellCleanup, cleanup)) {
+          _runtimes[id]?.shellCleanup = null;
+        }
+      }),
+    );
+  }
+
   Future<void> desktopFailed(String id, String message) async {
     final session = _find(id);
     if (session == null ||
@@ -915,7 +1163,13 @@ class SessionController extends GetxController {
 
   void activate(String id) {
     if (_find(id) == null) return;
+    _tabState.activate(id);
     activeSessionId.value = id;
+  }
+
+  void activateTab(String id) {
+    final tab = tabById(id);
+    if (tab != null) activate(tab.selectedSessionId);
   }
 
   /// 按标签 ID 调整顺序，保留最新会话快照和当前激活项。
@@ -923,9 +1177,12 @@ class SessionController extends GetxController {
   void reorder(Iterable<String> ids) {
     final remaining = {for (final session in sessions) session.id: session};
     final reordered = <Session>[];
+    final currentTabs = {for (final tab in tabs) tab.id: tab};
     for (final id in ids) {
-      final session = remaining.remove(id);
-      if (session != null) reordered.add(session);
+      for (final sessionId in currentTabs[id]?.sessionIds ?? [id]) {
+        final session = remaining.remove(sessionId);
+        if (session != null) reordered.add(session);
+      }
     }
     reordered.addAll(remaining.values);
     sessions.assignAll(reordered);
@@ -1010,7 +1267,9 @@ class SessionController extends GetxController {
     SessionKind kind = SessionKind.terminal,
   }) {
     for (final s in sessions) {
-      if (s.host.id == hostId && s.kind == kind) return s;
+      if (s.host.id == hostId && s.kind == kind) {
+        return s;
+      }
     }
     return null;
   }
@@ -1022,7 +1281,7 @@ class SessionController extends GetxController {
   bool focusExisting(String hostId, {SessionKind kind = SessionKind.terminal}) {
     final session = findByHost(hostId, kind: kind);
     if (session == null) return false;
-    activate(session.id);
+    activateTab(tabForSession(session.id)!.id);
     return true;
   }
 
@@ -1034,8 +1293,17 @@ class SessionController extends GetxController {
   }) {
     final pending = <Future<void>>{};
     final ids = <String>{};
-    for (final id in sessionIds.toSet()) {
-      if (id == keepSessionId) continue;
+    final kept = keepSessionId == null
+        ? <String>{}
+        : (tabById(keepSessionId) ?? tabForSession(keepSessionId))?.sessionIds
+                  .toSet() ??
+              {keepSessionId};
+    final expandedIds = <String>{
+      for (final id in sessionIds)
+        ...(tabById(id) ?? tabForSession(id))?.sessionIds ?? [id],
+    };
+    for (final id in expandedIds) {
+      if (kept.contains(id)) continue;
       final existing = _runtimes[id]?.tabCloseRequest;
       if (existing != null) {
         pending.add(existing);
@@ -1053,7 +1321,10 @@ class SessionController extends GetxController {
           (() async {
             try {
               if (previousConfirmation != null) await previousConfirmation;
-              if (keepSessionId != null && _find(keepSessionId) == null) return;
+              if (keepSessionId != null &&
+                  !sessions.any((s) => kept.contains(s.id))) {
+                return;
+              }
               final running = sessions
                   .where(
                     (s) => ids.contains(s.id) && _needsTabCloseConfirmation(s),
@@ -1061,8 +1332,10 @@ class SessionController extends GetxController {
                   .toList(growable: false);
               if (running.isNotEmpty && !await confirm(running)) return;
               if (keepSessionId != null) {
-                if (_find(keepSessionId) == null) return;
-                activate(keepSessionId);
+                final keptTab =
+                    tabById(keepSessionId) ?? tabForSession(keepSessionId);
+                if (keptTab == null) return;
+                activate(keptTab.selectedSessionId);
               }
             } finally {
               confirmationDone.complete();
@@ -1114,18 +1387,28 @@ class SessionController extends GetxController {
     final index = sessions.indexWhere((s) => s.id == id);
     if (index == -1) return;
     final session = sessions[index];
+    final tab = tabForSession(id)!;
+    final tabIndex = tabs.indexWhere((item) => item.id == tab.id);
 
     // 先同步移除标签：UI 即时响应，且天然去重——点击 ✕ 与断线自动关闭
     // 并发触发时，后到者查不到会话直接返回。绝不能在 await 之后再用
     // 事先算好的 index 访问列表：挂起期间列表可能已被其他关闭操作改动。
+    _tabState.remove(id);
     sessions.removeAt(index);
     if (activeSessionId.value == id) {
-      // 关闭当前激活标签时，激活其原先的邻位标签。
-      activeSessionId.value = sessions.isEmpty
-          ? null
-          : sessions[index.clamp(0, sessions.length - 1)].id;
+      final remaining = tabs;
+      final sameTab = tabById(tab.id);
+      activeSessionId.value =
+          sameTab?.selectedSessionId ??
+          (remaining.isEmpty
+              ? null
+              : remaining[tabIndex.clamp(0, remaining.length - 1)]
+                    .selectedSessionId);
     }
     _runtimes[id]?.cancelPending();
+    final statusClose = tabById(tab.id) == null
+        ? _serverStatusConnections.remove(tab.id)?.close()
+        : null;
 
     try {
       if (session.kind == SessionKind.portForward) {
@@ -1138,6 +1421,7 @@ class SessionController extends GetxController {
         _transfers?.clearFinished(sessionId: id);
       }
     } finally {
+      await statusClose;
       _forgetClosedRuntime(id);
     }
   }
@@ -1152,6 +1436,11 @@ class SessionController extends GetxController {
   }
 
   Future<void> _releaseResources(Session session) async {
+    final shellCleanup = _runtimes[session.id]?.shellCleanup;
+    if (shellCleanup != null) {
+      await shellCleanup;
+      return;
+    }
     if (session.kind == SessionKind.dynamicProxy) {
       await _releaseProxyResources(session.id);
     }
@@ -1200,14 +1489,21 @@ class SessionController extends GetxController {
 
   Future<void> closeActive() async {
     final id = activeSessionId.value;
-    if (id != null) await close(id);
+    if (id == null) return;
+    final ids = tabForSession(id)?.sessionIds.toList() ?? [id];
+    await Future.wait(ids.map(close));
   }
 
   /// 保留并激活指定标签，关闭操作发生时的其他标签。
   Future<void> closeOthers(String id) async {
-    if (_find(id) == null) return;
-    activate(id);
-    final ids = sessions.where((s) => s.id != id).map((s) => s.id).toList();
+    final tab = tabById(id) ?? tabForSession(id);
+    if (tab == null) return;
+    activate(tab.selectedSessionId);
+    final kept = tab.sessionIds.toSet();
+    final ids = sessions
+        .where((s) => !kept.contains(s.id))
+        .map((s) => s.id)
+        .toList();
     await Future.wait(ids.map(close));
   }
 
@@ -1223,6 +1519,10 @@ class SessionController extends GetxController {
   @override
   void onClose() {
     _disposed = true;
+    for (final connection in _serverStatusConnections.values) {
+      unawaited(connection.close());
+    }
+    _serverStatusConnections.clear();
     for (final runtime in _runtimes.values) {
       runtime.cancelPending();
     }

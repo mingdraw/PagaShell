@@ -110,7 +110,7 @@ void main() {
     final newGateway = tester.widget<shadcn.MenuButton>(
       find.widgetWithText(shadcn.MenuButton, '新建网关'),
     );
-    expect((newGateway.leading! as Icon).icon, shadcn.LucideIcons.network);
+    expect((newGateway.leading! as AppIcon).icon, AppIcons.network);
     await tester.tap(find.text('新建网关'));
     await tester.pumpAndSettle();
     expect(find.text('高级选项'), findsNothing);

@@ -16,8 +16,7 @@ import '../../application/updates/app_update_controller.dart';
 import '../../domain/proxy/system_proxy.dart';
 import '../ai/agent_workspace.dart';
 import '../components/app_dialog.dart';
-import '../components/app_icon_button.dart';
-import '../configuration/configuration_transfer_dialog.dart';
+import '../components/app_icon.dart';
 import '../hosts/host_edit_dialog.dart';
 import '../navigation/app_navigation.dart';
 import '../navigation/app_notice.dart';
@@ -28,7 +27,6 @@ import '../theme/app_theme.dart';
 import 'agent_sidebar_scope.dart';
 import 'command_palette.dart';
 import 'session_close_confirmation.dart';
-import 'widgets/settings_menu_button.dart';
 import 'widgets/sidebar.dart';
 import 'widgets/window_controls.dart';
 import 'widgets/workspace.dart';
@@ -400,46 +398,55 @@ class _ShellPageState extends State<ShellPage> with WindowListener {
     );
   }
 
-  Widget _fullscreenToolbar(BuildContext context) => ConstrainedBox(
-    constraints: const BoxConstraints(maxWidth: 440),
-    child: Container(
-      key: const ValueKey('rdp-fullscreen-toolbar'),
-      padding: const EdgeInsets.all(6),
-      decoration: BoxDecoration(
-        color: AppTheme.surface(context).withValues(alpha: 0.96),
-        border: Border.all(color: AppTheme.border(context)),
-        borderRadius: BorderRadius.circular(10),
-        boxShadow: const [BoxShadow(color: Color(0x40000000), blurRadius: 12)],
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const SizedBox(width: 6),
-          const Icon(shadcn.LucideIcons.monitor, size: 16),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              _sessions.sessions
-                      .firstWhereOrNull((s) => s.id == _fullscreenId)
-                      ?.title ??
-                  '远程桌面'.tr,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
+  Widget _fullscreenToolbar(BuildContext context) {
+    final session = _sessions.sessions.firstWhereOrNull(
+      (s) => s.id == _fullscreenId,
+    );
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 440),
+      child: Container(
+        key: const ValueKey('rdp-fullscreen-toolbar'),
+        padding: const EdgeInsets.all(6),
+        decoration: BoxDecoration(
+          color: AppTheme.surface(context).withValues(alpha: 0.96),
+          border: Border.all(color: AppTheme.border(context)),
+          borderRadius: BorderRadius.circular(10),
+          boxShadow: const [
+            BoxShadow(color: Color(0x40000000), blurRadius: 12),
+          ],
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(width: 6),
+            AppIcon(
+              session == null
+                  ? AppIcons.rdp
+                  : AppIcons.forServiceType(session.host.serviceType),
+              size: 16,
             ),
-          ),
-          const SizedBox(width: 12),
-          shadcn.OutlineButton(
-            key: const ValueKey('rdp-exit-fullscreen'),
-            onPressed: _fullscreenBusy
-                ? null
-                : () => unawaited(_exitFullscreen()),
-            leading: const Icon(shadcn.LucideIcons.minimize, size: 16),
-            child: Text('退出全屏'.tr),
-          ),
-        ],
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                session?.title ?? '远程桌面'.tr,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            const SizedBox(width: 12),
+            shadcn.OutlineButton(
+              key: const ValueKey('rdp-exit-fullscreen'),
+              onPressed: _fullscreenBusy
+                  ? null
+                  : () => unawaited(_exitFullscreen()),
+              leading: const AppIcon(AppIcons.minimize, size: 16),
+              child: Text('退出全屏'.tr),
+            ),
+          ],
+        ),
       ),
-    ),
-  );
+    );
+  }
 }
 
 /// 保持树的挂载和原宽度，只动画可见区域，避免文本在收起过程中反复换行。
@@ -502,63 +509,21 @@ class _SidebarPanel extends StatelessWidget {
                   if (isMac)
                     const SizedBox(width: AppTheme.macWindowControlsWidth),
                   const Expanded(child: WindowDragArea()),
-                  Obx(
-                    () => Offstage(
-                      offstage:
-                          !settings.sidebarVisible.value || hiddenForSpace,
-                      child: const WindowHeaderButton(
-                        child: SidebarToggleButton(),
+                  if (AgentSidebarScope.maybeOf(context) == null)
+                    Obx(
+                      () => Offstage(
+                        offstage:
+                            !settings.sidebarVisible.value || hiddenForSpace,
+                        child: const WindowHeaderButton(
+                          child: SidebarToggleButton(),
+                        ),
                       ),
                     ),
-                  ),
                   const SizedBox(width: 8),
                 ],
               ),
             ),
             const Expanded(child: Sidebar()),
-            SizedBox(
-              height: AppTheme.sidebarFooterHeight,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 12),
-                child: Align(
-                  alignment: Alignment.centerLeft,
-                  child: Obx(
-                    () => Offstage(
-                      offstage:
-                          !settings.sidebarVisible.value || hiddenForSpace,
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const SettingsMenuButton(),
-                          AppIconButton.ghost(
-                            key: const ValueKey('import-configuration'),
-                            semanticLabel: '导入配置'.tr,
-                            tooltip: '导入配置'.tr,
-                            icon: const Icon(
-                              shadcn.LucideIcons.download,
-                              size: AppTheme.toolbarIconSize,
-                            ),
-                            onPressed: () =>
-                                unawaited(showConfigurationImportDialog()),
-                          ),
-                          AppIconButton.ghost(
-                            key: const ValueKey('export-configuration'),
-                            semanticLabel: '导出配置'.tr,
-                            tooltip: '导出配置'.tr,
-                            icon: const Icon(
-                              shadcn.LucideIcons.upload,
-                              size: AppTheme.toolbarIconSize,
-                            ),
-                            onPressed: () =>
-                                unawaited(showConfigurationExportDialog()),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
           ],
         ),
       ),

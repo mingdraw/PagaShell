@@ -91,7 +91,7 @@ void main() {
     final folders = Get.find<IdentityFolderController>();
     final parent = folders.folders.single;
     expect(Get.find<FolderController>().folders, isEmpty);
-    expect(find.byIcon(shadcn.LucideIcons.folderKey), findsOneWidget);
+    expect(findAppIcon(AppIcons.folder), findsOneWidget);
 
     await tester.tap(find.text('凭证目录'), buttons: kSecondaryButton);
     await tester.pumpAndSettle();
@@ -118,10 +118,7 @@ void main() {
     expect(identity.folderId, folders.childrenOf(parent.id).single.id);
     expect(find.text('部署'), findsOneWidget);
     expect(
-      find.descendant(
-        of: _row('部署'),
-        matching: find.byIcon(shadcn.LucideIcons.fileKey),
-      ),
+      find.descendant(of: _row('部署'), matching: findAppIcon(AppIcons.fileKey)),
       findsOneWidget,
     );
     expect(tester.takeException(), isNull);
@@ -323,14 +320,12 @@ void main() {
         await tester.pumpAndSettle();
         final row = _row('a');
         final draggable = tester.widget<Draggable<IdentityTreeItem>>(row);
-        final iconData = isFolder
-            ? shadcn.LucideIcons.folderKey
-            : shadcn.LucideIcons.fileKey;
+        final iconData = isFolder ? AppIcons.folder : AppIcons.fileKey;
         final original = [
           tester.getRect(row),
           tester.getRect(find.descendant(of: row, matching: find.text('a'))),
           tester.getRect(
-            find.descendant(of: row, matching: find.byIcon(iconData)),
+            find.descendant(of: row, matching: findAppIcon(iconData)),
           ),
         ];
         final gesture = await tester.startGesture(
@@ -347,7 +342,7 @@ void main() {
             find.descendant(of: preview, matching: find.text('a')),
           ),
           tester.getRect(
-            find.descendant(of: preview, matching: find.byIcon(iconData)),
+            find.descendant(of: preview, matching: findAppIcon(iconData)),
           ),
         ];
         for (var i = 0; i < original.length; i++) {

@@ -78,7 +78,7 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  testWidgets('侧栏左下角设置打开独立分类弹窗，通用含主题和语言，入口随侧栏隐藏', (tester) async {
+  testWidgets('右上角设置打开独立分类弹窗，通用含主题和语言，侧栏隐藏时仍可用', (tester) async {
     await pumpApp(tester);
     final button = findAppIconButton('设置');
     expect(button, findsOneWidget);
@@ -90,8 +90,11 @@ void main() {
     );
     expect(tester.widget<AppIconButton>(button).tooltip, '设置');
     final size = tester.view.physicalSize / tester.view.devicePixelRatio;
-    expect(tester.getTopLeft(button).dx, lessThan(64));
-    expect(tester.getTopLeft(button).dy, greaterThan(size.height - 40));
+    expect(tester.getTopLeft(button).dx, greaterThan(size.width / 2));
+    expect(
+      tester.getRect(button).bottom,
+      lessThanOrEqualTo(AppTheme.windowHeaderHeight),
+    );
     await tester.tap(button);
     await tester.pumpAndSettle();
     expect(find.byType(AppDialog), findsOneWidget);
@@ -118,7 +121,7 @@ void main() {
     expect(findAppIconButton('设置'), findsOneWidget);
     await tester.tap(findAppIconButton('隐藏侧边栏'));
     await tester.pumpAndSettle();
-    expect(findAppIconButton('设置'), findsNothing);
+    expect(findAppIconButton('设置').hitTestable(), findsOneWidget);
     await tester.tap(findAppIconButton('显示侧边栏'));
     await tester.pumpAndSettle();
     expect(findAppIconButton('设置').hitTestable(), findsOneWidget);
@@ -131,7 +134,7 @@ void main() {
     expect(colors(tester).brightness, Brightness.light);
     expect(
       shellBackground(tester, Workspace),
-      shadcn.ColorSchemes.lightZinc.background,
+      shadcn.ColorSchemes.lightNeutral.background,
     );
     final lightSidebar = shellBackground(tester, Sidebar);
 
@@ -140,7 +143,7 @@ void main() {
     expect(colors(tester).brightness, Brightness.dark);
     expect(
       shellBackground(tester, Workspace),
-      shadcn.ColorSchemes.darkZinc.background,
+      shadcn.ColorSchemes.darkNeutral.background,
     );
     expect(shellBackground(tester, Sidebar), isNot(lightSidebar));
 

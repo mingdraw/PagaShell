@@ -12,6 +12,7 @@ import '../../domain/entities/identity.dart';
 import '../../domain/ssh/ssh_engine.dart';
 import '../../domain/vault/secret_store.dart';
 import '../components/app_dialog.dart';
+import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
 import '../components/app_select_field.dart';
 import '../components/app_text_form_field.dart';
@@ -388,10 +389,10 @@ class _ConnectDialogState extends State<_ConnectDialog> {
                       labelText: '密码'.tr,
                       suffixIcon: AppIconButton(
                         density: shadcn.ButtonDensity.compact,
-                        icon: Icon(
+                        icon: AppIcon(
                           _obscure
-                              ? shadcn.LucideIcons.eyeOff
-                              : shadcn.LucideIcons.eye,
+                              ? AppIcons.eyeOff
+                              : AppIcons.eye,
                           size: AppTheme.inputIconSize,
                         ),
                         onPressed: () => setState(() => _obscure = !_obscure),

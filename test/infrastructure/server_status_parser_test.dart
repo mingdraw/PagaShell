@@ -13,6 +13,10 @@ void main() {
     final status = ServerStatus.fromSamples(sample, null);
     expect(sample.system, 'macOS');
     expect(sample.systemLabel, 'macOS 15.0.1');
+    expect(sample.architecture, 'arm64');
+    expect(sample.loadAverage, [1.25, 2.5, 3.75]);
+    expect(sample.swapTotal, 512 * 1024 * 1024);
+    expect(sample.swapUsed, 128 * 1024 * 1024);
     expect(status.cpuFraction, closeTo(.3, .0001));
     expect(sample.cpuCores.keys, [0, 1]);
     expect(sample.cpuCores[0]!.total, 1000);
@@ -34,28 +38,41 @@ void main() {
     );
     expect(renamed.filesystems.single.name, '开发磁盘 SSD');
     final unnamed = parseServerStatus(
-      macStatusOutput.replaceFirst('Macintosh HD\n', ''),
+      macStatusOutput.replaceFirst('"Name":"Macintosh HD",', ''),
     );
     expect(unnamed.filesystems.single.name, isNull);
     expect(unnamed.filesystems.single.fraction, .5);
   });
 
-  test('macOS 只显示系统磁盘，按共享剩余空间计算占用而非仅系统卷用量', () {
+  test('macOS 按物理盘汇总共享空间，展开时保留各卷挂载路径', () {
     final sample = parseServerStatus(
-      macStatusOutput.replaceFirst(
-        '/dev/disk3s1s1 1048576 524288 524288 50% /',
-        '/dev/disk3s6 1048576 4 262144 1% /System/Volumes/VM\n'
-            '/dev/disk3s1s1 1048576 65536 262144 20% /\n'
-            '/dev/disk3s2 1048576 458752 262144 64% /System/Volumes/Data\n'
-            '/dev/disk4s1 2097152 1048576 1048576 50% /Volumes/External',
-      ),
+      macStatusOutput
+          .replaceFirst('"CapacityFree":536870912', '"CapacityFree":268435456')
+          .replaceFirst(
+            '/dev/disk3s1s1 1048576 524288 524288 50% /',
+            '/dev/disk3s6 1048576 4 262144 1% /System/Volumes/VM\n'
+                '/dev/disk3s1s1 1048576 65536 262144 20% /\n'
+                '/dev/disk3s2 1048576 458752 262144 64% /System/Volumes/Data\n'
+                '/dev/disk4s1 2097152 1048576 1048576 50% /Volumes/External',
+          ),
     );
-    final disk = sample.filesystems.single;
-    expect(disk.mount, '/');
+    final disk = sample.storage.first;
+    expect(disk.devices, ['disk0']);
     expect(disk.total, 1048576 * 1024);
     expect(disk.used, 786432 * 1024);
     expect(disk.available, 262144 * 1024);
     expect(disk.fraction, .75);
+    expect(disk.filesystems.map((fs) => fs.mount), [
+      '/',
+      '/System/Volumes/Data',
+    ]);
+    expect(sample.filesystems.map((fs) => fs.mount), [
+      '/',
+      '/System/Volumes/Data',
+      '/Volumes/External',
+    ]);
+    expect(sample.storage.last.name, 'Backup');
+    expect(sample.storage.last.fraction, .5);
   });
 
   test('macOS 系统磁盘数据缺失时不拿辅助卷代替', () {
@@ -79,7 +96,13 @@ void main() {
     expect(sample.memoryTotal, greaterThan(0));
     expect(sample.network, isNotEmpty);
     expect(sample.disks, isNotEmpty);
-    expect(sample.filesystems.single.mount, '/');
+    expect(sample.filesystems.any((fs) => fs.mount == '/'), isTrue);
+    expect(sample.architecture, isNotEmpty);
+    expect(sample.loadAverage, hasLength(3));
+    expect(sample.swapTotal, isNotNull);
+    expect(sample.storage, isNotEmpty);
+    expect(sample.storage.first.name, isNotEmpty);
+    expect(sample.storage.first.total, greaterThan(0));
     expect(sample.cpuCores, isNotEmpty);
     if (previousLiveSample.isNotEmpty) {
       final previous = parseServerStatus(
@@ -96,6 +119,12 @@ void main() {
   test('Linux 采样解析内存、挂载点、网卡和整盘扇区，CPU 不重复计算 guest', () {
     final sample = parseServerStatus(linuxStatusOutput);
     expect(sample.systemLabel, 'Ubuntu 24.04');
+    expect(sample.architecture, 'x86_64');
+    expect(sample.loadAverage, [.5, .75, 1.25]);
+    expect(sample.swapTotal, 512 * 1024 * 1024);
+    expect(sample.swapUsed, 128 * 1024 * 1024);
+    expect(sample.swapFraction, .25);
+    expect(sample.storage.map((disk) => disk.id), ['sda', 'sdb']);
     expect(sample.uptimeSeconds, 1000.5);
     expect(sample.cpuTotal, 1000);
     expect(sample.cpuIdle, 810);
@@ -110,6 +139,7 @@ void main() {
     expect(sample.disks['nvme0n1']!.read, 51200);
     expect(sample.disks['nvme0n1']!.write, 102400);
     expect(sample.filesystems.last.mount, '/data with spaces');
+    expect(sample.filesystems.first.device, '/dev/sda1');
     expect(sample.filesystems.first.fraction, closeTo(1 / 1.9, .0001));
   });
 

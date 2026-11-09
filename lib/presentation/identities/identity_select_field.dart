@@ -7,6 +7,7 @@ import '../../application/identities/identity_folder_controller.dart';
 import '../../application/identities/identity_tree_controller.dart';
 import '../../domain/entities/host.dart';
 import '../../domain/entities/identity.dart';
+import '../components/app_icon.dart';
 import '../components/app_select_field.dart';
 import '../components/app_tree_select_popup.dart';
 import '../theme/app_theme.dart';
@@ -57,7 +58,7 @@ class IdentitySelectField extends StatelessWidget {
             final folders = Get.find<IdentityFolderController>();
             return AppTreeSelectPopup(
               keyPrefix: 'identity',
-              folderIcon: shadcn.LucideIcons.folderKey,
+              folderIcon: AppIcons.folderKey,
               initialExpanded: folders.expanded,
               selectedFolderId: Get.find<IdentityController>()
                   .byId(selected)
@@ -113,7 +114,7 @@ class _IdentityLabel extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Row(
     children: [
-      const Icon(shadcn.LucideIcons.fileKey, size: AppTheme.sidebarIconSize),
+      const AppIcon(AppIcons.fileKey, size: AppTheme.sidebarIconSize),
       const SizedBox(width: 6),
       Expanded(
         child: Text(

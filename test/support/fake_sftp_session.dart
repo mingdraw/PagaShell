@@ -1,11 +1,13 @@
 import 'dart:async';
 
+import 'package:pagashell/domain/ssh/docker_manager.dart';
 import 'package:pagashell/domain/ssh/ssh_engine.dart';
 
 import 'fixture_terminal.dart';
 import 'in_memory_local_file_repository.dart';
 
-class FakeSftpSession implements SshEngineSession, TerminalScreenSource {
+class FakeSftpSession
+    implements SshEngineSession, TerminalScreenSource, DockerTerminalSource {
   FakeSftpSession({this.localFiles});
 
   final InMemoryLocalFileRepository? localFiles;
@@ -24,6 +26,22 @@ class FakeSftpSession implements SshEngineSession, TerminalScreenSource {
   final StreamController<String> _shell = StreamController<String>();
   int closes = 0;
   int shellStarts = 0;
+  final dockerShellStarts = <DockerTerminalTarget>[];
+  Object? dockerShellFailure;
+
+  @override
+  Stream<TerminalFrame> startDockerTerminalShell({
+    required DockerTerminalTarget target,
+    required int cols,
+    required int rows,
+    int scrollback = 10000,
+  }) {
+    dockerShellStarts.add(target);
+    if (dockerShellFailure case final failure?) {
+      return Stream<TerminalFrame>.error(failure);
+    }
+    return startTerminalShell(cols: cols, rows: rows, scrollback: scrollback);
+  }
 
   @override
   Future<void> acknowledgeTerminalFrame(int frameId) async {}

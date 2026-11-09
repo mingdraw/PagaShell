@@ -13,9 +13,9 @@ import 'package:pagashell/application/hosts/host_controller.dart';
 import 'package:pagashell/application/hosts/host_tree_controller.dart';
 import 'package:pagashell/domain/entities/host.dart';
 import 'package:pagashell/domain/entities/host_tree_item.dart';
-import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import 'support/in_memory_binding.dart';
+import 'support/shadcn_test_app.dart';
 
 const _captureDir = String.fromEnvironment('PAGASHELL_CAPTURE_DIR');
 
@@ -361,7 +361,7 @@ void main() {
       final text = find.descendant(of: row, matching: find.text('a'));
       final icon = find.descendant(
         of: row,
-        matching: find.byIcon(shadcn.LucideIcons.folder),
+        matching: findAppIcon(AppIcons.folder),
       );
       final originals = [
         tester.getRect(row),
@@ -380,10 +380,7 @@ void main() {
         tester.getRect(preview),
         tester.getRect(find.descendant(of: preview, matching: find.text('a'))),
         tester.getRect(
-          find.descendant(
-            of: preview,
-            matching: find.byIcon(shadcn.LucideIcons.folder),
-          ),
+          find.descendant(of: preview, matching: findAppIcon(AppIcons.folder)),
         ),
       ];
       for (var index = 0; index < originals.length; index++) {

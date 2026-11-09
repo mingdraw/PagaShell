@@ -8,6 +8,7 @@ import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import '../../application/ai/agent_controller.dart';
 import '../../application/session/session.dart';
+import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
 import '../components/app_text_form_field.dart';
 import 'agent_input_controller.dart';
@@ -24,7 +25,7 @@ class _MentionOption {
   final String id;
   final String label;
   final String detail;
-  final IconData icon;
+  final AppIcons icon;
   final bool selected;
   final VoidCallback onSelected;
 }
@@ -82,8 +83,8 @@ class _MentionOptionRowState extends State<_MentionOptionRow> {
             onChanged: (_) => option.onSelected(),
             child: Row(
               children: [
-                Icon(
-                  option.selected ? shadcn.LucideIcons.check : option.icon,
+                AppIcon(
+                  option.selected ? AppIcons.check : option.icon,
                   size: 15,
                 ),
                 const SizedBox(width: 8),
@@ -194,8 +195,7 @@ class _AgentSessionInputState extends State<AgentSessionInput> {
       value.composing.isValid && !value.composing.isCollapsed;
 
   ({int start, int end, String query})? _query(TextEditingValue value) {
-    if (widget.agent.busy.value ||
-        !value.selection.isValid ||
+    if (!value.selection.isValid ||
         !value.selection.isCollapsed ||
         value.selection.baseOffset > value.text.length ||
         widget.controller.containsMentionAt(value.selection.baseOffset)) {
@@ -224,10 +224,10 @@ class _AgentSessionInputState extends State<AgentSessionInput> {
   }
 
   bool _requestedByButton(TextEditingValue value) =>
-      _buttonRequest == value && !widget.agent.busy.value && !_composing(value);
+      _buttonRequest == value && !_composing(value);
 
   void _openMentions() {
-    if (widget.agent.busy.value || _composing(widget.controller.value)) return;
+    if (_composing(widget.controller.value)) return;
     if (!widget.controller.selection.isValid) {
       widget.controller.selection = TextSelection.collapsed(
         offset: widget.controller.text.length,
@@ -460,9 +460,7 @@ class _AgentSessionInputState extends State<AgentSessionInput> {
                 id: sessions[i].id,
                 label: displayLabel(sessions[i]),
                 detail: sessions[i].host.address,
-                icon: sessions[i].kind == SessionKind.remoteDesktop
-                    ? shadcn.LucideIcons.monitor
-                    : shadcn.LucideIcons.terminal,
+                icon: AppIcons.forServiceType(sessions[i].host.serviceType),
                 selected: isSelected(sessions[i]),
                 onSelected: () => _chooseSession(
                   sessions[i],
@@ -526,10 +524,8 @@ class _AgentSessionInputState extends State<AgentSessionInput> {
                     key: const ValueKey('agent-add-context'),
                     density: shadcn.ButtonDensity.compact,
                     semanticLabel: '添加上下文'.tr,
-                    icon: const Icon(shadcn.LucideIcons.plus, size: 16),
-                    onPressed: agent.busy.value || _composing(value)
-                        ? null
-                        : _openMentions,
+                    icon: const AppIcon(AppIcons.plus, size: 16),
+                    onPressed: _composing(value) ? null : _openMentions,
                   ),
                   const SizedBox(width: 12),
                   Expanded(child: widget.footer),

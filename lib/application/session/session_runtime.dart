@@ -8,6 +8,7 @@ class _SessionRuntime {
   Completer<bool>? hostKeyDecision;
   Completer<String?>? passwordDecision;
   StreamSubscription<Object?>? outputSubscription;
+  Future<void>? shellCleanup;
   StreamSubscription<PortForwardEvent>? forwardSubscription;
   Future<void>? forwardCleanup;
   Future<void>? proxyCleanup;

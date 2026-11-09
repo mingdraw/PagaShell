@@ -10,6 +10,7 @@ import '../../application/session/session.dart';
 import '../../application/session/session_controller.dart';
 import '../../domain/entities/forward_port.dart';
 import '../../domain/entities/host.dart';
+import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
 import '../components/app_text_form_field.dart';
 import '../localization/app_translations.dart';
@@ -277,8 +278,8 @@ class _ForwardSessionPanelState extends State<ForwardSessionPanel> {
                             Expanded(child: local),
                             const Padding(
                               padding: EdgeInsets.fromLTRB(12, 9, 12, 0),
-                              child: Icon(
-                                shadcn.LucideIcons.arrowRight,
+                              child: AppIcon(
+                                AppIcons.arrowRight,
                                 size: 16,
                               ),
                             ),
@@ -290,7 +291,7 @@ class _ForwardSessionPanelState extends State<ForwardSessionPanel> {
                 ),
                 const SizedBox(width: 12),
                 AppIconButton(
-                  icon: const Icon(shadcn.LucideIcons.trash2, size: 16),
+                  icon: const AppIcon(AppIcons.trash2, size: 16),
                   semanticLabel: '移除映射'.tr,
                   onPressed: editable
                       ? () {
@@ -337,7 +338,7 @@ class _ForwardSessionPanelState extends State<ForwardSessionPanel> {
             runSpacing: 8,
             crossAxisAlignment: WrapCrossAlignment.center,
             children: [
-              const Icon(shadcn.LucideIcons.arrowLeftRight, size: 22),
+              const AppIcon(AppIcons.arrowLeftRight, size: 22),
               Text(
                 '端口转发'.tr,
                 style: const TextStyle(
@@ -414,7 +415,7 @@ class _ForwardSessionPanelState extends State<ForwardSessionPanel> {
             runSpacing: 8,
             children: [
               shadcn.OutlineButton(
-                leading: const Icon(shadcn.LucideIcons.plus, size: 16),
+                leading: const AppIcon(AppIcons.plus, size: 16),
                 onPressed: editable
                     ? () {
                         setState(() => _ports.add(_PortEditors(null)));
@@ -430,7 +431,7 @@ class _ForwardSessionPanelState extends State<ForwardSessionPanel> {
                       : () => controller.stopForward(session.id),
                   child: _ForwardButtonContent(
                     loading: stopping,
-                    icon: shadcn.LucideIcons.square,
+                    icon: AppIcons.square,
                     label: '停止转发'.tr,
                   ),
                 )
@@ -439,7 +440,7 @@ class _ForwardSessionPanelState extends State<ForwardSessionPanel> {
                   onPressed: busy ? null : _start,
                   child: _ForwardButtonContent(
                     loading: busy,
-                    icon: shadcn.LucideIcons.play,
+                    icon: AppIcons.play,
                     label: '启动转发'.tr,
                   ),
                 ),
@@ -458,7 +459,7 @@ class _ForwardButtonContent extends StatelessWidget {
     required this.label,
   });
   final bool loading;
-  final IconData icon;
+  final AppIcons icon;
   final String label;
 
   @override
@@ -473,7 +474,7 @@ class _ForwardButtonContent extends StatelessWidget {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(icon, size: 16),
+                AppIcon(icon, size: 16),
                 const SizedBox(width: 8),
                 Text(label),
               ],

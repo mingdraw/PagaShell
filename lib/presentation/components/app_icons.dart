@@ -1,0 +1,111 @@
+import 'package:iconify_flutter/icons/bi.dart';
+import 'package:iconify_flutter/icons/mdi.dart';
+
+import '../../domain/entities/host.dart';
+import 'fluent_icons.dart';
+
+/// 应用图标集中选型；SVG 随应用打包，不依赖网络或图标字体。
+///
+/// 界面操作以 Material Design Icons 为主，文件夹使用实心图形。
+/// CPU/内存使用 Bootstrap Icons，左侧栏开关使用 Fluent。
+/// 系统品牌 Logo 由 ServerSystemLogo 单独保留 SVG Logos 原色。
+enum AppIcons {
+  activity(Mdi.pulse),
+  arrowDown(Mdi.arrow_down),
+  arrowLeftRight(Mdi.arrow_left_right),
+  arrowRight(Mdi.arrow_right),
+  arrowUpRight(Mdi.lan_connect),
+  bookKey(Mdi.book_lock_outline),
+  bot(Mdi.robot_outline),
+  brain(Mdi.brain),
+  brush(Mdi.broom),
+  check(Mdi.check),
+  chevronDown(Mdi.chevron_down),
+  chevronRight(Mdi.chevron_right),
+  chevronUp(Mdi.chevron_up),
+  circleAlert(Mdi.alert_circle_outline),
+  circleArrowUp(Mdi.arrow_up_circle_outline),
+  circleCheck(Mdi.check_circle_outline),
+  circleX(Mdi.close_circle_outline),
+  code(Mdi.code_tags),
+  columns2(Mdi.view_split_vertical),
+  container(Mdi.docker),
+  copy(Mdi.content_copy),
+  cpu(Bi.cpu),
+  database(Mdi.database_outline),
+  download(Mdi.download),
+  ellipsis(Mdi.dots_horizontal),
+  eye(Mdi.eye_outline),
+  eyeOff(Mdi.eye_off_outline),
+  file(Mdi.file_outline),
+  fileExport(Mdi.file_export_outline),
+  fileImport(Mdi.file_import_outline),
+  fileKey(Mdi.file_key_outline),
+  fileTerminal(Mdi.console),
+  fileUp(Mdi.file_upload_outline),
+  folder(Mdi.folder),
+  folderKey(Mdi.folder_key),
+  folderOpen(Mdi.folder_open),
+  folderPlus(Mdi.folder_plus),
+  hardDrive(Mdi.harddisk),
+  history(Mdi.history),
+  hourglass(Mdi.timer_sand),
+  info(Mdi.information_outline),
+  layers(Mdi.layers_outline),
+  listX(Mdi.playlist_remove),
+  maximize(Mdi.fullscreen),
+  memoryStick(Bi.memory),
+  minimize(Mdi.fullscreen_exit),
+  minus(Mdi.minus),
+  monitor(Mdi.monitor),
+  network(Mdi.lan),
+  panelLeftClose(Fluent.panel_left_24_regular),
+  panelLeftOpen(Fluent.panel_left_24_filled),
+  panelRightClose(Mdi.arrow_collapse_right),
+  pencil(Mdi.pencil),
+  play(Mdi.play),
+  plus(Mdi.plus),
+  processes(Mdi.view_list),
+  proxy(Mdi.web),
+  rdp(Mdi.microsoft_windows),
+  refreshCw(Mdi.refresh),
+  rotateCw(Mdi.rotate_right),
+  rows2(Mdi.view_split_horizontal),
+  screenShare(Mdi.monitor),
+  search(Mdi.magnify),
+  send(Mdi.send),
+  server(Mdi.server_network),
+  settings(Mdi.cog),
+  settings2(Mdi.tune),
+  statusAngle(Mdi.chevron_up),
+  statusCpu(Bi.cpu),
+  statusDisk(Mdi.harddisk),
+  statusMemory(Bi.memory),
+  statusNetwork(Mdi.ethernet),
+  statusOverview(Mdi.gauge),
+  statusRefresh(Mdi.refresh),
+  statusServer(Mdi.server),
+  shieldAlert(Mdi.shield_alert_outline),
+  shieldCheck(Mdi.shield_check_outline),
+  shieldOff(Mdi.shield_off_outline),
+  square(Mdi.stop),
+  squarePen(Mdi.square_edit_outline),
+  terminal(Mdi.console),
+  trash2(Mdi.delete_outline),
+  triangleAlert(Mdi.alert),
+  unplug(Mdi.power_plug_off),
+  upload(Mdi.upload),
+  windowMaximize(Mdi.window_maximize),
+  wrench(Mdi.wrench),
+  x(Mdi.close);
+
+  const AppIcons(this.svg);
+
+  final String svg;
+
+  static AppIcons forServiceType(ServiceType type) => switch (type) {
+    ServiceType.ssh => fileTerminal,
+    ServiceType.rdp => rdp,
+    ServiceType.vnc => screenShare,
+  };
+}

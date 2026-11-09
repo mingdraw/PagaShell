@@ -4,6 +4,7 @@ import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import '../../application/session/session.dart';
 import '../components/app_dialog.dart';
+import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
 import '../components/app_text_form_field.dart';
 import '../theme/app_theme.dart';
@@ -92,10 +93,10 @@ class _RdpPasswordDialogState extends State<RdpPasswordDialog> {
                 suffixIcon: AppIconButton(
                   semanticLabel: (_obscure ? '显示密码' : '隐藏密码').tr,
                   density: shadcn.ButtonDensity.compact,
-                  icon: Icon(
+                  icon: AppIcon(
                     _obscure
-                        ? shadcn.LucideIcons.eyeOff
-                        : shadcn.LucideIcons.eye,
+                        ? AppIcons.eyeOff
+                        : AppIcons.eye,
                     size: AppTheme.inputIconSize,
                   ),
                   onPressed: () => setState(() => _obscure = !_obscure),

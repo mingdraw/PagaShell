@@ -10,6 +10,7 @@ import '../../application/ai/ai_settings_controller.dart';
 import '../../domain/ai/agent_skill.dart';
 import '../../domain/ai/ai_model.dart';
 import '../components/app_dialog.dart';
+import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
 import '../components/app_menu.dart';
 import '../navigation/app_navigation.dart';
@@ -62,14 +63,17 @@ class _AgentPanelState extends State<AgentPanel> {
   }
 
   void _send() {
-    if (_agent.busy.value ||
-        _agent.currentModel == null ||
+    if (_agent.currentModel == null ||
         _input.text.trim().isEmpty ||
         (_input.value.composing.isValid &&
             !_input.value.composing.isCollapsed)) {
       return;
     }
     final text = _input.text;
+    if (text.trim().length > 20000) {
+      _agent.error.value = '消息过长，请缩短后发送';
+      return;
+    }
     final targets = _input.sessions;
     final labels = _input.referenceLabels;
     _input.clear();
@@ -92,7 +96,7 @@ class _AgentPanelState extends State<AgentPanel> {
             padding: const EdgeInsets.fromLTRB(12, 6, 6, 6),
             child: Row(
               children: [
-                const Icon(shadcn.LucideIcons.bot, size: 17),
+                const AppIcon(AppIcons.bot, size: 17),
                 const SizedBox(width: 8),
                 const Text(
                   'Agent',
@@ -122,8 +126,8 @@ class _AgentPanelState extends State<AgentPanel> {
                   key: const ValueKey('agent-history'),
                   semanticLabel: '历史对话'.tr,
                   tooltip: '历史对话'.tr,
-                  icon: const Icon(
-                    shadcn.LucideIcons.history,
+                  icon: const AppIcon(
+                    AppIcons.history,
                     size: AppTheme.toolbarIconSize,
                   ),
                   onPressed: () async {
@@ -137,8 +141,8 @@ class _AgentPanelState extends State<AgentPanel> {
                   key: const ValueKey('agent-new-chat'),
                   semanticLabel: '新对话'.tr,
                   tooltip: '新对话'.tr,
-                  icon: const Icon(
-                    shadcn.LucideIcons.squarePen,
+                  icon: const AppIcon(
+                    AppIcons.squarePen,
                     size: AppTheme.toolbarIconSize,
                   ),
                   onPressed: () {
@@ -149,8 +153,8 @@ class _AgentPanelState extends State<AgentPanel> {
                 AppIconButton(
                   semanticLabel: 'AI 设置'.tr,
                   tooltip: 'AI 设置'.tr,
-                  icon: const Icon(
-                    shadcn.LucideIcons.settings2,
+                  icon: const AppIcon(
+                    AppIcons.settings2,
                     size: AppTheme.toolbarIconSize,
                   ),
                   onPressed: () => unawaited(showSettingsDialog(ai: true)),
@@ -213,8 +217,8 @@ class _AgentPanelState extends State<AgentPanel> {
                     child: Row(
                       children: [
                         _agent.waitingForApproval.value
-                            ? const Icon(
-                                shadcn.LucideIcons.shieldCheck,
+                            ? const AppIcon(
+                                AppIcons.shieldCheck,
                                 size: 12,
                               )
                             : const SizedBox(
@@ -225,9 +229,19 @@ class _AgentPanelState extends State<AgentPanel> {
                         const SizedBox(width: 8),
                         Expanded(
                           child: Text(
-                            _agent.activity.value.tr,
+                            _agent.queuedCount == 0
+                                ? _agent.activity.value.tr
+                                : '${_agent.activity.value.tr} · ${'@count 条消息排队中'.trParams({'count': '${_agent.queuedCount}'})}',
+                            key: const ValueKey('agent-activity'),
                             style: const TextStyle(fontSize: 12),
                           ),
+                        ),
+                        const SizedBox(width: 8),
+                        shadcn.OutlineButton(
+                          key: const ValueKey('agent-stop'),
+                          onPressed: _agent.stop,
+                          size: shadcn.ButtonSize.small,
+                          child: Text('停止'.tr),
                         ),
                       ],
                     ),
@@ -311,22 +325,14 @@ class _AgentPanelState extends State<AgentPanel> {
                               ),
                             ),
                             const SizedBox(width: 8),
-                            _agent.busy.value
-                                ? shadcn.OutlineButton(
-                                    key: const ValueKey('agent-stop'),
-                                    onPressed: _agent.stop,
-                                    size: shadcn.ButtonSize.small,
-                                    child: Text('停止'.tr),
-                                  )
-                                : shadcn.PrimaryButton(
-                                    key: const ValueKey('agent-send'),
-                                    onPressed:
-                                        settings.state.value.apiConfig == null
-                                        ? null
-                                        : _send,
-                                    size: shadcn.ButtonSize.small,
-                                    child: Text('发送'.tr),
-                                  ),
+                            shadcn.PrimaryButton(
+                              key: const ValueKey('agent-send'),
+                              onPressed: settings.state.value.apiConfig == null
+                                  ? null
+                                  : _send,
+                              size: shadcn.ButtonSize.small,
+                              child: Text('发送'.tr),
+                            ),
                           ],
                         ),
                       ),
@@ -350,8 +356,7 @@ class _AgentPanelState extends State<AgentPanel> {
         key: const ValueKey('agent-reasoning-select'),
         semanticLabel: label,
         density: shadcn.ButtonDensity.compact,
-        onPressed:
-            !_agent.modesLoaded || _agent.busy.value || options.length < 2
+        onPressed: !_agent.modesLoaded || options.length < 2
             ? null
             : () {
                 shadcn.showDropdown<void>(
@@ -368,7 +373,7 @@ class _AgentPanelState extends State<AgentPanel> {
         icon: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(shadcn.LucideIcons.brain, size: 14),
+            const AppIcon(AppIcons.brain, size: 14),
             const SizedBox(width: 4),
             Text(
               selected.label.tr,
@@ -390,7 +395,7 @@ class _AgentPanelState extends State<AgentPanel> {
         key: const ValueKey('agent-access-select'),
         semanticLabel: label,
         density: shadcn.ButtonDensity.compact,
-        onPressed: !_agent.modesLoaded || _agent.busy.value
+        onPressed: !_agent.modesLoaded
             ? null
             : () {
                 shadcn.showDropdown<void>(
@@ -410,10 +415,10 @@ class _AgentPanelState extends State<AgentPanel> {
         icon: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(
+            AppIcon(
               selected == AgentAccessMode.fullAccess
-                  ? shadcn.LucideIcons.shieldOff
-                  : shadcn.LucideIcons.shieldCheck,
+                  ? AppIcons.shieldOff
+                  : AppIcons.shieldCheck,
               size: 14,
             ),
             const SizedBox(width: 4),
@@ -521,7 +526,7 @@ class _AgentPanelState extends State<AgentPanel> {
         padding: const EdgeInsets.symmetric(vertical: 6),
         child: Row(
           children: [
-            const Icon(shadcn.LucideIcons.wrench, size: 12),
+            const AppIcon(AppIcons.wrench, size: 12),
             const SizedBox(width: 6),
             Expanded(
               child: Text(
@@ -549,9 +554,44 @@ class _AgentPanelState extends State<AgentPanel> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text(
-            user ? '你'.tr : 'Agent',
-            style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
+          Row(
+            children: [
+              Text(
+                user ? '你'.tr : 'Agent',
+                style: const TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              if (user) ...[
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Obx(() {
+                    final state = entry.requestState.value;
+                    final label = switch (state) {
+                      AgentRequestState.queued => '排队中',
+                      AgentRequestState.running => '处理中…',
+                      AgentRequestState.failed => '请求失败',
+                      AgentRequestState.cancelled => '已取消',
+                      _ => '',
+                    };
+                    return Text(
+                      label.tr,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: state == AgentRequestState.failed
+                            ? shadcn.Theme.of(context).colorScheme.destructive
+                            : shadcn.Theme.of(context)
+                                  .colorScheme
+                                  .mutedForeground,
+                      ),
+                    );
+                  }),
+                ),
+              ],
+            ],
           ),
           const SizedBox(height: 4),
           user
@@ -560,6 +600,23 @@ class _AgentPanelState extends State<AgentPanel> {
                   style: const TextStyle(fontSize: 13, height: 1.6),
                 )
               : AgentMessageBody(entry.text),
+          if (user)
+            Obx(
+              () => entry.requestError.value == null
+                  ? const SizedBox.shrink()
+                  : Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Text(
+                        entry.requestError.value!.tr,
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: shadcn.Theme.of(context)
+                              .colorScheme
+                              .destructive,
+                        ),
+                      ),
+                    ),
+            ),
         ],
       ),
     );

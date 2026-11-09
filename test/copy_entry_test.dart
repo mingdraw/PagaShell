@@ -66,7 +66,7 @@ void main() {
     final copy = tester.widget<shadcn.MenuButton>(
       find.widgetWithText(shadcn.MenuButton, '复制'),
     );
-    expect((copy.leading! as Icon).icon, shadcn.LucideIcons.copy);
+    expect((copy.leading! as AppIcon).icon, AppIcons.copy);
     await tester.tap(find.text('复制'));
     await tester.pumpAndSettle();
   }

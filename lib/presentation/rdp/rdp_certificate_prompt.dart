@@ -8,6 +8,7 @@ import '../../application/session/session.dart';
 import '../../application/session/session_controller.dart';
 import '../../domain/ssh/host_key.dart';
 import '../components/app_dialog.dart';
+import '../components/app_icon.dart';
 import '../navigation/app_navigation.dart';
 import 'rdp_password_dialog.dart';
 
@@ -182,8 +183,8 @@ class _RdpCertificateDialogState extends State<RdpCertificateDialog> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(
-            shadcn.LucideIcons.shieldAlert,
+          AppIcon(
+            AppIcons.shieldAlert,
             size: 40,
             color: shadcn.Theme.of(context).colorScheme.destructive,
           ),

@@ -6,6 +6,7 @@ import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
+import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
 import '../components/app_text_form_field.dart';
 import '../components/export_file.dart';
@@ -126,7 +127,7 @@ class _PrivateKeyFieldsState extends State<PrivateKeyFields> {
             children: [
               shadcn.OutlineButton(
                 onPressed: enabled ? _import : null,
-                leading: const Icon(shadcn.LucideIcons.fileKey, size: 16),
+                leading: const AppIcon(AppIcons.fileImport, size: 16),
                 child: Text(_importing ? '读取中…'.tr : '导入私钥文件'.tr),
               ),
               shadcn.OutlineButton(
@@ -137,7 +138,7 @@ class _PrivateKeyFieldsState extends State<PrivateKeyFields> {
                             widget.privateKey.text.trim().isNotEmpty)
                     ? _export
                     : null,
-                leading: const Icon(shadcn.LucideIcons.download, size: 16),
+                leading: const AppIcon(AppIcons.fileExport, size: 16),
                 child: Text(_exporting ? '导出中…'.tr : '导出私钥文件'.tr),
               ),
             ],
@@ -190,10 +191,10 @@ class _PrivateKeyFieldsState extends State<PrivateKeyFields> {
                   ? () =>
                         setState(() => _obscurePassphrase = !_obscurePassphrase)
                   : null,
-              icon: Icon(
+              icon: AppIcon(
                 _obscurePassphrase
-                    ? shadcn.LucideIcons.eyeOff
-                    : shadcn.LucideIcons.eye,
+                    ? AppIcons.eyeOff
+                    : AppIcons.eye,
                 size: AppTheme.inputIconSize,
               ),
             ),

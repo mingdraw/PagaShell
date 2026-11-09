@@ -5,6 +5,7 @@ import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import '../../application/hosts/host_controller.dart';
 import '../../domain/entities/host.dart';
+import '../components/app_icon.dart';
 import '../components/app_list_row.dart';
 import '../hosts/host_edit_dialog.dart';
 import '../navigation/app_navigation.dart';
@@ -105,7 +106,7 @@ class _CommandPaletteState extends State<_CommandPalette> {
                       padding: const EdgeInsets.all(16),
                       features: const [
                         shadcn.InputFeature.leading(
-                          Icon(shadcn.LucideIcons.search, size: 16),
+                          AppIcon(AppIcons.search, size: 16),
                         ),
                       ],
                     ),
@@ -144,8 +145,8 @@ class _CommandPaletteState extends State<_CommandPalette> {
                             borderRadius: BorderRadius.circular(
                               AppTheme.commandPaletteItemRadius,
                             ),
-                            leading: const Icon(
-                              shadcn.LucideIcons.fileTerminal,
+                            leading: AppIcon(
+                              AppIcons.forServiceType(host.serviceType),
                               size: 18,
                             ),
                             title: Text(

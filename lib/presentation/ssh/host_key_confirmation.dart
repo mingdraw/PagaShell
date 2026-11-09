@@ -3,6 +3,7 @@ import 'package:get/get.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import '../../domain/ssh/host_key.dart';
+import '../components/app_icon.dart';
 
 /// 会话内确认界面，多个待确认连接可通过标签分别处理。
 class HostKeyConfirmation extends StatelessWidget {
@@ -33,10 +34,10 @@ class HostKeyConfirmation extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Icon(
+                AppIcon(
                   changed
-                      ? shadcn.LucideIcons.triangleAlert
-                      : shadcn.LucideIcons.shieldCheck,
+                      ? AppIcons.triangleAlert
+                      : AppIcons.shieldCheck,
                   color: changed ? colors.destructive : colors.primary,
                   size: 40,
                 ),

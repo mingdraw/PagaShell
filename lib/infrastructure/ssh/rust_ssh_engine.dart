@@ -14,16 +14,22 @@ import '../../domain/entities/proxy_config.dart';
 import '../../domain/proxy/dynamic_proxy_engine.dart';
 import '../../domain/rdp/rdp_clipboard.dart';
 import '../../domain/rdp/rdp_engine.dart';
+import '../../domain/ssh/docker_manager.dart';
 import '../../domain/ssh/host_key.dart';
+import '../../domain/ssh/process_manager.dart';
 import '../../domain/ssh/server_status.dart';
 import '../../domain/ssh/ssh_engine.dart';
 import '../../domain/terminal/terminal_frame.dart';
 import '../../domain/vnc/vnc_engine.dart';
 import '../../src/rust/api/desktop.dart' as desktop;
+import '../../src/rust/api/docker.dart' as docker;
 import '../../src/rust/api/page.dart' as page;
 import '../../src/rust/api/proxy.dart' as proxy;
 import '../../src/rust/api/ssh.dart' as rust;
+import '../../src/rust/api/terminal.dart' as native_terminal;
 import '../../src/rust/api/vnc.dart' as vnc;
+import 'docker_parser.dart';
+import 'process_parser.dart';
 import 'rdp_connection_error.dart';
 import 'rust_transfer_stream.dart';
 import 'server_status_parser.dart';
@@ -675,6 +681,11 @@ class _RustEngineSession
     implements
         SshEngineSession,
         ServerStatusSource,
+        ProcessManagerSource,
+        DockerManagerSource,
+        DockerContainerActions,
+        DockerImageActions,
+        DockerTerminalSource,
         PortForwardSession,
         TerminalScreenSource {
   _RustEngineSession(this._sessionId);
@@ -687,6 +698,7 @@ class _RustEngineSession
   // 或分片粘贴可能乱序；合并也减少了逐键的跨语言调用与全局会话锁竞争。
   final _pendingInput = BytesBuilder(copy: false);
   bool _writingInput = false;
+  bool _awaitingDockerFrame = false;
 
   @override
   Stream<PortForwardEvent> startPortForwards(List<ForwardPort> ports) async* {
@@ -719,6 +731,119 @@ class _RustEngineSession
   });
 
   @override
+  Future<ProcessSnapshot> readProcesses() => _guard(() async {
+    if (_closed) throw const SshEngineException('进程管理连接已关闭');
+    return parseProcesses(await rust.sshReadProcesses(sessionId: _sessionId));
+  });
+
+  @override
+  Future<List<DockerResource>> readDockerResources(DockerResourceKind kind) =>
+      _guard(() async {
+        if (_closed) throw const SshEngineException('Docker 管理连接已关闭');
+        return parseDockerResources(
+          await docker.sshReadDockerResources(
+            sessionId: _sessionId,
+            kind: _dockerKind(kind),
+          ),
+          kind,
+        );
+      });
+
+  @override
+  Future<DockerDetails> readDockerDetails(DockerResource resource) =>
+      _guard(() async {
+        if (_closed) throw const SshEngineException('Docker 管理连接已关闭');
+        return parseDockerDetails(
+          await docker.sshReadDockerDetails(
+            sessionId: _sessionId,
+            kind: _dockerKind(resource.kind),
+            resourceId: resource.id,
+          ),
+          resource,
+        );
+      });
+
+  @override
+  Future<DockerActionResult> runDockerContainerAction(
+    DockerResource container,
+    DockerContainerAction action, {
+    String? targetImage,
+    bool forcePull = false,
+  }) => _guard(() async {
+    if (_closed) throw const SshEngineException('Docker 操作连接已关闭');
+    if (container.kind != DockerResourceKind.container) {
+      throw const SshEngineException('此操作仅支持容器');
+    }
+    final warning = await docker.sshRunDockerContainerAction(
+      sessionId: _sessionId,
+      containerId: container.id,
+      action: switch (action) {
+        DockerContainerAction.start => docker.DockerContainerAction.start,
+        DockerContainerAction.stop => docker.DockerContainerAction.stop,
+        DockerContainerAction.upgrade => docker.DockerContainerAction.upgrade,
+        DockerContainerAction.delete => docker.DockerContainerAction.delete,
+      },
+      targetImage: targetImage,
+      forcePull: forcePull,
+    );
+    return DockerActionResult(warning: warning);
+  });
+
+  @override
+  Future<DockerActionResult> runDockerImageAction(
+    DockerImageAction action, {
+    DockerResource? image,
+  }) => _guard(() async {
+    if (_closed) throw const SshEngineException('Docker 操作连接已关闭');
+    if (image != null && image.kind != DockerResourceKind.image) {
+      throw const SshEngineException('此操作仅支持镜像');
+    }
+    await docker.sshRunDockerImageAction(
+      sessionId: _sessionId,
+      action: switch (action) {
+        DockerImageAction.delete => docker.DockerImageAction.delete,
+        DockerImageAction.pruneUntagged =>
+          docker.DockerImageAction.pruneUntagged,
+        DockerImageAction.pruneUnused => docker.DockerImageAction.pruneUnused,
+      },
+      imageId: image?.id,
+    );
+    return const DockerActionResult();
+  });
+
+  static docker.DockerResourceKind _dockerKind(DockerResourceKind kind) =>
+      switch (kind) {
+        DockerResourceKind.container => docker.DockerResourceKind.container,
+        DockerResourceKind.image => docker.DockerResourceKind.image,
+        DockerResourceKind.network => docker.DockerResourceKind.network,
+        DockerResourceKind.volume => docker.DockerResourceKind.volume,
+      };
+
+  @override
+  Future<ProcessDetails> readProcessDetails(RemoteProcess process) =>
+      _guard(() async {
+        if (_closed) throw const SshEngineException('进程管理连接已关闭');
+        return parseProcessDetails(
+          await rust.sshReadProcessDetails(
+            sessionId: _sessionId,
+            pid: process.pid,
+            startedAt: process.startedAt,
+          ),
+          process,
+        );
+      });
+
+  @override
+  Future<void> terminateProcess(RemoteProcess process) => _guard(() async {
+    if (_closed) throw const SshEngineException('进程管理连接已关闭');
+    await rust.sshTerminateProcess(
+      sessionId: _sessionId,
+      pid: process.pid,
+      startedAt: process.startedAt,
+    );
+  });
+
+  @override
   Stream<TerminalFrame> startTerminalShell({
     required int cols,
     required int rows,
@@ -732,39 +857,91 @@ class _RustEngineSession
           rows: rows,
           scrollback: scrollback,
         )
-        .map(
-          (frame) => TerminalFrame(
-            frameId: frame.frameId,
-            columns: frame.columns,
-            rows: frame.rows,
-            alternate: frame.alternate,
-            cursorX: frame.cursorX,
-            cursorY: frame.cursorY,
-            modes: frame.modes,
-            cursorBlink: frame.cursorBlink,
-            trimFront: frame.trimFront,
-            keepRows: frame.keepRows,
-            appendRows: frame.appendRows,
-            lines: [
-              for (final line in frame.lines)
-                TerminalLine(
-                  id: line.id,
-                  wrapped: line.wrapped,
-                  cells: line.cells,
-                  // 绝大多数行没有组合字符，避免每行分配一个空 Map。
-                  clusters: line.clusters.isEmpty
-                      ? const {}
-                      : {
-                          for (final cluster in line.clusters)
-                            cluster.column: cluster.text,
-                        },
-                ),
-            ],
-            title: frame.title,
-            bell: frame.bell,
-          ),
-        );
+        .map(_terminalFrame);
   }
+
+  @override
+  Stream<TerminalFrame> startDockerTerminalShell({
+    required DockerTerminalTarget target,
+    required int cols,
+    required int rows,
+    int scrollback = 10000,
+  }) {
+    if (_closed) throw const SshEngineException('终端已关闭');
+    // 容器预检可能等待数秒；PTY 就绪前保留输入，避免写入尚未建立的通道。
+    _awaitingDockerFrame = true;
+    return _dockerTerminalFrames(target, cols, rows, scrollback);
+  }
+
+  Stream<TerminalFrame> _dockerTerminalFrames(
+    DockerTerminalTarget target,
+    int cols,
+    int rows,
+    int scrollback,
+  ) async* {
+    try {
+      yield* rust
+          .sshStartDockerTerminal(
+            sessionId: _sessionId,
+            containerId: target.id,
+            cols: cols,
+            rows: rows,
+            scrollback: scrollback,
+          )
+          .map((frame) {
+            _awaitingDockerFrame = false;
+            if (!_writingInput && _pendingInput.isNotEmpty) {
+              unawaited(_drainInput());
+            }
+            return _terminalFrame(frame);
+          })
+          .handleError((Object error, StackTrace stack) {
+            Error.throwWithStackTrace(
+              error is AnyhowException
+                  ? SshEngineException(error.message.split('\n').first, error)
+                  : error,
+              stack,
+            );
+          });
+    } on AnyhowException catch (e) {
+      throw SshEngineException(e.message.split('\n').first, e);
+    } finally {
+      _awaitingDockerFrame = false;
+      _pendingInput.clear();
+    }
+  }
+
+  static TerminalFrame _terminalFrame(native_terminal.TerminalFrame frame) =>
+      TerminalFrame(
+        frameId: frame.frameId,
+        columns: frame.columns,
+        rows: frame.rows,
+        alternate: frame.alternate,
+        cursorX: frame.cursorX,
+        cursorY: frame.cursorY,
+        modes: frame.modes,
+        cursorBlink: frame.cursorBlink,
+        trimFront: frame.trimFront,
+        keepRows: frame.keepRows,
+        appendRows: frame.appendRows,
+        lines: [
+          for (final line in frame.lines)
+            TerminalLine(
+              id: line.id,
+              wrapped: line.wrapped,
+              cells: line.cells,
+              // 绝大多数行没有组合字符，避免每行分配一个空 Map。
+              clusters: line.clusters.isEmpty
+                  ? const {}
+                  : {
+                      for (final cluster in line.clusters)
+                        cluster.column: cluster.text,
+                    },
+            ),
+        ],
+        title: frame.title,
+        bell: frame.bell,
+      );
 
   @override
   Future<void> acknowledgeTerminalFrame(int frameId) => _guard(() async {
@@ -776,13 +953,13 @@ class _RustEngineSession
   void write(String data) {
     if (_closed || data.isEmpty) return;
     _pendingInput.add(utf8.encode(data));
-    if (!_writingInput) unawaited(_drainInput());
+    if (!_writingInput && !_awaitingDockerFrame) unawaited(_drainInput());
   }
 
   Future<void> _drainInput() async {
     _writingInput = true;
     try {
-      while (!_closed && _pendingInput.isNotEmpty) {
+      while (!_closed && !_awaitingDockerFrame && _pendingInput.isNotEmpty) {
         final bytes = _pendingInput.takeBytes();
         try {
           await rust.sshWrite(sessionId: _sessionId, data: bytes);

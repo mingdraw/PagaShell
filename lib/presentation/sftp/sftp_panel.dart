@@ -17,6 +17,7 @@ import '../../domain/entities/local_file_entry.dart';
 import '../../domain/repositories/local_file_repository.dart';
 import '../../domain/ssh/ssh_engine.dart';
 import '../components/app_dialog.dart';
+import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
 import '../components/app_text_form_field.dart';
 import '../localization/app_translations.dart';
@@ -831,10 +832,10 @@ class _TransferStripState extends State<_TransferStrip> {
                       children: [
                         AppIconButton.text(
                           semanticLabel: (_expanded ? '折叠传输进度' : '展开传输进度').tr,
-                          icon: Icon(
+                          icon: AppIcon(
                             _expanded
-                                ? shadcn.LucideIcons.chevronDown
-                                : shadcn.LucideIcons.chevronUp,
+                                ? AppIcons.chevronDown
+                                : AppIcons.chevronUp,
                             size: 15,
                           ),
                           onPressed: () => setState(() {
@@ -889,7 +890,7 @@ class _TransferStripState extends State<_TransferStrip> {
                         ),
                         AppIconButton.text(
                           semanticLabel: '清除已完成'.tr,
-                          icon: const Icon(shadcn.LucideIcons.listX, size: 15),
+                          icon: const AppIcon(AppIcons.listX, size: 15),
                           onPressed: () => controller.clearFinished(
                             sessionId: widget.sessionId,
                           ),
@@ -995,11 +996,11 @@ class _TransferRow extends StatelessWidget {
         final icon = switch (status) {
           TransferStatus.running =>
             task.kind == TransferKind.upload
-                ? shadcn.LucideIcons.upload
-                : shadcn.LucideIcons.download,
-          TransferStatus.done => shadcn.LucideIcons.circleCheck,
-          TransferStatus.failed => shadcn.LucideIcons.circleAlert,
-          TransferStatus.cancelled => shadcn.LucideIcons.circleX,
+                ? AppIcons.upload
+                : AppIcons.download,
+          TransferStatus.done => AppIcons.circleCheck,
+          TransferStatus.failed => AppIcons.circleAlert,
+          TransferStatus.cancelled => AppIcons.circleX,
         };
         final color = switch (status) {
           TransferStatus.failed => colors.destructive,
@@ -1032,8 +1033,8 @@ class _TransferRow extends StatelessWidget {
               icon: icon,
               color: color,
               hoverIcon: status == TransferStatus.running
-                  ? shadcn.LucideIcons.x
-                  : shadcn.LucideIcons.rotateCw,
+                  ? AppIcons.x
+                  : AppIcons.rotateCw,
               semanticLabel: switch (status) {
                 TransferStatus.running => '停止传输'.tr,
                 TransferStatus.failed => '重试传输'.tr,
@@ -1112,8 +1113,8 @@ class _TransferStatusAction extends StatefulWidget {
     super.key,
   });
 
-  final IconData icon;
-  final IconData hoverIcon;
+  final AppIcons icon;
+  final AppIcons hoverIcon;
   final Color color;
   final String semanticLabel;
   final VoidCallback? onPressed;
@@ -1133,10 +1134,10 @@ class _TransferStatusActionState extends State<_TransferStatusAction> {
       width: 26,
       height: 26,
       child: widget.onPressed == null
-          ? Center(child: Icon(widget.icon, size: 13, color: widget.color))
+          ? Center(child: AppIcon(widget.icon, size: 13, color: widget.color))
           : AppIconButton.text(
               semanticLabel: widget.semanticLabel,
-              icon: Icon(
+              icon: AppIcon(
                 _hovered ? widget.hoverIcon : widget.icon,
                 size: 13,
                 color: widget.color,

@@ -1,5 +1,6 @@
 import '../../domain/ssh/server_status.dart';
 import '../../domain/ssh/ssh_engine.dart';
+import 'server_status_storage_parser.dart';
 
 /// 解析固定脚本的分段输出；Linux 读取内核计数，macOS 使用 C 语言环境。
 ServerStatusSample parseServerStatus(String output) {
@@ -83,15 +84,29 @@ ServerStatusSample parseServerStatus(String output) {
         int.parse(fields[7]) * 512,
       );
     }
+    final filesystems = _filesystems(sections['FILESYSTEMS']);
+    final swapTotal = memory['SwapTotal'];
+    final swapFree = memory['SwapFree'];
     return ServerStatusSample(
       systemRelease: _linuxRelease(sections['OS_RELEASE']),
+      architecture: sections['ARCHITECTURE']?.firstOrNull,
+      loadAverage: _loadAverage(sections['LOAD']),
       uptimeSeconds: uptime,
       cpuTotal: ticks.fold(0, (sum, value) => sum + value),
       cpuIdle: ticks[3] + (ticks.length > 4 ? ticks[4] : 0),
       cpuCores: cpuCores,
       memoryTotal: total,
       memoryAvailable: available.clamp(0, total),
-      filesystems: _filesystems(sections['FILESYSTEMS']),
+      swapTotal: swapTotal,
+      swapUsed: swapTotal == null || swapFree == null
+          ? null
+          : (swapTotal - swapFree).clamp(0, swapTotal),
+      filesystems: filesystems,
+      storage: parseLinuxStorage(
+        sections['LINUX_STORAGE'],
+        filesystems,
+        deviceAliases: sections['LINUX_DEVICE_ALIASES'],
+      ),
       network: network,
       disks: disks,
     );
@@ -138,6 +153,7 @@ List<FilesystemUsage> _filesystems(List<String>? lines) {
     result.add(
       FilesystemUsage(
         mount: fields.skip(mountIndex).join(' '),
+        device: fields.first,
         total: total,
         used: int.parse(fields[2]) * 1024,
         available: int.parse(fields[3]) * 1024,
@@ -204,11 +220,20 @@ ServerStatusSample _parseMacStatus(Map<String, List<String>> sections) {
   if (uptime <= 0 || total <= 0 || cpu < 0 || cpu > 1) {
     throw const FormatException('invalid macOS sample');
   }
+  final storage = parseMacStorage(
+    sections['MAC_STORAGE'],
+    sections['MAC_APFS'],
+    _filesystems(sections['FILESYSTEMS']),
+    legacyRootName: sections['MAC_DISK_NAME']?.firstOrNull,
+  );
+  final swap = _macSwap(sections['MAC_SWAP']);
   return ServerStatusSample(
     system: 'macOS',
     systemRelease: sections['MAC_VERSION']?.firstOrNull == null
         ? null
         : 'macOS ${sections['MAC_VERSION']!.first}',
+    architecture: sections['ARCHITECTURE']?.firstOrNull,
+    loadAverage: _loadAverage(sections['LOAD']),
     measuredCpuFraction: cpu,
     uptimeSeconds: uptime,
     cpuTotal: 0,
@@ -216,10 +241,10 @@ ServerStatusSample _parseMacStatus(Map<String, List<String>> sections) {
     cpuCores: _macCpuCores(sections['MAC_CPU_CORES']),
     memoryTotal: total,
     memoryAvailable: available.clamp(0, total),
-    filesystems: _macSystemFilesystem(
-      sections['FILESYSTEMS'],
-      sections['MAC_DISK_NAME']?.firstOrNull,
-    ),
+    swapTotal: swap?.total,
+    swapUsed: swap?.used,
+    filesystems: storage.filesystems,
+    storage: storage.storage,
     network: network,
     disks: disks,
   );
@@ -246,18 +271,36 @@ Map<int, CpuCounters> _macCpuCores(List<String>? lines) {
   return cores;
 }
 
-List<FilesystemUsage> _macSystemFilesystem(List<String>? lines, String? name) {
-  final root = _filesystems(lines).where((fs) => fs.mount == '/').firstOrNull;
-  if (root == null) return [];
-  final available = root.available.clamp(0, root.total);
-  // APFS 的 Used 仅属于当前卷；总容量减共享可用空间才反映系统容器占用。
-  return [
-    FilesystemUsage(
-      mount: root.mount,
-      name: name,
-      total: root.total,
-      used: root.total - available,
-      available: available,
-    ),
-  ];
+List<double> _loadAverage(List<String>? lines) {
+  final values = RegExp(r'\d+(?:\.\d+)?')
+      .allMatches(lines?.firstOrNull ?? '')
+      .take(3)
+      .map((match) => double.parse(match.group(0)!))
+      .toList();
+  return values.length == 3 ? values : [];
+}
+
+({int total, int used})? _macSwap(List<String>? lines) {
+  final text = lines?.join(' ') ?? '';
+  int? bytes(String key) {
+    final match = RegExp('$key = ([0-9.]+)([KMGT]?)').firstMatch(text);
+    if (match == null) return null;
+    final factor = switch (match.group(2)) {
+      'K' => 1024,
+      'M' => 1024 * 1024,
+      'G' => 1024 * 1024 * 1024,
+      'T' => 1024 * 1024 * 1024 * 1024,
+      _ => 1,
+    };
+    final value = double.tryParse(match.group(1)!);
+    return value != null && value.isFinite && value >= 0
+        ? (value * factor).round()
+        : null;
+  }
+
+  final total = bytes('total');
+  final used = bytes('used');
+  return total == null || used == null
+      ? null
+      : (total: total, used: used.clamp(0, total));
 }

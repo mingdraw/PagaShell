@@ -386,7 +386,7 @@ void main() {
     expect(
       find.descendant(
         of: action,
-        matching: find.byIcon(shadcn.LucideIcons.circleAlert),
+        matching: findAppIcon(AppIcons.circleAlert),
       ),
       findsOneWidget,
     );
@@ -415,7 +415,7 @@ void main() {
     expect(
       find.descendant(
         of: findAppIconButton('重试传输'),
-        matching: find.byIcon(shadcn.LucideIcons.rotateCw),
+        matching: findAppIcon(AppIcons.rotateCw),
       ),
       findsOneWidget,
     );
@@ -456,7 +456,7 @@ void main() {
     expect(
       find.descendant(
         of: action,
-        matching: find.byIcon(shadcn.LucideIcons.circleCheck),
+        matching: findAppIcon(AppIcons.circleCheck),
       ),
       findsOneWidget,
     );
@@ -500,7 +500,7 @@ void main() {
     expect(
       find.descendant(
         of: action,
-        matching: find.byIcon(shadcn.LucideIcons.upload),
+        matching: findAppIcon(AppIcons.upload),
       ),
       findsOneWidget,
     );
@@ -516,7 +516,7 @@ void main() {
     await mouse.moveTo(tester.getCenter(action));
     await tester.pump();
     expect(
-      find.descendant(of: action, matching: find.byIcon(shadcn.LucideIcons.x)),
+      find.descendant(of: action, matching: findAppIcon(AppIcons.x)),
       findsOneWidget,
     );
     await mouse.moveTo(Offset.zero);
@@ -524,7 +524,7 @@ void main() {
     expect(
       find.descendant(
         of: action,
-        matching: find.byIcon(shadcn.LucideIcons.upload),
+        matching: findAppIcon(AppIcons.upload),
       ),
       findsOneWidget,
     );
@@ -549,7 +549,7 @@ void main() {
     expect(local.top, remote.top);
     expect(local.right, lessThan(remote.left));
     expect(local.height, greaterThan(300));
-    expect(find.byIcon(shadcn.LucideIcons.ellipsis), findsNothing);
+    expect(findAppIcon(AppIcons.ellipsis), findsNothing);
     expect(find.text('拖拽文件到另一侧传输，双击文件夹打开'), findsNothing);
   });
 
@@ -641,15 +641,15 @@ void main() {
   testWidgets('两侧右键上传下载有图标，本地右键提供重命名和删除', (tester) async {
     await pumpPanel(tester);
     for (final (side, name, command, icon) in [
-      ('local', 'upload.txt', '上传', shadcn.LucideIcons.upload),
-      ('remote', 'readme.txt', '下载', shadcn.LucideIcons.download),
+      ('local', 'upload.txt', '上传', AppIcons.upload),
+      ('remote', 'readme.txt', '下载', AppIcons.download),
     ]) {
       await tester.tap(fileIn(side, name), buttons: kSecondaryMouseButton);
       await tester.pumpAndSettle();
       final item = find.widgetWithText(shadcn.MenuButton, command);
       expect(item, findsOneWidget);
       expect(
-        find.descendant(of: item, matching: find.byIcon(icon)),
+        find.descendant(of: item, matching: findAppIcon(icon)),
         findsOneWidget,
       );
       expect(find.text('重命名'), findsOneWidget);
@@ -1150,7 +1150,7 @@ void main() {
     final clear = findAppIconButton('清除已完成');
     final icon = find.descendant(
       of: clear,
-      matching: find.byIcon(shadcn.LucideIcons.listX),
+      matching: findAppIcon(AppIcons.listX),
     );
     final idleColor = IconTheme.of(tester.element(icon)).color;
     final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
@@ -1239,7 +1239,7 @@ void main() {
     expect(
       find.descendant(
         of: clear,
-        matching: find.byIcon(shadcn.LucideIcons.listX),
+        matching: findAppIcon(AppIcons.listX),
       ),
       findsOneWidget,
     );

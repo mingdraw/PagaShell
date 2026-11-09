@@ -67,7 +67,20 @@ extension _AgentHistoryOperations on AgentController {
   }
 
   void _addEntry(AgentEntry entry) {
-    entries.add(entry);
+    final active = _queue.active;
+    final activeIndex = active == null ? -1 : entries.indexOf(active.entry);
+    final nextUser = entry.kind == AgentEntryKind.user || activeIndex < 0
+        ? -1
+        : entries.indexWhere(
+            (item) => item.kind == AgentEntryKind.user,
+            activeIndex + 1,
+          );
+    // 工具和回复跟在本轮用户消息后面，尚未执行的消息保持在其下方。
+    if (nextUser < 0) {
+      entries.add(entry);
+    } else {
+      entries.insert(nextUser, entry);
+    }
     _saveConversation();
   }
 
@@ -184,6 +197,8 @@ extension _AgentHistoryOperations on AgentController {
           message.kind,
           message.text,
           archivedCommand: message.command,
+          requestState: message.requestState,
+          requestError: message.requestError,
         ),
     ]);
     _history = turns;

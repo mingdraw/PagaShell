@@ -3,6 +3,7 @@ import 'package:pagashell/terminal/core.dart';
 import '../../domain/entities/host.dart';
 import '../../domain/proxy/dynamic_proxy_engine.dart';
 import '../../domain/rdp/rdp_engine.dart';
+import '../../domain/ssh/docker_manager.dart';
 import '../../domain/ssh/host_key.dart';
 import '../../domain/ssh/ssh_engine.dart';
 
@@ -39,10 +40,14 @@ enum SessionPhase {
 
 enum SessionKind {
   terminal,
+  containerTerminal,
   fileTransfer,
   portForward,
   dynamicProxy,
-  remoteDesktop,
+  remoteDesktop;
+
+  bool get isInteractiveTerminal =>
+      this == terminal || this == containerTerminal;
 }
 
 /// 一个终端、文件传输或端口转发标签对应的会话快照（不可变）。
@@ -62,6 +67,7 @@ class Session {
     this.hostKeyFailure,
     this.desktopSession,
     this.passwordRequest,
+    this.dockerTarget,
   });
 
   final String id;
@@ -78,7 +84,8 @@ class Session {
   }
 
   final SessionKind kind;
-  String get title => host.name;
+  final DockerTerminalTarget? dockerTarget;
+  String get title => dockerTarget?.name ?? host.name;
   final SessionPhase phase;
 
   /// [SessionPhase.failed] 时的原因描述。
@@ -136,6 +143,7 @@ class Session {
         SessionPhase.failed => passwordRequest ?? this.passwordRequest,
         _ => null,
       },
+      dockerTarget: dockerTarget,
     );
   }
 
@@ -148,6 +156,7 @@ class Session {
       other.kind == kind &&
       other.phase == phase &&
       other.error == error &&
+      other.dockerTarget == dockerTarget &&
       other.hostKeyReview == hostKeyReview &&
       other.hostKeyFailure == hostKeyFailure &&
       other.passwordRequest == passwordRequest;
@@ -163,6 +172,7 @@ class Session {
     hostKeyReview,
     hostKeyFailure,
     passwordRequest,
+    dockerTarget,
   );
 }
 

@@ -189,6 +189,10 @@ void main() {
 
   testWidgets('传输进度覆盖桌面而不改变视口，取消保持会话', (tester) async {
     final (session, _) = await panel(tester);
+    final desktopViewport = find.ancestor(
+      of: find.byKey(const ValueKey('rdp-desktop-image')),
+      matching: find.byType(FittedBox),
+    );
     session.output.add(
       RdpFrame(width: 64, height: 32, rgba: Uint8List(64 * 32 * 4)),
     );
@@ -198,9 +202,10 @@ void main() {
         () => Future<void>.delayed(const Duration(milliseconds: 10)),
       );
       await tester.pump();
-      if (find.byType(FittedBox).evaluate().isNotEmpty) break;
+      if (desktopViewport.evaluate().isNotEmpty) break;
     }
-    final viewport = tester.getSize(find.byType(FittedBox));
+    expect(desktopViewport, findsOneWidget);
+    final viewport = tester.getSize(desktopViewport);
     session.clipboardOutput.add(
       const RdpClipboardEvent(
         kind: RdpClipboardEventKind.receiving,
@@ -210,7 +215,7 @@ void main() {
     );
     await tester.pump();
     expect(find.text('正在接收剪贴板文件（25%）'), findsOneWidget);
-    expect(tester.getSize(find.byType(FittedBox)), viewport);
+    expect(tester.getSize(desktopViewport), viewport);
     await tester.tap(find.byKey(const ValueKey('rdp-clipboard-cancel')));
     await tester.pump();
     expect(find.text('正在接收剪贴板文件（25%）'), findsNothing);

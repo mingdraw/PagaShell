@@ -4,6 +4,7 @@
 // ignore_for_file: unused_import, unused_element, unnecessary_import, duplicate_ignore, invalid_use_of_internal_member, annotate_overrides, non_constant_identifier_names, curly_braces_in_flow_control_structures, prefer_const_literals_to_create_immutables, unused_field
 
 import 'api/desktop.dart';
+import 'api/docker.dart';
 import 'api/page.dart';
 import 'api/proxy.dart';
 import 'api/ssh.dart';
@@ -72,7 +73,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0';
 
   @override
-  int get rustContentHash => -1016295253;
+  int get rustContentHash => 1600103255;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -244,12 +245,53 @@ abstract class RustLibApi extends BaseApi {
     required PageGateway gateway,
   });
 
+  Future<String> crateApiDockerSshReadDockerDetails({
+    required int sessionId,
+    required DockerResourceKind kind,
+    required String resourceId,
+  });
+
+  Future<String> crateApiDockerSshReadDockerResources({
+    required int sessionId,
+    required DockerResourceKind kind,
+  });
+
+  Future<String> crateApiSshSshReadProcessDetails({
+    required int sessionId,
+    required int pid,
+    required String startedAt,
+  });
+
+  Future<String> crateApiSshSshReadProcesses({required int sessionId});
+
   Future<String> crateApiSshSshReadServerStatus({required int sessionId});
 
   Future<void> crateApiSshSshResize({
     required int sessionId,
     required int cols,
     required int rows,
+  });
+
+  Future<String?> crateApiDockerSshRunDockerContainerAction({
+    required int sessionId,
+    required String containerId,
+    required DockerContainerAction action,
+    String? targetImage,
+    required bool forcePull,
+  });
+
+  Future<void> crateApiDockerSshRunDockerImageAction({
+    required int sessionId,
+    required DockerImageAction action,
+    String? imageId,
+  });
+
+  Stream<TerminalFrame> crateApiSshSshStartDockerTerminal({
+    required int sessionId,
+    required String containerId,
+    required int cols,
+    required int rows,
+    required int scrollback,
   });
 
   Stream<PortForwardEvent> crateApiSshSshStartPortForwards({
@@ -267,6 +309,12 @@ abstract class RustLibApi extends BaseApi {
   Future<void> crateApiSshSshTerminalAck({
     required int sessionId,
     required int frameId,
+  });
+
+  Future<void> crateApiSshSshTerminateProcess({
+    required int sessionId,
+    required int pid,
+    required String startedAt,
   });
 
   Future<void> crateApiSshSshValidatePrivateKey({
@@ -1478,6 +1526,146 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<String> crateApiDockerSshReadDockerDetails({
+    required int sessionId,
+    required DockerResourceKind kind,
+    required String resourceId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_32(sessionId, serializer);
+          sse_encode_docker_resource_kind(kind, serializer);
+          sse_encode_String(resourceId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 33,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDockerSshReadDockerDetailsConstMeta,
+        argValues: [sessionId, kind, resourceId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDockerSshReadDockerDetailsConstMeta =>
+      const TaskConstMeta(
+        debugName: "ssh_read_docker_details",
+        argNames: ["sessionId", "kind", "resourceId"],
+      );
+
+  @override
+  Future<String> crateApiDockerSshReadDockerResources({
+    required int sessionId,
+    required DockerResourceKind kind,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_32(sessionId, serializer);
+          sse_encode_docker_resource_kind(kind, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 34,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDockerSshReadDockerResourcesConstMeta,
+        argValues: [sessionId, kind],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDockerSshReadDockerResourcesConstMeta =>
+      const TaskConstMeta(
+        debugName: "ssh_read_docker_resources",
+        argNames: ["sessionId", "kind"],
+      );
+
+  @override
+  Future<String> crateApiSshSshReadProcessDetails({
+    required int sessionId,
+    required int pid,
+    required String startedAt,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_32(sessionId, serializer);
+          sse_encode_u_32(pid, serializer);
+          sse_encode_String(startedAt, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 35,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiSshSshReadProcessDetailsConstMeta,
+        argValues: [sessionId, pid, startedAt],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiSshSshReadProcessDetailsConstMeta =>
+      const TaskConstMeta(
+        debugName: "ssh_read_process_details",
+        argNames: ["sessionId", "pid", "startedAt"],
+      );
+
+  @override
+  Future<String> crateApiSshSshReadProcesses({required int sessionId}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_32(sessionId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 36,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiSshSshReadProcessesConstMeta,
+        argValues: [sessionId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiSshSshReadProcessesConstMeta =>
+      const TaskConstMeta(
+        debugName: "ssh_read_processes",
+        argNames: ["sessionId"],
+      );
+
+  @override
   Future<String> crateApiSshSshReadServerStatus({required int sessionId}) {
     return handler.executeNormal(
       NormalTask(
@@ -1487,7 +1675,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 33,
+            funcId: 37,
             port: port_,
           );
         },
@@ -1524,7 +1712,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 34,
+            funcId: 38,
             port: port_,
           );
         },
@@ -1545,6 +1733,143 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   );
 
   @override
+  Future<String?> crateApiDockerSshRunDockerContainerAction({
+    required int sessionId,
+    required String containerId,
+    required DockerContainerAction action,
+    String? targetImage,
+    required bool forcePull,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_32(sessionId, serializer);
+          sse_encode_String(containerId, serializer);
+          sse_encode_docker_container_action(action, serializer);
+          sse_encode_opt_String(targetImage, serializer);
+          sse_encode_bool(forcePull, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 39,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_opt_String,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDockerSshRunDockerContainerActionConstMeta,
+        argValues: [sessionId, containerId, action, targetImage, forcePull],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDockerSshRunDockerContainerActionConstMeta =>
+      const TaskConstMeta(
+        debugName: "ssh_run_docker_container_action",
+        argNames: [
+          "sessionId",
+          "containerId",
+          "action",
+          "targetImage",
+          "forcePull",
+        ],
+      );
+
+  @override
+  Future<void> crateApiDockerSshRunDockerImageAction({
+    required int sessionId,
+    required DockerImageAction action,
+    String? imageId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_32(sessionId, serializer);
+          sse_encode_docker_image_action(action, serializer);
+          sse_encode_opt_String(imageId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 40,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDockerSshRunDockerImageActionConstMeta,
+        argValues: [sessionId, action, imageId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDockerSshRunDockerImageActionConstMeta =>
+      const TaskConstMeta(
+        debugName: "ssh_run_docker_image_action",
+        argNames: ["sessionId", "action", "imageId"],
+      );
+
+  @override
+  Stream<TerminalFrame> crateApiSshSshStartDockerTerminal({
+    required int sessionId,
+    required String containerId,
+    required int cols,
+    required int rows,
+    required int scrollback,
+  }) {
+    final output = RustStreamSink<TerminalFrame>();
+    unawaited(
+      handler.executeNormal(
+        NormalTask(
+          callFfi: (port_) {
+            final serializer = SseSerializer(generalizedFrbRustBinding);
+            sse_encode_u_32(sessionId, serializer);
+            sse_encode_String(containerId, serializer);
+            sse_encode_u_32(cols, serializer);
+            sse_encode_u_32(rows, serializer);
+            sse_encode_u_32(scrollback, serializer);
+            sse_encode_StreamSink_terminal_frame_Sse(output, serializer);
+            pdeCallFfi(
+              generalizedFrbRustBinding,
+              serializer,
+              funcId: 41,
+              port: port_,
+            );
+          },
+          codec: SseCodec(
+            decodeSuccessData: sse_decode_unit,
+            decodeErrorData: null,
+          ),
+          constMeta: kCrateApiSshSshStartDockerTerminalConstMeta,
+          argValues: [sessionId, containerId, cols, rows, scrollback, output],
+          apiImpl: this,
+        ),
+      ),
+    );
+    return output.stream;
+  }
+
+  TaskConstMeta get kCrateApiSshSshStartDockerTerminalConstMeta =>
+      const TaskConstMeta(
+        debugName: "ssh_start_docker_terminal",
+        argNames: [
+          "sessionId",
+          "containerId",
+          "cols",
+          "rows",
+          "scrollback",
+          "output",
+        ],
+      );
+
+  @override
   Stream<PortForwardEvent> crateApiSshSshStartPortForwards({
     required int sessionId,
     required List<ForwardPortSpec> ports,
@@ -1561,7 +1886,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 35,
+              funcId: 42,
               port: port_,
             );
           },
@@ -1605,7 +1930,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 36,
+              funcId: 43,
               port: port_,
             );
           },
@@ -1642,7 +1967,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 37,
+            funcId: 44,
             port: port_,
           );
         },
@@ -1663,6 +1988,43 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   );
 
   @override
+  Future<void> crateApiSshSshTerminateProcess({
+    required int sessionId,
+    required int pid,
+    required String startedAt,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_32(sessionId, serializer);
+          sse_encode_u_32(pid, serializer);
+          sse_encode_String(startedAt, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 45,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiSshSshTerminateProcessConstMeta,
+        argValues: [sessionId, pid, startedAt],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiSshSshTerminateProcessConstMeta =>
+      const TaskConstMeta(
+        debugName: "ssh_terminate_process",
+        argNames: ["sessionId", "pid", "startedAt"],
+      );
+
+  @override
   Future<void> crateApiSshSshValidatePrivateKey({
     required String privateKey,
     String? passphrase,
@@ -1676,7 +2038,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 38,
+            funcId: 46,
             port: port_,
           );
         },
@@ -1711,7 +2073,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 39,
+            funcId: 47,
             port: port_,
           );
         },
@@ -1751,7 +2113,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 40,
+            funcId: 48,
             port: port_,
           );
         },
@@ -1781,7 +2143,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 41,
+            funcId: 49,
             port: port_,
           );
         },
@@ -1813,7 +2175,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 42,
+            funcId: 50,
             port: port_,
           );
         },
@@ -1857,7 +2219,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 43,
+            funcId: 51,
             port: port_,
           );
         },
@@ -2038,6 +2400,24 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  DockerContainerAction dco_decode_docker_container_action(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return DockerContainerAction.values[raw as int];
+  }
+
+  @protected
+  DockerImageAction dco_decode_docker_image_action(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return DockerImageAction.values[raw as int];
+  }
+
+  @protected
+  DockerResourceKind dco_decode_docker_resource_kind(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return DockerResourceKind.values[raw as int];
+  }
+
+  @protected
   ForwardPortSpec dco_decode_forward_port_spec(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
@@ -2048,6 +2428,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       targetHost: dco_decode_String(arr[1]),
       targetPort: dco_decode_u_16(arr[2]),
     );
+  }
+
+  @protected
+  int dco_decode_i_32(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as int;
   }
 
   @protected
@@ -2483,6 +2869,33 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  DockerContainerAction sse_decode_docker_container_action(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return DockerContainerAction.values[inner];
+  }
+
+  @protected
+  DockerImageAction sse_decode_docker_image_action(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return DockerImageAction.values[inner];
+  }
+
+  @protected
+  DockerResourceKind sse_decode_docker_resource_kind(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return DockerResourceKind.values[inner];
+  }
+
+  @protected
   ForwardPortSpec sse_decode_forward_port_spec(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_localPort = sse_decode_u_16(deserializer);
@@ -2493,6 +2906,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       targetHost: var_targetHost,
       targetPort: var_targetPort,
     );
+  }
+
+  @protected
+  int sse_decode_i_32(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getInt32();
   }
 
   @protected
@@ -2833,12 +3252,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  int sse_decode_i_32(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    return deserializer.buffer.getInt32();
-  }
-
-  @protected
   void sse_encode_AnyhowException(
     AnyhowException self,
     SseSerializer serializer,
@@ -3020,6 +3433,33 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_docker_container_action(
+    DockerContainerAction self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_docker_image_action(
+    DockerImageAction self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_docker_resource_kind(
+    DockerResourceKind self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
   void sse_encode_forward_port_spec(
     ForwardPortSpec self,
     SseSerializer serializer,
@@ -3028,6 +3468,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_u_16(self.localPort, serializer);
     sse_encode_String(self.targetHost, serializer);
     sse_encode_u_16(self.targetPort, serializer);
+  }
+
+  @protected
+  void sse_encode_i_32(int self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putInt32(self);
   }
 
   @protected
@@ -3326,11 +3772,5 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   @protected
   void sse_encode_unit(void self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-  }
-
-  @protected
-  void sse_encode_i_32(int self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    serializer.buffer.putInt32(self);
   }
 }

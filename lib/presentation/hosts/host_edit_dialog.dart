@@ -8,6 +8,7 @@ import '../../domain/entities/host.dart';
 import '../../domain/entities/proxy_config.dart';
 import '../../domain/vault/secret_store.dart';
 import '../components/app_dialog.dart';
+import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
 import '../components/app_radio_card_field.dart';
 import '../components/app_select_field.dart';
@@ -323,12 +324,12 @@ class _HostEditDialogState extends State<HostEditDialog> {
                     items: const [
                       AppRadioCardOption(
                         value: GatewayType.ssh,
-                        icon: shadcn.LucideIcons.terminal,
+                        icon: AppIcons.terminal,
                         child: Text('SSH'),
                       ),
                       AppRadioCardOption(
                         value: GatewayType.page,
-                        icon: shadcn.LucideIcons.network,
+                        icon: AppIcons.network,
                         child: Text('Page'),
                       ),
                     ],
@@ -356,17 +357,17 @@ class _HostEditDialogState extends State<HostEditDialog> {
                     items: const [
                       AppRadioCardOption(
                         value: ServiceType.ssh,
-                        icon: shadcn.LucideIcons.terminal,
+                        icon: AppIcons.terminal,
                         child: Text('SSH'),
                       ),
                       AppRadioCardOption(
                         value: ServiceType.rdp,
-                        icon: shadcn.LucideIcons.monitor,
+                        icon: AppIcons.rdp,
                         child: Text('RDP'),
                       ),
                       AppRadioCardOption(
                         value: ServiceType.vnc,
-                        icon: shadcn.LucideIcons.screenShare,
+                        icon: AppIcons.screenShare,
                         child: Text('VNC'),
                       ),
                     ],
@@ -508,10 +509,8 @@ class _HostEditDialogState extends State<HostEditDialog> {
                                 : '留空则连接时询问'.tr),
                       suffixIcon: AppIconButton(
                         density: shadcn.ButtonDensity.compact,
-                        icon: Icon(
-                          _obscure
-                              ? shadcn.LucideIcons.eyeOff
-                              : shadcn.LucideIcons.eye,
+                        icon: AppIcon(
+                          _obscure ? AppIcons.eyeOff : AppIcons.eye,
                           size: AppTheme.inputIconSize,
                         ),
                         onPressed: () => setState(() => _obscure = !_obscure),
@@ -546,10 +545,10 @@ class _HostEditDialogState extends State<HostEditDialog> {
                     key: const ValueKey('host-advanced-toggle'),
                     onPressed: () =>
                         setState(() => _advancedExpanded = !_advancedExpanded),
-                    leading: Icon(
+                    leading: AppIcon(
                       _advancedExpanded
-                          ? shadcn.LucideIcons.chevronDown
-                          : shadcn.LucideIcons.chevronRight,
+                          ? AppIcons.chevronDown
+                          : AppIcons.chevronRight,
                       size: 16,
                     ),
                     child: Text('高级选项'.tr),

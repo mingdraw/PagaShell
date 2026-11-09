@@ -24,7 +24,7 @@ import 'package:pagashell/presentation/ai/agent_workspace.dart';
 import 'package:pagashell/presentation/components/app_text_form_field.dart';
 import 'package:pagashell/presentation/shell/widgets/window_controls.dart';
 import 'package:pagashell/presentation/shell/widgets/workspace.dart';
-import 'package:pagashell/presentation/terminal/server_status_panel.dart';
+import 'package:pagashell/presentation/terminal/terminal_side_panel.dart';
 import 'package:pagashell/presentation/theme/app_theme.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
@@ -826,9 +826,12 @@ ss -lntp
       final windowButtons = platform == TargetPlatform.macOS
           ? null
           : tester.getRect(find.byType(WindowButtons));
+      final agentButtonBounds = tester.getRect(
+        find.byKey(const ValueKey('agent-toggle')),
+      );
       expect(tester.getSize(viewport).width, 0);
       expect(
-        tester.getRect(find.byKey(const ValueKey('agent-toggle'))).right,
+        tester.getRect(find.byKey(const ValueKey('app-settings-button'))).right,
         windowButtons?.left ?? tester.view.physicalSize.width,
       );
 
@@ -852,11 +855,11 @@ ss -lntp
       expect(openedBounds.right, tester.getRect(viewport).left);
       expect(tester.getRect(panel).top, AppTheme.windowHeaderHeight);
       final collapse = find.byKey(const ValueKey('agent-toggle'));
-      expect(tester.getRect(collapse).left, tester.getRect(panel).left);
+      expect(tester.getRect(collapse), agentButtonBounds);
       expect(
         find.descendant(
           of: collapse,
-          matching: find.byIcon(shadcn.LucideIcons.panelRightClose),
+          matching: findAppIcon(AppIcons.bot),
         ),
         findsOneWidget,
       );
@@ -1108,7 +1111,7 @@ ss -lntp
         find.byType(shadcn.TabPane<String>),
       );
       expect(
-        tester.getRect(find.byType(ServerStatusPanel)),
+        tester.getRect(find.byType(TerminalSidePanel)),
         tester.getRect(find.byWidget(pane.child)),
       );
       expect(
@@ -1616,6 +1619,127 @@ ss -lntp
       await tester.pumpWidget(const SizedBox.shrink());
     });
   }
+
+  testWidgets('Agent 忙碌时支持 Enter 和按钮连续发送，引用与模式用于对应排队消息', (tester) async {
+    final first = Completer<Response<dynamic>>();
+    var count = 0;
+    final connect = FakeAiConnect(
+      (_) => ++count == 1 ? first.future : openAiReply('reply-$count'),
+    );
+    final capture = await pump(
+      tester,
+      size: const Size(800, 600),
+      connect: connect,
+    );
+    await configure(tester);
+    Get.find<SessionController>().sessions.add(
+      Session(
+        id: 'server',
+        host: const Host(id: 'server', name: 'Server', hostname: 'server.test'),
+        phase: SessionPhase.ready,
+        engineSession: _SshSession(),
+        terminal: Terminal(),
+      ),
+    );
+    await tester.tap(find.byKey(const ValueKey('agent-toggle')).first);
+    await tester.pumpAndSettle();
+    final input = find.byKey(const ValueKey('agent-input'));
+    final controller = tester.widget<AppTextFormField>(input).controller;
+    final agent = Get.find<AgentController>();
+    await tester.enterText(input, 'first');
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await pumpModelOptions(tester);
+    expect(controller.text, isEmpty);
+    expect(agent.busy.value, isTrue);
+    expect(find.byKey(const ValueKey('agent-send')), findsOneWidget);
+    expect(find.byKey(const ValueKey('agent-stop')), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('agent-add-context')));
+    await pumpModelOptions(tester);
+    await tester.tap(find.text('Server · 终端').hitTestable());
+    await pumpModelOptions(tester);
+    await tester.tap(find.byKey(const ValueKey('agent-access-select')));
+    await pumpModelOptions(tester);
+    await tester.tap(find.text('完全访问').hitTestable());
+    await pumpModelOptions(tester);
+    await tester.tap(find.byKey(const ValueKey('agent-reasoning-select')));
+    await pumpModelOptions(tester);
+    await tester.tap(find.text('高').hitTestable());
+    await pumpModelOptions(tester);
+    await tester.enterText(input, '${controller.text}second');
+    await tester.tap(find.byKey(const ValueKey('agent-send')));
+    await pumpModelOptions(tester);
+    expect(controller.text, isEmpty);
+    await tester.enterText(input, 'third');
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await pumpModelOptions(tester);
+    expect(controller.text, isEmpty);
+    expect(count, 1);
+    expect(agent.queuedCount, 2);
+    expect(find.text('排队中'), findsNWidgets(2));
+    expect(find.text('正在思考 · 2 条消息排队中'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await _capture(tester, capture, 'agent-message-queue');
+    first.complete(openAiReply('first-reply'));
+    await tester.pumpAndSettle();
+    expect(count, 3);
+    expect(agent.entries.map((entry) => entry.text), [
+      'first',
+      'first-reply',
+      '@Server second',
+      'reply-2',
+      'third',
+      'reply-3',
+    ]);
+    expect(jsonEncode(connect.requests[1].body), contains('server.test'));
+    expect(
+      jsonEncode(connect.requests[1].body),
+      contains('ACCESS_MODE: fullAccess'),
+    );
+    expect(connect.requests[1].body['reasoning_effort'], 'high');
+    final thirdSystem = (connect.requests[2].body['messages'] as List).first;
+    expect(
+      jsonEncode(thirdSystem),
+      contains('No session was selected with @.'),
+    );
+    expect(find.byKey(const ValueKey('agent-stop')), findsNothing);
+    expect(agent.queuedCount, 0);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('Agent 停止按钮取消整队，输入框可以继续发送且忽略迟到回复', (tester) async {
+    final first = Completer<Response<dynamic>>();
+    var count = 0;
+    final connect = FakeAiConnect(
+      (_) => ++count == 1 ? first.future : openAiReply('new-reply'),
+    );
+    await pump(tester, connect: connect);
+    await configure(tester);
+    await tester.tap(find.byKey(const ValueKey('agent-toggle')).first);
+    await tester.pumpAndSettle();
+    final input = find.byKey(const ValueKey('agent-input'));
+    for (final text in ['first', 'queued']) {
+      await tester.enterText(input, text);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await pumpModelOptions(tester);
+    }
+    final agent = Get.find<AgentController>();
+    expect(agent.queuedCount, 1);
+    await tester.tap(find.byKey(const ValueKey('agent-stop')));
+    await tester.pumpAndSettle();
+    expect(agent.queuedCount, 0);
+    expect(find.text('已取消'), findsNWidgets(2));
+    await tester.enterText(input, 'new-message');
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+    first.complete(openAiReply('late-reply'));
+    await tester.pumpAndSettle();
+    expect(count, 2);
+    expect(find.text('new-reply'), findsOneWidget);
+    expect(agent.entries.any((entry) => entry.text == 'late-reply'), isFalse);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 
   testWidgets('Agent 完全访问不弹批准框，发送后自动读取输出并继续', (tester) async {
     var count = 0;

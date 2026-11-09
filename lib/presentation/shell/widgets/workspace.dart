@@ -6,8 +6,9 @@ import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import '../../../application/session/session.dart';
 import '../../../application/session/session_controller.dart';
+import '../../../application/session/session_layout.dart';
 import '../../../domain/repositories/local_file_repository.dart';
-import '../../../domain/ssh/server_status.dart';
+import '../../components/app_icon.dart';
 import '../../forward/forward_session_panel.dart';
 import '../../hosts/host_edit_dialog.dart';
 import '../../localization/app_translations.dart';
@@ -18,7 +19,7 @@ import '../../rdp/rdp_fullscreen_scope.dart';
 import '../../sftp/sftp_panel.dart';
 import '../../ssh/host_key_confirmation.dart';
 import '../../terminal/app_terminal_view.dart';
-import '../../terminal/server_status_panel.dart';
+import '../../terminal/terminal_tab_workspace.dart';
 import '../../theme/app_theme.dart';
 import '../command_palette.dart';
 import '../session_close_confirmation.dart';
@@ -42,23 +43,71 @@ class _WorkspaceState extends State<Workspace> {
   // 按会话缓存视图实例。外层 Obx 订阅整个会话列表，任一标签变化都会重跑；
   // 会话快照与激活状态都没变时返回同一个 widget 实例，Flutter 会跳过该子树，
   // 避免后台终端、SFTP 目录与代理面板随别的标签一起重建。
-  final Map<String, ({Session session, bool active, Widget view})> _views = {};
+  final Map<String, ({Session session, bool visible, bool active, Widget view})>
+  _views = {};
+  final _paneKeys = <String, GlobalKey>{};
+  final _tabViews =
+      <
+        String,
+        ({SessionTab tab, List<Session> sessions, bool active, Widget view})
+      >{};
 
-  Widget _viewFor(Session session, bool active) {
+  Widget _viewFor(
+    Session session, {
+    required bool visible,
+    required bool active,
+  }) {
     final cached = _views[session.id];
     if (cached != null &&
         identical(cached.session, session) &&
+        cached.visible == visible &&
         cached.active == active) {
       return cached.view;
     }
     final view = TickerMode(
-      enabled: active,
+      key: _paneKeys.putIfAbsent(session.id, GlobalKey.new),
+      // 当前标签内所有可见窗格都要同步 PTY 尺寸，仅选中窗格接收输入。
+      enabled: visible,
       child: ExcludeFocus(
         excluding: !active,
         child: _SessionView(session: session, active: active),
       ),
     );
-    _views[session.id] = (session: session, active: active, view: view);
+    _views[session.id] = (
+      session: session,
+      visible: visible,
+      active: active,
+      view: view,
+    );
+    return view;
+  }
+
+  Widget _tabView(SessionTab tab, List<Session> sessions, bool active) {
+    final cached = _tabViews[tab.id];
+    if (cached != null &&
+        cached.active == active &&
+        cached.tab.layout == tab.layout &&
+        cached.tab.selectedSessionId == tab.selectedSessionId &&
+        cached.sessions.length == sessions.length &&
+        Iterable<int>.generate(sessions.length)
+            .every((i) => identical(cached.sessions[i], sessions[i]))) {
+      return cached.view;
+    }
+    final view = sessions.first.kind.isInteractiveTerminal
+        ? TerminalTabWorkspace(
+            tab: tab,
+            sessions: sessions,
+            active: active,
+            paneBuilder: (session, selected) =>
+                _viewFor(session, visible: active, active: active && selected),
+          )
+        : _viewFor(sessions.single, visible: active, active: active);
+    _tabViews[tab.id] = (
+      tab: tab,
+      sessions: sessions,
+      active: active,
+      view: view,
+    );
     return view;
   }
 
@@ -70,19 +119,27 @@ class _WorkspaceState extends State<Workspace> {
       color: AppTheme.background(context),
       child: Obx(() {
         final sessions = controller.sessions.toList();
-        final activeId = controller.activeSessionId.value;
+        final tabs = controller.tabs;
+        final activeId = controller.activeTabId;
 
-        var index = sessions.indexWhere((s) => s.id == activeId);
+        var index = tabs.indexWhere((tab) => tab.id == activeId);
         if (index < 0) index = 0;
         // 会话数量不变时也可能发生替换，始终按 ID 清理已关闭会话的缓存。
         final ids = {for (final s in sessions) s.id};
         _views.removeWhere((id, _) => !ids.contains(id));
+        _paneKeys.removeWhere((id, _) => !ids.contains(id));
+        final tabIds = tabs.map((tab) => tab.id).toSet();
+        _tabViews.removeWhere((id, _) => !tabIds.contains(id));
+        final sessionsById = {
+          for (final session in sessions) session.id: session,
+        };
 
         return RdpCertificatePrompts(
           sessions: sessions,
           controller: controller,
           child: SessionTabPane(
             sessions: sessions,
+            tabs: tabs,
             activeId: activeId,
             fullscreen: fullscreen,
             child: KeyedSubtree(
@@ -92,11 +149,14 @@ class _WorkspaceState extends State<Workspace> {
                   : Stack(
                       fit: StackFit.expand,
                       children: [
-                        for (var i = 0; i < sessions.length; i++)
+                        for (var i = 0; i < tabs.length; i++)
                           Offstage(
-                            key: ValueKey(sessions[i].id),
+                            key: ValueKey(tabs[i].id),
                             offstage: i != index,
-                            child: _viewFor(sessions[i], i == index),
+                            child: _tabView(tabs[i], [
+                              for (final id in tabs[i].sessionIds)
+                                sessionsById[id]!,
+                            ], i == index),
                           ),
                       ],
                     ),
@@ -135,7 +195,7 @@ class _WelcomeView extends StatelessWidget {
                   border: Border.all(color: AppTheme.border(context)),
                   borderRadius: BorderRadius.circular(12),
                 ),
-                child: const Icon(shadcn.LucideIcons.terminal, size: 26),
+                child: const AppIcon(AppIcons.terminal, size: 26),
               ),
               const SizedBox(height: 24),
               shadcn.OutlineBadge(child: Text('本地工作区'.tr)),
@@ -160,15 +220,15 @@ class _WelcomeView extends StatelessWidget {
                 children: [
                   shadcn.PrimaryButton(
                     onPressed: () => showCommandPalette(context),
-                    leading: const Icon(
-                      shadcn.LucideIcons.arrowUpRight,
+                    leading: const AppIcon(
+                      AppIcons.arrowUpRight,
                       size: 16,
                     ),
                     child: Text('快速连接'.tr),
                   ),
                   shadcn.GhostButton(
                     onPressed: () => showHostEditDialog(context),
-                    leading: const Icon(shadcn.LucideIcons.plus, size: 16),
+                    leading: const AppIcon(AppIcons.plus, size: 16),
                     child: Text('新建服务'.tr),
                   ),
                 ],
@@ -195,8 +255,8 @@ class _WelcomeView extends StatelessWidget {
               const SizedBox(height: 20),
               Row(
                 children: [
-                  Icon(
-                    shadcn.LucideIcons.shieldCheck,
+                  AppIcon(
+                    AppIcons.shieldCheck,
                     size: 14,
                     color: colors.mutedForeground,
                   ),
@@ -346,24 +406,11 @@ class _TerminalHostState extends State<_TerminalHost> {
   }
 
   @override
-  Widget build(BuildContext context) {
-    final engine = widget.session.engineSession;
-    return LayoutBuilder(
-      builder: (context, constraints) => ServerStatusPanel(
-        source: engine is ServerStatusSource
-            ? engine as ServerStatusSource
-            : null,
-        active: widget.active,
-        availableWidth: constraints.maxWidth,
-        availableHeight: constraints.maxHeight,
-        terminal: AppTerminalView(
-          widget.session.terminal!,
-          focusNode: _focusNode,
-          active: widget.active,
-        ),
-      ),
-    );
-  }
+  Widget build(BuildContext context) => AppTerminalView(
+    widget.session.terminal!,
+    focusNode: _focusNode,
+    active: widget.active,
+  );
 }
 
 class _FailedView extends StatelessWidget {
@@ -382,14 +429,16 @@ class _FailedView extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(
-              shadcn.LucideIcons.unplug,
+            const AppIcon(
+              AppIcons.unplug,
               size: 44,
               color: StatusColors.failed,
             ),
             const SizedBox(height: 16),
             Text(
-              '无法连接到 @address'.trParams({'address': session.address}),
+              session.kind == SessionKind.containerTerminal
+                  ? '无法打开容器 @name 的终端'.trParams({'name': session.title})
+                  : '无法连接到 @address'.trParams({'address': session.address}),
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 8),
@@ -405,8 +454,9 @@ class _FailedView extends StatelessWidget {
               runSpacing: 8,
               children: [
                 shadcn.OutlineButton(
-                  onPressed: () =>
-                      requestSessionTabClose(controller, [session.id]),
+                  onPressed: () => session.kind.isInteractiveTerminal
+                      ? controller.close(session.id)
+                      : requestSessionTabClose(controller, [session.id]),
                   child: Text('关闭'.tr),
                 ),
                 if (session.hostKeyFailure?.hasChanged == true)
@@ -414,12 +464,12 @@ class _FailedView extends StatelessWidget {
                     key: const ValueKey('clear-host-key-and-retry'),
                     onPressed: () =>
                         controller.clearHostKeyAndRetry(session.id),
-                    leading: const Icon(shadcn.LucideIcons.trash2, size: 16),
+                    leading: const AppIcon(AppIcons.trash2, size: 16),
                     child: Text('清除指纹并重试'.tr),
                   ),
                 shadcn.PrimaryButton(
                   onPressed: () => controller.retry(session.id),
-                  leading: const Icon(shadcn.LucideIcons.rotateCw, size: 16),
+                  leading: const AppIcon(AppIcons.rotateCw, size: 16),
                   child: Text('重试'.tr),
                 ),
               ],

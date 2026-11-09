@@ -1,39 +1,41 @@
 # PagaShell
 
-PagaShell 是一个开源桌面客户端，用来连接服务器、传输文件和使用远程桌面，支持 Windows、macOS 和 Linux。
+PagaShell 是一款开源的服务器管理桌面应用，支持 Windows、macOS 和 Linux，提供 SSH 终端、SFTP 文件传输和 RDP/VNC 远程桌面。
 
-SSH、SFTP、RDP 和 VNC 会话可以分别打开标签。主机、凭据和网关集中管理，既能直连服务器，也能通过 SSH 跳板机或 Page 网关访问内网。
+你可以在多个标签和分屏中同时操作服务器，查看资源占用、管理进程和 Docker 容器，也可以通过网关访问内网服务。主机、凭据和配置保存在本机，无需注册账号。
 
 [下载最新版](https://github.com/mingdraw/PagaShell/releases/latest) · [更新记录](CHANGELOG.md) · [问题反馈](https://github.com/mingdraw/PagaShell/issues)
 
-## 功能
+## 主要功能
 
 | 功能 | 说明 |
 |---|---|
-| SSH 终端 | 多标签会话、密码和私钥登录、批量执行命令，查看 Linux/macOS 服务器状态 |
+| SSH 终端 | 密码和私钥登录，多标签、左右/上下分屏，支持批量执行命令 |
 | SFTP 文件传输 | 浏览本地和远程文件，拖放上传、下载，查看进度或取消传输 |
 | RDP 远程桌面 | 连接 Windows 桌面，自适应分辨率、全屏，双向复制粘贴文字、文件和文件夹 |
 | VNC 远程桌面 | 键鼠操作、画面缩放和全屏 |
+| 服务器状态与进程 | 查看 Linux/macOS 服务器资源占用，搜索、排序和结束进程 |
+| Docker 管理 | 查看容器、镜像、网络和存储卷；启停、升级和删除容器，打开容器终端，清理未使用镜像 |
 | 主机与凭据 | 用文件夹、标签和搜索整理服务，按协议保存和复用凭据 |
 | 网关 | 通过 SSH 跳板机或 Page 网关连接内网的 SSH、RDP、VNC 服务 |
 | 端口转发 | 在网关下设置多组端口映射，访问内网数据库等服务 |
 | 动态代理 | HTTP(S) 和 SOCKS5 代理，支持全局代理及按域名、IP 规则分流 |
 
-界面支持简体中文和 English，提供浅色、深色主题。
+界面支持简体中文和英文，提供浅色、深色主题。
 
 ### 网关与内网访问
 
-已有 SSH 跳板机时，可以直接将它添加为网关。Page 网关配合 [PagaGateway](https://github.com/mingdraw/PagaGateway) 使用，由内网客户端主动连接中转服务器，再通过网关访问内网服务。
+已有 SSH 跳板机时，可以直接将它添加为网关。Page 网关配合 [PagaGateway](https://github.com/mingdraw/PagaGateway) 使用，通过部署在内网的客户端连接中转服务器，访问内网的 SSH、远程桌面和其他服务。
 
-右键网关可打开端口转发或动态代理。端口转发适合数据库等固定地址的服务；动态代理适合浏览器和其他应用访问内网站点。
+端口转发适合访问数据库等固定地址的服务；动态代理可供浏览器和其他应用访问内网站点，支持按域名、IP 配置分流规则。
 
 ### AI 助手（可选）
 
-配置自己的 OpenAI 或 Anthropic 兼容 API 后，可以在侧边栏使用 AI 助手。输入 `@` 选择 SSH 会话，让助手结合终端输出分析问题、给出命令建议；执行 SSH 命令默认需要确认。
+配置自己的 OpenAI 或 Anthropic 兼容 API 后，可以使用 AI 助手分析终端输出、排查问题和执行服务器命令。输入 `@` 可引用 SSH 会话，支持连续对话和消息排队；执行 SSH 命令默认需要确认。
 
 ## 数据与隐私
 
-- 无需注册账号，主机、凭据和聊天记录保存在本机。
+- 主机配置、凭据和聊天记录保存在本机。
 - 密码、私钥和 API Key 加密保存，SSH 连接支持主机指纹校验。
 - 支持配置导入导出，导出时可设置密码加密。
 - 使用 AI 助手时，消息和主动分享的会话内容会发送到你配置的 API 服务。
@@ -50,11 +52,11 @@ SSH、SFTP、RDP 和 VNC 会话可以分别打开标签。主机、凭据和网�
 
 发布页附带 `checksums.txt`，可用于 SHA-256 校验。macOS 版本尚未经过 Apple 公证，Windows 版本未使用代码签名证书。
 
-Windows 首次运行可能出现 SmartScreen 的“无法识别的应用”提示。当前处于测试阶段，确认下载来源并核对校验和后，可点击 **更多信息 → 仍要运行**。
+Windows 首次运行可能出现 SmartScreen 的“无法识别的应用”提示。确认下载来源并核对校验和后，可点击 **更多信息 → 仍要运行**。
 
 ### 软件更新
 
-打开软件时会检查 GitHub 上的新版本，确认后自动下载、安装并重启。也可以在 **设置 → 通用** 中点击 **检查更新**，或关闭 **自动更新**，改为手动检查。更新会保留本机配置和凭据。
+支持检查 GitHub 发布的新版本，确认后自动下载、安装并重启，保留本机配置和凭据。在 **设置 → 通用** 中可手动检查更新，也可选择是否在启动时自动检查。
 
 ## 使用文档
 
@@ -70,11 +72,9 @@ Windows 首次运行可能出现 SmartScreen 的“无法识别的应用”提�
 
 问题和建议请提交到 [Issues](https://github.com/mingdraw/PagaShell/issues)。参与开发请阅读 [贡献指南](CONTRIBUTING.md)。
 
-### 终端组件
+## 致谢
 
-内部终端组件 [paga_terminal](docs/terminal-component.md) 位于 `lib/terminal/`，负责 Flutter 显示、输入和滚动选区。Rust 内核位于项目的 `rust/src/terminal/`，通过 crates.io 引入官方 `alacritty_terminal 0.26.0`，负责 ANSI 解析、屏幕、回滚与重排。
-
-Flutter 部分参考并改造自 [TerminalStudio/xterm.dart 4.0.0](https://github.com/TerminalStudio/xterm.dart/tree/25bc19e49d9e948ba45bdb185d534c26bb3df9b2)。终端复用项目现有的原生桥接，接入方式与参考来源见[终端组件说明](docs/terminal-component.md)。
+终端界面参考并改造自 [TerminalStudio/xterm.dart](https://github.com/TerminalStudio/xterm.dart/tree/25bc19e49d9e948ba45bdb185d534c26bb3df9b2)，终端内核使用 `alacritty_terminal`。组件说明与参考来源见 [终端组件文档](docs/terminal-component.md)。
 
 ## 许可证
 

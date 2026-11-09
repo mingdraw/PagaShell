@@ -390,6 +390,32 @@ mod tests {
     }
 
     #[test]
+    fn flutter_short_screen_resize_fixture_matches_native_parser() {
+        let mut core = TerminalCore::new(48, 24, 32);
+        core.feed(b"Last login: resize fixture\r\n\x1b[32mrocky@host:~$ \x1b[0m");
+        let mut frames = vec![core.frame().unwrap()];
+        for (columns, rows) in [(48, 10), (48, 18), (32, 8), (64, 20)] {
+            core.resize(columns, rows);
+            let frame = core.frame().unwrap();
+            assert_eq!(frame.cursor_y, 1);
+            assert_eq!(core.term.grid().history_size(), 0);
+            frames.push(frame);
+        }
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../test/fixtures/native_terminal_resize_frames.json");
+        let actual = serde_json::to_value(&frames).unwrap();
+        if std::env::var_os("PAGASHELL_UPDATE_TERMINAL_FIXTURE").is_some() {
+            std::fs::write(&fixture, serde_json::to_string(&actual).unwrap() + "\n").unwrap();
+        }
+        let expected: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(fixture).unwrap()).unwrap();
+        assert!(
+            actual == expected,
+            "Native resize fixture changed; regenerate it with PAGASHELL_UPDATE_TERMINAL_FIXTURE=1"
+        );
+    }
+
+    #[test]
     fn split_utf8_ansi_styles_combining_and_device_replies() {
         let mut core = TerminalCore::new(20, 3, 100);
         let bytes = "\x1b[31;1m中e\u{301}\x1b[0m".as_bytes();

@@ -5,6 +5,7 @@ import 'package:get/get.dart';
 import 'package:path/path.dart' as p;
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
+import '../components/app_icon.dart';
 import '../components/app_menu.dart';
 
 /// 远程路径使用 POSIX 规则；本地路径同时支持盘符和 UNC 共享根目录。
@@ -132,7 +133,7 @@ class FilePathBreadcrumb extends StatelessWidget {
                             ], (target) => onNavigate!(target)),
                           ),
                         ),
-                  child: const Icon(shadcn.LucideIcons.ellipsis, size: 16),
+                  child: const AppIcon(AppIcons.ellipsis, size: 16),
                 ),
               ),
             ),
@@ -145,7 +146,7 @@ class FilePathBreadcrumb extends StatelessWidget {
               key: ValueKey('sftp-path-$path'),
               separator: const SizedBox(
                 width: separatorWidth,
-                child: Icon(shadcn.LucideIcons.chevronRight, size: 12),
+                child: AppIcon(AppIcons.chevronRight, size: 12),
               ),
               children: [
                 for (final index in visible) ...[

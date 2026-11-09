@@ -7,6 +7,11 @@ class ServerStatusSample {
   const ServerStatusSample({
     this.system = 'Linux',
     this.systemRelease,
+    this.architecture,
+    this.loadAverage = const [],
+    this.swapTotal,
+    this.swapUsed,
+    this.storage = const [],
     this.measuredCpuFraction,
     this.cpuCores = const {},
     required this.uptimeSeconds,
@@ -21,6 +26,10 @@ class ServerStatusSample {
 
   final String system;
   final String? systemRelease;
+  final String? architecture;
+
+  /// 最近 1、5、15 分钟的系统负载，并非 CPU 百分比。
+  final List<double> loadAverage;
   String get systemLabel => systemRelease ?? system;
 
   /// macOS top 的第二次（1 秒间隔）采样已给出增量 CPU 利用率。
@@ -31,12 +40,20 @@ class ServerStatusSample {
   final Map<int, CpuCounters> cpuCores;
   final int memoryTotal;
   final int memoryAvailable;
+  final int? swapTotal;
+  final int? swapUsed;
   final List<FilesystemUsage> filesystems;
+  final List<DiskUsage> storage;
   final Map<String, IoCounters> network;
   final Map<String, IoCounters> disks;
 
   int get memoryUsed => (memoryTotal - memoryAvailable).clamp(0, memoryTotal);
   double get memoryFraction => memoryTotal > 0 ? memoryUsed / memoryTotal : 0;
+  double? get swapFraction => swapTotal == null || swapUsed == null
+      ? null
+      : swapTotal! > 0
+      ? (swapUsed! / swapTotal!).clamp(0, 1).toDouble()
+      : 0;
 }
 
 /// 每个逻辑核心的累计时钟计数，按核心编号匹配相邻采样。
@@ -51,6 +68,7 @@ class FilesystemUsage {
   const FilesystemUsage({
     required this.mount,
     this.name,
+    this.device,
     required this.total,
     required this.used,
     required this.available,
@@ -58,6 +76,7 @@ class FilesystemUsage {
 
   final String mount;
   final String? name;
+  final String? device;
   final int total;
   final int used;
   final int available;
@@ -65,6 +84,34 @@ class FilesystemUsage {
   // df 的占用比例排除文件系统保留块。
   double get fraction => used + available > 0
       ? (used / (used + available)).clamp(0, 1).toDouble()
+      : 0;
+}
+
+/// 按整盘或共享存储池归组；total 仅汇总已挂载文件系统/容器一次。
+/// 无挂载数据时保留设备容量，used/available 为空，不能视为零占用。
+class DiskUsage {
+  const DiskUsage({
+    required this.id,
+    required this.name,
+    required this.devices,
+    required this.total,
+    required this.used,
+    required this.available,
+    required this.filesystems,
+  });
+
+  final String id;
+  final String name;
+  final List<String> devices;
+  final int total;
+  final int? used;
+  final int? available;
+  final List<FilesystemUsage> filesystems;
+
+  double? get fraction => used == null || available == null
+      ? null
+      : used! + available! > 0
+      ? (used! / (used! + available!)).clamp(0, 1).toDouble()
       : 0;
 }
 

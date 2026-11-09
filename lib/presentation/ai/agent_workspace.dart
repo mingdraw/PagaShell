@@ -7,11 +7,13 @@ import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import '../../application/ai/ai_settings_controller.dart';
 import '../../application/settings/settings_controller.dart';
+import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
 import '../navigation/app_notice.dart';
 import '../rdp/rdp_fullscreen_scope.dart';
 import '../shell/agent_sidebar_scope.dart';
 import '../shell/widgets/window_controls.dart';
+import '../shell/widgets/workspace_header_actions.dart';
 import '../theme/app_theme.dart';
 import 'agent_panel.dart';
 
@@ -23,11 +25,8 @@ class AgentToggleButton extends StatelessWidget {
   Widget build(BuildContext context) => AppIconButton(
     key: const ValueKey('agent-toggle'),
     semanticLabel: (expanded ? '收起 Agent' : 'AI Agent').tr,
-    tooltip: (expanded ? '收起 Agent' : '展开 Agent').tr,
-    icon: Icon(
-      expanded ? shadcn.LucideIcons.panelRightClose : shadcn.LucideIcons.bot,
-      size: 16,
-    ),
+    tooltip: 'Agent',
+    icon: const AppIcon(AppIcons.bot, size: 16),
     onPressed: () => toggleAgentPanel(),
   );
 }
@@ -177,9 +176,6 @@ class _AgentWorkspaceState extends State<AgentWorkspace> {
                             height: AppTheme.windowHeaderHeight,
                             child: Row(
                               children: [
-                                const WindowHeaderButton(
-                                  child: AgentToggleButton(expanded: true),
-                                ),
                                 const Expanded(child: WindowDragArea()),
                                 if (!isMac)
                                   const SizedBox(
@@ -215,21 +211,30 @@ class _AgentWorkspaceState extends State<AgentWorkspace> {
                     panel,
                   ],
                 ),
-                if (!fullscreen && (!sidebarVisible || (visible && compact)))
-                  Positioned(
+                // 开关持续挂载，让图标渐变和位置移动沿用同一段动画状态。
+                if (!fullscreen)
+                  AnimatedPositioned(
+                    duration: duration,
+                    curve: Curves.easeInOutCubic,
                     top: AppTheme.sessionPaneTopMargin,
-                    left: isMac ? AppTheme.macWindowControlsWidth : 0,
+                    left: sidebarVisible && !(visible && compact)
+                        ? AppTheme.sidebarWidth - headerControlSize - 8
+                        : isMac
+                        ? AppTheme.macWindowControlsWidth
+                        : 0,
                     height: headerControlSize,
                     child: const WindowHeaderButton(
                       child: SidebarToggleButton(),
                     ),
                   ),
-                if (!fullscreen && !visible)
+                if (!fullscreen)
                   Positioned(
                     top: AppTheme.sessionPaneTopMargin,
                     right: isMac ? 0 : AppTheme.windowButtonWidth * 3,
                     height: headerControlSize,
-                    child: const WindowHeaderButton(child: AgentToggleButton()),
+                    child: WorkspaceHeaderActions(
+                      agentButton: AgentToggleButton(expanded: visible),
+                    ),
                   ),
                 if (!isMac && !fullscreen)
                   Positioned(
