@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:desktop_drop/desktop_drop.dart' as desktop;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
@@ -39,6 +41,7 @@ class FileTransferDrag {
     required this.path,
     required this.name,
     this.selectedFiles,
+    this.isDirectory = false,
   });
 
   final String sessionId;
@@ -46,10 +49,11 @@ class FileTransferDrag {
   final String path;
   final String name;
   final List<FileBrowserEntry>? selectedFiles;
+  final bool isDirectory;
 
   List<FileBrowserEntry> get files =>
       selectedFiles ??
-      [FileBrowserEntry(name: name, path: path, isDir: false, size: 0)];
+      [FileBrowserEntry(name: name, path: path, isDir: isDirectory, size: 0)];
 }
 
 class FileBrowserPane extends StatefulWidget {
@@ -68,6 +72,7 @@ class FileBrowserPane extends StatefulWidget {
     this.onBrowse,
     this.onAuthorize,
     this.onUpload,
+    this.onUploadDirectory,
     this.onMkdir,
     this.onRename,
     this.onDelete,
@@ -92,6 +97,7 @@ class FileBrowserPane extends StatefulWidget {
   final VoidCallback? onBrowse;
   final VoidCallback? onAuthorize;
   final VoidCallback? onUpload;
+  final VoidCallback? onUploadDirectory;
   final VoidCallback? onMkdir;
   final ValueChanged<FileBrowserEntry>? onRename;
   final ValueChanged<FileBrowserEntry>? onDelete;
@@ -117,6 +123,17 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
   String? _externalHoverPath;
   final _directoryDropKeys = <String, GlobalKey>{};
   final _fileListDropKey = GlobalKey();
+  int? _selectionPointer;
+  Offset? _selectionOrigin;
+  Offset? _selectionPosition;
+  Rect? _selectionRect;
+  Set<String> _selectionBeforeDrag = {};
+  String? _selectionAnchorBeforeDrag;
+  int _selectionFocusBeforeDrag = 0;
+  bool _selectionDragging = false;
+  bool _selectionToggle = false;
+  bool _selectionAdditive = false;
+  Timer? _selectionScrollTimer;
 
   String get sessionId => widget.sessionId;
   FileBrowserSide get side => widget.side;
@@ -135,14 +152,228 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
   ValueChanged<FileBrowserEntry>? get onRename => widget.onRename;
   ValueChanged<FileBrowserEntry>? get onDelete => widget.onDelete;
 
-  List<FileBrowserEntry> get _selectedFiles => [
+  List<FileBrowserEntry> get _selectedEntries => [
     for (final entry in entries)
-      if (_selected.contains(entry.path) && !entry.isDir) entry,
+      if (_selected.contains(entry.path)) entry,
   ];
+
+  @override
+  void initState() {
+    super.initState();
+    _scroll.addListener(_selectionScrolled);
+  }
+
+  RenderBox? get _selectionViewport {
+    final box = _fileListDropKey.currentContext?.findRenderObject();
+    return box is RenderBox && box.hasSize ? box : null;
+  }
+
+  void _beginSelection(PointerDownEvent event) {
+    if (event.kind != PointerDeviceKind.mouse ||
+        event.buttons != kPrimaryMouseButton ||
+        !widget.active ||
+        loading ||
+        error != null ||
+        _selectionPointer != null) {
+      return;
+    }
+    final box = _selectionViewport;
+    if (box == null) return;
+    final local = box.globalToLocal(event.position);
+    final offset = _scroll.hasClients ? _scroll.offset : 0.0;
+    final inRow =
+        local.dx >= AppTheme.fileSelectionGutter &&
+        local.dx < box.size.width - AppTheme.fileSelectionGutter &&
+        local.dy + offset < entries.length * _rowHeight;
+    // 条目上的拖动仍由 Draggable 发起文件传输；空白处才开始框选。
+    if (inRow) return;
+    // 有滚动条时让出右侧的命中区域，避免拖动滚动条触发框选。
+    if (_scroll.hasClients &&
+        _scroll.position.maxScrollExtent > 0 &&
+        local.dx >= box.size.width - AppTheme.fileSelectionGutter) {
+      return;
+    }
+    _focus.requestFocus();
+    final keyboard = HardwareKeyboard.instance;
+    setState(() {
+      _selectionPointer = event.pointer;
+      _selectionOrigin = local + Offset(0, offset);
+      _selectionPosition = event.position;
+      _selectionBeforeDrag = Set.of(_selected);
+      _selectionAnchorBeforeDrag = _anchor;
+      _selectionFocusBeforeDrag = _focusedIndex;
+      _selectionToggle = keyboard.isMetaPressed || keyboard.isControlPressed;
+      _selectionAdditive = keyboard.isShiftPressed;
+      if (!_selectionToggle && !_selectionAdditive) {
+        _selected.clear();
+        _anchor = null;
+      }
+    });
+  }
+
+  void _moveSelection(PointerMoveEvent event) {
+    if (_selectionPointer != event.pointer) return;
+    final box = _selectionViewport;
+    final origin = _selectionOrigin;
+    if (box == null || origin == null) return;
+    _selectionPosition = event.position;
+    final offset = _scroll.hasClients ? _scroll.offset : 0.0;
+    final point = box.globalToLocal(event.position) + Offset(0, offset);
+    if (!_selectionDragging &&
+        (point - origin).distance < AppTheme.fileSelectionDragThreshold) {
+      return;
+    }
+    setState(() {
+      _selectionDragging = true;
+      _updateSelectionRect();
+    });
+    _updateSelectionScrolling();
+  }
+
+  void _updateSelectionRect() {
+    final box = _selectionViewport;
+    final origin = _selectionOrigin;
+    final position = _selectionPosition;
+    if (box == null || origin == null || position == null) return;
+    final local = box.globalToLocal(position);
+    final offset = _scroll.hasClients ? _scroll.offset : 0.0;
+    final point = Offset(
+      local.dx.clamp(0.0, box.size.width),
+      local.dy.clamp(0.0, box.size.height) + offset,
+    );
+    final rect = Rect.fromPoints(origin, point);
+    _selectionRect = rect;
+    final hits = <String>{};
+    if (rect.width > 0 &&
+        rect.height > 0 &&
+        rect.right > AppTheme.fileSelectionGutter &&
+        rect.left < box.size.width - AppTheme.fileSelectionGutter) {
+      final first = (rect.top / _rowHeight).floor().clamp(0, entries.length);
+      final end = (rect.bottom / _rowHeight).ceil().clamp(0, entries.length);
+      for (var index = first; index < end; index++) {
+        hits.add(entries[index].path);
+      }
+    }
+    final selection = _selectionToggle
+        ? _selectionBeforeDrag
+              .difference(hits)
+              .union(hits.difference(_selectionBeforeDrag))
+        : _selectionAdditive
+        ? _selectionBeforeDrag.union(hits)
+        : hits;
+    _selected
+      ..clear()
+      ..addAll(selection);
+  }
+
+  void _selectionScrolled() {
+    if (mounted && _selectionDragging) setState(_updateSelectionRect);
+  }
+
+  double _selectionScrollDelta() {
+    final box = _selectionViewport;
+    final position = _selectionPosition;
+    if (!_selectionDragging ||
+        !_scroll.hasClients ||
+        box == null ||
+        position == null) {
+      return 0;
+    }
+    final point = box.globalToLocal(position);
+    if (point.dx < 0 || point.dx > box.size.width) return 0;
+    const edge = AppTheme.fileSelectionEdgeExtent;
+    final delta = point.dy < edge
+        ? point.dy - edge
+        : point.dy > box.size.height - edge
+        ? point.dy - (box.size.height - edge)
+        : 0.0;
+    final scroll = _scroll.position;
+    if ((delta < 0 && scroll.pixels <= scroll.minScrollExtent) ||
+        (delta > 0 && scroll.pixels >= scroll.maxScrollExtent)) {
+      return 0;
+    }
+    return delta.clamp(-edge, edge);
+  }
+
+  void _updateSelectionScrolling() {
+    if (_selectionScrollDelta() == 0) {
+      _selectionScrollTimer?.cancel();
+      _selectionScrollTimer = null;
+      return;
+    }
+    _selectionScrollTimer ??= Timer.periodic(
+      AppTheme.fileSelectionScrollInterval,
+      (_) {
+        final delta = _selectionScrollDelta();
+        if (!mounted || delta == 0) {
+          _selectionScrollTimer?.cancel();
+          _selectionScrollTimer = null;
+          return;
+        }
+        final position = _scroll.position;
+        _scroll.jumpTo(
+          (position.pixels + delta).clamp(
+            position.minScrollExtent,
+            position.maxScrollExtent,
+          ),
+        );
+      },
+    );
+  }
+
+  void _resetSelectionDrag() {
+    _selectionScrollTimer?.cancel();
+    _selectionScrollTimer = null;
+    _selectionPointer = null;
+    _selectionOrigin = null;
+    _selectionPosition = null;
+    _selectionRect = null;
+    _selectionBeforeDrag = {};
+    _selectionAnchorBeforeDrag = null;
+    _selectionDragging = false;
+  }
+
+  void _endSelection(PointerUpEvent event) {
+    if (_selectionPointer != event.pointer) return;
+    setState(() {
+      if (_selectionDragging && _selected.isNotEmpty) {
+        _focusedIndex = entries.lastIndexWhere(
+          (entry) => _selected.contains(entry.path),
+        );
+        _anchor = entries
+            .firstWhere((entry) => _selected.contains(entry.path))
+            .path;
+      }
+      _resetSelectionDrag();
+    });
+  }
+
+  void _cancelSelection(PointerCancelEvent event) {
+    if (_selectionPointer != event.pointer) return;
+    setState(() {
+      _selected
+        ..clear()
+        ..addAll(_selectionBeforeDrag);
+      _anchor = _selectionAnchorBeforeDrag;
+      _focusedIndex = _selectionFocusBeforeDrag;
+      _resetSelectionDrag();
+    });
+  }
 
   @override
   void didUpdateWidget(FileBrowserPane oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (!widget.active ||
+        loading ||
+        error != null ||
+        oldWidget.cwd != cwd ||
+        oldWidget.sessionId != sessionId ||
+        oldWidget.entries.length != entries.length ||
+        (oldWidget.entries.indexed.any(
+          (item) => item.$2.path != entries[item.$1].path,
+        ))) {
+      _resetSelectionDrag();
+    }
     if (_directoryDropKeys.isNotEmpty) {
       final directories = {
         for (final entry in entries)
@@ -173,6 +404,7 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
 
   @override
   void dispose() {
+    _resetSelectionDrag();
     _focus.dispose();
     _scroll.dispose();
     super.dispose();
@@ -222,7 +454,7 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
   }
 
   List<FileBrowserEntry> _filesFor(FileBrowserEntry entry) =>
-      _selected.contains(entry.path) ? _selectedFiles : [entry];
+      _selected.contains(entry.path) ? _selectedEntries : [entry];
 
   KeyEventResult _onKeyEvent(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
@@ -239,6 +471,7 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
       });
     } else if (key == LogicalKeyboardKey.escape) {
       setState(() {
+        _resetSelectionDrag();
         _selected.clear();
         _anchor = null;
       });
@@ -291,11 +524,82 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
     setState(() => _externalHoverPath = path);
   }
 
+  Widget _fileList(BuildContext context) => LayoutBuilder(
+    key: _fileListDropKey,
+    builder: (context, constraints) {
+      final offset = _scroll.hasClients ? _scroll.offset : 0.0;
+      final rect = _selectionRect
+          ?.shift(Offset(0, -offset))
+          .intersect(Offset.zero & constraints.biggest);
+      final colors = shadcn.Theme.of(context).colorScheme;
+      return Listener(
+        behavior: HitTestBehavior.opaque,
+        onPointerDown: _beginSelection,
+        onPointerMove: _moveSelection,
+        onPointerUp: _endSelection,
+        onPointerCancel: _cancelSelection,
+        child: Stack(
+          fit: StackFit.expand,
+          clipBehavior: Clip.hardEdge,
+          children: [
+            if (loading)
+              const Center(
+                child: SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: shadcn.CircularProgressIndicator(strokeWidth: 2),
+                ),
+              )
+            else if (entries.isEmpty)
+              Center(
+                child: Text(
+                  '空目录'.tr,
+                  style: TextStyle(fontSize: 12, color: colors.mutedForeground),
+                ),
+              )
+            else
+              ListView.builder(
+                key: ValueKey('sftp-${side.name}-file-list'),
+                controller: _scroll,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: AppTheme.fileSelectionGutter,
+                ),
+                itemExtent: _rowHeight,
+                itemCount: entries.length,
+                itemBuilder: (context, index) =>
+                    _entry(context, entries[index]),
+              ),
+            if (rect != null && !rect.isEmpty)
+              Positioned.fromRect(
+                rect: rect,
+                child: IgnorePointer(
+                  child: DecoratedBox(
+                    key: ValueKey('sftp-${side.name}-selection-box'),
+                    decoration: BoxDecoration(
+                      color: colors.primary.withValues(alpha: 0.12),
+                      border: Border.all(
+                        color: colors.primary.withValues(alpha: 0.8),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      );
+    },
+  );
+
   @override
   Widget build(BuildContext context) {
     final colors = shadcn.Theme.of(context).colorScheme;
     final pane = Focus(
       focusNode: _focus,
+      onFocusChange: (focused) {
+        if (!focused && _selectionPointer != null) {
+          setState(_resetSelectionDrag);
+        }
+      },
       onKeyEvent: _onKeyEvent,
       child: DragTarget<FileTransferDrag>(
         onWillAcceptWithDetails: (details) => _accepts(details.data),
@@ -377,6 +681,9 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
                       semanticLabel:
                           (side == FileBrowserSide.local ? '上传所选文件' : '下载所选文件')
                               .tr,
+                      tooltip:
+                          (side == FileBrowserSide.local ? '上传所选文件' : '下载所选文件')
+                              .tr,
                       icon: AppIcon(
                         side == FileBrowserSide.local
                             ? AppIcons.upload
@@ -384,38 +691,45 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
                         size: 16,
                       ),
                       onPressed:
-                          loading || error != null || _selectedFiles.isEmpty
+                          loading || error != null || _selectedEntries.isEmpty
                           ? null
-                          : () => onTransfer(_selectedFiles),
+                          : () => onTransfer(_selectedEntries),
                     ),
                     AppIconButton(
                       semanticLabel: '刷新'.tr,
+                      tooltip: '刷新'.tr,
                       icon: const AppIcon(AppIcons.refreshCw, size: 16),
                       onPressed: onRefresh,
                     ),
                     if (onBrowse != null)
                       AppIconButton(
                         semanticLabel: '选择本地目录'.tr,
-                        icon: const AppIcon(
-                          AppIcons.folderOpen,
-                          size: 16,
-                        ),
+                        tooltip: '选择本地目录'.tr,
+                        icon: const AppIcon(AppIcons.folderOpen, size: 16),
                         onPressed: onBrowse,
                       ),
                     if (onMkdir != null)
                       AppIconButton(
                         semanticLabel: '新建目录'.tr,
-                        icon: const AppIcon(
-                          AppIcons.folderPlus,
-                          size: 16,
-                        ),
+                        tooltip: '新建目录'.tr,
+                        icon: const AppIcon(AppIcons.folderPlus, size: 16),
                         onPressed: loading || error != null ? null : onMkdir,
                       ),
                     if (onUpload != null)
                       AppIconButton(
                         semanticLabel: '上传文件'.tr,
+                        tooltip: '上传文件'.tr,
                         icon: const AppIcon(AppIcons.fileUp, size: 16),
                         onPressed: loading || error != null ? null : onUpload,
+                      ),
+                    if (widget.onUploadDirectory != null)
+                      AppIconButton(
+                        semanticLabel: '上传文件夹'.tr,
+                        tooltip: '上传文件夹'.tr,
+                        icon: const AppIcon(AppIcons.folderUp, size: 16),
+                        onPressed: loading || error != null
+                            ? null
+                            : widget.onUploadDirectory,
                       ),
                     const SizedBox(width: 4),
                   ],
@@ -472,47 +786,7 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
                     ],
                   ),
                 ),
-              Expanded(
-                child: GestureDetector(
-                  key: _fileListDropKey,
-                  behavior: HitTestBehavior.opaque,
-                  onTap: () {
-                    _focus.requestFocus();
-                    setState(() {
-                      _selected.clear();
-                      _anchor = null;
-                    });
-                  },
-                  child: loading
-                      ? const Center(
-                          child: SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: shadcn.CircularProgressIndicator(
-                              strokeWidth: 2,
-                            ),
-                          ),
-                        )
-                      : entries.isEmpty
-                      ? Center(
-                          child: Text(
-                            '空目录'.tr,
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: colors.mutedForeground,
-                            ),
-                          ),
-                        )
-                      : ListView.builder(
-                          controller: _scroll,
-                          // 固定行高：大目录滚动时无需逐行测量即可定位。
-                          itemExtent: _rowHeight,
-                          itemCount: entries.length,
-                          itemBuilder: (context, index) =>
-                              _entry(context, entries[index]),
-                        ),
-                ),
-              ),
+              Expanded(child: _fileList(context)),
             ],
           ),
         ),
@@ -549,13 +823,11 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
     final selected = _selected.contains(entry.path);
     final selectedForeground = AppTheme.fileSelectionForeground(context);
     final actions = [
-      if (entry.isDir)
-        ('open', '打开'.tr)
-      else
-        (
-          side == FileBrowserSide.local ? 'upload' : 'download',
-          (side == FileBrowserSide.local ? '上传' : '下载').tr,
-        ),
+      if (entry.isDir) ('open', '打开'.tr),
+      (
+        side == FileBrowserSide.local ? 'upload' : 'download',
+        (side == FileBrowserSide.local ? '上传' : '下载').tr,
+      ),
       if (onRename != null) ('rename', '重命名'.tr),
       if (onDelete != null) ('delete', '删除'.tr),
     ];
@@ -631,11 +903,9 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
               height: _rowHeight,
               child: Row(
                 children: [
-                  const SizedBox(width: 12),
+                  const SizedBox(width: 12 - AppTheme.fileSelectionGutter),
                   AppIcon(
-                    entry.isDir
-                        ? AppIcons.folder
-                        : AppIcons.file,
+                    entry.isDir ? AppIcons.folder : AppIcons.file,
                     size: 15,
                     color: selected
                         ? selectedForeground
@@ -684,7 +954,7 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
                       ),
                     ),
                   ),
-                  const SizedBox(width: 12),
+                  const SizedBox(width: 12 - AppTheme.fileSelectionGutter),
                 ],
               ),
             ),
@@ -692,19 +962,19 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
         ),
       ),
     );
-    if (entry.isDir) {
-      return DragTarget<FileTransferDrag>(
-        onWillAcceptWithDetails: (details) => _accepts(details.data),
-        onAcceptWithDetails: (details) => onDrop(details.data, entry.path),
-        builder: (context, candidates, rejected) => ColoredBox(
-          key: _directoryDropKeys.putIfAbsent(entry.path, GlobalKey.new),
-          color: candidates.isEmpty && _externalHoverPath != entry.path
-              ? shadcn.Colors.transparent
-              : colors.primary.withValues(alpha: 0.16),
-          child: row,
-        ),
-      );
-    }
+    final draggableRow = entry.isDir
+        ? DragTarget<FileTransferDrag>(
+            onWillAcceptWithDetails: (details) => _accepts(details.data),
+            onAcceptWithDetails: (details) => onDrop(details.data, entry.path),
+            builder: (context, candidates, rejected) => ColoredBox(
+              key: _directoryDropKeys.putIfAbsent(entry.path, GlobalKey.new),
+              color: candidates.isEmpty && _externalHoverPath != entry.path
+                  ? shadcn.Colors.transparent
+                  : colors.primary.withValues(alpha: 0.16),
+              child: row,
+            ),
+          )
+        : row;
     return Draggable<FileTransferDrag>(
       key: ValueKey('sftp-${side.name}-${entry.path}'),
       maxSimultaneousDrags: loading || error != null ? 0 : 1,
@@ -714,6 +984,7 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
         source: side,
         path: entry.path,
         name: entry.name,
+        isDirectory: entry.isDir,
         selectedFiles: List.of(_filesFor(entry)),
       ),
       dragAnchorStrategy: pointerDragAnchorStrategy,
@@ -730,8 +1001,8 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
           ),
         ),
       ),
-      childWhenDragging: Opacity(opacity: 0.4, child: row),
-      child: row,
+      childWhenDragging: Opacity(opacity: 0.4, child: draggableRow),
+      child: draggableRow,
     );
   }
 }

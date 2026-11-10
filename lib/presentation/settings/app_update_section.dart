@@ -8,6 +8,7 @@ import '../../application/settings/settings_controller.dart';
 import '../../application/updates/app_update_controller.dart';
 import '../../domain/updates/app_release.dart';
 import '../components/app_dialog.dart';
+import '../components/app_markdown.dart';
 import '../navigation/app_navigation.dart';
 
 class AppUpdateSection extends StatefulWidget {
@@ -178,9 +179,9 @@ class _AppUpdateDialogState extends State<_AppUpdateDialog> {
                 style: const TextStyle(fontWeight: FontWeight.w600),
               ),
               const SizedBox(height: 8),
-              Text(
+              AppMarkdown(
                 widget.release.notes,
-                style: const TextStyle(fontSize: 13, height: 1.6),
+                key: const ValueKey('app-update-notes'),
               ),
             ],
           ],

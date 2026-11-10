@@ -58,6 +58,29 @@ class InMemoryLocalFileRepository implements LocalFileRepository {
   }
 
   @override
+  Future<void> createDirectory(String path) async {
+    final parent = parentOf(path);
+    if (deniedDirectories.contains(parent) ||
+        deniedDirectories.contains(path)) {
+      throw LocalDirectoryAccessDenied(parent);
+    }
+    if (fs.containsKey(path)) return;
+    final entries = fs[parent]!;
+    if (entries.any((entry) => entry.path == path)) {
+      throw const LocalFileTargetExists();
+    }
+    entries.add(
+      LocalFileEntry(
+        path: path,
+        name: path.substring(path.lastIndexOf('/') + 1),
+        isDir: true,
+        size: 0,
+      ),
+    );
+    fs[path] = [];
+  }
+
+  @override
   Future<void> rename(
     String path,
     String newName, {
@@ -89,6 +112,7 @@ class InMemoryLocalFileRepository implements LocalFileRepository {
     size: entry.size,
     modified: entry.modified,
     isHidden: entry.isHidden,
+    isSymbolicLink: entry.isSymbolicLink,
   );
 
   @override

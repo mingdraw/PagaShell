@@ -3,7 +3,6 @@ import 'dart:math' as math;
 
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_selector/file_selector.dart';
-import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
@@ -12,6 +11,7 @@ import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 import '../../application/session/session.dart';
 import '../../application/sftp/local_file_controller.dart';
 import '../../application/sftp/sftp_controller.dart';
+import '../../application/transfer/directory_transfer.dart';
 import '../../application/transfer/transfer_controller.dart';
 import '../../domain/entities/local_file_entry.dart';
 import '../../domain/repositories/local_file_repository.dart';
@@ -41,6 +41,7 @@ typedef _FileConflictDecision = ({
 /// 冲突策略只在当前批次中共享，新的传输操作重新询问。
 class _TransferBatch {
   _FileConflictAction? conflictAction;
+  bool cancelled = false;
 }
 
 Future<Future<void> Function()> _acquireExternalSource(
@@ -94,6 +95,13 @@ class _SftpPanelState extends State<SftpPanel> {
   late String _tag;
   final List<Worker> _transferWorkers = [];
   final Set<String> _preparingTargets = {};
+  final _filePane = shadcn.AbsoluteResizablePaneController(0);
+  final _transferPane = shadcn.AbsoluteResizablePaneController(
+    AppTheme.transferProgressDefaultHeight,
+    collapsed: true,
+  );
+  bool _transferExpanded = false;
+  double _expandedTransferHeight = AppTheme.transferProgressDefaultHeight;
   bool _choosingLocalDirectory = false;
 
   @override
@@ -121,6 +129,11 @@ class _SftpPanelState extends State<SftpPanel> {
   @override
   void didUpdateWidget(SftpPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.session.id != widget.session.id) {
+      _transferExpanded = false;
+      _expandedTransferHeight = AppTheme.transferProgressDefaultHeight;
+      _transferPane.collapse();
+    }
     if (oldWidget.session.id != widget.session.id ||
         oldWidget.session.engineSession != widget.session.engineSession ||
         oldWidget.localFiles != widget.localFiles) {
@@ -141,7 +154,28 @@ class _SftpPanelState extends State<SftpPanel> {
   @override
   void dispose() {
     _releaseBrowser();
+    _filePane.dispose();
+    _transferPane.dispose();
     super.dispose();
+  }
+
+  void _toggleTransferExpanded() {
+    setState(() {
+      _transferExpanded = !_transferExpanded;
+      if (_transferExpanded) {
+        _transferPane.expand();
+      } else {
+        _transferPane.collapse();
+      }
+    });
+  }
+
+  void _resizeTransfer(double height) {
+    final expanded = !_transferPane.collapsed;
+    if (expanded) _expandedTransferHeight = height;
+    if (_transferExpanded != expanded) {
+      setState(() => _transferExpanded = expanded);
+    }
   }
 
   Future<void> _upload() async {
@@ -172,24 +206,15 @@ class _SftpPanelState extends State<SftpPanel> {
     final sessionId = widget.session.id;
     final batch = _TransferBatch();
     final seen = <String>{};
-    var skippedDirectory = false;
     for (final file in files) {
       if (!mounted || browser != _browser || local != _local) return;
       if (!seen.add(file.path)) continue;
-      if (file is DropItemDirectory) {
-        skippedDirectory = true;
-        continue;
-      }
       final bookmark = file.extraAppleBookmark;
       var started = false;
       Future<void> Function()? release;
       try {
         release = await _acquireExternalSource(bookmark);
         final entry = await local.files.entryAt(file.path);
-        if (entry.isDir) {
-          skippedDirectory = true;
-          continue;
-        }
         if (!mounted || browser != _browser || local != _local) return;
         final proceed = await _transferFile(
           FileTransferDrag(
@@ -197,6 +222,7 @@ class _SftpPanelState extends State<SftpPanel> {
             source: FileBrowserSide.local,
             path: entry.path,
             name: entry.name,
+            isDirectory: entry.isDir,
           ),
           directory,
           batch,
@@ -214,9 +240,47 @@ class _SftpPanelState extends State<SftpPanel> {
         if (!started) await release?.call();
       }
     }
-    if (skippedDirectory && mounted && browser == _browser) {
-      AppNotice.error('拖入上传仅支持文件，已跳过文件夹'.tr);
+  }
+
+  Future<void> _uploadDirectory() async {
+    if (_choosingLocalDirectory) return;
+    final browser = _browser;
+    final local = _local;
+    final directory = browser.cwd.value;
+    _choosingLocalDirectory = true;
+    String? path;
+    try {
+      path = await widget.directoryPicker(
+        initialDirectory: local.cwd.value,
+        confirmButtonText: '上传文件夹'.tr,
+      );
+    } on Object {
+      if (mounted) AppNotice.error('无法打开目录选择窗口，请重试'.tr);
+    } finally {
+      _choosingLocalDirectory = false;
     }
+    if (path == null || !mounted || browser != _browser || local != _local) {
+      return;
+    }
+    late LocalFileEntry entry;
+    try {
+      entry = await local.files.entryAt(path);
+    } on Object {
+      if (mounted) AppNotice.error('无法读取文件夹，请检查访问权限'.tr);
+      return;
+    }
+    if (!mounted || browser != _browser || local != _local) return;
+    await _transferFile(
+      FileTransferDrag(
+        sessionId: widget.session.id,
+        source: FileBrowserSide.local,
+        path: path,
+        name: entry.name,
+        isDirectory: true,
+      ),
+      directory,
+      _TransferBatch(),
+    );
   }
 
   Future<void> _chooseLocalDirectory() async {
@@ -303,7 +367,7 @@ class _SftpPanelState extends State<SftpPanel> {
     final local = _local;
     final sessionId = widget.session.id;
     final batch = _TransferBatch();
-    for (final file in files.where((entry) => !entry.isDir)) {
+    for (final file in files) {
       if (!mounted || browser != _browser || local != _local) return;
       final proceed = await _transferFile(
         FileTransferDrag(
@@ -311,6 +375,7 @@ class _SftpPanelState extends State<SftpPanel> {
           source: source,
           path: file.path,
           name: file.name,
+          isDirectory: file.isDir,
         ),
         directory,
         batch,
@@ -333,7 +398,9 @@ class _SftpPanelState extends State<SftpPanel> {
     TransferSourceAccess? acquireUploadSource,
     VoidCallback? onUploadStarted,
   }) async {
-    if (!mounted || data.sessionId != widget.session.id) return false;
+    if (!mounted || data.sessionId != widget.session.id || batch.cancelled) {
+      return false;
+    }
     if (directory.isEmpty) {
       AppNotice.error('请先打开目标目录'.tr);
       return false;
@@ -361,12 +428,14 @@ class _SftpPanelState extends State<SftpPanel> {
           .tasksOf(sessionId)
           .any(
             (task) =>
-                task.status.value == TransferStatus.running &&
-                (upload
-                    ? task.kind == TransferKind.upload &&
-                          task.remotePath == remotePath
-                    : task.kind == TransferKind.download &&
-                          task.localPath == localPath),
+                (task.status.value == TransferStatus.running ||
+                    task.retrying.value) &&
+                task.conflictsWithTarget(
+                  kind: upload ? TransferKind.upload : TransferKind.download,
+                  remotePath: remotePath,
+                  localPath: localPath,
+                  isDirectory: data.isDirectory,
+                ),
           );
       if (isRunning()) return true;
 
@@ -400,27 +469,58 @@ class _SftpPanelState extends State<SftpPanel> {
         isDir = entry?.isDir ?? false;
       }
       if (!mounted || browser != _browser || local != _local) return false;
-      if (isDir) {
-        AppNotice.error('目标位置存在同名目录'.tr);
+      if (exists && isDir != data.isDirectory) {
+        AppNotice.error((isDir ? '目标位置存在同名目录' : '目标文件与目录类型不一致').tr);
         return true;
       }
-      if (exists) {
+      Future<_FileConflictAction?> resolveConflict(String name) async {
+        if (!mounted ||
+            browser != _browser ||
+            local != _local ||
+            batch.cancelled) {
+          return null;
+        }
         var action = batch.conflictAction;
         if (action == null) {
           final decision = await AppNavigation.dialog<_FileConflictDecision>(
-            _FileConflictDialog(name: data.name),
+            _FileConflictDialog(name: name),
           );
-          if (decision == null) return false;
-          if (!mounted || browser != _browser || local != _local) return false;
+          if (decision == null) {
+            batch.cancelled = true;
+            return null;
+          }
+          if (!mounted || browser != _browser || local != _local) return null;
           action = decision.action;
           if (decision.applyToRemaining) batch.conflictAction = action;
         }
+        return action;
+      }
+
+      if (exists && !data.isDirectory) {
+        final action = await resolveConflict(data.name);
+        if (action == null) return false;
         if (action == _FileConflictAction.skip) return true;
       }
       if (!mounted || browser != _browser || local != _local) {
         return false;
       }
       if (isRunning()) return true;
+      Future<DirectoryConflictAction> directoryConflict(String name) async =>
+          switch (await resolveConflict(name)) {
+            _FileConflictAction.overwrite => DirectoryConflictAction.overwrite,
+            _FileConflictAction.skip => DirectoryConflictAction.skip,
+            null => DirectoryConflictAction.cancel,
+          };
+      Future<bool> authorize(String path) async =>
+          mounted &&
+          browser == _browser &&
+          local == _local &&
+          await _requestLocalDirectoryAccess(
+                local,
+                path,
+                local.navigationRevision,
+              ) !=
+              null;
       final task = upload
           ? controller.startUpload(
               sessionId: sessionId,
@@ -429,16 +529,29 @@ class _SftpPanelState extends State<SftpPanel> {
               remotePath: remotePath,
               releaseSource: releaseUploadSource,
               acquireSource: acquireUploadSource,
+              isDirectory: data.isDirectory,
+              localFiles: local.files,
+              onConflict: directoryConflict,
+              authorizeLocalDirectory: authorize,
             )
           : controller.startDownload(
               sessionId: sessionId,
               engineSession: engine,
               remotePath: remotePath,
               localPath: localPath,
+              isDirectory: data.isDirectory,
+              localFiles: local.files,
+              onConflict: directoryConflict,
+              authorizeLocalDirectory: authorize,
             );
       if (upload) onUploadStarted?.call();
       _refreshAfterTransfer(task);
-      return true;
+      if (data.isDirectory && task.status.value == TransferStatus.running) {
+        await task.status.stream.firstWhere(
+          (status) => status != TransferStatus.running,
+        );
+      }
+      return !batch.cancelled && task.status.value != TransferStatus.cancelled;
     } on Object catch (e) {
       if (mounted && browser == _browser) {
         AppNotice.error(
@@ -565,111 +678,156 @@ class _SftpPanelState extends State<SftpPanel> {
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
-      builder: (context, constraints) => Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Expanded(
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Expanded(
-                  child: Obx(
-                    () => FileBrowserPane(
-                      sessionId: widget.session.id,
-                      side: FileBrowserSide.local,
-                      cwd: _local.cwd.value.isEmpty
-                          ? _local.files.homeDirectory
-                          : _local.cwd.value,
-                      loading: _local.loading.value,
-                      error: _local.error.value,
-                      entries: [
-                        for (final entry in _local.visibleEntries)
-                          FileBrowserEntry(
-                            name: entry.name,
-                            path: entry.path,
-                            isDir: entry.isDir,
-                            size: entry.size,
-                            modified: entry.modified,
-                          ),
-                      ],
-                      onNavigate: _navigateLocalDirectory,
-                      onRefresh: () => _navigateLocalDirectory(
-                        _local.cwd.value.isEmpty
+      builder: (context, constraints) {
+        final maxHeight = math.max(
+          AppTheme.transferProgressCollapsedHeight,
+          constraints.maxHeight - AppTheme.fileBrowserMinHeight,
+        );
+        final minHeight = math.min(
+          AppTheme.transferProgressMinHeight,
+          maxHeight,
+        );
+        final height = _expandedTransferHeight.clamp(minHeight, maxHeight);
+        // 窗口缩小时只限制显示高度，保留用户选择的展开高度。
+        if (_transferPane.value != height) _transferPane.size = height;
+        final fileHeight = math.max(
+          0.0,
+          constraints.maxHeight -
+              (_transferExpanded
+                  ? height
+                  : AppTheme.transferProgressCollapsedHeight),
+        );
+        if (_filePane.value != fileHeight) _filePane.size = fileHeight;
+        return shadcn.ResizablePanel.vertical(
+          key: const ValueKey('sftp-transfer-resizable'),
+          // 边框由传输条绘制，折叠时分隔区域必须为零，避免命中拖动光标。
+          dividerBuilder: (_) => const SizedBox.shrink(),
+          draggerThickness: _transferExpanded ? null : 0,
+          draggerBuilder: (_) => _transferExpanded
+              ? const shadcn.VerticalResizableDragger(
+                  key: ValueKey('sftp-transfer-resize-handle'),
+                )
+              : const SizedBox.shrink(),
+          children: [
+            shadcn.ResizablePane.controlled(
+              controller: _filePane,
+              minSize: math.min(
+                AppTheme.fileBrowserMinHeight,
+                math.max(
+                  0,
+                  constraints.maxHeight -
+                      AppTheme.transferProgressCollapsedHeight,
+                ),
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Expanded(
+                    child: Obx(
+                      () => FileBrowserPane(
+                        sessionId: widget.session.id,
+                        side: FileBrowserSide.local,
+                        active: widget.active,
+                        cwd: _local.cwd.value.isEmpty
                             ? _local.files.homeDirectory
                             : _local.cwd.value,
-                      ),
-                      onBrowse: _chooseLocalDirectory,
-                      onAuthorize: _local.permissionDeniedPath.value == null
-                          ? null
-                          : () => _authorizeLocalDirectory(
-                              _local,
-                              _local.permissionDeniedPath.value!,
-                              _local.navigationRevision,
+                        loading: _local.loading.value,
+                        error: _local.error.value,
+                        entries: [
+                          for (final entry in _local.visibleEntries)
+                            FileBrowserEntry(
+                              name: entry.name,
+                              path: entry.path,
+                              isDir: entry.isDir,
+                              size: entry.size,
+                              modified: entry.modified,
                             ),
-                      onOpen: (entry) => _navigateLocalDirectory(entry.path),
-                      onTransfer: (entries) => _transferFiles(
-                        entries,
-                        FileBrowserSide.local,
-                        _browser.cwd.value,
+                        ],
+                        onNavigate: _navigateLocalDirectory,
+                        onRefresh: () => _navigateLocalDirectory(
+                          _local.cwd.value.isEmpty
+                              ? _local.files.homeDirectory
+                              : _local.cwd.value,
+                        ),
+                        onBrowse: _chooseLocalDirectory,
+                        onAuthorize: _local.permissionDeniedPath.value == null
+                            ? null
+                            : () => _authorizeLocalDirectory(
+                                _local,
+                                _local.permissionDeniedPath.value!,
+                                _local.navigationRevision,
+                              ),
+                        onOpen: (entry) => _navigateLocalDirectory(entry.path),
+                        onTransfer: (entries) => _transferFiles(
+                          entries,
+                          FileBrowserSide.local,
+                          _browser.cwd.value,
+                        ),
+                        onDrop: _dropFiles,
+                        onRename: (entry) => _rename(entry, local: true),
+                        onDelete: (entry) => _delete(entry, local: true),
+                        showHidden: _local.showHidden.value,
+                        onShowHiddenChanged: (value) =>
+                            _local.showHidden.value = value,
                       ),
-                      onDrop: _dropFiles,
-                      onRename: (entry) => _rename(entry, local: true),
-                      onDelete: (entry) => _delete(entry, local: true),
-                      showHidden: _local.showHidden.value,
-                      onShowHiddenChanged: (value) =>
-                          _local.showHidden.value = value,
                     ),
                   ),
-                ),
-                Container(width: 1, color: AppTheme.border(context)),
-                Expanded(
-                  child: Obx(
-                    () => FileBrowserPane(
-                      sessionId: widget.session.id,
-                      side: FileBrowserSide.remote,
-                      active: widget.active,
-                      cwd: _browser.cwd.value,
-                      loading: _browser.loading.value,
-                      error: _browser.error.value,
-                      entries: [
-                        for (final entry in _browser.entries)
-                          FileBrowserEntry(
-                            name: entry.name,
-                            path: _browser.pathOf(entry.name),
-                            isDir: entry.isDir,
-                            size: entry.size,
-                            modified: entry.modified,
-                          ),
-                      ],
-                      onNavigate: _browser.navigate,
-                      onRefresh: _browser.refreshDirectory,
-                      onMkdir: _mkdir,
-                      onUpload: _upload,
-                      onOpen: (entry) => _browser.enter(entry.name),
-                      onTransfer: (entries) => _transferFiles(
-                        entries,
-                        FileBrowserSide.remote,
-                        _local.cwd.value,
+                  Container(width: 1, color: AppTheme.border(context)),
+                  Expanded(
+                    child: Obx(
+                      () => FileBrowserPane(
+                        sessionId: widget.session.id,
+                        side: FileBrowserSide.remote,
+                        active: widget.active,
+                        cwd: _browser.cwd.value,
+                        loading: _browser.loading.value,
+                        error: _browser.error.value,
+                        entries: [
+                          for (final entry in _browser.entries)
+                            FileBrowserEntry(
+                              name: entry.name,
+                              path: _browser.pathOf(entry.name),
+                              isDir: entry.isDir,
+                              size: entry.size,
+                              modified: entry.modified,
+                            ),
+                        ],
+                        onNavigate: _browser.navigate,
+                        onRefresh: _browser.refreshDirectory,
+                        onMkdir: _mkdir,
+                        onUpload: _upload,
+                        onUploadDirectory: _uploadDirectory,
+                        onOpen: (entry) => _browser.enter(entry.name),
+                        onTransfer: (entries) => _transferFiles(
+                          entries,
+                          FileBrowserSide.remote,
+                          _local.cwd.value,
+                        ),
+                        onDrop: _dropFiles,
+                        onExternalDrop: _uploadExternal,
+                        onRename: _rename,
+                        onDelete: _delete,
                       ),
-                      onDrop: _dropFiles,
-                      onExternalDrop: _uploadExternal,
-                      onRename: _rename,
-                      onDelete: _delete,
                     ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
-          _TransferStrip(
-            sessionId: widget.session.id,
-            maxHeight: math.max(
-              AppTheme.transferProgressCollapsedHeight,
-              constraints.maxHeight - AppTheme.fileBrowserMinHeight,
+            shadcn.ResizablePane.controlled(
+              controller: _transferPane,
+              minSize: minHeight,
+              collapsedSize: AppTheme.transferProgressCollapsedHeight,
+              onSizeChange: _resizeTransfer,
+              onSizeChangeCancel: _resizeTransfer,
+              child: _TransferStrip(
+                sessionId: widget.session.id,
+                expanded: _transferExpanded,
+                onToggle: _toggleTransferExpanded,
+              ),
             ),
-          ),
-        ],
-      ),
+          ],
+        );
+      },
     );
   }
 }
@@ -737,241 +895,115 @@ class _FileConflictDialogState extends State<_FileConflictDialog> {
 }
 
 /// 本会话的传输任务条，默认折叠。
-class _TransferStrip extends StatefulWidget {
-  const _TransferStrip({required this.sessionId, required this.maxHeight});
+class _TransferStrip extends StatelessWidget {
+  const _TransferStrip({
+    required this.sessionId,
+    required this.expanded,
+    required this.onToggle,
+  });
 
   final String sessionId;
-  final double maxHeight;
-
-  @override
-  State<_TransferStrip> createState() => _TransferStripState();
-}
-
-class _TransferStripState extends State<_TransferStrip> {
-  bool _expanded = false;
-  double _expandedHeight = AppTheme.transferProgressDefaultHeight;
-  bool _hovering = false;
-  bool _resizing = false;
-  double? _resizeStartY;
-  double? _resizeStartHeight;
-
-  @override
-  void didUpdateWidget(_TransferStrip oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.sessionId != widget.sessionId) {
-      _expanded = false;
-      _expandedHeight = AppTheme.transferProgressDefaultHeight;
-      _hovering = false;
-      _resizing = false;
-      _resizeStartY = null;
-      _resizeStartHeight = null;
-    }
-  }
-
-  void _resize(DragUpdateDetails details) {
-    final startY = _resizeStartY;
-    final startHeight = _resizeStartHeight;
-    if (!_expanded || startY == null || startHeight == null) return;
-    // 用全局位移计算，避免分隔线本身移动时累加出跳动。
-    final height = startHeight - (details.globalPosition.dy - startY);
-    setState(() {
-      if (height <= AppTheme.transferProgressCollapsedHeight) {
-        _expanded = false;
-        _hovering = false;
-        _resizing = false;
-        _resizeStartY = null;
-        _resizeStartHeight = null;
-      } else {
-        _expanded = true;
-        _expandedHeight = height.clamp(
-          math.min(AppTheme.transferProgressMinHeight, widget.maxHeight),
-          widget.maxHeight,
-        );
-      }
-    });
-  }
-
-  void _endResize() {
-    if (!_resizing) return;
-    setState(() {
-      _resizing = false;
-      _resizeStartY = null;
-      _resizeStartHeight = null;
-    });
-  }
+  final bool expanded;
+  final VoidCallback onToggle;
 
   @override
   Widget build(BuildContext context) {
     final controller = Get.find<TransferController>();
     final colors = shadcn.Theme.of(context).colorScheme;
-    final height = _expanded
-        ? _expandedHeight
-              .clamp(
-                math.min(AppTheme.transferProgressMinHeight, widget.maxHeight),
-                widget.maxHeight,
-              )
-              .toDouble()
-        : AppTheme.transferProgressCollapsedHeight;
     return Obx(() {
-      final tasks = controller.tasksOf(widget.sessionId);
+      final tasks = controller.tasksOf(sessionId);
       final running = tasks
           .where((task) => task.status.value == TransferStatus.running)
           .length;
-      return SizedBox(
+      return Container(
         key: const ValueKey('sftp-transfer-progress'),
-        height: height,
-        child: Stack(
+        decoration: BoxDecoration(
+          border: Border(top: BorderSide(color: AppTheme.border(context))),
+        ),
+        child: Column(
           children: [
-            Positioned.fill(
-              top: 1,
-              child: Column(
+            SizedBox(
+              height: AppTheme.transferProgressCollapsedHeight - 1,
+              child: Row(
                 children: [
-                  SizedBox(
-                    height: AppTheme.transferProgressCollapsedHeight - 1,
+                  AppIconButton.text(
+                    semanticLabel: (expanded ? '折叠传输进度' : '展开传输进度').tr,
+                    tooltip: (expanded ? '折叠传输进度' : '展开传输进度').tr,
+                    icon: AppIcon(
+                      expanded ? AppIcons.chevronDown : AppIcons.chevronUp,
+                      size: 15,
+                    ),
+                    onPressed: onToggle,
+                  ),
+                  Expanded(
                     child: Row(
                       children: [
-                        AppIconButton.text(
-                          semanticLabel: (_expanded ? '折叠传输进度' : '展开传输进度').tr,
-                          icon: AppIcon(
-                            _expanded
-                                ? AppIcons.chevronDown
-                                : AppIcons.chevronUp,
-                            size: 15,
-                          ),
-                          onPressed: () => setState(() {
-                            _expanded = !_expanded;
-                            if (!_expanded) {
-                              _hovering = false;
-                              _resizing = false;
-                              _resizeStartY = null;
-                              _resizeStartHeight = null;
-                            }
+                        Text(
+                          '传输进度 · @count 项 · @running 项进行中'.trParams({
+                            'count': '${tasks.length}',
+                            'running': '$running',
                           }),
-                        ),
-                        Expanded(
-                          child: Row(
-                            children: [
-                              Text(
-                                '传输进度 · @count 项 · @running 项进行中'.trParams({
-                                  'count': '${tasks.length}',
-                                  'running': '$running',
-                                }),
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  color: colors.mutedForeground,
-                                ),
-                              ),
-                              const SizedBox(width: 12),
-                              // 速率每次采样都会变化，单独订阅，避免重建
-                              // 整个传输条与任务列表。
-                              Flexible(
-                                child: Obx(
-                                  () => Text(
-                                    '总速率 @speed'.trParams({
-                                      'speed': formatTransferRate(
-                                        controller.totalBytesPerSecond(
-                                          widget.sessionId,
-                                        ),
-                                      ),
-                                    }),
-                                    key: const ValueKey(
-                                      'sftp-total-transfer-rate',
-                                    ),
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                      fontSize: 11,
-                                      color: colors.mutedForeground,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                        AppIconButton.text(
-                          semanticLabel: '清除已完成'.tr,
-                          icon: const AppIcon(AppIcons.listX, size: 15),
-                          onPressed: () => controller.clearFinished(
-                            sessionId: widget.sessionId,
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: colors.mutedForeground,
                           ),
                         ),
                         const SizedBox(width: 12),
+                        // 速率每次采样都会变化，单独订阅，避免重建
+                        // 整个传输条与任务列表。
+                        Flexible(
+                          child: Obx(
+                            () => Text(
+                              '总速率 @speed'.trParams({
+                                'speed': formatTransferRate(
+                                  controller.totalBytesPerSecond(sessionId),
+                                ),
+                              }),
+                              key: const ValueKey('sftp-total-transfer-rate'),
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: colors.mutedForeground,
+                              ),
+                            ),
+                          ),
+                        ),
                       ],
                     ),
                   ),
-                  if (_expanded)
-                    Expanded(
-                      child: tasks.isEmpty
-                          ? Center(
-                              child: Text(
-                                '暂无传输任务'.tr,
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  color: colors.mutedForeground,
-                                ),
-                              ),
-                            )
-                          : ListView.builder(
-                              key: const ValueKey('sftp-transfer-list'),
-                              padding: EdgeInsets.zero,
-                              itemCount: tasks.length,
-                              itemBuilder: (_, index) => SizedBox(
-                                key: ValueKey(
-                                  'sftp-transfer-row-${tasks[index].id}',
-                                ),
-                                height: 30,
-                                child: _TransferRow(task: tasks[index]),
-                              ),
-                            ),
-                    ),
+                  AppIconButton.text(
+                    semanticLabel: '清除已完成'.tr,
+                    tooltip: '清除已完成'.tr,
+                    icon: const AppIcon(AppIcons.listX, size: 15),
+                    onPressed: () =>
+                        controller.clearFinished(sessionId: sessionId),
+                  ),
+                  const SizedBox(width: 12),
                 ],
               ),
             ),
-            Positioned(
-              top: 0,
-              left: 0,
-              right: 0,
-              height: 1,
-              child: ColoredBox(color: AppTheme.border(context)),
-            ),
-            if (_expanded)
-              Positioned(
-                top: 0,
-                left: 0,
-                right: 0,
-                height: AppTheme.transferProgressResizeHeight,
-                child: MouseRegion(
-                  cursor: SystemMouseCursors.resizeRow,
-                  onEnter: (_) => setState(() => _hovering = true),
-                  onExit: (_) => setState(() => _hovering = false),
-                  child: GestureDetector(
-                    key: const ValueKey('sftp-transfer-resize-handle'),
-                    behavior: HitTestBehavior.opaque,
-                    dragStartBehavior: DragStartBehavior.down,
-                    onVerticalDragStart: (details) {
-                      _resizeStartY = details.globalPosition.dy;
-                      _resizeStartHeight = height;
-                      setState(() => _resizing = true);
-                    },
-                    onVerticalDragUpdate: _resize,
-                    onVerticalDragEnd: (_) => _endResize(),
-                    onVerticalDragCancel: _endResize,
-                    child: DecoratedBox(
-                      decoration: BoxDecoration(
-                        color: _hovering || _resizing
-                            ? colors.primary.withValues(alpha: 0.12)
-                            : null,
-                        border: Border(
-                          top: BorderSide(
-                            color: _hovering || _resizing
-                                ? colors.primary
-                                : AppTheme.border(context),
+            if (expanded)
+              Expanded(
+                child: tasks.isEmpty
+                    ? Center(
+                        child: Text(
+                          '暂无传输任务'.tr,
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: colors.mutedForeground,
                           ),
                         ),
+                      )
+                    : ListView.builder(
+                        key: const ValueKey('sftp-transfer-list'),
+                        padding: EdgeInsets.zero,
+                        itemCount: tasks.length,
+                        itemBuilder: (_, index) => SizedBox(
+                          key: ValueKey('sftp-transfer-row-${tasks[index].id}'),
+                          height: AppTheme.transferProgressRowHeight,
+                          child: _TransferRow(task: tasks[index]),
+                        ),
                       ),
-                    ),
-                  ),
-                ),
               ),
           ],
         ),
@@ -990,7 +1022,7 @@ class _TransferRow extends StatelessWidget {
     final colors = shadcn.Theme.of(context).colorScheme;
     final controller = Get.find<TransferController>();
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
       child: Obx(() {
         final status = task.status.value;
         final icon = switch (status) {
@@ -1008,9 +1040,12 @@ class _TransferRow extends StatelessWidget {
           _ => colors.mutedForeground,
         };
         final labelStyle = TextStyle(fontSize: 11, color: color);
-        final failureReason = status == TransferStatus.failed
+        final rawFailureReason = status == TransferStatus.failed
             ? task.error.value?.trim()
             : null;
+        final failureReason = rawFailureReason == null
+            ? null
+            : AppTranslations.error(rawFailureReason);
         final label = Text(
           switch (status) {
             TransferStatus.failed =>
@@ -1025,7 +1060,8 @@ class _TransferRow extends StatelessWidget {
           overflow: TextOverflow.ellipsis,
           style: labelStyle,
         );
-        return Row(
+        final content = Row(
+          key: ValueKey('sftp-transfer-content-${task.id}'),
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
             _TransferStatusAction(
@@ -1098,6 +1134,33 @@ class _TransferRow extends StatelessWidget {
             ),
           ],
         );
+        final path = task.currentPath.value;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            SizedBox(height: 26, child: content),
+            const SizedBox(height: 2),
+            Padding(
+              padding: const EdgeInsets.only(left: 32),
+              child: SizedBox(
+                height: 14,
+                child: shadcn.Tooltip(
+                  tooltip: (_) => shadcn.TooltipContainer(child: Text(path)),
+                  child: Text(
+                    path,
+                    key: ValueKey('sftp-transfer-path-${task.id}'),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 10,
+                      color: colors.mutedForeground,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
       }),
     );
   }
@@ -1137,6 +1200,7 @@ class _TransferStatusActionState extends State<_TransferStatusAction> {
           ? Center(child: AppIcon(widget.icon, size: 13, color: widget.color))
           : AppIconButton.text(
               semanticLabel: widget.semanticLabel,
+              tooltip: widget.semanticLabel,
               icon: AppIcon(
                 _hovered ? widget.hoverIcon : widget.icon,
                 size: 13,

@@ -7,6 +7,7 @@ abstract interface class LocalFileRepository {
   String pathOf(String directory, String name);
   Future<LocalFileEntry> entryAt(String path);
   Future<List<LocalFileEntry>> listDirectory(String path);
+  Future<void> createDirectory(String path);
   Future<void> rename(String path, String newName, {required bool isDir});
   Future<void> remove(String path, {required bool isDir});
 }

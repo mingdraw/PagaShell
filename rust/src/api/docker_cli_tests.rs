@@ -18,6 +18,7 @@ use std::time::Duration;
 struct FixtureDaemon {
     address: SocketAddr,
     value: Arc<Mutex<Value>>,
+    requests: Arc<Mutex<Vec<(String, String)>>>,
     stopping: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -29,12 +30,14 @@ impl FixtureDaemon {
         listener.set_nonblocking(true).unwrap();
         let value = Arc::new(Mutex::new(Value::Null));
         let stopping = Arc::new(AtomicBool::new(false));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let calls = requests.clone();
         let data = value.clone();
         let stop = stopping.clone();
         let thread = std::thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) {
                 match listener.accept() {
-                    Ok((stream, _)) => Self::serve(stream, &data),
+                    Ok((stream, _)) => Self::serve(stream, &data, &calls),
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(5));
                     }
@@ -45,12 +48,13 @@ impl FixtureDaemon {
         Self {
             address,
             value,
+            requests,
             stopping,
             thread: Some(thread),
         }
     }
 
-    fn serve(mut stream: TcpStream, value: &Mutex<Value>) {
+    fn serve(mut stream: TcpStream, value: &Mutex<Value>, calls: &Mutex<Vec<(String, String)>>) {
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
@@ -72,14 +76,47 @@ impl FixtureDaemon {
         let mut first_line = request.lines().next().unwrap().split_whitespace();
         let method = first_line.next().unwrap();
         let path = first_line.next().unwrap();
+        calls.lock().unwrap().push((method.into(), path.into()));
+        let route = path.split('?').next().unwrap();
         let (status, body) = if path.ends_with("/_ping") {
             ("200 OK", "OK".to_owned())
-        } else if path.contains("/containers/") && path.ends_with("/json") {
+        } else if route.ends_with("/containers/json") {
             ("200 OK", value.lock().unwrap().to_string())
+        } else if route.ends_with("/networks") {
+            ("200 OK", "[]".into())
+        } else if route.ends_with("/volumes") {
+            (
+                "200 OK",
+                json!({"Volumes": [], "Warnings": null}).to_string(),
+            )
+        } else if method == "POST" && (route.ends_with("/start") || route.ends_with("/stop")) {
+            let mut value = value.lock().unwrap();
+            value[0]["State"] = json!(if route.ends_with("/start") {
+                "running"
+            } else {
+                "exited"
+            });
+            ("204 No Content", String::new())
+        } else if method == "DELETE" && route.contains("/containers/") {
+            *value.lock().unwrap() = json!([]);
+            ("204 No Content", String::new())
+        } else if path.contains("/containers/") && path.ends_with("/json") {
+            let value = value.lock().unwrap();
+            if value.is_array() {
+                let mut details = container(value[0]["Id"].as_str().unwrap(), None);
+                details["Config"]["Labels"] = value[0]["Labels"].clone();
+                details["State"]["Status"] = value[0]["State"].clone();
+                details["State"]["Running"] = json!(value[0]["State"] == "running");
+                details["HostConfig"] = json!({});
+                ("200 OK", details.to_string())
+            } else {
+                ("200 OK", value.to_string())
+            }
         } else {
             (
                 "404 Not Found",
-                json!({"message": "Unexpected fixture endpoint"}).to_string(),
+                json!({"message": format!("Unexpected fixture endpoint: {method} {path}")})
+                    .to_string(),
             )
         };
         let headers = format!(
@@ -90,6 +127,109 @@ impl FixtureDaemon {
             let _ = stream.write_all(body.as_bytes());
         }
     }
+}
+
+#[tokio::test]
+#[ignore = "requires Docker Compose CLI; only connects to a loopback fixture daemon"]
+async fn docker_compose_lists_metadata_and_controls_projects_without_source_yaml_with_actual_cli() {
+    use std::os::unix::fs::symlink;
+    let cli = docker_cli();
+    let temp = tempfile::tempdir().unwrap();
+    let bin = temp.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    symlink(&cli, bin.join("docker")).unwrap();
+    let daemon = FixtureDaemon::new();
+    let project = json!([{
+        "Id": "a".repeat(64), "Names": ["/app-api-1"], "Image": "example:latest",
+        "ImageID": format!("sha256:{}", "b".repeat(64)), "State": "exited", "Status": "Exited (0)",
+        "Labels": {
+            "com.docker.compose.project": "app", "com.docker.compose.service": "api",
+            "com.docker.compose.oneoff": "False", "com.docker.compose.config-hash": "fixture",
+            "com.docker.compose.project.working_dir": "/missing/app",
+            "com.docker.compose.project.config_files": "/missing/app/compose.yaml",
+            "com.docker.compose.version": "2.40.0", "password": "PAGA_TEST_SECRET"
+        },
+        "HostConfig": {"NetworkMode":"bridge"}, "NetworkSettings": {"Networks": {}}, "Mounts": []
+    }]);
+    *daemon.value.lock().unwrap() = project.clone();
+    // Run the production projection using the real Docker Go-template formatter.
+    for target in [None, Some("app")] {
+        let command = docker_command(DockerResourceKind::Compose, target).unwrap();
+        let mut process = tokio::process::Command::new("sh");
+        process
+            .args(["-c", &command])
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("DOCKER_HOST", format!("tcp://{}", daemon.address))
+            .env("DOCKER_API_VERSION", "1.53")
+            .env("DOCKER_CONFIG", temp.path())
+            .env_remove("DOCKER_CONTEXT")
+            .env_remove("DOCKER_TLS_VERIFY")
+            .env_remove("DOCKER_TLS")
+            .env_remove("DOCKER_CERT_PATH")
+            .kill_on_drop(true);
+        let output = tokio::time::timeout(Duration::from_secs(10), process.output())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(output.status.success(), "{:?}", output.status);
+        let raw = String::from_utf8(output.stdout).unwrap();
+        assert!(!raw.contains("PAGA_TEST_SECRET"));
+        let row: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(row["id"], "app");
+        assert_eq!(row["service"], "api");
+        assert_eq!(row["configFiles"], "/missing/app/compose.yaml");
+    }
+    // No YAML exists in the working directory or at the recorded source location.
+    // The actual plugin must use project labels for start/stop/down.
+    for args in [
+        vec!["start"],
+        vec!["stop", "--timeout", "20"],
+        vec!["down", "--remove-orphans", "--timeout", "20"],
+    ] {
+        let mut process = tokio::process::Command::new(&cli);
+        process
+            .args([
+                "--host",
+                &format!("tcp://{}", daemon.address),
+                "compose",
+                "--ansi",
+                "never",
+                "--project-name",
+                "app",
+            ])
+            .args(&args)
+            .current_dir(temp.path())
+            .env("DOCKER_API_VERSION", "1.53")
+            // Preserve plugin discovery from the user's Docker config; the explicit
+            // loopback --host above and cleared context keep every request isolated.
+            .env_remove("COMPOSE_FILE")
+            .env_remove("DOCKER_CONTEXT")
+            .env_remove("DOCKER_TLS_VERIFY")
+            .env_remove("DOCKER_TLS")
+            .env_remove("DOCKER_CERT_PATH")
+            .kill_on_drop(true);
+        let output = tokio::time::timeout(Duration::from_secs(10), process.output())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let calls = daemon.requests.lock().unwrap();
+    assert!(calls
+        .iter()
+        .any(|(method, path)| method == "POST" && path.ends_with("/start")));
+    assert!(calls
+        .iter()
+        .any(|(method, path)| method == "POST" && path.contains("/stop")));
+    assert!(calls
+        .iter()
+        .any(|(method, path)| method == "DELETE" && path.contains("/containers/")));
+    assert!(!calls.iter().any(|(method, path)| method == "DELETE"
+        && (path.contains("/images/") || path.contains("/volumes/"))));
 }
 
 impl Drop for FixtureDaemon {

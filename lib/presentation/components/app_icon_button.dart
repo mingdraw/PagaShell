@@ -27,10 +27,10 @@ class AppIconButton extends StatelessWidget {
     required this.icon,
     this.semanticLabel = '',
     this.onPressed,
+    this.tooltip,
     this.density = shadcn.ButtonDensity.icon,
     super.key,
-  }) : tooltip = null,
-       _variant = _AppIconButtonVariant.text;
+  }) : _variant = _AppIconButtonVariant.text;
 
   final Widget icon;
   final String semanticLabel;

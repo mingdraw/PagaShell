@@ -12,6 +12,7 @@ import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
 import '../theme/app_theme.dart';
 import 'docker_manager_panel.dart';
+import 'network_ports_panel.dart';
 import 'process_manager_panel.dart';
 import 'server_status_panel.dart';
 import 'terminal_side_panel.dart';
@@ -144,6 +145,7 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
     final statusSource = controller.serverStatusSource(widget.tab.id);
     final processSource = controller.processManagerSource(widget.tab.id);
     final dockerSource = controller.dockerManagerSource(widget.tab.id);
+    final portsSource = controller.networkPortsSource(widget.tab.id);
     return LayoutBuilder(
       builder: (context, constraints) => TerminalSidePanel(
         availableWidth: constraints.maxWidth,
@@ -187,6 +189,13 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
                   widget.active &&
                   visible &&
                   panel == TerminalSidePanelKind.docker,
+            ),
+            NetworkPortsPanel(
+              source: portsSource,
+              active:
+                  widget.active &&
+                  visible &&
+                  panel == TerminalSidePanelKind.networkPorts,
             ),
           ],
         ),
@@ -232,6 +241,23 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
                 ? () => toggle(TerminalSidePanelKind.processes)
                 : null,
             icon: AppIcons.processes,
+          ),
+          const SizedBox(width: 4),
+          _toolbarButton(
+            name: 'toolbar-network-ports',
+            label:
+                (panel == TerminalSidePanelKind.networkPorts
+                        ? '折叠网络端口'
+                        : '展开网络端口')
+                    .tr,
+            tooltip: '网络端口'.tr,
+            onPressed:
+                canExpand &&
+                    (portsSource != null ||
+                        panel == TerminalSidePanelKind.networkPorts)
+                ? () => toggle(TerminalSidePanelKind.networkPorts)
+                : null,
+            icon: AppIcons.networkPorts,
           ),
           const SizedBox(width: 4),
           _toolbarButton(

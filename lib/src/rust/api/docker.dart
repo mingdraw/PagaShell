@@ -8,7 +8,18 @@ import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `docker_command`, `docker_terminal_command`, `docker_terminal_error`, `docker_terminal_exec_error`, `docker_terminal_launch_command`, `docker_terminal_preflight_error`, `query`, `shell_argument`, `validate_docker_id`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`
+
+/// 仅接受 Compose 项目名及固定操作；重建从远端原配置读取，不传回配置内容。
+Future<String?> sshRunDockerComposeAction({
+  required int sessionId,
+  required String projectName,
+  required DockerComposeAction action,
+}) => RustLib.instance.api.crateApiDockerSshRunDockerComposeAction(
+  sessionId: sessionId,
+  projectName: projectName,
+  action: action,
+);
 
 /// 镜像删除不强制；批量清理按所选范围执行，保留容器引用。
 Future<void> sshRunDockerImageAction({
@@ -46,7 +57,8 @@ Future<String> sshReadDockerResources({
   kind: kind,
 );
 
-/// 单项详情只输出固定字段，不读取环境变量、命令参数、标签或驱动凭据。
+/// 单项详情只输出固定字段；Compose 只投影明确的元数据标签。
+/// 不读取环境变量、命令参数、任意标签或驱动凭据。
 Future<String> sshReadDockerDetails({
   required int sessionId,
   required DockerResourceKind kind,
@@ -57,8 +69,10 @@ Future<String> sshReadDockerDetails({
   resourceId: resourceId,
 );
 
+enum DockerComposeAction { start, stop, rebuild, delete }
+
 enum DockerContainerAction { start, stop, upgrade, delete }
 
 enum DockerImageAction { delete, pruneUntagged, pruneUnused }
 
-enum DockerResourceKind { container, image, network, volume }
+enum DockerResourceKind { container, image, network, volume, compose }

@@ -94,7 +94,8 @@ class _DockerDetailsDialogState extends State<DockerDetailsDialog> {
     mainAxisSize: MainAxisSize.min,
     children: [
       _row('名称'.tr, resource.name, 'name'),
-      _row('ID', resource.id, 'id'),
+      if (resource.kind != DockerResourceKind.compose)
+        _row('ID', resource.id, 'id'),
       for (final field in resource.fields.entries)
         _row(field.key.label, field.key.display(field.value), field.key.name),
     ],

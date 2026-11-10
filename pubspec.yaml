@@ -30,6 +30,7 @@ dependencies:
   rust_lib_pagashell:
     path: rust_builder
   shadcn_flutter: ^0.0.55
+  url_launcher: ^6.3.3
   win32: ^6.4.0
   window_manager: ^0.5.2
 

@@ -2,8 +2,11 @@ import 'dart:async';
 import 'dart:collection';
 
 import 'package:get/get.dart';
+import 'package:path/path.dart' as p;
 
+import '../../domain/repositories/local_file_repository.dart';
 import '../../domain/ssh/ssh_engine.dart';
+import 'directory_transfer.dart';
 
 enum TransferKind { upload, download }
 
@@ -26,7 +29,8 @@ class TransferTask {
     required this.fileName,
     required this.remotePath,
     required this.localPath,
-  });
+    this.isDirectory = false,
+  }) : currentPath = (kind == TransferKind.upload ? localPath : remotePath).obs;
 
   final String id;
   final String sessionId;
@@ -34,6 +38,8 @@ class TransferTask {
   final String fileName;
   final String remotePath;
   final String localPath;
+  final bool isDirectory;
+  final RxString currentPath;
 
   final Rx<TransferStatus> status = TransferStatus.running.obs;
   final RxInt transferred = 0.obs;
@@ -46,6 +52,25 @@ class TransferTask {
   double? get fraction => total.value <= 0
       ? null
       : (transferred.value / total.value).clamp(0.0, 1.0).toDouble();
+
+  /// 目录任务占用整个目标树，避免重试或另一项操作并行写入子文件。
+  bool conflictsWithTarget({
+    required TransferKind kind,
+    required String localPath,
+    required String remotePath,
+    bool isDirectory = false,
+  }) {
+    if (this.kind != kind) return false;
+    final own = kind == TransferKind.upload ? this.remotePath : this.localPath;
+    final target = kind == TransferKind.upload ? remotePath : localPath;
+    final windows =
+        kind == TransferKind.download &&
+        (RegExp(r'^[a-zA-Z]:[/\\]').hasMatch(own) || own.startsWith(r'\\'));
+    final paths = p.Context(style: windows ? p.Style.windows : p.Style.posix);
+    return paths.equals(own, target) ||
+        (this.isDirectory && paths.isWithin(own, target)) ||
+        (isDirectory && paths.isWithin(target, own));
+  }
 }
 
 /// 传输队列控制器：发起上传/下载、跟踪进度、取消与清理。
@@ -116,6 +141,7 @@ class TransferController extends GetxController {
   }
 
   void _onProgress(TransferTask task, SftpTransferProgress progress) {
+    if (progress.currentPath case final path?) task.currentPath.value = path;
     if (_progressTimers.containsKey(task.id)) {
       _pendingProgress[task.id] = progress;
       return;
@@ -164,18 +190,32 @@ class TransferController extends GetxController {
     required SshEngineSession engineSession,
     required String remotePath,
     required String localPath,
+    bool isDirectory = false,
+    LocalFileRepository? localFiles,
+    DirectoryConflictResolver? onConflict,
+    DirectoryAccessRequest? authorizeLocalDirectory,
   }) {
+    Stream<SftpTransferProgress> open() => isDirectory
+        ? transferDirectory(
+            engine: engineSession,
+            localFiles:
+                localFiles ?? (throw ArgumentError.notNull('localFiles')),
+            localPath: localPath,
+            remotePath: remotePath,
+            upload: false,
+            onConflict: onConflict,
+            authorizeLocalDirectory: authorizeLocalDirectory,
+          )
+        : engineSession.download(remotePath, localPath);
     return _start(
       sessionId: sessionId,
       kind: TransferKind.download,
       fileName: _baseName(remotePath),
       remotePath: remotePath,
       localPath: localPath,
-      progress: engineSession.download(remotePath, localPath),
-      request: _TransferRequest(
-        () => engineSession.download(remotePath, localPath),
-        null,
-      ),
+      isDirectory: isDirectory,
+      progress: open(),
+      request: _TransferRequest(open, null),
     );
   }
 
@@ -186,20 +226,33 @@ class TransferController extends GetxController {
     required String remotePath,
     Future<void> Function()? releaseSource,
     TransferSourceAccess? acquireSource,
+    bool isDirectory = false,
+    LocalFileRepository? localFiles,
+    DirectoryConflictResolver? onConflict,
+    DirectoryAccessRequest? authorizeLocalDirectory,
   }) {
-    final progress = engineSession.upload(localPath, remotePath);
+    Stream<SftpTransferProgress> open() => isDirectory
+        ? transferDirectory(
+            engine: engineSession,
+            localFiles:
+                localFiles ?? (throw ArgumentError.notNull('localFiles')),
+            localPath: localPath,
+            remotePath: remotePath,
+            upload: true,
+            onConflict: onConflict,
+            authorizeLocalDirectory: authorizeLocalDirectory,
+          )
+        : engineSession.upload(localPath, remotePath);
     return _start(
       sessionId: sessionId,
       kind: TransferKind.upload,
       fileName: _baseName(localPath),
       remotePath: remotePath,
       localPath: localPath,
-      progress: progress,
+      isDirectory: isDirectory,
+      progress: open(),
       releaseSource: releaseSource,
-      request: _TransferRequest(
-        () => engineSession.upload(localPath, remotePath),
-        acquireSource,
-      ),
+      request: _TransferRequest(open, acquireSource),
     );
   }
 
@@ -216,6 +269,7 @@ class TransferController extends GetxController {
     required String remotePath,
     required String localPath,
     required Stream<SftpTransferProgress> progress,
+    bool isDirectory = false,
     Future<void> Function()? releaseSource,
     required _TransferRequest request,
   }) {
@@ -226,6 +280,7 @@ class TransferController extends GetxController {
       fileName: fileName,
       remotePath: remotePath,
       localPath: localPath,
+      isDirectory: isDirectory,
     );
     tasks.insert(0, task);
     _requests[task.id] = request;
@@ -245,8 +300,13 @@ class TransferController extends GetxController {
       (p) => _onProgress(task, p),
       onError: (Object e, StackTrace _) {
         _flushProgress(task);
-        task.error.value = e is SshEngineException ? e.message : e.toString();
-        task.status.value = TransferStatus.failed;
+        if (e is DirectoryTransferCancelled) {
+          task.status.value = TransferStatus.cancelled;
+          _requests.remove(task.id);
+        } else {
+          task.error.value = _errorMessage(e);
+          task.status.value = TransferStatus.failed;
+        }
         _finishRate(task);
         _cleanup[task.id] =
             _subs
@@ -289,9 +349,12 @@ class TransferController extends GetxController {
           other.kind == task.kind &&
           (other.status.value == TransferStatus.running ||
               other.retrying.value) &&
-          (task.kind == TransferKind.upload
-              ? other.remotePath == task.remotePath
-              : other.localPath == task.localPath),
+          other.conflictsWithTarget(
+            kind: task.kind,
+            localPath: task.localPath,
+            remotePath: task.remotePath,
+            isDirectory: task.isDirectory,
+          ),
     );
     if (targetBusy()) return;
     final attempt = Object();
@@ -310,6 +373,9 @@ class TransferController extends GetxController {
       final progress = request.open();
       task.transferred.value = 0;
       task.total.value = 0;
+      task.currentPath.value = task.kind == TransferKind.upload
+          ? task.localPath
+          : task.remotePath;
       task.bytesPerSecond.value = 0;
       task.error.value = null;
       task.status.value = TransferStatus.running;
@@ -318,7 +384,7 @@ class TransferController extends GetxController {
       _listen(task, progress);
     } on Object catch (e) {
       if (current()) {
-        task.error.value = e is SshEngineException ? e.message : e.toString();
+        task.error.value = _errorMessage(e);
         task.status.value = TransferStatus.failed;
       }
     } finally {
@@ -405,6 +471,12 @@ class TransferController extends GetxController {
     _subs.clear();
     super.onClose();
   }
+
+  static String _errorMessage(Object error) => switch (error) {
+    SshEngineException() => error.message,
+    LocalDirectoryAccessDenied() => '需要授权才能访问此文件夹',
+    _ => error.toString(),
+  };
 
   /// 取路径最后一段作为展示名（远端为 POSIX，本地兼容 Windows 分隔符）。
   static String _baseName(String path) {

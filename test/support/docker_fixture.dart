@@ -9,12 +9,15 @@ DockerResource dockerResource({
   kind: kind,
   id:
       id ??
-      (kind == DockerResourceKind.volume
-          ? 'app_data'
+      (kind == DockerResourceKind.volume || kind == DockerResourceKind.compose
+          ? kind == DockerResourceKind.compose
+                ? 'app'
+                : 'app_data'
           : '${kind == DockerResourceKind.image ? 'sha256:' : ''}${'a'.padRight(64, 'a')}'),
   name:
       name ??
       switch (kind) {
+        DockerResourceKind.compose => 'app',
         DockerResourceKind.container => 'web-api',
         DockerResourceKind.image => 'nginx:stable',
         DockerResourceKind.network => 'app_net',
@@ -23,6 +26,15 @@ DockerResource dockerResource({
   fields:
       fields ??
       switch (kind) {
+        DockerResourceKind.compose => {
+          DockerField.state: 'running',
+          DockerField.status: 'running (2)',
+          DockerField.serviceCount: '2',
+          DockerField.containerCount: '2',
+          DockerField.services: 'api\ndb',
+          DockerField.workingDirectory: '/srv/app',
+          DockerField.configFiles: '/srv/app/compose.yaml',
+        },
         DockerResourceKind.container => {
           DockerField.image: 'nginx:stable',
           DockerField.state: 'running',

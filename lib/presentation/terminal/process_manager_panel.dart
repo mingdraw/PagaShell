@@ -200,7 +200,10 @@ class _ProcessManagerPanelState extends State<ProcessManagerPanel> {
                   ),
                 ),
                 const SizedBox(width: 8),
-                SizedBox(width: 156, child: _sortSelector(controller)),
+                SizedBox(
+                  width: Get.locale?.languageCode == 'en' ? 152 : 136,
+                  child: _sortSelector(controller),
+                ),
               ],
             ),
           ),
@@ -292,7 +295,7 @@ class _ProcessManagerPanelState extends State<ProcessManagerPanel> {
                   key: ValueKey('process-sort-${value.name}'),
                   value: value,
                   theme: const shadcn.RadioCardTheme(
-                    padding: EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                    padding: EdgeInsets.symmetric(horizontal: 4, vertical: 2),
                   ),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.center,
@@ -394,11 +397,12 @@ class _ProcessManagerPanelState extends State<ProcessManagerPanel> {
                             _requestTermination(controller, process),
                           ),
                     icon: AppIcon(
-                      busy
-                          ? AppIcons.hourglass
-                          : AppIcons.circleX,
-                      size: 14,
-                      color: process.canTerminate && !busy
+                      busy ? AppIcons.hourglass : AppIcons.square,
+                      size: 13,
+                      color:
+                          process.canTerminate &&
+                              !busy &&
+                              !_confirming.contains(process.identity)
                           ? StatusColors.failed
                           : AppTheme.terminalMutedForeground,
                     ),

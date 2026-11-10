@@ -15,6 +15,7 @@ import '../localization/app_translations.dart';
 import '../navigation/app_navigation.dart';
 import '../navigation/app_notice.dart';
 import '../theme/app_theme.dart';
+import 'docker_compose_dialog.dart';
 import 'docker_container_dialog.dart';
 import 'docker_details_dialog.dart';
 import 'docker_image_dialog.dart';
@@ -222,7 +223,7 @@ class _DockerManagerPanelState extends State<DockerManagerPanel> {
                 ),
                 if (kind == DockerResourceKind.image) ...[
                   const SizedBox(width: 6),
-                  shadcn.GhostButton(
+                  shadcn.TextButton(
                     key: const ValueKey('docker-image-cleanup'),
                     density: shadcn.ButtonDensity.compact,
                     leading: const AppIcon(AppIcons.brush, size: 13),
@@ -288,7 +289,7 @@ class _DockerManagerPanelState extends State<DockerManagerPanel> {
     builder: (_, constraints) {
       final showLabels =
           constraints.maxWidth >=
-          (Get.locale?.languageCode == 'en' ? 380 : 260);
+          (Get.locale?.languageCode == 'en' ? 480 : 300);
       return shadcn.TabList(
         key: const ValueKey('docker-manager-tabs'),
         index: controller.selected.value.index,
@@ -352,6 +353,11 @@ class _DockerManagerPanelState extends State<DockerManagerPanel> {
         ? DockerContainerAction.stop
         : DockerContainerAction.start;
     final fields = switch (resource.kind) {
+      DockerResourceKind.compose => [
+        DockerField.status,
+        DockerField.serviceCount,
+        DockerField.containerCount,
+      ],
       DockerResourceKind.container => [DockerField.image, DockerField.status],
       DockerResourceKind.image => [
         DockerField.tags,
@@ -377,7 +383,8 @@ class _DockerManagerPanelState extends State<DockerManagerPanel> {
           children: [
             Row(
               children: [
-                if (resource.kind == DockerResourceKind.container) ...[
+                if (resource.kind == DockerResourceKind.container ||
+                    resource.kind == DockerResourceKind.compose) ...[
                   Container(
                     width: 6,
                     height: 6,
@@ -406,6 +413,31 @@ class _DockerManagerPanelState extends State<DockerManagerPanel> {
                   ),
                 ),
                 const SizedBox(width: 4),
+                if (resource.kind == DockerResourceKind.compose) ...[
+                  _cardButton(
+                    stoppable ? 'stop' : 'start',
+                    resource,
+                    stoppable ? '停止编排' : '启动编排',
+                    stoppable ? AppIcons.square : AppIcons.play,
+                    available && controller.canMutateCompose
+                        ? () => unawaited(
+                            stoppable
+                                ? _requestComposeAction(
+                                    controller,
+                                    resource,
+                                    DockerComposeAction.stop,
+                                  )
+                                : _performComposeAction(
+                                    controller,
+                                    resource,
+                                    DockerComposeAction.start,
+                                  ),
+                          )
+                        : null,
+                    color: stoppable ? StatusColors.failed : StatusColors.ready,
+                  ),
+                  const SizedBox(width: 2),
+                ],
                 if (resource.kind == DockerResourceKind.container) ...[
                   _cardButton(
                     powerAction.name,
@@ -432,6 +464,7 @@ class _DockerManagerPanelState extends State<DockerManagerPanel> {
                                   ),
                           )
                         : null,
+                    color: stoppable ? StatusColors.failed : StatusColors.ready,
                   ),
                   const SizedBox(width: 2),
                 ],
@@ -506,6 +539,27 @@ class _DockerManagerPanelState extends State<DockerManagerPanel> {
                     ),
                   ),
                 ],
+                if (resource.kind == DockerResourceKind.compose) ...[
+                  const SizedBox(width: 2),
+                  SizedBox.square(
+                    dimension: 22,
+                    child: AppMenuButton<DockerComposeAction>(
+                      key: ValueKey('docker-more-${resource.identity}'),
+                      semanticLabel: '更多编排操作'.tr,
+                      tooltip: '更多编排操作'.tr,
+                      density: shadcn.ButtonDensity.compact,
+                      icon: const AppIcon(AppIcons.ellipsis, size: 14),
+                      enabled: available && controller.canMutateCompose,
+                      items: [
+                        (DockerComposeAction.rebuild, '重建'.tr),
+                        (DockerComposeAction.delete, '删除'.tr),
+                      ],
+                      onSelected: (action) => unawaited(
+                        _requestComposeAction(controller, resource, action),
+                      ),
+                    ),
+                  ),
+                ],
               ],
             ),
             if (resource.kind == DockerResourceKind.image)
@@ -527,15 +581,18 @@ class _DockerManagerPanelState extends State<DockerManagerPanel> {
                   ),
                 ],
               )
-            else if (resource.kind != DockerResourceKind.volume)
+            else if (resource.kind != DockerResourceKind.volume &&
+                resource.kind != DockerResourceKind.compose)
               Text(resource.shortId, style: _secondaryStyle),
             if (pending?.resourceId == resource.identity)
               Padding(
                 padding: const EdgeInsets.only(top: 4),
                 child: Text(
-                  (pending?.imageAction == null
-                          ? '正在执行容器操作…'
-                          : '正在处理 Docker 镜像…')
+                  (pending?.composeAction != null
+                          ? '正在执行编排操作…'
+                          : pending?.imageAction != null
+                          ? '正在处理 Docker 镜像…'
+                          : '正在执行容器操作…')
                       .tr,
                   style: _secondaryStyle,
                 ),
@@ -563,15 +620,22 @@ class _DockerManagerPanelState extends State<DockerManagerPanel> {
     DockerResource resource,
     String label,
     AppIcons icon,
-    VoidCallback? onPressed,
-  ) => SizedBox.square(
+    VoidCallback? onPressed, {
+    Color? color,
+  }) => SizedBox.square(
     dimension: 22,
     child: AppIconButton(
       key: ValueKey('docker-$key-${resource.identity}'),
       semanticLabel: label.tr,
       tooltip: label.tr,
       density: shadcn.ButtonDensity.compact,
-      icon: AppIcon(icon, size: 14),
+      icon: AppIcon(
+        icon,
+        size: 14,
+        color: onPressed == null && color != null
+            ? AppTheme.terminalMutedForeground
+            : color,
+      ),
       onPressed: onPressed,
     ),
   );
@@ -628,6 +692,52 @@ class _DockerManagerPanelState extends State<DockerManagerPanel> {
             image: image,
             forcePull: force,
           ),
+        ),
+        barrierDismissible: false,
+      );
+    } finally {
+      _showingAction = false;
+    }
+  }
+
+  Future<void> _performComposeAction(
+    DockerManagerController controller,
+    DockerResource resource,
+    DockerComposeAction action,
+  ) async {
+    try {
+      final result = await controller.runComposeAction(resource, action);
+      if (result.warning case final warning?) {
+        AppNotice.error(warning);
+      } else {
+        AppNotice.success(switch (action) {
+          DockerComposeAction.start => '编排已启动'.tr,
+          DockerComposeAction.stop => '编排已停止'.tr,
+          DockerComposeAction.rebuild => '编排已重建'.tr,
+          DockerComposeAction.delete => '编排已删除'.tr,
+        });
+      }
+    } on Object catch (error) {
+      AppNotice.error(
+        error is SshEngineException ? error.message : 'Docker 编排操作失败，请刷新列表检查',
+      );
+      if (action != DockerComposeAction.start) rethrow;
+    }
+  }
+
+  Future<void> _requestComposeAction(
+    DockerManagerController controller,
+    DockerResource resource,
+    DockerComposeAction action,
+  ) async {
+    if (_showingAction || controller.busy || !widget.active) return;
+    _showingAction = true;
+    try {
+      await AppNavigation.dialog<bool>(
+        DockerComposeDialog(
+          project: resource,
+          action: action,
+          onConfirm: () => _performComposeAction(controller, resource, action),
         ),
         barrierDismissible: false,
       );

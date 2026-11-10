@@ -11,6 +11,7 @@ import '../../domain/rdp/rdp_engine.dart';
 import '../../domain/repositories/known_host_repository.dart';
 import '../../domain/ssh/docker_manager.dart';
 import '../../domain/ssh/host_key.dart';
+import '../../domain/ssh/network_ports.dart';
 import '../../domain/ssh/process_manager.dart';
 import '../../domain/ssh/server_status.dart';
 import '../../domain/ssh/ssh_engine.dart';
@@ -78,6 +79,9 @@ class SessionController extends GetxController {
 
   DockerManagerSource? dockerManagerSource(String tabId) =>
       _monitoringConnection(tabId, (session) => session is DockerManagerSource);
+
+  NetworkPortsSource? networkPortsSource(String tabId) =>
+      _monitoringConnection(tabId, (session) => session is NetworkPortsSource);
 
   ServerStatusConnection? _monitoringConnection(
     String tabId,

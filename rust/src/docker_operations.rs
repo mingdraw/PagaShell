@@ -19,6 +19,9 @@ use crate::api::ssh::{
     docker_api_channel, read_only_exec, server_status_command, ReadOnlyExecPolicy,
 };
 
+#[path = "docker_compose.rs"]
+pub(crate) mod compose;
+
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(12 * 60);
 const RESPONSE_LIMIT: usize = 8 * 1024 * 1024;

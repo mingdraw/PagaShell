@@ -39,7 +39,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.13.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1600103255;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1218327215;
 
 // Section: executor
 
@@ -1449,6 +1449,44 @@ fn wire__crate__api__docker__ssh_read_docker_resources_impl(
         },
     )
 }
+fn wire__crate__api__network_ports__ssh_read_network_ports_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "ssh_read_network_ports",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_session_id = <u32>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || async move {
+                        let output_ok =
+                            crate::api::network_ports::ssh_read_network_ports(api_session_id)
+                                .await?;
+                        std::result::Result::Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__ssh__ssh_read_process_details_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -1596,6 +1634,50 @@ fn wire__crate__api__ssh__ssh_resize_impl(
                     (move || async move {
                         let output_ok =
                             crate::api::ssh::ssh_resize(api_session_id, api_cols, api_rows).await?;
+                        std::result::Result::Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__docker__ssh_run_docker_compose_action_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "ssh_run_docker_compose_action",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_session_id = <u32>::sse_decode(&mut deserializer);
+            let api_project_name = <String>::sse_decode(&mut deserializer);
+            let api_action =
+                <crate::api::docker::DockerComposeAction>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || async move {
+                        let output_ok = crate::api::docker::ssh_run_docker_compose_action(
+                            api_session_id,
+                            api_project_name,
+                            api_action,
+                        )
+                        .await?;
                         std::result::Result::Ok(output_ok)
                     })()
                     .await,
@@ -2337,6 +2419,20 @@ impl SseDecode for crate::api::desktop::DesktopTile {
     }
 }
 
+impl SseDecode for crate::api::docker::DockerComposeAction {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::docker::DockerComposeAction::Start,
+            1 => crate::api::docker::DockerComposeAction::Stop,
+            2 => crate::api::docker::DockerComposeAction::Rebuild,
+            3 => crate::api::docker::DockerComposeAction::Delete,
+            _ => unreachable!("Invalid variant for DockerComposeAction: {}", inner),
+        };
+    }
+}
+
 impl SseDecode for crate::api::docker::DockerContainerAction {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -2373,6 +2469,7 @@ impl SseDecode for crate::api::docker::DockerResourceKind {
             1 => crate::api::docker::DockerResourceKind::Image,
             2 => crate::api::docker::DockerResourceKind::Network,
             3 => crate::api::docker::DockerResourceKind::Volume,
+            4 => crate::api::docker::DockerResourceKind::Compose,
             _ => unreachable!("Invalid variant for DockerResourceKind: {}", inner),
         };
     }
@@ -2850,41 +2947,53 @@ fn pde_ffi_dispatcher_primary_impl(
             rust_vec_len,
             data_len,
         ),
-        35 => {
+        35 => wire__crate__api__network_ports__ssh_read_network_ports_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        36 => {
             wire__crate__api__ssh__ssh_read_process_details_impl(port, ptr, rust_vec_len, data_len)
         }
-        36 => wire__crate__api__ssh__ssh_read_processes_impl(port, ptr, rust_vec_len, data_len),
-        37 => wire__crate__api__ssh__ssh_read_server_status_impl(port, ptr, rust_vec_len, data_len),
-        38 => wire__crate__api__ssh__ssh_resize_impl(port, ptr, rust_vec_len, data_len),
-        39 => wire__crate__api__docker__ssh_run_docker_container_action_impl(
+        37 => wire__crate__api__ssh__ssh_read_processes_impl(port, ptr, rust_vec_len, data_len),
+        38 => wire__crate__api__ssh__ssh_read_server_status_impl(port, ptr, rust_vec_len, data_len),
+        39 => wire__crate__api__ssh__ssh_resize_impl(port, ptr, rust_vec_len, data_len),
+        40 => wire__crate__api__docker__ssh_run_docker_compose_action_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        40 => wire__crate__api__docker__ssh_run_docker_image_action_impl(
+        41 => wire__crate__api__docker__ssh_run_docker_container_action_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        41 => {
+        42 => wire__crate__api__docker__ssh_run_docker_image_action_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        43 => {
             wire__crate__api__ssh__ssh_start_docker_terminal_impl(port, ptr, rust_vec_len, data_len)
         }
-        42 => {
+        44 => {
             wire__crate__api__ssh__ssh_start_port_forwards_impl(port, ptr, rust_vec_len, data_len)
         }
-        43 => wire__crate__api__ssh__ssh_start_terminal_impl(port, ptr, rust_vec_len, data_len),
-        44 => wire__crate__api__ssh__ssh_terminal_ack_impl(port, ptr, rust_vec_len, data_len),
-        45 => wire__crate__api__ssh__ssh_terminate_process_impl(port, ptr, rust_vec_len, data_len),
-        46 => {
+        45 => wire__crate__api__ssh__ssh_start_terminal_impl(port, ptr, rust_vec_len, data_len),
+        46 => wire__crate__api__ssh__ssh_terminal_ack_impl(port, ptr, rust_vec_len, data_len),
+        47 => wire__crate__api__ssh__ssh_terminate_process_impl(port, ptr, rust_vec_len, data_len),
+        48 => {
             wire__crate__api__ssh__ssh_validate_private_key_impl(port, ptr, rust_vec_len, data_len)
         }
-        47 => wire__crate__api__ssh__ssh_write_impl(port, ptr, rust_vec_len, data_len),
-        48 => wire__crate__api__vnc__vnc_connect_impl(port, ptr, rust_vec_len, data_len),
-        49 => wire__crate__api__vnc__vnc_disconnect_impl(port, ptr, rust_vec_len, data_len),
-        50 => wire__crate__api__vnc__vnc_frame_impl(port, ptr, rust_vec_len, data_len),
-        51 => wire__crate__api__vnc__vnc_input_impl(port, ptr, rust_vec_len, data_len),
+        49 => wire__crate__api__ssh__ssh_write_impl(port, ptr, rust_vec_len, data_len),
+        50 => wire__crate__api__vnc__vnc_connect_impl(port, ptr, rust_vec_len, data_len),
+        51 => wire__crate__api__vnc__vnc_disconnect_impl(port, ptr, rust_vec_len, data_len),
+        52 => wire__crate__api__vnc__vnc_frame_impl(port, ptr, rust_vec_len, data_len),
+        53 => wire__crate__api__vnc__vnc_input_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -3029,6 +3138,29 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::desktop::DesktopTile>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::docker::DockerComposeAction {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Start => 0.into_dart(),
+            Self::Stop => 1.into_dart(),
+            Self::Rebuild => 2.into_dart(),
+            Self::Delete => 3.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::docker::DockerComposeAction
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::docker::DockerComposeAction>
+    for crate::api::docker::DockerComposeAction
+{
+    fn into_into_dart(self) -> crate::api::docker::DockerComposeAction {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::docker::DockerContainerAction {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         match self {
@@ -3081,6 +3213,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::docker::DockerResourceKind {
             Self::Image => 1.into_dart(),
             Self::Network => 2.into_dart(),
             Self::Volume => 3.into_dart(),
+            Self::Compose => 4.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -3408,6 +3541,24 @@ impl SseEncode for crate::api::desktop::DesktopTile {
     }
 }
 
+impl SseEncode for crate::api::docker::DockerComposeAction {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::docker::DockerComposeAction::Start => 0,
+                crate::api::docker::DockerComposeAction::Stop => 1,
+                crate::api::docker::DockerComposeAction::Rebuild => 2,
+                crate::api::docker::DockerComposeAction::Delete => 3,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
 impl SseEncode for crate::api::docker::DockerContainerAction {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -3452,6 +3603,7 @@ impl SseEncode for crate::api::docker::DockerResourceKind {
                 crate::api::docker::DockerResourceKind::Image => 1,
                 crate::api::docker::DockerResourceKind::Network => 2,
                 crate::api::docker::DockerResourceKind::Volume => 3,
+                crate::api::docker::DockerResourceKind::Compose => 4,
                 _ => {
                     unimplemented!("");
                 }

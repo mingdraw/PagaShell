@@ -94,8 +94,12 @@ class FakeSftpSession
     String localPath,
   ) async* {
     downloads.add((remotePath, localPath));
-    localFiles?.putFile(localPath, 42);
-    yield const SftpTransferProgress(transferred: 42, total: 42);
+    final cut = remotePath.lastIndexOf('/');
+    final entry = fs[remotePath.substring(0, cut)]!.firstWhere(
+      (entry) => entry.name == remotePath.substring(cut + 1),
+    );
+    localFiles?.putFile(localPath, entry.size);
+    yield SftpTransferProgress(transferred: entry.size, total: entry.size);
   }
 
   @override
@@ -104,12 +108,15 @@ class FakeSftpSession
     String remotePath,
   ) async* {
     uploads.add((localPath, remotePath));
+    final size = localFiles == null
+        ? 100
+        : (await localFiles!.entryAt(localPath)).size;
     final cut = remotePath.lastIndexOf('/');
     final parent = fs[cut == 0 ? '/' : remotePath.substring(0, cut)]!;
     final name = remotePath.substring(cut + 1);
     parent.removeWhere((entry) => entry.name == name);
-    parent.add(SftpDirEntry(name: name, isDir: false, size: 100));
-    yield const SftpTransferProgress(transferred: 100, total: 100);
+    parent.add(SftpDirEntry(name: name, isDir: false, size: size));
+    yield SftpTransferProgress(transferred: size, total: size);
   }
 
   @override

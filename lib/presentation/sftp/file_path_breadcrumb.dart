@@ -114,26 +114,30 @@ class FilePathBreadcrumb extends StatelessWidget {
           Widget overflow() => SizedBox(
             width: overflowWidth,
             child: Builder(
-              builder: (anchor) => Semantics(
-                label: '其他上级目录'.tr,
-                child: shadcn.TextButton(
-                  key: const ValueKey('sftp-path-overflow'),
-                  onPressed: onNavigate == null
-                      ? null
-                      : () => shadcn.showDropdown<void>(
-                          context: anchor,
-                          follow: false,
-                          builder: (_) => shadcn.DropdownMenu(
-                            children: appMenuItems([
-                              for (final index in hidden)
-                                (
-                                  paths.joinAll(parts.take(index + 1)),
-                                  parts[index],
-                                ),
-                            ], (target) => onNavigate!(target)),
+              builder: (anchor) => shadcn.Tooltip(
+                tooltip: (_) =>
+                    shadcn.TooltipContainer(child: Text('其他上级目录'.tr)),
+                child: Semantics(
+                  label: '其他上级目录'.tr,
+                  child: shadcn.TextButton(
+                    key: const ValueKey('sftp-path-overflow'),
+                    onPressed: onNavigate == null
+                        ? null
+                        : () => shadcn.showDropdown<void>(
+                            context: anchor,
+                            follow: false,
+                            builder: (_) => shadcn.DropdownMenu(
+                              children: appMenuItems([
+                                for (final index in hidden)
+                                  (
+                                    paths.joinAll(parts.take(index + 1)),
+                                    parts[index],
+                                  ),
+                              ], (target) => onNavigate!(target)),
+                            ),
                           ),
-                        ),
-                  child: const AppIcon(AppIcons.ellipsis, size: 16),
+                    child: const AppIcon(AppIcons.ellipsis, size: 16),
+                  ),
                 ),
               ),
             ),

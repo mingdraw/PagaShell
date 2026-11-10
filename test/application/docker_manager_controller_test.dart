@@ -8,7 +8,11 @@ import 'package:pagashell/domain/ssh/ssh_engine.dart';
 import '../support/docker_fixture.dart';
 
 class _Source
-    implements DockerManagerSource, DockerContainerActions, DockerImageActions {
+    implements
+        DockerManagerSource,
+        DockerContainerActions,
+        DockerImageActions,
+        DockerComposeActions {
   final reads = <(DockerResourceKind, Completer<List<DockerResource>>)>[];
   final details = <DockerResource>[];
   Completer<DockerDetails>? detailGate;
@@ -17,6 +21,17 @@ class _Source
   final actionGate = Completer<DockerActionResult>();
   final imageActions = <(DockerImageAction, DockerResource?)>[];
   final imageActionGate = Completer<DockerActionResult>();
+  final composeActions = <(DockerResource, DockerComposeAction)>[];
+  final composeActionGate = Completer<DockerActionResult>();
+
+  @override
+  Future<DockerActionResult> runDockerComposeAction(
+    DockerResource project,
+    DockerComposeAction action,
+  ) {
+    composeActions.add((project, action));
+    return composeActionGate.future;
+  }
 
   @override
   Future<DockerActionResult> runDockerImageAction(
@@ -54,6 +69,55 @@ class _Source
 }
 
 void main() {
+  testWidgets('编排操作独占变更并暂停轮询，成功后刷新当前项目，失败等待手动刷新', (tester) async {
+    for (final action in DockerComposeAction.values) {
+      final source = _Source();
+      final controller = DockerManagerController(source: source);
+      controller.select(DockerResourceKind.compose);
+      controller.setEnabled(true);
+      final project = dockerResource(kind: DockerResourceKind.compose);
+      source.reads.last.$2.complete([project]);
+      await tester.pump();
+      final request = controller.runComposeAction(project, action);
+      expect(source.composeActions.single, (project, action));
+      expect(controller.pendingAction.value?.composeAction, action);
+      await expectLater(
+        controller.runComposeAction(project, action),
+        throwsA(isA<SshEngineException>()),
+      );
+      await tester.pump(const Duration(seconds: 20));
+      expect(source.reads, hasLength(1));
+      if (action == DockerComposeAction.rebuild) {
+        final failure = expectLater(
+          request,
+          throwsA(isA<SshEngineException>()),
+        );
+        source.composeActionGate.completeError(
+          const SshEngineException('编排配置校验失败，请检查原配置和环境文件'),
+        );
+        await failure;
+        await tester.pump(const Duration(seconds: 20));
+        expect(controller.current.resources.single, project);
+        expect(source.reads, hasLength(1));
+        final refresh = controller.refreshResources();
+        source.reads.last.$2.complete([project]);
+        await refresh;
+      } else {
+        source.composeActionGate.complete(const DockerActionResult());
+        await tester.pump();
+        expect(source.reads.last.$1, DockerResourceKind.compose);
+        source.reads.last.$2.complete(
+          action == DockerComposeAction.delete ? [] : [project],
+        );
+        await request;
+        expect(
+          controller.current.resources,
+          action == DockerComposeAction.delete ? isEmpty : [project],
+        );
+      }
+      controller.onClose();
+    }
+  });
   testWidgets('镜像删除和清理共用变更背压，成功刷新镜像列表，拒绝使用中或未知状态的删除', (tester) async {
     for (final action in DockerImageAction.values) {
       final source = _Source();

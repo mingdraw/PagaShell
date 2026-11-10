@@ -14,6 +14,7 @@ typedef DockerPendingAction = ({
   String resourceId,
   DockerContainerAction? action,
   DockerImageAction? imageAction,
+  DockerComposeAction? composeAction,
 });
 
 class DockerResourceState {
@@ -49,6 +50,7 @@ class DockerManagerController extends GetxController {
   final Rxn<DockerPendingAction> pendingAction = Rxn<DockerPendingAction>();
   bool get canMutate => source is DockerContainerActions;
   bool get canMutateImages => source is DockerImageActions;
+  bool get canMutateCompose => source is DockerComposeActions;
   bool get busy => pendingAction.value != null;
   Timer? _timer;
   bool _enabled = false;
@@ -246,6 +248,7 @@ class DockerManagerController extends GetxController {
         resourceId: container.identity,
         action: action,
         imageAction: null,
+        composeAction: null,
       ),
       run: () => (source as DockerContainerActions).runDockerContainerAction(
         container,
@@ -279,12 +282,38 @@ class DockerManagerController extends GetxController {
         resourceId: image?.identity ?? 'images:prune',
         action: null,
         imageAction: action,
+        composeAction: null,
       ),
       run: () => (source as DockerImageActions).runDockerImageAction(
         action,
         image: image,
       ),
       failureMessage: 'Docker 镜像操作失败，请刷新列表检查',
+    );
+  }
+
+  Future<DockerActionResult> runComposeAction(
+    DockerResource project,
+    DockerComposeAction action,
+  ) async {
+    if (!canMutateCompose) {
+      throw const SshEngineException('此连接不支持 Docker 编排操作');
+    }
+    if (project.kind != DockerResourceKind.compose) {
+      throw const SshEngineException('此操作仅支持编排');
+    }
+    return _runAction(
+      pending: (
+        resourceId: project.identity,
+        action: null,
+        imageAction: null,
+        composeAction: action,
+      ),
+      run: () => (source as DockerComposeActions).runDockerComposeAction(
+        project,
+        action,
+      ),
+      failureMessage: 'Docker 编排操作失败，请刷新列表检查',
     );
   }
 

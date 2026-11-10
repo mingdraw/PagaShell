@@ -224,7 +224,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('删除凭证文件夹确认保留内容，编辑保留分组与密码', (tester) async {
+  testWidgets('凭证单击不编辑，双击修改保留分组与密码，删除文件夹保留内容', (tester) async {
     await pumpApp(tester);
     final folder = await Get.find<IdentityFolderController>().create(
       name: '目录',
@@ -233,7 +233,14 @@ void main() {
     Get.find<IdentityFolderController>().expanded.add(folder.id);
     await tester.pumpAndSettle();
     await tester.tap(find.text('凭证 A'));
+    await tester.pump(const Duration(milliseconds: 350));
     await tester.pumpAndSettle();
+    expect(find.text('编辑凭证'), findsNothing);
+    await tester.tap(find.text('凭证 A'));
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.tap(find.text('凭证 A'));
+    await tester.pumpAndSettle();
+    expect(find.text('编辑凭证'), findsOneWidget);
     await tester.enterText(find.widgetWithText(AppTextFormField, '名称'), '凭证 B');
     await tester.tap(find.text('保存'));
     await tester.pumpAndSettle();

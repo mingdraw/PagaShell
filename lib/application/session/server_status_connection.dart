@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import '../../domain/ssh/docker_manager.dart';
+import '../../domain/ssh/network_ports.dart';
 import '../../domain/ssh/process_manager.dart';
 import '../../domain/ssh/server_status.dart';
 import '../../domain/ssh/ssh_engine.dart';
@@ -10,17 +11,21 @@ class ServerStatusConnection
     implements
         ServerStatusSource,
         ProcessManagerSource,
+        NetworkPortsSource,
         DockerManagerSource,
         DockerContainerActions,
-        DockerImageActions {
+        DockerImageActions,
+        DockerComposeActions {
   ServerStatusConnection({
     required Future<SshEngineSession> Function(Future<void> cancelled)
     this._connect,
     this.dockerTimeout = dockerQueryTimeout,
+    this.networkPortsTimeout = networkPortsQueryTimeout,
   });
 
   Future<SshEngineSession> Function(Future<void> cancelled)? _connect;
   final Duration dockerTimeout;
+  final Duration networkPortsTimeout;
   SshEngineSession? _session;
   Future<SshEngineSession>? _connecting;
   Completer<void>? _cancellation;
@@ -91,6 +96,46 @@ class ServerStatusConnection
       }
       rethrow;
     }
+  }
+
+  @override
+  Future<NetworkPortsSnapshot> readNetworkPorts() {
+    final generation = _generation;
+    final request = () async {
+      try {
+        final session = await _getSession();
+        if (_closed || generation != _generation) {
+          throw const SshEngineException('网络端口连接已关闭');
+        }
+        if (session is! NetworkPortsSource) {
+          throw const SshEngineException('此连接不支持网络端口查询');
+        }
+        final result = await (session as NetworkPortsSource).readNetworkPorts();
+        if (_closed || generation != _generation) {
+          throw const SshEngineException('网络端口连接已关闭');
+        }
+        return result;
+      } on TimeoutException {
+        unawaited(_resetConnection(generation));
+        throw const SshEngineException('网络端口查询超时，请重试');
+      } on SshEngineException catch (e) {
+        if (const {
+          '网络端口连接已关闭',
+          '无法查询网络端口，请检查连接',
+          '网络端口查询超时，请重试',
+        }.contains(e.message)) {
+          unawaited(_resetConnection(generation));
+        }
+        rethrow;
+      }
+    }();
+    return request.timeout(
+      networkPortsTimeout,
+      onTimeout: () {
+        unawaited(_resetConnection(generation));
+        throw const SshEngineException('网络端口查询超时，请重试');
+      },
+    );
   }
 
   @override
@@ -206,6 +251,20 @@ class ServerStatusConnection
     return (session as DockerImageActions).runDockerImageAction(
       action,
       image: image,
+    );
+  });
+
+  @override
+  Future<DockerActionResult> runDockerComposeAction(
+    DockerResource project,
+    DockerComposeAction action,
+  ) => _dockerAction((session) {
+    if (session is! DockerComposeActions) {
+      throw const SshEngineException('此连接不支持 Docker 编排操作');
+    }
+    return (session as DockerComposeActions).runDockerComposeAction(
+      project,
+      action,
     );
   });
 

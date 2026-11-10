@@ -772,7 +772,7 @@ class _EmptyIdentitiesHint extends StatelessWidget {
   }
 }
 
-/// 凭证项：单击编辑；右键菜单：编辑、删除。
+/// 凭证项：双击编辑；右键菜单：编辑、复制、删除。
 class _IdentityTile extends StatelessWidget {
   const _IdentityTile({
     required this.identity,
@@ -813,7 +813,6 @@ class _IdentityTile extends StatelessWidget {
         overflow: TextOverflow.ellipsis,
         style: const TextStyle(fontSize: 13),
       ),
-      onTap: () => showIdentityEditDialog(context, identity: identity),
       subtitle: Text(
         identity.serviceType.label,
         style: TextStyle(fontSize: 11, color: colors.mutedForeground),
@@ -832,7 +831,12 @@ class _IdentityTile extends StatelessWidget {
         preview: row,
         child: shadcn.ContextMenu(
           items: appMenuItems(actions, (action) => _onAction(context, action)),
-          child: row,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onDoubleTap: () =>
+                showIdentityEditDialog(context, identity: identity),
+            child: row,
+          ),
         ),
       ),
     );
@@ -868,10 +872,6 @@ class _HostTileState extends State<_HostTile> {
   DateTime? _lastTapAt;
 
   void _handleTap() {
-    if (widget.gateway) {
-      showHostEditDialog(context, host: widget.host, gateway: true);
-      return;
-    }
     final now = DateTime.now();
     final isDoubleTap =
         _lastTapAt != null &&
@@ -964,11 +964,18 @@ class _HostTileState extends State<_HostTile> {
       contentPadding: EdgeInsets.only(left: 14.0 + widget.depth * 14, right: 4),
       leading: leading,
       title: title,
-      onTap: _handleTap,
+      onTap: widget.gateway ? null : _handleTap,
     );
     final tile = shadcn.ContextMenu(
       items: appMenuItems(actions, _onMenuAction),
-      child: row,
+      child: widget.gateway
+          ? GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onDoubleTap: () =>
+                  showHostEditDialog(context, host: widget.host, gateway: true),
+              child: row,
+            )
+          : row,
     );
 
     final item = HostTreeItem.host(host.id);

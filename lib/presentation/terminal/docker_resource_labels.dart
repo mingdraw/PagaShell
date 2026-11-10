@@ -5,6 +5,7 @@ import '../components/app_icon.dart';
 
 extension DockerResourceLabels on DockerResourceKind {
   String get label => switch (this) {
+    DockerResourceKind.compose => '编排'.tr,
     DockerResourceKind.container => '容器'.tr,
     DockerResourceKind.image => '镜像'.tr,
     DockerResourceKind.network => '网络'.tr,
@@ -12,6 +13,7 @@ extension DockerResourceLabels on DockerResourceKind {
   };
 
   AppIcons get icon => switch (this) {
+    DockerResourceKind.compose => AppIcons.compose,
     DockerResourceKind.container => AppIcons.container,
     DockerResourceKind.image => AppIcons.layers,
     DockerResourceKind.network => AppIcons.network,
@@ -19,6 +21,7 @@ extension DockerResourceLabels on DockerResourceKind {
   };
 
   String get detailsTitle => switch (this) {
+    DockerResourceKind.compose => '编排详情'.tr,
     DockerResourceKind.container => '容器详情'.tr,
     DockerResourceKind.image => '镜像详情'.tr,
     DockerResourceKind.network => '网络详情'.tr,
@@ -55,6 +58,12 @@ extension DockerFieldLabels on DockerField {
     DockerField.containers => '已连接容器'.tr,
     DockerField.mountpoint => '挂载路径'.tr,
     DockerField.usage => '使用状态'.tr,
+    DockerField.services => '服务'.tr,
+    DockerField.serviceCount => '服务数量'.tr,
+    DockerField.containerCount => '容器数量'.tr,
+    DockerField.workingDirectory => '工作目录'.tr,
+    DockerField.configFiles => '配置文件'.tr,
+    DockerField.composeVersion => 'Compose 版本'.tr,
   };
 
   String display(String value) {

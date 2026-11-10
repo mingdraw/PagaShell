@@ -13,6 +13,8 @@ enum DockerContainerAction { start, stop, upgrade, delete }
 
 enum DockerImageAction { delete, pruneUntagged, pruneUnused }
 
+enum DockerComposeAction { start, stop, rebuild, delete }
+
 class DockerActionResult {
   const DockerActionResult({this.warning});
   final String? warning;
@@ -33,6 +35,13 @@ abstract interface class DockerImageActions {
     DockerImageAction action, {
     DockerResource? image,
   });
+}
+
+abstract interface class DockerComposeActions {
+  Future<DockerActionResult> runDockerComposeAction(
+    DockerResource project,
+    DockerComposeAction action,
+  );
 }
 
 /// 容器交互终端使用独立 SSH 连接，帧和 ACK 沿用终端内核。
@@ -59,7 +68,7 @@ class DockerTerminalTarget {
   int get hashCode => Object.hash(id, name);
 }
 
-enum DockerResourceKind { container, image, network, volume }
+enum DockerResourceKind { compose, container, image, network, volume }
 
 enum DockerField {
   image,
@@ -89,6 +98,12 @@ enum DockerField {
   containers,
   mountpoint,
   usage,
+  services,
+  serviceCount,
+  containerCount,
+  workingDirectory,
+  configFiles,
+  composeVersion,
 }
 
 class DockerResource {
@@ -113,7 +128,8 @@ class DockerResource {
     'unused' => false,
     _ => null,
   };
-  String get shortId => kind == DockerResourceKind.volume
+  String get shortId =>
+      kind == DockerResourceKind.volume || kind == DockerResourceKind.compose
       ? id
       : id.replaceFirst('sha256:', '').substring(0, 12);
 

@@ -121,6 +121,31 @@ void main() {
     );
   });
 
+  test('目录传输可创建层级和空目录，重复创建保留内容，拒绝同名文件', () async {
+    final root = files.pathOf(directory.path, 'received');
+    await files.createDirectory(root);
+    final empty = files.pathOf(root, 'empty');
+    await files.createDirectory(empty);
+    final path = files.pathOf(root, 'keep.txt');
+    File(path).writeAsStringSync('keep');
+    await files.createDirectory(root);
+    expect(Directory(empty).existsSync(), isTrue);
+    expect(File(path).readAsStringSync(), 'keep');
+    await expectLater(
+      files.createDirectory(path),
+      throwsA(isA<FileSystemException>()),
+    );
+    expect(File(path).readAsStringSync(), 'keep');
+  });
+
+  test('目录列表保留符号链接标记，递归上传可避免跟随循环链接', () async {
+    final link = Link(files.pathOf(directory.path, 'loop'));
+    link.createSync(directory.path);
+    final entry = (await files.listDirectory(directory.path)).single;
+    expect(entry.isSymbolicLink, isTrue);
+    expect((await files.entryAt(link.path)).isSymbolicLink, isTrue);
+  }, skip: Platform.isWindows);
+
   test('Windows 隐藏属性标记为隐藏', () async {
     final file = File(files.pathOf(directory.path, 'hidden.txt'))
       ..writeAsStringSync('hidden');

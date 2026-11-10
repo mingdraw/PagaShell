@@ -8,6 +8,7 @@
 
 import 'api/desktop.dart';
 import 'api/docker.dart';
+import 'api/network_ports.dart';
 import 'api/page.dart';
 import 'api/proxy.dart';
 import 'api/ssh.dart';
@@ -87,6 +88,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DesktopTile dco_decode_desktop_tile(dynamic raw);
+
+  @protected
+  DockerComposeAction dco_decode_docker_compose_action(dynamic raw);
 
   @protected
   DockerContainerAction dco_decode_docker_container_action(dynamic raw);
@@ -256,6 +260,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DesktopTile sse_decode_desktop_tile(SseDeserializer deserializer);
+
+  @protected
+  DockerComposeAction sse_decode_docker_compose_action(
+    SseDeserializer deserializer,
+  );
 
   @protected
   DockerContainerAction sse_decode_docker_container_action(
@@ -459,6 +468,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_desktop_tile(DesktopTile self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_docker_compose_action(
+    DockerComposeAction self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_docker_container_action(

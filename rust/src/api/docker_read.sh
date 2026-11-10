@@ -93,8 +93,22 @@ docker_images() {
   printf '{"imageUsageComplete":true}\n'
 }
 
-# All templates project explicit fields. Never emit full inspect, Env, Args,
-# Config, Labels or driver Options, which may contain credentials.
+# Compose metadata is an explicit label allowlist; configuration contents,
+# environment, arbitrary Labels and driver Options never leave the server.
+docker_compose() {
+  if [ -n "$target" ]; then
+    set -- --filter "label=com.docker.compose.project=$target"
+  else
+    set --
+  fi
+  docker_query container ls --all --no-trunc --filter label=com.docker.compose.project "$@" --format '{"id":{{json (.Label "com.docker.compose.project")}},"containerId":{{json .ID}},"name":{{json .Names}},"state":{{json .State}},"service":{{json (.Label "com.docker.compose.service")}},"oneoff":{{json (.Label "com.docker.compose.oneoff")}},"workingDirectory":{{json (.Label "com.docker.compose.project.working_dir")}},"configFiles":{{json (.Label "com.docker.compose.project.config_files")}},"composeVersion":{{json (.Label "com.docker.compose.version")}}}'
+}
+
+# All other templates also project explicit fields, never full inspect.
+if [ "$kind" = compose ]; then
+  docker_compose
+  exit $?
+fi
 if [ -z "$target" ]; then
   case "$kind" in
     container) docker_query container ls --all --no-trunc --format '{"id":{{json .ID}},"name":{{json .Names}},"image":{{json .Image}},"state":{{json .State}},"status":{{json .Status}},"ports":{{json .Ports}},"networks":{{json .Networks}},"createdAt":{{json .CreatedAt}}}' ;;

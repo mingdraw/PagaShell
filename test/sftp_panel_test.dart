@@ -126,6 +126,14 @@ void main() {
     await tester.pumpAndSettle();
   }
 
+  Future<void> pumpUntil(WidgetTester tester, bool Function() ready) async {
+    for (var index = 0; index < 100 && !ready(); index++) {
+      await tester.pump(const Duration(milliseconds: 20));
+    }
+    expect(ready(), isTrue, reason: '等待文件夹传输异步步骤完成');
+    await tester.pump();
+  }
+
   LocalFileController localController(WidgetTester tester) =>
       Get.find<LocalFileController>(
         tag:
@@ -178,16 +186,27 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('外部文件拖到远程文件夹行使用该文件夹，目录条目不作为文件上传', (tester) async {
+  testWidgets('外部文件和文件夹拖到远程文件夹行，递归上传且保留空目录', (tester) async {
     final files = InMemoryLocalFileRepository()
       ..fs['/external'] = []
       ..putFile('/external/a.txt', 10);
+    await files.createDirectory('/external/folder');
+    await files.createDirectory('/external/folder/empty');
+    files.putFile('/external/folder/nested.txt', 20);
     final engine = await pumpPanel(tester, files: files);
     await nativeFileDrop(tester, tester.getCenter(fileIn('remote', 'logs')), [
       {'path': '/external/folder', 'isDirectory': true},
       {'path': '/external/a.txt'},
     ], macOS: true);
-    expect(engine.uploads, [('/external/a.txt', '/home/test/logs/a.txt')]);
+    expect(engine.uploads, [
+      ('/external/folder/nested.txt', '/home/test/logs/folder/nested.txt'),
+      ('/external/a.txt', '/home/test/logs/a.txt'),
+    ]);
+    expect(engine.fs['/home/test/logs/folder/empty'], isEmpty);
+    final tasks = Get.find<TransferController>().tasks;
+    expect(tasks, hasLength(2));
+    expect(tasks.last.isDirectory, isTrue);
+    expect(tasks.last.currentPath.value, '/external/folder/nested.txt');
     expect(find.byKey(const ValueKey('sftp-path-/home/test')), findsOneWidget);
     expect(fileIn('remote', 'a.txt'), findsNothing);
     expect(tester.takeException(), isNull);
@@ -384,13 +403,12 @@ void main() {
       lessThan(tester.getRect(fileName).left),
     );
     expect(
-      find.descendant(
-        of: action,
-        matching: findAppIcon(AppIcons.circleAlert),
-      ),
+      find.descendant(of: action, matching: findAppIcon(AppIcons.circleAlert)),
       findsOneWidget,
     );
-    final centerY = tester.getCenter(row).dy;
+    final centerY = tester
+        .getCenter(find.byKey(ValueKey('sftp-transfer-content-${task.id}')))
+        .dy;
     expect(tester.getCenter(failureLabel).dy, closeTo(centerY, 0.5));
     expect(tester.getCenter(bar).dy, closeTo(centerY, 0.5));
     expect(
@@ -454,10 +472,7 @@ void main() {
     );
     expect(tester.widget<Text>(fileName).style!.color, StatusColors.ready);
     expect(
-      find.descendant(
-        of: action,
-        matching: findAppIcon(AppIcons.circleCheck),
-      ),
+      find.descendant(of: action, matching: findAppIcon(AppIcons.circleCheck)),
       findsOneWidget,
     );
     expect(fileIn('remote', 'retry.txt'), findsOneWidget);
@@ -498,10 +513,7 @@ void main() {
       lessThan(tester.getRect(fileName).left),
     );
     expect(
-      find.descendant(
-        of: action,
-        matching: findAppIcon(AppIcons.upload),
-      ),
+      find.descendant(of: action, matching: findAppIcon(AppIcons.upload)),
       findsOneWidget,
     );
     final button = tester.widget<shadcn.IconButton>(
@@ -522,10 +534,7 @@ void main() {
     await mouse.moveTo(Offset.zero);
     await tester.pump();
     expect(
-      find.descendant(
-        of: action,
-        matching: findAppIcon(AppIcons.upload),
-      ),
+      find.descendant(of: action, matching: findAppIcon(AppIcons.upload)),
       findsOneWidget,
     );
     await mouse.moveTo(tester.getCenter(action));
@@ -918,6 +927,206 @@ void main() {
     ]);
   });
 
+  testWidgets('目录和文件可混合多选上传，目录作为单个汇总任务', (tester) async {
+    final files = InMemoryLocalFileRepository()
+      ..putFile('/local/downloads/a.txt', 10);
+    final engine = await pumpPanel(tester, files: files);
+    await selectFile(tester, 'local', 'downloads');
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+    await selectFile(tester, 'local', 'upload.txt');
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+    await tester.tap(findAppIconButton('上传所选文件'));
+    await pumpUntil(
+      tester,
+      () =>
+          engine.uploads.length == 2 &&
+          Get.find<TransferController>().tasks.every(
+            (task) => task.status.value == TransferStatus.done,
+          ),
+    );
+    expect(engine.uploads, [
+      ('/local/downloads/a.txt', '/home/test/downloads/a.txt'),
+      ('/local/upload.txt', '/home/test/upload.txt'),
+    ]);
+    final tasks = Get.find<TransferController>().tasks;
+    expect(tasks, hasLength(2));
+    expect(tasks.last.isDirectory, isTrue);
+    expect(tasks.last.transferred.value, 10);
+    expect(tasks.last.total.value, 10);
+  });
+
+  for (final upload in [true, false]) {
+    testWidgets('${upload ? '本地' : '远程'}目录可拖到另一侧目录行递归传输', (tester) async {
+      final files = InMemoryLocalFileRepository()
+        ..putFile('/local/downloads/a.txt', 10);
+      final engine = await pumpPanel(tester, files: files);
+      await dragFile(
+        tester,
+        fileIn(upload ? 'local' : 'remote', upload ? 'downloads' : 'logs'),
+        tester.getCenter(
+          fileIn(upload ? 'remote' : 'local', upload ? 'logs' : 'downloads'),
+        ),
+      );
+      if (upload) {
+        expect(engine.uploads, [
+          ('/local/downloads/a.txt', '/home/test/logs/downloads/a.txt'),
+        ]);
+      } else {
+        expect(engine.downloads, [
+          ('/home/test/logs/app.log', '/local/downloads/logs/app.log'),
+        ]);
+        expect(
+          (await files.entryAt('/local/downloads/logs/app.log')).size,
+          2048,
+        );
+      }
+      final task = Get.find<TransferController>().tasks.single;
+      await pumpUntil(
+        tester,
+        () => task.status.value != TransferStatus.running,
+      );
+      expect(task.isDirectory, isTrue);
+      expect(task.status.value, TransferStatus.done);
+    });
+  }
+
+  testWidgets('远程目录右键可下载，目录菜单保留打开和其他操作', (tester) async {
+    final files = InMemoryLocalFileRepository();
+    final engine = await pumpPanel(tester, files: files);
+    await tester.tap(fileIn('remote', 'logs'), buttons: kSecondaryMouseButton);
+    await tester.pumpAndSettle();
+    expect(find.widgetWithText(shadcn.MenuButton, '打开'), findsOneWidget);
+    final download = find.widgetWithText(shadcn.MenuButton, '下载');
+    expect(
+      find.descendant(of: download, matching: findAppIcon(AppIcons.download)),
+      findsOneWidget,
+    );
+    await tester.tap(download);
+    await pumpUntil(
+      tester,
+      () =>
+          Get.find<TransferController>().tasks.isNotEmpty &&
+          Get.find<TransferController>().tasks.single.status.value ==
+              TransferStatus.done,
+    );
+    expect(engine.downloads, [
+      ('/home/test/logs/app.log', '/local/logs/app.log'),
+    ]);
+    expect(fileIn('local', 'logs'), findsOneWidget);
+  });
+
+  testWidgets('上传文件夹按钮使用系统选择器并递归上传所选目录', (tester) async {
+    final files = InMemoryLocalFileRepository()
+      ..putFile('/local/downloads/a.txt', 10);
+    final requests = <(String?, String?)>[];
+    final engine = await pumpPanel(
+      tester,
+      files: files,
+      directoryPicker: ({initialDirectory, confirmButtonText}) async {
+        requests.add((initialDirectory, confirmButtonText));
+        return '/local/downloads';
+      },
+    );
+    await tester.tap(findAppIconButton('上传文件夹'));
+    await pumpUntil(
+      tester,
+      () =>
+          Get.find<TransferController>().tasks.isNotEmpty &&
+          Get.find<TransferController>().tasks.single.status.value ==
+              TransferStatus.done,
+    );
+    expect(requests, [('/local', '上传文件夹')]);
+    expect(engine.uploads, [
+      ('/local/downloads/a.txt', '/home/test/downloads/a.txt'),
+    ]);
+    expect(Get.find<TransferController>().tasks.single.isDirectory, isTrue);
+  });
+
+  testWidgets('文件夹传输路径随当前文件更新，单文件路径固定，路径和进度不重叠', (tester) async {
+    final files = InMemoryLocalFileRepository()
+      ..putFile('/local/downloads/a.txt', 10)
+      ..putFile('/local/downloads/b.txt', 20);
+    final engine = _RetryUploadSession(localFiles: files);
+    addTearDown(engine.disposeUploads);
+    await pumpPanel(tester, files: files, sshEngine: engine);
+    await selectFile(tester, 'local', 'downloads');
+    await tester.tap(findAppIconButton('上传所选文件'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    final task = Get.find<TransferController>().tasks.single;
+    expect(engine.attempts, hasLength(1));
+    await tester.tap(findAppIconButton('展开传输进度'));
+    await tester.pump();
+    final path = find.byKey(ValueKey('sftp-transfer-path-${task.id}'));
+    expect(tester.widget<Text>(path).data, '/local/downloads/a.txt');
+    engine.attempts.first.add(
+      const SftpTransferProgress(transferred: 10, total: 10),
+    );
+    unawaited(engine.attempts.first.close());
+    await pumpUntil(tester, () => engine.attempts.length == 2);
+    expect(tester.widget<Text>(path).data, '/local/downloads/b.txt');
+    final bar = find.byKey(ValueKey('sftp-transfer-progress-${task.id}'));
+    expect(tester.getRect(path).top, greaterThan(tester.getRect(bar).bottom));
+    engine.attempts.last.add(
+      const SftpTransferProgress(transferred: 20, total: 20),
+    );
+    unawaited(engine.attempts.last.close());
+    await pumpUntil(tester, () => task.status.value == TransferStatus.done);
+    expect(task.status.value, TransferStatus.done);
+    expect(tester.widget<Text>(path).data, '/local/downloads/b.txt');
+    await selectFile(tester, 'local', 'upload.txt');
+    await tester.tap(findAppIconButton('上传所选文件'));
+    await tester.pump();
+    final single = Get.find<TransferController>().tasks.first;
+    final singlePath = find.byKey(ValueKey('sftp-transfer-path-${single.id}'));
+    expect(tester.widget<Text>(singlePath).data, '/local/upload.txt');
+    engine.attempts.last.add(
+      const SftpTransferProgress(transferred: 100, total: 100),
+    );
+    unawaited(engine.attempts.last.close());
+    await tester.pumpAndSettle();
+    expect(tester.widget<Text>(singlePath).data, '/local/upload.txt');
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('目录内同名文件支持跳过且后续沿用决定，保留已有目录内容', (tester) async {
+    final files = InMemoryLocalFileRepository()
+      ..putFile('/local/downloads/a.txt', 10)
+      ..putFile('/local/downloads/b.txt', 20)
+      ..putFile('/local/downloads/new.txt', 30);
+    final engine = await pumpPanel(tester, files: files);
+    await engine.createDir('/home/test/downloads');
+    engine.fs['/home/test/downloads']!.addAll([
+      _file('a.txt', 1),
+      _file('b.txt', 2),
+    ]);
+    await selectFile(tester, 'local', 'downloads');
+    await tester.tap(findAppIconButton('上传所选文件'));
+    await tester.pumpAndSettle();
+    expect(find.text('覆盖「a.txt」？'), findsOneWidget);
+    await tester.tap(find.text('后续文件采用相同操作'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('跳过'));
+    await pumpUntil(
+      tester,
+      () =>
+          Get.find<TransferController>().tasks.single.status.value ==
+          TransferStatus.done,
+    );
+    await tester.pumpAndSettle();
+    expect(find.byType(AppDialog), findsNothing);
+    expect(engine.uploads, [
+      ('/local/downloads/new.txt', '/home/test/downloads/new.txt'),
+    ]);
+    expect(
+      engine.fs['/home/test/downloads']!
+          .firstWhere((entry) => entry.name == 'a.txt')
+          .size,
+      1,
+    );
+    expect(Get.find<TransferController>().tasks.single.transferred.value, 30);
+  });
+
   testWidgets('多选后文件菜单的上传命令传输全部所选文件', (tester) async {
     final files = InMemoryLocalFileRepository()..putFile('/local/a.txt', 10);
     final engine = await pumpPanel(tester, files: files);
@@ -1139,7 +1348,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('没有已完成任务时清理按钮仍有手形指针和悬停变色', (tester) async {
+  testWidgets('没有已完成任务时清理按钮仍有手形指针、悬停变色和提示', (tester) async {
     final highlightStrategy = FocusManager.instance.highlightStrategy;
     FocusManager.instance.highlightStrategy =
         FocusHighlightStrategy.alwaysTraditional;
@@ -1156,13 +1365,24 @@ void main() {
     final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
     await mouse.addPointer(location: Offset.zero);
     await mouse.moveTo(tester.getCenter(clear));
-    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 600));
+    await tester.pump(const Duration(milliseconds: 250));
     expect(
       tester.binding.mouseTracker.debugDeviceActiveCursor(1),
       SystemMouseCursors.click,
     );
     expect(IconTheme.of(tester.element(icon)).color, isNot(idleColor));
-    expect(find.byType(shadcn.Tooltip), findsNothing);
+    expect(
+      find.descendant(of: clear, matching: find.byType(shadcn.Tooltip)),
+      findsOneWidget,
+    );
+    expect(
+      find.widgetWithText(shadcn.TooltipContainer, '清除已完成'),
+      findsOneWidget,
+    );
+    await mouse.removePointer();
+    await tester.pumpAndSettle();
     await tester.tap(clear);
     await tester.pumpAndSettle();
     final controller = Get.find<TransferController>();
@@ -1180,7 +1400,6 @@ void main() {
     await tester.tap(clear);
     await tester.pumpAndSettle();
     expect(controller.tasks, [running]);
-    await mouse.removePointer();
     expect(tester.takeException(), isNull);
   });
 
@@ -1237,10 +1456,7 @@ void main() {
     final clear = findAppIconButton('清除已完成');
     expect(find.text('清除已完成'), findsNothing);
     expect(
-      find.descendant(
-        of: clear,
-        matching: findAppIcon(AppIcons.listX),
-      ),
+      find.descendant(of: clear, matching: findAppIcon(AppIcons.listX)),
       findsOneWidget,
     );
     final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
@@ -1249,8 +1465,10 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 600));
     await tester.pump(const Duration(milliseconds: 200));
-    expect(find.text('清除已完成'), findsNothing);
-    expect(find.byType(shadcn.Tooltip), findsNothing);
+    expect(
+      find.widgetWithText(shadcn.TooltipContainer, '清除已完成'),
+      findsOneWidget,
+    );
     await mouse.removePointer();
     await tester.pumpAndSettle();
     await tester.tap(clear);
@@ -1269,6 +1487,7 @@ void main() {
     final handle = find.byKey(const ValueKey('sftp-transfer-resize-handle'));
     await tester.tap(findAppIconButton('展开传输进度'));
     await tester.pumpAndSettle();
+    expect(find.byType(shadcn.VerticalResizableDragger), findsOneWidget);
     final initialHeight = tester.getSize(progress).height;
     final fileHeight = tester.getSize(pane('local')).height;
     final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
@@ -1307,7 +1526,7 @@ void main() {
     await tester.tap(findAppIconButton('展开传输进度'));
     await tester.pumpAndSettle();
     expect(tester.getSize(progress).height, closeTo(initialHeight + 100, 0.1));
-    await tester.drag(handle, const Offset(0, 40));
+    await tester.dragFrom(tester.getCenter(handle), const Offset(0, 40));
     await tester.pumpAndSettle();
     expect(tester.getSize(progress).height, closeTo(initialHeight + 60, 0.1));
     expect(selectedPaths('local'), selection);
@@ -1323,6 +1542,14 @@ void main() {
     await pumpPanel(tester);
     final progress = find.byKey(const ValueKey('sftp-transfer-progress'));
     final handle = find.byKey(const ValueKey('sftp-transfer-resize-handle'));
+    expect(
+      tester
+          .widget<shadcn.ResizablePanel>(
+            find.byKey(const ValueKey('sftp-transfer-resizable')),
+          )
+          .direction,
+      Axis.vertical,
+    );
     expect(handle, findsNothing);
     final collapsedBoundary =
         tester.getTopLeft(progress) + const Offset(400, 1);
@@ -1344,11 +1571,11 @@ void main() {
     await mouse.removePointer();
     await tester.tap(findAppIconButton('展开传输进度'));
     await tester.pumpAndSettle();
-    await tester.drag(handle, const Offset(0, -16));
+    await tester.dragFrom(tester.getCenter(handle), const Offset(0, -16));
     await tester.pumpAndSettle();
     expect(tester.getSize(progress).height, 256);
     expect(findAppIconButton('折叠传输进度'), findsOneWidget);
-    await tester.drag(handle, const Offset(0, -1000));
+    await tester.dragFrom(tester.getCenter(handle), const Offset(0, -1000));
     await tester.pumpAndSettle();
     final maxHeight =
         tester.getSize(find.byType(SftpPanel)).height -
@@ -1367,13 +1594,13 @@ void main() {
     tester.view.physicalSize = const Size(1200, 700);
     await tester.pumpAndSettle();
     expect(tester.getSize(progress).height, maxHeight);
-    await tester.drag(
-      handle,
-      Offset(0, maxHeight - AppTheme.transferProgressMinHeight + 10),
+    await tester.dragFrom(
+      tester.getCenter(handle),
+      Offset(0, maxHeight - AppTheme.transferProgressMinHeight),
     );
     await tester.pumpAndSettle();
     expect(tester.getSize(progress).height, AppTheme.transferProgressMinHeight);
-    await tester.drag(handle, const Offset(0, 200));
+    await tester.dragFrom(tester.getCenter(handle), const Offset(0, 200));
     await tester.pumpAndSettle();
     expect(
       tester.getSize(progress).height,
@@ -1393,7 +1620,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('传输记录从顶部排列，每条记录内文件名和进度条垂直居中对齐', (tester) async {
+  testWidgets('传输记录从顶部排列，文件名进度条保持居中且路径显示在下一行', (tester) async {
     await pumpPanel(tester);
     final controller = Get.find<TransferController>();
     for (var count = 1; count <= 2; count++) {
@@ -1415,15 +1642,15 @@ void main() {
       final first = tester.getRect(
         find.byKey(const ValueKey('sftp-transfer-row-center-1')),
       );
-      final last = tester.getRect(
-        find.byKey(ValueKey('sftp-transfer-row-center-$count')),
+      final content = tester.getRect(
+        find.byKey(ValueKey('sftp-transfer-content-center-$count')),
       );
       expect(first.top, closeTo(list.top, 0.5));
       expect(
         tester
             .getCenter(find.byKey(ValueKey('sftp-transfer-name-${task.id}')))
             .dy,
-        closeTo(last.center.dy, 0.5),
+        closeTo(content.center.dy, 0.5),
       );
       expect(
         tester
@@ -1431,8 +1658,11 @@ void main() {
               find.byKey(ValueKey('sftp-transfer-progress-${task.id}')),
             )
             .dy,
-        closeTo(last.center.dy, 0.5),
+        closeTo(content.center.dy, 0.5),
       );
+      final path = find.byKey(ValueKey('sftp-transfer-path-${task.id}'));
+      expect(tester.widget<Text>(path).data, '/local/center-$count.txt');
+      expect(tester.getRect(path).top, greaterThanOrEqualTo(content.bottom));
     }
     expect(tester.takeException(), isNull);
   });

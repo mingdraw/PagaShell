@@ -5,7 +5,7 @@ import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import '../theme/app_theme.dart';
 
-enum TerminalSidePanelKind { status, processes, docker }
+enum TerminalSidePanelKind { status, processes, docker, networkPorts }
 
 /// 终端共用一个可调宽的侧面板；收起和切换内容时保留子组件状态。
 class TerminalSidePanel extends StatefulWidget {

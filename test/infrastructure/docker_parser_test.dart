@@ -10,6 +10,74 @@ import '../support/docker_fixture.dart';
 void main() {
   final id = 'a'.padRight(64, 'a');
 
+  test('编排按项目汇总运行和停止服务，排除临时容器，只暴露允许的元数据', () {
+    String row(
+      String hex,
+      String project,
+      String service,
+      String state, {
+      bool oneoff = false,
+    }) => jsonEncode({
+      'id': project,
+      'containerId': hex.padRight(64, hex),
+      'name': '$project-$service-1',
+      'service': service,
+      'state': state,
+      'oneoff': oneoff ? 'True' : 'False',
+      'workingDirectory': '/srv/$project',
+      'configFiles': '/srv/$project/compose.yaml,/srv/$project/override.yaml',
+      'composeVersion': '2.40.0',
+      'Env': ['TOKEN=secret'],
+      'Labels': {'secret': 'hidden'},
+    });
+    final raw = [
+      row('a', 'app', 'api', 'running'),
+      row('b', 'app', 'db', 'exited'),
+      row('c', 'old', 'api', 'exited'),
+      row('d', 'app', 'task', 'running', oneoff: true),
+    ].join('\n');
+    final projects = parseDockerResources(raw, DockerResourceKind.compose);
+    expect(projects.map((p) => p.id), ['app', 'old']);
+    final app = projects.first;
+    expect(app.shortId, 'app');
+    expect(app.fields[DockerField.services], 'api\ndb');
+    expect(app.fields[DockerField.serviceCount], '2');
+    expect(app.fields[DockerField.containerCount], '2');
+    expect(app.fields[DockerField.state], 'running');
+    expect(projects.last.fields[DockerField.state], 'exited');
+    expect(
+      app.fields[DockerField.configFiles],
+      '/srv/app/compose.yaml\n/srv/app/override.yaml',
+    );
+    expect(app.matches('db'), isTrue);
+    expect(app.fields.values.join(), isNot(contains('secret')));
+    final details = parseDockerDetails(
+      [
+        row('a', 'app', 'api', 'running'),
+        row('b', 'app', 'db', 'exited'),
+      ].join('\n'),
+      app,
+    );
+    expect(
+      details.resource.fields[DockerField.containers],
+      contains('app-db-1 · exited'),
+    );
+    expect(
+      () => parseDockerDetails(row('c', 'old', 'api', 'exited'), app),
+      throwsA(isA<SshEngineException>()),
+    );
+    expect(
+      () => parseDockerDetails('', app),
+      throwsA(
+        isA<SshEngineException>().having(
+          (e) => e.message,
+          'message',
+          'Docker 资源可能已移除，请刷新后重试',
+        ),
+      ),
+    );
+  });
+
   test('四类列表包含停止容器和卷，镜像按 ID 合并所有引用，空列表合法', () {
     final containers = parseDockerResources(
       [

@@ -17,6 +17,7 @@ pub enum DockerResourceKind {
     Image,
     Network,
     Volume,
+    Compose,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -32,6 +33,23 @@ pub enum DockerImageAction {
     Delete,
     PruneUntagged,
     PruneUnused,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum DockerComposeAction {
+    Start,
+    Stop,
+    Rebuild,
+    Delete,
+}
+
+/// 仅接受 Compose 项目名及固定操作；重建从远端原配置读取，不传回配置内容。
+pub async fn ssh_run_docker_compose_action(
+    session_id: u32,
+    project_name: String,
+    action: DockerComposeAction,
+) -> Result<Option<String>> {
+    crate::docker_operations::compose::run(session_id, &project_name, action).await
 }
 
 /// 镜像删除不强制；批量清理按所选范围执行，保留容器引用。
@@ -80,7 +98,8 @@ pub async fn ssh_read_docker_resources(
     query(session_id, kind, None).await
 }
 
-/// 单项详情只输出固定字段，不读取环境变量、命令参数、标签或驱动凭据。
+/// 单项详情只输出固定字段；Compose 只投影明确的元数据标签。
+/// 不读取环境变量、命令参数、任意标签或驱动凭据。
 pub async fn ssh_read_docker_details(
     session_id: u32,
     kind: DockerResourceKind,
@@ -119,6 +138,7 @@ pub(super) fn docker_command(kind: DockerResourceKind, id: Option<&str>) -> Resu
         DockerResourceKind::Image => "image",
         DockerResourceKind::Network => "network",
         DockerResourceKind::Volume => "volume",
+        DockerResourceKind::Compose => "compose",
     };
     Ok(format!(
         "{} paga-docker {resource} '{}'",
@@ -130,6 +150,14 @@ pub(super) fn docker_command(kind: DockerResourceKind, id: Option<&str>) -> Resu
 #[flutter_rust_bridge::frb(ignore)]
 pub(crate) fn validate_docker_id(kind: DockerResourceKind, id: &str) -> Result<()> {
     let valid = match kind {
+        DockerResourceKind::Compose => {
+            !id.is_empty()
+                && id.len() <= 255
+                && (id.as_bytes()[0].is_ascii_lowercase() || id.as_bytes()[0].is_ascii_digit())
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-".contains(&b))
+        }
         DockerResourceKind::Volume => {
             !id.is_empty()
                 && id.len() <= 255

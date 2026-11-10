@@ -9,12 +9,14 @@ import 'package:pagashell/domain/entities/host.dart';
 import 'package:pagashell/domain/repositories/known_host_repository.dart';
 import 'package:pagashell/domain/ssh/docker_manager.dart';
 import 'package:pagashell/domain/ssh/host_key.dart';
+import 'package:pagashell/domain/ssh/network_ports.dart';
 import 'package:pagashell/domain/ssh/process_manager.dart';
 import 'package:pagashell/domain/ssh/server_status.dart';
 import 'package:pagashell/domain/ssh/ssh_engine.dart';
 
 import '../support/docker_fixture.dart';
 import '../support/fake_sftp_session.dart';
+import '../support/network_ports_fixture.dart';
 import '../support/process_fixture.dart';
 import '../support/server_status_fixture.dart';
 
@@ -77,12 +79,30 @@ class _StatusSession extends FakeSftpSession
     implements
         ServerStatusSource,
         ProcessManagerSource,
+        NetworkPortsSource,
         DockerManagerSource,
         DockerContainerActions,
-        DockerImageActions {
+        DockerImageActions,
+        DockerComposeActions {
   final actions = <(DockerResource, DockerContainerAction, String?, bool)>[];
   final imageActions = <(DockerImageAction, DockerResource?)>[];
+  final composeActions = <(DockerResource, DockerComposeAction)>[];
   Completer<DockerActionResult>? actionGate;
+  int portReads = 0;
+  @override
+  Future<NetworkPortsSnapshot> readNetworkPorts() async {
+    portReads++;
+    return networkPortsFixture();
+  }
+
+  @override
+  Future<DockerActionResult> runDockerComposeAction(
+    DockerResource project,
+    DockerComposeAction action,
+  ) async {
+    composeActions.add((project, action));
+    return actionGate?.future ?? const DockerActionResult();
+  }
 
   @override
   Future<DockerActionResult> runDockerImageAction(
@@ -220,6 +240,80 @@ class _Engine implements SshEngine {
 }
 
 void main() {
+  test('端口与进程和服务状态复用后台连接，端口采集不启动 shell', () async {
+    final session = _StatusSession();
+    var connects = 0;
+    final source = ServerStatusConnection(
+      connect: (_) async {
+        connects++;
+        return session;
+      },
+    );
+    final ports = await source.readNetworkPorts();
+    await source.readProcesses();
+    await source.readServerStatus();
+    expect(connects, 1);
+    expect(ports.ports, hasLength(3));
+    expect(session.portReads, 1);
+    expect(session.shellStarts, 0);
+    await source.close();
+    expect(session.closes, 1);
+  });
+
+  testWidgets('端口查询的总超时覆盖握手，迟到旧连接被释放，新请求重新连接', (tester) async {
+    final gate = Completer<SshEngineSession>();
+    final retry = _StatusSession();
+    var connects = 0;
+    final source = ServerStatusConnection(
+      networkPortsTimeout: const Duration(seconds: 1),
+      connect: (_) => connects++ == 0 ? gate.future : Future.value(retry),
+    );
+    final failure = expectLater(
+      source.readNetworkPorts(),
+      throwsA(
+        isA<SshEngineException>().having(
+          (e) => e.message,
+          'message',
+          '网络端口查询超时，请重试',
+        ),
+      ),
+    );
+    await tester.pump(const Duration(seconds: 1));
+    await failure;
+    final late = _StatusSession();
+    gate.complete(late);
+    await tester.pump();
+    expect(late.closes, 1);
+    expect((await source.readNetworkPorts()).ports, hasLength(3));
+    expect(connects, 2);
+    await source.close();
+    expect(retry.closes, 1);
+  });
+  test('编排重建使用独立连接，面板关闭不打断已提交操作，完成后释放连接', () async {
+    final sampler = _StatusSession();
+    final owned = _StatusSession()
+      ..actionGate = Completer<DockerActionResult>();
+    var connections = 0;
+    final source = ServerStatusConnection(
+      connect: (_) async => connections++ == 0 ? sampler : owned,
+    );
+    await source.readDockerResources(DockerResourceKind.compose);
+    final project = dockerResource(kind: DockerResourceKind.compose);
+    final operation = source.runDockerComposeAction(
+      project,
+      DockerComposeAction.rebuild,
+    );
+    await Future<void>.delayed(Duration.zero);
+    expect(connections, 2);
+    expect(owned.composeActions.single, (project, DockerComposeAction.rebuild));
+    expect(owned.shellStarts, 0);
+    await source.close();
+    expect(sampler.closes, 1);
+    expect(owned.closes, 0);
+    owned.actionGate!.complete(const DockerActionResult());
+    await operation;
+    expect(owned.closes, 1);
+  });
   test('镜像删除和无标签清理独占操作连接，采集连接关闭后仍完成并回收', () async {
     for (final kind in DockerImageAction.values) {
       final sampler = _StatusSession();

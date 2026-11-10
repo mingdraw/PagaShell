@@ -9,6 +9,52 @@ const _nativeLibrary = String.fromEnvironment('PAGASHELL_NATIVE_LIBRARY');
 
 void main() {
   test(
+    '真实编排桥接校验项目名并正确传递新增资源类型和操作',
+    () async {
+      await RustLib.init(externalLibrary: ExternalLibrary.open(_nativeLibrary));
+      addTearDown(RustLib.dispose);
+      for (final action in docker.DockerComposeAction.values) {
+        for (final (name, message) in [
+          (r'$(id)', 'Docker 资源标识无效，请刷新列表'),
+          ('app', 'Docker 操作连接已关闭'),
+        ]) {
+          await expectLater(
+            docker.sshRunDockerComposeAction(
+              sessionId: 0,
+              projectName: name,
+              action: action,
+            ),
+            throwsA(
+              isA<AnyhowException>().having(
+                (e) => e.message,
+                'message',
+                message,
+              ),
+            ),
+          );
+        }
+      }
+      await expectLater(
+        docker.sshReadDockerDetails(
+          sessionId: 0,
+          kind: docker.DockerResourceKind.compose,
+          resourceId: 'app',
+        ),
+        throwsA(
+          isA<AnyhowException>().having(
+            (e) => e.message,
+            'message',
+            'Docker 管理连接已关闭',
+          ),
+        ),
+      );
+    },
+    skip: _nativeLibrary.isEmpty
+        ? '通过 PAGASHELL_NATIVE_LIBRARY 指定已构建的原生库'
+        : false,
+  );
+
+  test(
     '真实容器操作桥接校验参数，失败不执行 Docker 操作',
     () async {
       await RustLib.init(externalLibrary: ExternalLibrary.open(_nativeLibrary));

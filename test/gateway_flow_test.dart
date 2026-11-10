@@ -103,7 +103,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
   }
 
-  testWidgets('网关组新建账号密码网关，编辑复用凭证表单且没有高级网关选项', (tester) async {
+  testWidgets('网关组新建后单击不编辑，双击编辑复用凭证表单且没有高级网关选项', (tester) async {
     await pumpApp(tester);
     expect(find.text('网关'), findsOneWidget);
     await menu(tester, '网关组操作');
@@ -142,6 +142,13 @@ void main() {
       'gateway-secret',
     );
     expect(Get.find<HostController>().hosts, isEmpty);
+    await tester.tap(find.text(endpoint.name));
+    await tester.pump(const Duration(milliseconds: 350));
+    await tester.pumpAndSettle();
+    expect(find.text('编辑网关'), findsNothing);
+    expect(Get.find<SessionController>().sessions, isEmpty);
+    await tester.tap(find.text(endpoint.name));
+    await tester.pump(const Duration(milliseconds: 100));
     await tester.tap(find.text(endpoint.name));
     await tester.pumpAndSettle();
     expect(find.text('编辑网关'), findsOneWidget);

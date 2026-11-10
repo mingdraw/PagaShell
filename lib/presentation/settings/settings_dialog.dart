@@ -8,7 +8,6 @@ import '../../application/ai/agent_api_codec.dart';
 import '../../application/ai/agent_controller.dart';
 import '../../application/ai/ai_settings_controller.dart';
 import '../../application/settings/settings_controller.dart';
-import '../../application/updates/app_update_controller.dart';
 import '../../domain/ai/ai_model.dart';
 import '../../domain/entities/app_theme_mode.dart';
 import '../components/app_dialog.dart';
@@ -20,7 +19,7 @@ import '../localization/app_translations.dart';
 import '../navigation/app_navigation.dart';
 import '../navigation/app_notice.dart';
 import '../theme/app_theme.dart';
-import 'app_update_section.dart';
+import 'about_settings_section.dart';
 
 Future<void> showSettingsDialog({bool ai = false}) =>
     AppNavigation.dialog<void>(SettingsDialog(initialTab: ai ? 1 : 0));
@@ -236,6 +235,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
               children: [
                 shadcn.TabItem(child: Text('通用'.tr)),
                 shadcn.TabItem(child: Text('AI 设置'.tr)),
+                shadcn.TabItem(child: Text('关于'.tr)),
               ],
             ),
             const SizedBox(height: 24),
@@ -245,6 +245,8 @@ class _SettingsDialogState extends State<SettingsDialog> {
                   if (mounted) setState(() {});
                 },
               )
+            else if (_tab == 2)
+              const AboutSettingsSection()
             else if (!_settings.isLoaded.value)
               const Center(child: shadcn.CircularProgressIndicator())
             else if (_settings.loadFailed.value)
@@ -376,9 +378,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
               key: const ValueKey('ai-model-key-visibility'),
               density: shadcn.ButtonDensity.compact,
               icon: AppIcon(
-                _obscureKey
-                    ? AppIcons.eyeOff
-                    : AppIcons.eye,
+                _obscureKey ? AppIcons.eyeOff : AppIcons.eye,
                 size: AppTheme.inputIconSize,
               ),
               semanticLabel: (_obscureKey ? '显示 API Key' : '隐藏 API Key').tr,
@@ -518,10 +518,6 @@ class _GeneralSettings extends StatelessWidget {
               onLocaleChanged();
             },
           ),
-          if (Get.isRegistered<AppUpdateController>()) ...[
-            const SizedBox(height: 28),
-            const AppUpdateSection(),
-          ],
         ],
       ),
     );

@@ -17,6 +17,7 @@ import 'package:pagashell/domain/entities/app_theme_mode.dart';
 import 'package:pagashell/domain/entities/host.dart';
 import 'package:pagashell/domain/ssh/docker_manager.dart';
 import 'package:pagashell/domain/ssh/host_key.dart';
+import 'package:pagashell/domain/ssh/network_ports.dart';
 import 'package:pagashell/domain/ssh/process_manager.dart';
 import 'package:pagashell/domain/ssh/server_status.dart';
 import 'package:pagashell/domain/ssh/ssh_engine.dart';
@@ -31,6 +32,7 @@ import 'support/docker_fixture.dart';
 import 'support/fake_sftp_session.dart';
 import 'support/fixture_terminal.dart';
 import 'support/in_memory_binding.dart';
+import 'support/network_ports_fixture.dart';
 import 'support/process_fixture.dart';
 import 'support/server_status_fixture.dart';
 import 'support/shadcn_test_app.dart';
@@ -39,9 +41,21 @@ class _Session extends FakeSftpSession
     implements
         ServerStatusSource,
         ProcessManagerSource,
+        NetworkPortsSource,
         DockerManagerSource,
         DockerContainerActions,
         DockerImageActions {
+  int portReads = 0;
+  Object? portsFailure;
+  bool portsLimited = false;
+
+  @override
+  Future<NetworkPortsSnapshot> readNetworkPorts() async {
+    portReads++;
+    if (portsFailure case final failure?) throw failure;
+    return networkPortsFixture(limited: portsLimited);
+  }
+
   Future<DockerActionResult> Function(DockerImageAction, DockerResource?)?
   imageActionHandler;
   List<DockerResource>? imageResources;
@@ -404,6 +418,116 @@ void main() {
   });
 
   for (final locale in [const Locale('zh', 'CN'), const Locale('en', 'US')]) {
+    testWidgets('网络端口工具栏、双栈卡片、端口进程检索和协议过滤，隐藏停止采集 ${locale.languageCode}', (
+      tester,
+    ) async {
+      final (controller, engine, captureKey) = await _mount(tester);
+      unawaited(Get.updateLocale(locale));
+      await tester.pumpAndSettle();
+      final first = await controller.open(_host, _credentials);
+      await tester.pumpAndSettle();
+      expect(engine.sessions.single.portReads, 0);
+      expect(
+        tester.widget<AppIconButton>(_button('toolbar-network-ports')).tooltip,
+        '网络端口'.tr,
+      );
+      await tester.tap(_button('toolbar-network-ports'));
+      await tester.pumpAndSettle();
+      var source = engine.sessions.last;
+      expect(engine.sessions, hasLength(2));
+      expect(source.shellStarts, 0);
+      expect(source.portReads, 1);
+      expect(find.text('0.0.0.0:22'), findsOneWidget);
+      expect(find.text('[::]:22'), findsOneWidget);
+      expect(find.text('sshd (7)'), findsOneWidget);
+      expect(find.text('dns server (80)'), findsOneWidget);
+      source.portsLimited = true;
+      await tester.tap(find.byKey(const ValueKey('network-ports-refresh')));
+      await tester.pumpAndSettle();
+      expect(find.text('当前权限可能无法显示全部端口及进程信息'.tr), findsOneWidget);
+      source.portsFailure = const SshEngineException('网络端口查询超时，请重试');
+      await tester.tap(find.byKey(const ValueKey('network-ports-refresh')));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('网络端口查询超时，请重试'.tr), findsOneWidget);
+      expect(find.text('sshd (7)'), findsOneWidget);
+      source.portsFailure = null;
+      source.portsLimited = false;
+      await tester.tap(find.byKey(const ValueKey('network-ports-refresh')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('network-ports-message')), findsNothing);
+      expect(source.closes, 1);
+      source = engine.sessions.last;
+      expect(engine.sessions, hasLength(3));
+      expect(source.shellStarts, 0);
+      final search = tester
+          .widget<AppTextFormField>(
+            find.byKey(const ValueKey('network-ports-search')),
+          )
+          .controller;
+      search.text = 'WEB';
+      await tester.pumpAndSettle();
+      expect(find.text('8080'), findsOneWidget);
+      expect(find.text('22'), findsNothing);
+      search.text = '22';
+      await tester.pumpAndSettle();
+      expect(find.text('sshd (7)'), findsOneWidget);
+      search.clear();
+      await tester.tap(find.byKey(const ValueKey('network-ports-filter-udp')));
+      await tester.pumpAndSettle();
+      expect(find.text('53'), findsOneWidget);
+      expect(find.text('8080'), findsNothing);
+      await tester.tap(find.byKey(const ValueKey('network-ports-filter-tcp')));
+      await tester.pumpAndSettle();
+      expect(find.text('53'), findsNothing);
+      await tester.tap(find.byKey(const ValueKey('network-ports-filter-all')));
+      await tester.pumpAndSettle();
+      await _capture(
+        tester,
+        captureKey,
+        'network-ports-${locale.languageCode}',
+      );
+      final reads = source.portReads;
+      await tester.pump(const Duration(seconds: 3));
+      await tester.pumpAndSettle();
+      expect(source.portReads, greaterThan(reads));
+      final split = await controller.splitTerminal(
+        first,
+        SessionSplitAxis.horizontal,
+      );
+      await tester.pumpAndSettle();
+      controller.activate(first);
+      await tester.pumpAndSettle();
+      controller.activate(split!);
+      await tester.pumpAndSettle();
+      expect(engine.sessions, hasLength(4));
+      expect(find.text('sshd (7)'), findsOneWidget);
+      await tester.tap(_button('toolbar-processes'));
+      await tester.pumpAndSettle();
+      final hiddenReads = source.portReads;
+      await tester.pump(const Duration(seconds: 10));
+      await tester.pumpAndSettle();
+      expect(source.portReads, hiddenReads);
+      await tester.tap(_button('toolbar-network-ports'));
+      await tester.pumpAndSettle();
+      expect(engine.sessions, hasLength(4));
+      final divider = find.byKey(const ValueKey('terminal-side-panel-dragger'));
+      await tester.drag(divider, const Offset(600, 0));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      await _capture(
+        tester,
+        captureKey,
+        'network-ports-narrow-${locale.languageCode}',
+      );
+      await tester.tap(_button('toolbar-network-ports'));
+      await tester.pumpAndSettle();
+      final collapsedReads = source.portReads;
+      await tester.pump(const Duration(seconds: 10));
+      expect(source.portReads, collapsedReads);
+      await tester.runAsync(controller.closeAll);
+      await tester.pumpAndSettle();
+    });
+
     testWidgets('Docker 四类 TabList、搜索、按需详情和窄面板 ${locale.languageCode}', (
       tester,
     ) async {
@@ -1651,6 +1775,7 @@ void main() {
       tester.getRect(_button('open-sftp')),
       tester.getRect(_button('toolbar-docker')),
       tester.getRect(_button('toolbar-processes')),
+      tester.getRect(_button('toolbar-network-ports')),
       tester.getRect(_button('toolbar-status')),
     ];
     expect(

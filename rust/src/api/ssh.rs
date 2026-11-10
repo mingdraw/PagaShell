@@ -3641,6 +3641,81 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
     }
 
     #[tokio::test]
+    async fn network_ports_use_separate_readonly_channels_and_sanitize_failures() {
+        use crate::api::network_ports::ssh_read_network_ports;
+        for (code, output, error) in [
+            (
+                0,
+                b"PAGA_NETWORK_PORTS_V1\nACCESS FULL\nSS4\nSS6\nEND_PORTS\n".to_vec(),
+                None,
+            ),
+            (
+                64,
+                b"private diagnostic".to_vec(),
+                Some("网络端口仅支持 Linux 和 macOS"),
+            ),
+            (
+                69,
+                Vec::new(),
+                Some("未找到端口采集工具，请安装 ss 或 lsof"),
+            ),
+            (
+                77,
+                b"private permission diagnostic".to_vec(),
+                Some("没有权限读取网络端口"),
+            ),
+            (
+                0,
+                vec![b'x'; 2 * 1024 * 1024 + 1],
+                Some("网络端口数据过大，无法读取"),
+            ),
+        ] {
+            let expected = output.clone();
+            let (id, task) = process_test_connection(StatusServer {
+                output,
+                exit_code: code,
+                command: server_status_command(include_str!("network_ports.sh")),
+                hang: false,
+            })
+            .await;
+            let (tx, mut rx) = mpsc::channel(4);
+            SESSIONS.lock().await.get_mut(&id).unwrap().shell_tx = Some(tx);
+            let result = ssh_read_network_ports(id).await;
+            if let Some(message) = error {
+                assert_eq!(result.unwrap_err().to_string(), message);
+            } else {
+                assert_eq!(result.unwrap().as_bytes(), expected);
+            }
+            assert!(rx.try_recv().is_err());
+            ssh_write(id, b"echo shell-still-open\n".to_vec())
+                .await
+                .unwrap();
+            assert!(matches!(rx.recv().await, Some(ShellCmd::Data(_))));
+            ssh_disconnect(id).await.unwrap();
+            task.abort();
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn network_ports_deadline_includes_the_session_registry_lock() {
+        use crate::api::network_ports::ssh_read_network_ports;
+        let registry = SESSIONS.lock().await;
+        let ready = Arc::new(Notify::new());
+        let started = ready.clone();
+        let request = tokio::spawn(async move {
+            started.notify_one();
+            ssh_read_network_ports(u32::MAX).await
+        });
+        ready.notified().await;
+        tokio::time::advance(Duration::from_secs(8)).await;
+        assert_eq!(
+            request.await.unwrap().unwrap_err().to_string(),
+            "网络端口查询超时，请重试"
+        );
+        drop(registry);
+    }
+
+    #[tokio::test]
     async fn process_commands_use_separate_exec_channels_and_check_limits_and_exit_status() {
         for (terminate, output, code, error) in [
             (false, b"PAGA_PROCESSES_V1\n".to_vec(), 0, None),

@@ -5,10 +5,12 @@ import '../../domain/ssh/ssh_engine.dart';
 
 final _hexId = RegExp(r'^[a-fA-F0-9]{12,64}$');
 final _volumeId = RegExp(r'^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,254}$');
+final _composeId = RegExp(r'^[a-z0-9][a-z0-9_-]{0,254}$');
 final _controls = RegExp(r'[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]');
 
 List<DockerResource> parseDockerResources(String raw, DockerResourceKind kind) {
   try {
+    if (kind == DockerResourceKind.compose) return _composeResources(raw);
     final resources = <String, DockerResource>{};
     final usedImages = <String>{};
     var imageUsageComplete = false;
@@ -29,6 +31,8 @@ List<DockerResource> parseDockerResources(String raw, DockerResourceKind kind) {
       final fields = <DockerField, String>{};
       String name;
       switch (kind) {
+        case DockerResourceKind.compose:
+          _invalid();
         case DockerResourceKind.container:
           name = _requiredText(data['name']);
           _strings(data, fields, const {
@@ -108,6 +112,16 @@ List<DockerResource> parseDockerResources(String raw, DockerResourceKind kind) {
 }
 
 DockerDetails parseDockerDetails(String raw, DockerResource requested) {
+  if (requested.kind == DockerResourceKind.compose) {
+    final projects = parseDockerResources(raw, requested.kind);
+    if (projects.isEmpty) {
+      throw const SshEngineException('Docker 资源可能已移除，请刷新后重试');
+    }
+    if (projects.length != 1 || projects.single.id != requested.id) {
+      throw const SshEngineException('Docker 详情格式无效，请刷新后重试');
+    }
+    return DockerDetails(projects.single);
+  }
   try {
     final data = _object(jsonDecode(raw));
     final kind = requested.kind;
@@ -117,6 +131,8 @@ DockerDetails parseDockerDetails(String raw, DockerResource requested) {
     _strings(data, fields, const {DockerField.createdAt: 'createdAt'});
     var name = _text(data['name']);
     switch (kind) {
+      case DockerResourceKind.compose:
+        _invalid();
       case DockerResourceKind.container:
         name = name.replaceFirst(RegExp(r'^/'), '');
         _strings(data, fields, const {
@@ -208,6 +224,10 @@ String _requiredText(Object? value) {
 
 String _id(Object? value, DockerResourceKind kind) {
   if (value is! String) _invalid();
+  if (kind == DockerResourceKind.compose) {
+    if (!_composeId.hasMatch(value)) _invalid();
+    return value;
+  }
   if (kind == DockerResourceKind.volume) {
     if (!_volumeId.hasMatch(value)) _invalid();
     return value;
@@ -219,6 +239,73 @@ String _id(Object? value, DockerResourceKind kind) {
   return kind == DockerResourceKind.image
       ? 'sha256:${hex.toLowerCase()}'
       : hex.toLowerCase();
+}
+
+List<DockerResource> _composeResources(String raw) {
+  final groups = <String, Map<String, Map<String, dynamic>>>{};
+  for (final line in const LineSplitter().convert(raw)) {
+    if (line.trim().isEmpty) continue;
+    final data = _object(jsonDecode(line));
+    final project = _id(data['id'], DockerResourceKind.compose);
+    if (_text(data['oneoff']).toLowerCase() == 'true') continue;
+    final container = _id(data['containerId'], DockerResourceKind.container);
+    _requiredText(data['name']);
+    _requiredText(data['service']);
+    (groups[project] ??= {})[container] = data;
+  }
+  final names = groups.keys.toList()..sort();
+  return List.unmodifiable([
+    for (final name in names)
+      _composeResource(name, groups[name]!.values.toList()),
+  ]);
+}
+
+DockerResource _composeResource(String name, List<Map<String, dynamic>> rows) {
+  rows.sort((a, b) => _text(a['name']).compareTo(_text(b['name'])));
+  final services = <String>{};
+  final configs = <String>{};
+  final directories = <String>{};
+  final versions = <String>{};
+  final counts = <String, int>{};
+  for (final row in rows) {
+    services.add(_requiredText(row['service']));
+    configs.addAll(
+      _text(row['configFiles'])
+          .split(',')
+          .where((s) => s.trim().isNotEmpty)
+          .map((s) => s.trim()),
+    );
+    final directory = _text(row['workingDirectory']);
+    if (directory.isNotEmpty) directories.add(directory);
+    final version = _text(row['composeVersion']);
+    if (version.isNotEmpty) versions.add(version);
+    final state = _requiredText(row['state']);
+    counts[state] = (counts[state] ?? 0) + 1;
+  }
+  final active = counts.keys.any(
+    const {'running', 'restarting', 'paused'}.contains,
+  );
+  return DockerResource(
+    kind: DockerResourceKind.compose,
+    id: name,
+    name: name,
+    fields: {
+      DockerField.state: active ? 'running' : 'exited',
+      DockerField.status: counts.entries
+          .map((e) => '${e.key} (${e.value})')
+          .join(' · '),
+      DockerField.serviceCount: '${services.length}',
+      DockerField.containerCount: '${rows.length}',
+      DockerField.services: (services.toList()..sort()).join('\n'),
+      DockerField.containers: rows
+          .map((row) => '${_text(row['name'])} · ${_text(row['state'])}')
+          .join('\n'),
+      if (directories.isNotEmpty)
+        DockerField.workingDirectory: directories.join('\n'),
+      if (configs.isNotEmpty) DockerField.configFiles: configs.join('\n'),
+      if (versions.isNotEmpty) DockerField.composeVersion: versions.join(' · '),
+    },
+  );
 }
 
 void _strings(

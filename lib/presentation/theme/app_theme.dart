@@ -118,10 +118,16 @@ abstract final class AppTheme {
   static const double fileSizeColumnWidth = 64;
   static const double fileModifiedColumnWidth = 140;
   static const double fileBrowserMinHeight = 180;
+  static const double fileSelectionGutter = 8;
+  static const double fileSelectionDragThreshold = 4;
+  static const double fileSelectionEdgeExtent = 24;
+  static const Duration fileSelectionScrollInterval = Duration(
+    milliseconds: 40,
+  );
   static const double transferProgressCollapsedHeight = 36;
   static const double transferProgressDefaultHeight = 240;
   static const double transferProgressMinHeight = 96;
-  static const double transferProgressResizeHeight = 6;
+  static const double transferProgressRowHeight = 50;
   static const double sidebarWidth = 264;
   static const double sidebarFooterHeight = 40;
   static const double settingsDialogMaxWidth = 600;

@@ -126,12 +126,19 @@ class PortForwardEvent {
 
 /// SFTP 传输进度（domain 层数据结构）。
 class SftpTransferProgress {
-  const SftpTransferProgress({required this.transferred, required this.total});
+  const SftpTransferProgress({
+    required this.transferred,
+    required this.total,
+    this.currentPath,
+  });
 
   final int transferred;
 
   /// 总字节数；0 表示大小未知。
   final int total;
+
+  /// 目录任务当前传输的源文件路径；单文件由任务本身提供固定路径。
+  final String? currentPath;
 
   /// 完成比例（0~1）；大小未知时为 null。
   double? get fraction =>

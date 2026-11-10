@@ -16,6 +16,7 @@ import '../../domain/rdp/rdp_clipboard.dart';
 import '../../domain/rdp/rdp_engine.dart';
 import '../../domain/ssh/docker_manager.dart';
 import '../../domain/ssh/host_key.dart';
+import '../../domain/ssh/network_ports.dart';
 import '../../domain/ssh/process_manager.dart';
 import '../../domain/ssh/server_status.dart';
 import '../../domain/ssh/ssh_engine.dart';
@@ -23,12 +24,14 @@ import '../../domain/terminal/terminal_frame.dart';
 import '../../domain/vnc/vnc_engine.dart';
 import '../../src/rust/api/desktop.dart' as desktop;
 import '../../src/rust/api/docker.dart' as docker;
+import '../../src/rust/api/network_ports.dart' as network_ports;
 import '../../src/rust/api/page.dart' as page;
 import '../../src/rust/api/proxy.dart' as proxy;
 import '../../src/rust/api/ssh.dart' as rust;
 import '../../src/rust/api/terminal.dart' as native_terminal;
 import '../../src/rust/api/vnc.dart' as vnc;
 import 'docker_parser.dart';
+import 'network_ports_parser.dart';
 import 'process_parser.dart';
 import 'rdp_connection_error.dart';
 import 'rust_transfer_stream.dart';
@@ -682,9 +685,11 @@ class _RustEngineSession
         SshEngineSession,
         ServerStatusSource,
         ProcessManagerSource,
+        NetworkPortsSource,
         DockerManagerSource,
         DockerContainerActions,
         DockerImageActions,
+        DockerComposeActions,
         DockerTerminalSource,
         PortForwardSession,
         TerminalScreenSource {
@@ -734,6 +739,14 @@ class _RustEngineSession
   Future<ProcessSnapshot> readProcesses() => _guard(() async {
     if (_closed) throw const SshEngineException('进程管理连接已关闭');
     return parseProcesses(await rust.sshReadProcesses(sessionId: _sessionId));
+  });
+
+  @override
+  Future<NetworkPortsSnapshot> readNetworkPorts() => _guard(() async {
+    if (_closed) throw const SshEngineException('网络端口连接已关闭');
+    return parseNetworkPorts(
+      await network_ports.sshReadNetworkPorts(sessionId: _sessionId),
+    );
   });
 
   @override
@@ -813,11 +826,34 @@ class _RustEngineSession
 
   static docker.DockerResourceKind _dockerKind(DockerResourceKind kind) =>
       switch (kind) {
+        DockerResourceKind.compose => docker.DockerResourceKind.compose,
         DockerResourceKind.container => docker.DockerResourceKind.container,
         DockerResourceKind.image => docker.DockerResourceKind.image,
         DockerResourceKind.network => docker.DockerResourceKind.network,
         DockerResourceKind.volume => docker.DockerResourceKind.volume,
       };
+
+  @override
+  Future<DockerActionResult> runDockerComposeAction(
+    DockerResource project,
+    DockerComposeAction action,
+  ) => _guard(() async {
+    if (_closed) throw const SshEngineException('Docker 操作连接已关闭');
+    if (project.kind != DockerResourceKind.compose) {
+      throw const SshEngineException('此操作仅支持编排');
+    }
+    final warning = await docker.sshRunDockerComposeAction(
+      sessionId: _sessionId,
+      projectName: project.id,
+      action: switch (action) {
+        DockerComposeAction.start => docker.DockerComposeAction.start,
+        DockerComposeAction.stop => docker.DockerComposeAction.stop,
+        DockerComposeAction.rebuild => docker.DockerComposeAction.rebuild,
+        DockerComposeAction.delete => docker.DockerComposeAction.delete,
+      },
+    );
+    return DockerActionResult(warning: warning);
+  });
 
   @override
   Future<ProcessDetails> readProcessDetails(RemoteProcess process) =>

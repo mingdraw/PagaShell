@@ -101,6 +101,7 @@ void main() {
     expect(find.byType(shadcn.Tabs), findsOneWidget);
     expect(find.text('通用'), findsOneWidget);
     expect(find.text('AI 设置'), findsOneWidget);
+    expect(find.text('关于'), findsOneWidget);
     for (final label in ['主题模式', '语言']) {
       expect(find.text(label).hitTestable(), findsOneWidget);
     }
@@ -115,6 +116,17 @@ void main() {
       findsOneWidget,
     );
     expect(find.text('主题模式'), findsNothing);
+    await tester.enterText(
+      find.byKey(const ValueKey('ai-model-url')),
+      'https://api.example.test/v1',
+    );
+    await tester.tap(find.text('关于'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('about-settings')), findsOneWidget);
+    expect(find.byKey(const ValueKey('ai-model-save')), findsNothing);
+    await tester.tap(find.text('AI 设置'));
+    await tester.pumpAndSettle();
+    expect(find.text('https://api.example.test/v1'), findsOneWidget);
     await tester.tap(find.widgetWithText(shadcn.OutlineButton, '关闭'));
     await tester.pumpAndSettle();
     expect(Get.find<SettingsController>().sidebarState.value.visible, isTrue);

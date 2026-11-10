@@ -7,6 +7,7 @@ class LocalFileEntry {
     required this.size,
     this.modified,
     this.isHidden = false,
+    this.isSymbolicLink = false,
   });
 
   final String path;
@@ -15,4 +16,5 @@ class LocalFileEntry {
   final int size;
   final DateTime? modified;
   final bool isHidden;
+  final bool isSymbolicLink;
 }

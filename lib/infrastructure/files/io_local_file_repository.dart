@@ -66,6 +66,9 @@ class IoLocalFileRepository implements LocalFileRepository {
       isDir: stat.type == FileSystemEntityType.directory,
       size: stat.size,
       modified: stat.modified,
+      isSymbolicLink:
+          FileSystemEntity.typeSync(path, followLinks: false) ==
+          FileSystemEntityType.link,
     );
   }
 
@@ -89,6 +92,7 @@ class IoLocalFileRepository implements LocalFileRepository {
             isDir: stat.type == FileSystemEntityType.directory,
             size: stat.size,
             modified: stat.modified,
+            isSymbolicLink: entity is Link,
             isHidden:
                 name.startsWith('.') || _hasWindowsHiddenAttribute(entity.path),
           ),
@@ -114,6 +118,19 @@ class IoLocalFileRepository implements LocalFileRepository {
           attributes & win32.FILE_ATTRIBUTE_HIDDEN != 0;
     } finally {
       win32.free(nativePath);
+    }
+  }
+
+  @override
+  Future<void> createDirectory(String path) async {
+    try {
+      await Directory(path).create();
+    } on FileSystemException catch (e) {
+      if (Platform.isMacOS &&
+          (e.osError?.errorCode == 1 || e.osError?.errorCode == 13)) {
+        throw LocalDirectoryAccessDenied(path);
+      }
+      rethrow;
     }
   }
 
