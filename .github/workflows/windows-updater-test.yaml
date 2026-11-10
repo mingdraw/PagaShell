@@ -8,7 +8,7 @@ on:
       - '.github/workflows/windows-updater-test.yaml'
       - 'assets/updater/**'
       - 'lib/infrastructure/updates/**'
-      - 'scripts/probe_windows_updater.dart'
+      - 'scripts/test_windows_update_launcher.dart'
 
 permissions:
   contents: read
@@ -16,7 +16,7 @@ permissions:
 jobs:
   launch:
     runs-on: windows-2022
-    timeout-minutes: 15
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
@@ -24,4 +24,44 @@ jobs:
           channel: stable
           flutter-version: '3.47.8'
           cache: true
-      - run: dart scripts/probe_windows_updater.dart
+      - run: flutter pub get
+      - run: dart scripts/test_windows_update_launcher.dart
+      - run: python scripts/test_updater_helpers.py
+      - run: flutter analyze
+      - name: Verify update interface and application exit
+        run: flutter test test/app_update_test.dart test/application/app_update_controller_test.dart test/domain/app_release_test.dart test/window_close_test.dart --reporter expanded
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: release-windows-amd64
+      - name: Install native build dependencies
+        run: |
+          choco install nasm --yes --no-progress
+          Add-Content $env:GITHUB_PATH 'C:\Program Files\NASM'
+      - run: flutter build windows --release
+      - name: Include Visual C++ runtime
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products '*' -property installationPath
+          if (-not $vs) { throw 'Visual Studio installation was not found' }
+          $crt = Get-ChildItem "$vs\VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT" -Directory |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $crt) { throw 'Visual C++ runtime was not found' }
+          Copy-Item "$($crt.FullName)\*.dll" 'build\windows\x64\runner\Release\' -Force
+      - name: Verify native application close
+        run: ./scripts/test_windows_close.ps1 -Executable build/windows/x64/runner/Release/pagashell.exe -MaxVisibleMilliseconds 1500 -MaxExitMilliseconds 5000
+      - name: Package and verify architecture
+        run: |
+          python scripts/package_release.py --platform windows --arch amd64 --version v0.3.0
+          if ($LASTEXITCODE -ne 0) { throw 'Packaging failed' }
+          Get-ChildItem dist/*.zip | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          } | Set-Content dist/checksums.txt -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pagashell-windows-amd64-updater-test
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7

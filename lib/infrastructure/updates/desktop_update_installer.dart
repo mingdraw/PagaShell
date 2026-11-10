@@ -10,6 +10,7 @@ import 'package:path/path.dart' as path;
 
 import '../../domain/updates/app_release.dart';
 import '../../domain/updates/update_installer.dart';
+import 'windows_update_launcher.dart';
 
 class DesktopUpdateInstaller implements UpdateInstaller {
   final _owned = <String>{};
@@ -265,24 +266,11 @@ class DesktopUpdateInstaller implements UpdateInstaller {
     }
     _helpers.add(work.path);
     if (release.platform == UpdatePlatform.windows) {
-      await Process.start(
-        _powershell,
-        [
-          '-NoProfile',
-          '-NonInteractive',
-          '-WindowStyle',
-          'Hidden',
-          '-ExecutionPolicy',
-          'Bypass',
-          '-File',
-          script.path,
-          '-Mode',
-          'Watch',
-          '-ConfigPath',
-          config.path,
-        ],
-        workingDirectory: work.path,
-        mode: ProcessStartMode.detached,
+      await startWindowsUpdateHelper(
+        powershell: _powershell,
+        script: script,
+        config: config,
+        work: work,
       );
     } else {
       await Process.start(
