@@ -1,0 +1,27 @@
+name: Windows updater test
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['test/windows']
+    paths:
+      - '.github/workflows/windows-updater-test.yaml'
+      - 'assets/updater/**'
+      - 'lib/infrastructure/updates/**'
+      - 'scripts/probe_windows_updater.dart'
+
+permissions:
+  contents: read
+
+jobs:
+  launch:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: '3.47.8'
+          cache: true
+      - run: dart scripts/probe_windows_updater.dart
