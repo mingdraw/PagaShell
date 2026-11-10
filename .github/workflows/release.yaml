@@ -8,7 +8,7 @@ on:
       tag:
         description: Existing version tag to build and publish
         required: true
-        default: v0.3.0
+        default: v0.3.1
 
 permissions:
   contents: read
@@ -94,6 +94,9 @@ jobs:
       - run: flutter pub get
       - name: Verify update helper transactions
         run: python scripts/test_updater_helpers.py
+      - name: Verify Windows update launcher
+        if: runner.os == 'Windows'
+        run: dart scripts/test_windows_update_launcher.dart
       - name: Validate version
         shell: bash
         run: python scripts/package_release.py --check-version "$RELEASE_TAG"
@@ -210,6 +213,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - uses: actions/download-artifact@v4
         with:
           pattern: pagashell-*
@@ -236,19 +242,32 @@ jobs:
           (root / 'checksums.txt').write_text(''.join(lines), encoding='utf-8')
           PY
           (cd dist && sha256sum --check checksums.txt)
+      - name: Prepare release notes
+        env:
+          RELEASE_NOTES_PATH: ${{ runner.temp }}/pagashell-release-notes.md
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          version = os.environ['RELEASE_TAG'].removeprefix('v')
+          heading = f'## {version}'
+          lines = Path('CHANGELOG.md').read_text(encoding='utf-8').splitlines()
+          start = next((i for i, line in enumerate(lines) if line == heading or line.startswith(heading + ' ')), None)
+          if start is None:
+              raise SystemExit(f'Missing changelog for {version}')
+          end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith('## ')), len(lines))
+          notes = '\n'.join(lines[start + 1:end]).strip()
+          if not notes:
+              raise SystemExit(f'Empty changelog for {version}')
+          Path(os.environ['RELEASE_NOTES_PATH']).write_text(notes + '\n', encoding='utf-8')
+          PY
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           name: ${{ env.RELEASE_TAG }}
-          generate_release_notes: true
           fail_on_unmatched_files: true
-          body: |
-            Windows, macOS and Linux packages for amd64 (x86_64) and arm64 (AArch64).
-
-            - Windows: extract the complete ZIP and run `pagashell.exe`.
-            - macOS: open the DMG and drag PagaShell to Applications. The app is ad hoc signed and is not Apple notarized.
-            - Linux: extract the tar.gz and run `pagashell`. GTK 3 and libsecret are required.
-            - Verify downloads with `checksums.txt`. Windows packages are not code signed.
+          body_path: ${{ runner.temp }}/pagashell-release-notes.md
           files: |
             dist/*.tar.gz
             dist/*.dmg
