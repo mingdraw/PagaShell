@@ -105,6 +105,11 @@ Future<void> main(List<String> arguments) async {
 Future<void> _run(String name, Future<void> Function(_Fixture) test) async {
   final root = await Directory.systemTemp.createTemp("pagashell update ' 测试 ");
   final fixture = _Fixture(root);
+  stdout.writeln('RUN: $name');
+  final watchdog = Timer(const Duration(seconds: 60), () async {
+    stderr.writeln('TIMEOUT: $name\n${await fixture.logs()}');
+    exit(1);
+  });
   try {
     await fixture.setUp();
     await test(fixture);
@@ -113,6 +118,7 @@ Future<void> _run(String name, Future<void> Function(_Fixture) test) async {
     stderr.writeln('FAIL: $name\n$error\n${await fixture.logs()}');
     rethrow;
   } finally {
+    watchdog.cancel();
     await fixture.dispose();
   }
 }

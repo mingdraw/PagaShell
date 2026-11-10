@@ -32,6 +32,8 @@ Future<void> startWindowsUpdateHelper({
 \$child.Id | Set-Content -LiteralPath ${_quote(watcherPid.path)} -Encoding ASCII
 ''';
   Process? process;
+  final output = StringBuffer();
+  final subscriptions = <StreamSubscription<String>>[];
   try {
     // Dart's DETACHED_PROCESS mode prevents Windows PowerShell from reaching
     // the script on Windows. The short bootstrap uses normal handles, and
@@ -46,15 +48,27 @@ Future<void> startWindowsUpdateHelper({
       '-EncodedCommand',
       _encodeCommand(bootstrap),
     ], workingDirectory: work.path);
-    final output = Future.wait([
-      process.stdout.transform(const Utf8Decoder(allowMalformed: true)).join(),
-      process.stderr.transform(const Utf8Decoder(allowMalformed: true)).join(),
-    ]);
+    for (final stream in [process.stdout, process.stderr]) {
+      subscriptions.add(
+        stream
+            .transform(const Utf8Decoder(allowMalformed: true))
+            .listen(
+              output.write,
+              onError: (Object error) => output.writeln(error),
+            ),
+      );
+    }
     await process.stdin.close();
     final exitCode = await process.exitCode.timeout(readyTimeout);
-    final messages = await output;
+    // Descendants may inherit a duplicate of the bootstrap's pipe handles.
+    // Its exit code is sufficient: waiting for pipe EOF waits for the watcher
+    // itself, which is waiting for this application's commit and exit.
+    await Future.wait(
+      subscriptions.map((subscription) => subscription.cancel()),
+    );
+    subscriptions.clear();
     await launcherLog.writeAsString(
-      'Bootstrap exit code: $exitCode\n${messages.join('\n')}',
+      'Bootstrap exit code: $exitCode\n$output',
       flush: true,
     );
     if (exitCode != 0) {
@@ -77,6 +91,10 @@ Future<void> startWindowsUpdateHelper({
     );
     if (error is FormatException) rethrow;
     throw const FormatException('无法启动更新安装程序，请重试');
+  } finally {
+    await Future.wait(
+      subscriptions.map((subscription) => subscription.cancel()),
+    );
   }
 }
 
