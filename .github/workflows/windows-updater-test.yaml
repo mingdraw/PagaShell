@@ -2,6 +2,12 @@ name: Windows updater test
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: Display version (0.2.99 reproduces the update to 0.3.0)
+        type: choice
+        options: ['0.2.99', '0.3.0']
+        default: '0.2.99'
   push:
     branches: ['test/windows']
     paths:
@@ -17,6 +23,8 @@ jobs:
   launch:
     runs-on: windows-2022
     timeout-minutes: 60
+    env:
+      BUILD_VERSION: ${{ inputs.version || '0.2.99' }}
     steps:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
@@ -24,6 +32,15 @@ jobs:
           channel: stable
           flutter-version: '3.47.8'
           cache: true
+      - name: Set test build version
+        run: |
+          $file = Join-Path $PWD 'pubspec.yaml'
+          $source = [IO.File]::ReadAllText($file)
+          $testVersion = [regex]::Replace($source, '(?m)^version:\s*\S+', "version: $env:BUILD_VERSION+5")
+          if ($testVersion -notmatch "(?m)^version: $([regex]::Escape($env:BUILD_VERSION))\+5\s*$") {
+            throw 'Cannot set test build version'
+          }
+          [IO.File]::WriteAllText($file, $testVersion, [Text.UTF8Encoding]::new($false))
       - run: flutter pub get
       - run: dart scripts/test_windows_update_launcher.dart
       - run: python scripts/test_updater_helpers.py
@@ -40,6 +57,13 @@ jobs:
           choco install nasm --yes --no-progress
           Add-Content $env:GITHUB_PATH 'C:\Program Files\NASM'
       - run: flutter build windows --release
+      - name: Verify executable version
+        run: |
+          $version = (Get-Item 'build/windows/x64/runner/Release/pagashell.exe').VersionInfo.ProductVersion
+          if ($version.Split('+')[0] -ne $env:BUILD_VERSION) {
+            throw "Unexpected executable version: $version"
+          }
+          Write-Output "Verified executable version: $version"
       - name: Include Visual C++ runtime
         run: |
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -53,15 +77,33 @@ jobs:
         run: ./scripts/test_windows_close.ps1 -Executable build/windows/x64/runner/Release/pagashell.exe -MaxVisibleMilliseconds 1500 -MaxExitMilliseconds 5000
       - name: Package and verify architecture
         run: |
-          python scripts/package_release.py --platform windows --arch amd64 --version v0.3.0
+          python scripts/package_release.py --platform windows --arch amd64 --version "v$env:BUILD_VERSION"
           if ($LASTEXITCODE -ne 0) { throw 'Packaging failed' }
           Get-ChildItem dist/*.zip | ForEach-Object {
             $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
             "$hash  $($_.Name)"
           } | Set-Content dist/checksums.txt -Encoding ascii
+      - name: Include update reproduction instructions
+        if: env.BUILD_VERSION == '0.2.99'
+        run: |
+          @'
+          Windows 更新复现说明
+
+          本测试包基于 0.3.0 代码并包含 Windows 更新器修复。
+          显示版本 0.2.99 用于触发更新到 GitHub 正式版 0.3.0。
+
+          1. 关闭当前 PagaShell，将程序 ZIP 完整解压到一个单独的测试文件夹。
+          2. 运行测试文件夹里的 pagashell.exe，确认当前版本为 0.2.99。
+          3. 在“设置 → 通用 → 检查更新”中下载并安装正式版 0.3.0。
+          4. 应用应自动关闭，安装完成后重新打开，版本变为 0.3.0。
+          5. 测试结束后关闭此应用，继续使用之前的 0.3.0 修复版测试包。
+
+          本流程验证的是从修复后的更新器安装正式版。
+          当前正式版 0.3.0 尚未包含本次修复，安装它后会恢复原来的更新器。
+          '@ | Set-Content dist/UPDATE-TEST.txt -Encoding utf8
       - uses: actions/upload-artifact@v4
         with:
-          name: pagashell-windows-amd64-updater-test
+          name: pagashell-windows-amd64-updater-${{ env.BUILD_VERSION }}
           path: dist/*
           if-no-files-found: error
           retention-days: 7
