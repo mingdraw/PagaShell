@@ -185,6 +185,22 @@ class _Fixture {
 
   Future<void> dispose() async {
     await file('cancel').writeAsString('');
+    if (file('watcher.pid').existsSync()) {
+      final watcher = int.parse(
+        (await file('watcher.pid').readAsString()).trim(),
+      );
+      // Keep the cancellation marker until the watcher has closed its log
+      // handles. A partial recursive delete can otherwise remove it too soon.
+      final result = await Process.run(_powershell, [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        '\$watcher = Get-Process -Id $watcher -ErrorAction SilentlyContinue; '
+            'if (\$null -ne \$watcher -and -not \$watcher.WaitForExit(10000)) '
+            "{ throw 'Watcher did not exit after cancellation' }; exit 0",
+      ]);
+      _check(result.exitCode == 0, '${result.stderr}');
+    }
     final deadline = DateTime.now().add(const Duration(seconds: 10));
     while (true) {
       try {
