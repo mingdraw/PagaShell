@@ -18,6 +18,12 @@ transaction() {
   mkdir "$lock" || return 1
   moved=0
   trap 'status=$?; if [ "$status" -ne 0 ] && [ "$moved" -eq 1 ] && [ ! -e "$target" ] && [ -d "$backup" ]; then mv "$backup" "$target"; rm -f "$marker"; fi; rm -rf "$incoming"; rmdir "$lock"; exit "$status"' EXIT
+  if [ "$mode" = cleanup ]; then
+    [ -d "$target" ] && [ -f "$marker" ] || return 1
+    rm -rf "$backup"
+    rm -f "$marker"
+    return
+  fi
   if [ "$mode" = rollback ]; then
     [ -d "$backup" ] && [ -f "$marker" ]
     mv "$target" "$incoming"
@@ -105,7 +111,11 @@ if ! launch_app; then
   launch_app || true
   exit 1
 fi
+# Keep the backup available until the replacement has launched. Use the same
+# authorization as installation when its directory requires administrator access.
+if [ "$platform" = macos ]; then
+  run_transaction cleanup || echo backup-cleanup-failed > "$work/error"
+fi
 : > "$work/complete"
-# Keep one previous installation for recovery. User data is outside both bundles.
 rm -rf "$work/stage"
 rm -f "$work"/pagashell_*

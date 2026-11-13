@@ -77,9 +77,9 @@ class UpdaterHelperTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
         return result
 
-    def start_watcher(self):
+    def start_watcher(self, platform="linux"):
         with (self.work / "watcher.log").open("wb") as log:
-            child = subprocess.Popen(self.command("Watch"), stdout=log, stderr=subprocess.STDOUT)
+            child = subprocess.Popen(self.command("Watch", platform), stdout=log, stderr=subprocess.STDOUT)
         self.children.append(child)
         self.wait_for(self.work / "ready")
         return child
@@ -99,6 +99,10 @@ class UpdaterHelperTests(unittest.TestCase):
     @property
     def backup(self):
         return Path(str(self.target) + ".pagashell-backup")
+
+    @property
+    def marker(self):
+        return Path(str(self.backup) + ".marker")
 
     def test_complete_directory_replacement_and_rollback(self):
         (self.target / "old-only").touch()
@@ -189,6 +193,83 @@ class UpdaterHelperTests(unittest.TestCase):
         self.assertEqual((self.target / "version").read_text(), "new")
         self.run_helper("Rollback", platform="macos")
         self.assertEqual((self.target / "version").read_text(), "old")
+
+    @unittest.skipIf(WINDOWS, "POSIX backup cleanup")
+    def test_cleanup_preserves_unmanaged_backup(self):
+        self.backup.mkdir()
+        (self.backup / "keep").touch()
+        self.run_helper("Cleanup", success=False, platform="macos")
+        self.assertTrue((self.backup / "keep").exists())
+        self.assertEqual((self.target / "version").read_text(), "old")
+
+    @unittest.skipIf(WINDOWS, "POSIX backup cleanup")
+    def test_cleanup_requires_current_installation(self):
+        self.run_helper("Apply")
+        shutil.rmtree(self.target)
+        self.run_helper("Cleanup", success=False, platform="macos")
+        self.assertEqual((self.backup / "version").read_text(), "old")
+        self.assertTrue(self.marker.exists())
+
+    def stub_macos_launch(self, body):
+        # Exercise the macOS watcher without depending on a GUI session. Only
+        # LaunchServices is stubbed in this disposable copy of the real helper.
+        launcher = self.work / "open"
+        launcher.write_text("#!/bin/sh\nset -eu\ntarget=$2\n" + body, encoding="utf-8")
+        launcher.chmod(0o755)
+        self.script.write_text(
+            self.script.read_text(encoding="utf-8").replace('/usr/bin/open -n "$target"',
+                                                         '"$work/open" -n "$target"'),
+            encoding="utf-8")
+
+    def commit_and_exit(self, child):
+        (self.work / "commit").touch()
+        self.parent.terminate()
+        self.parent.wait(timeout=10)
+        return child.wait(timeout=20)
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS watcher cleanup")
+    def test_macos_success_removes_backup_after_launch(self):
+        self.stub_macos_launch(
+            '[ -f "$target.pagashell-backup.marker" ]\n'
+            '[ "$(cat "$target.pagashell-backup/version")" = old ]\n'
+            ': > "$target/launched"\n')
+        child = self.start_watcher(platform="macos")
+        self.assertEqual(self.commit_and_exit(child), 0, self.watcher_log())
+        self.assertTrue((self.target / "launched").exists())
+        self.assertTrue((self.work / "complete").exists())
+        self.assertEqual((self.target / "version").read_text(), "new")
+        self.assertFalse(self.backup.exists())
+        self.assertFalse(self.marker.exists())
+        self.assertFalse(self.stage.exists())
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS watcher rollback")
+    def test_macos_launch_failure_rolls_back(self):
+        self.stub_macos_launch(
+            '[ "$(cat "$target/version")" = old ] || exit 1\n'
+            ': > "$target/restarted"\n')
+        child = self.start_watcher(platform="macos")
+        self.assertNotEqual(self.commit_and_exit(child), 0, self.watcher_log())
+        self.assertEqual((self.target / "version").read_text(), "old")
+        self.assertTrue((self.target / "restarted").exists())
+        self.assertEqual((self.work / "error").read_text().strip(), "launch-failed")
+        self.assertFalse((self.work / "complete").exists())
+        self.assertFalse(self.backup.exists())
+        self.assertFalse(self.marker.exists())
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS watcher cleanup failure")
+    def test_macos_cleanup_failure_keeps_running_update(self):
+        self.stub_macos_launch(': > "$target/launched"\n')
+        self.script.write_text(
+            self.script.read_text(encoding="utf-8").replace('rm -rf "$backup"', 'false'),
+            encoding="utf-8")
+        child = self.start_watcher(platform="macos")
+        self.assertEqual(self.commit_and_exit(child), 0, self.watcher_log())
+        self.assertTrue((self.target / "launched").exists())
+        self.assertTrue((self.work / "complete").exists())
+        self.assertEqual((self.work / "error").read_text().strip(), "backup-cleanup-failed")
+        self.assertEqual((self.target / "version").read_text(), "new")
+        self.assertEqual((self.backup / "version").read_text(), "old")
+        self.assertTrue(self.marker.exists())
 
     @unittest.skipUnless(WINDOWS, "Windows ZIP extraction")
     def test_windows_extract_rejects_traversal(self):
