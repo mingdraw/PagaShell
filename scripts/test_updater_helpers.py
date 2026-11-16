@@ -72,7 +72,13 @@ class UpdaterHelperTests(unittest.TestCase):
     def run_helper(self, mode, *, success=True, platform="linux"):
         result = subprocess.run(self.command(mode, platform), capture_output=True, timeout=20)
         if success:
-            self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+            if result.returncode != 0:
+                self.fail(
+                    f"Helper exited with {result.returncode}\n"
+                    f"stdout: {result.stdout.decode(errors='replace')}\n"
+                    f"stderr: {result.stderr.decode(errors='replace')}\n"
+                    f"{self.watcher_log()}"
+                )
         else:
             self.assertNotEqual(result.returncode, 0)
         return result
@@ -277,6 +283,7 @@ class UpdaterHelperTests(unittest.TestCase):
             archive.writestr("bundle/../../escape", "invalid")
         self.run_helper("Extract", success=False)
         self.assertFalse((self.root / "escape").exists())
+        (self.work / "helper.log").unlink(missing_ok=True)
         with zipfile.ZipFile(self.archive, "w") as archive:
             archive.writestr("bundle/data/flutter_assets/asset", "valid")
         self.run_helper("Extract")
