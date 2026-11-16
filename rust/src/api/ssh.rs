@@ -14,7 +14,8 @@ use anyhow::{anyhow, Context, Result};
 use russh::client::{self, Handle};
 use russh::keys::{decode_secret_key, HashAlg, PrivateKey, PrivateKeyWithHashAlg, PublicKey};
 use russh::{ChannelMsg, Disconnect};
-use russh_sftp::client::SftpSession;
+use russh_sftp::client::{Config as SftpConfig, SftpSession};
+use russh_sftp::protocol::{FileAttributes, OpenFlags, StatusCode};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch, Mutex, Notify, RwLock};
@@ -41,7 +42,9 @@ pub struct TransferProgress {
 }
 
 /// 传输块大小与进度上报节流阈值。
-const TRANSFER_CHUNK: usize = 64 * 1024;
+const TRANSFER_CHUNK: usize = 128 * 1024;
+// 保持有界的写入流水线；较高 RTT 下允许最多约 2 MiB 的数据等待确认。
+const TRANSFER_MAX_CONCURRENT_WRITES: usize = 16;
 const PROGRESS_EMIT_EVERY: u64 = 512 * 1024;
 const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(200);
 const TRANSFER_IO_TIMEOUT: Duration = Duration::from_secs(10);
@@ -50,6 +53,14 @@ const TRANSFER_RESPONSE_ATTEMPTS: usize = 3;
 const SSH_CLEANUP_TIMEOUT: Duration = Duration::from_millis(500);
 /// 终端帧最短间隔：与旧的固定 16ms 节拍一致，ack 很快时也不超过约 60 帧/秒。
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+
+fn sftp_client_config() -> SftpConfig {
+    SftpConfig {
+        max_concurrent_writes: TRANSFER_MAX_CONCURRENT_WRITES,
+        // 包大小和单请求超时沿用库默认值，读写长度仍由服务端 limits 收窄。
+        ..SftpConfig::default()
+    }
+}
 
 #[derive(Debug)]
 struct TransferTimeout;
@@ -94,7 +105,7 @@ async fn transfer_io<T, E: Into<anyhow::Error>>(
 }
 
 async fn transfer_cleanup<T>(operation: impl Future<Output = T>) {
-    // 断线后的删除半成品/关闭通道也必须有上限，不能挡住失败事件。
+    // 断线后的通道关闭必须有上限，不能挡住失败事件。
     let _ = tokio::time::timeout(TRANSFER_CLEANUP_TIMEOUT, operation).await;
 }
 
@@ -1411,24 +1422,36 @@ async fn open_sftp(session_id: u32) -> Result<SftpSession> {
     transfer_io(&AtomicBool::new(false), open_sftp_inner(session_id)).await
 }
 
+const SSH_CONNECTION_CLOSED: &str = "SSH连接已断开，请刷新重新连接";
+
 async fn open_sftp_inner(session_id: u32) -> Result<SftpSession> {
     let handle = {
         let sessions = SESSIONS.lock().await;
         sessions
             .get(&session_id)
-            .ok_or_else(|| anyhow!("会话不存在: {session_id}"))?
+            .ok_or_else(|| anyhow!(SSH_CONNECTION_CLOSED))?
             .handle
             .clone()
     };
 
-    let channel = {
+    let result = async {
         let guard = handle.read().await;
-        guard.channel_open_session().await?
-    };
-    channel.request_subsystem(true, "sftp").await?;
-    SftpSession::new(channel.into_stream())
-        .await
-        .context("SFTP 子系统初始化失败")
+        if guard.is_closed() {
+            anyhow::bail!(SSH_CONNECTION_CLOSED);
+        }
+        let channel = guard.channel_open_session().await?;
+        drop(guard);
+        channel.request_subsystem(true, "sftp").await?;
+        SftpSession::new_with_config(channel.into_stream(), sftp_client_config())
+            .await
+            .context("SFTP 子系统初始化失败")
+    }
+    .await;
+    // 连接可能在开通道或初始化子系统期间退出，不能继续把失效句柄当目录错误。
+    if result.is_err() && handle.read().await.is_closed() {
+        anyhow::bail!(SSH_CONNECTION_CLOSED);
+    }
+    result
 }
 
 /// 列出远程目录（SFTP 子系统按需在同一连接上开通道）。
@@ -1522,32 +1545,32 @@ pub async fn sftp_cancel_transfer(transfer_id: u32) -> Result<()> {
 
 /// 下载远程文件到本地，进度经 [progress] 流回 Dart（约每 512KB 一次）。
 ///
-/// 取消或失败时删除本地半成品文件并以错误结束。
+/// 失败或中断保留本地已写入文件，失败以错误结束。
 pub async fn sftp_download(
     session_id: u32,
     transfer_id: u32,
     remote_path: String,
     local_path: String,
+    resume: bool,
     progress: StreamSink<TransferProgress>,
 ) {
     let cancel = register_transfer(transfer_id).await;
     let result = async {
         let sftp = transfer_io(&cancel, open_sftp(session_id)).await?;
-        let mut created = false;
-        let r = download_inner(
+        transfer_file(
             &sftp,
             &cancel,
-            &remote_path,
             &local_path,
-            &progress,
-            &mut created,
+            &remote_path,
+            TransferMode {
+                upload: false,
+                resume,
+            },
+            &|event| {
+                let _ = progress.add(event);
+            },
         )
-        .await;
-        if r.is_err() && created {
-            transfer_cleanup(tokio::fs::remove_file(&local_path)).await;
-        }
-        transfer_cleanup(sftp.close()).await;
-        r
+        .await
     }
     .await;
     unregister_transfer(transfer_id).await;
@@ -1562,8 +1585,8 @@ async fn download_inner(
     cancel: &AtomicBool,
     remote_path: &str,
     local_path: &str,
-    progress: &StreamSink<TransferProgress>,
-    created: &mut bool,
+    resume: bool,
+    progress: &(impl Fn(TransferProgress) + Sync),
 ) -> Result<()> {
     let meta = transfer_io(cancel, sftp.metadata(remote_path))
         .await
@@ -1572,14 +1595,52 @@ async fn download_inner(
     let mut remote = transfer_io(cancel, sftp.open(remote_path))
         .await
         .context("打开远程文件失败")?;
-    let mut local = tokio::fs::File::create(local_path)
-        .await
-        .context("创建本地文件失败")?;
-    *created = true;
+    let mut local = if resume {
+        match tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(local_path)
+            .await
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                tokio::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create_new(true)
+                    .open(local_path)
+                    .await
+                    .context("创建本地文件失败")?
+            }
+            Err(error) => return Err(error).context("打开本地文件失败"),
+        }
+    } else {
+        tokio::fs::File::create(local_path)
+            .await
+            .context("创建本地文件失败")?
+    };
+
+    let mut transferred = if resume {
+        let before = local.metadata().await.context("读取本地文件信息失败")?;
+        let offset = before.len();
+        if meta.size.is_some_and(|size| offset > size) {
+            return Err(resume_mismatch());
+        }
+        verify_resume_prefix(cancel, &mut remote, &mut local, offset, total, progress).await?;
+        let after = local.metadata().await.context("读取本地文件信息失败")?;
+        let source = transfer_io(cancel, sftp.metadata(remote_path))
+            .await
+            .context("读取远程文件信息失败")?;
+        if local_changed(&before, &after) || remote_changed(&meta, &source) {
+            return Err(anyhow!("续传期间文件已变化，请重新发起传输"));
+        }
+        offset
+    } else {
+        0
+    };
 
     let mut buf = vec![0u8; TRANSFER_CHUNK];
-    let mut transferred: u64 = 0;
-    let mut last_emit: u64 = 0;
+    let mut last_emit = transferred;
     let mut last_emit_at = tokio::time::Instant::now();
     loop {
         if cancel.load(Ordering::Relaxed) {
@@ -1601,7 +1662,7 @@ async fn download_inner(
         {
             last_emit = transferred;
             last_emit_at = tokio::time::Instant::now();
-            let _ = progress.add(TransferProgress {
+            progress(TransferProgress {
                 transferred,
                 total,
                 completed: false,
@@ -1609,10 +1670,13 @@ async fn download_inner(
         }
     }
     local.flush().await.context("写入本地文件失败")?;
-    if total > 0 && transferred != total {
-        return Err(anyhow!("远程文件大小已变化，下载未完成"));
+    let source_after = transfer_io(cancel, sftp.metadata(remote_path))
+        .await
+        .context("读取远程文件信息失败")?;
+    if (meta.size.is_some() && transferred != total) || remote_changed(&meta, &source_after) {
+        return Err(anyhow!("远程文件已变化，下载未完成"));
     }
-    let _ = progress.add(TransferProgress {
+    progress(TransferProgress {
         transferred,
         total,
         completed: true,
@@ -1622,32 +1686,32 @@ async fn download_inner(
 
 /// 上传本地文件到远程路径，进度经 [progress] 流回 Dart。
 ///
-/// 取消或失败时删除远端半成品文件并以错误结束。
+/// 失败或中断保留远端已写入文件，失败以错误结束。
 pub async fn sftp_upload(
     session_id: u32,
     transfer_id: u32,
     local_path: String,
     remote_path: String,
+    resume: bool,
     progress: StreamSink<TransferProgress>,
 ) {
     let cancel = register_transfer(transfer_id).await;
     let result = async {
         let sftp = transfer_io(&cancel, open_sftp(session_id)).await?;
-        let mut created = false;
-        let r = upload_inner(
+        transfer_file(
             &sftp,
             &cancel,
             &local_path,
             &remote_path,
-            &progress,
-            &mut created,
+            TransferMode {
+                upload: true,
+                resume,
+            },
+            &|event| {
+                let _ = progress.add(event);
+            },
         )
-        .await;
-        if r.is_err() && created {
-            transfer_cleanup(sftp.remove_file(&remote_path)).await;
-        }
-        transfer_cleanup(sftp.close()).await;
-        r
+        .await
     }
     .await;
     unregister_transfer(transfer_id).await;
@@ -1656,29 +1720,95 @@ pub async fn sftp_upload(
     }
 }
 
+async fn transfer_file(
+    sftp: &SftpSession,
+    cancel: &AtomicBool,
+    local_path: &str,
+    remote_path: &str,
+    mode: TransferMode,
+    progress: &(impl Fn(TransferProgress) + Sync),
+) -> Result<()> {
+    let result = if mode.upload {
+        upload_inner(sftp, cancel, local_path, remote_path, mode.resume, progress).await
+    } else {
+        download_inner(sftp, cancel, remote_path, local_path, mode.resume, progress).await
+    };
+    // 包括断线重连触发的取消：只释放资源，不删除已写入的目标文件。
+    transfer_cleanup(sftp.close()).await;
+    result
+}
+
+#[derive(Clone, Copy)]
+struct TransferMode {
+    upload: bool,
+    resume: bool,
+}
+
 async fn upload_inner(
     sftp: &SftpSession,
     cancel: &AtomicBool,
     local_path: &str,
     remote_path: &str,
-    progress: &StreamSink<TransferProgress>,
-    created: &mut bool,
+    resume: bool,
+    progress: &(impl Fn(TransferProgress) + Sync),
 ) -> Result<()> {
-    let total = tokio::fs::metadata(local_path)
-        .await
-        .context("读取本地文件信息失败")?
-        .len();
     let mut local = tokio::fs::File::open(local_path)
         .await
         .context("打开本地文件失败")?;
-    let mut remote = transfer_io(cancel, sftp.create(remote_path))
+    let source_before = local.metadata().await.context("读取本地文件信息失败")?;
+    let total = source_before.len();
+    let mut remote = if resume {
+        match transfer_io(
+            cancel,
+            sftp.open_with_flags(remote_path, OpenFlags::READ | OpenFlags::WRITE),
+        )
         .await
-        .context("创建远程文件失败")?;
-    *created = true;
+        {
+            Ok(file) => file,
+            Err(error) if is_missing_remote_file(&error) => transfer_io(
+                cancel,
+                sftp.open_with_flags(
+                    remote_path,
+                    OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCLUDE,
+                ),
+            )
+            .await
+            .context("创建远程文件失败")?,
+            Err(error) => return Err(error).context("打开远程文件失败"),
+        }
+    } else {
+        transfer_io(cancel, sftp.create(remote_path))
+            .await
+            .context("创建远程文件失败")?
+    };
+
+    let mut transferred = if resume {
+        let target_before = transfer_io(cancel, sftp.metadata(remote_path))
+            .await
+            .context("读取远程文件信息失败")?;
+        let offset = target_before
+            .size
+            .ok_or_else(|| anyhow!("无法确认续传文件大小，请重新发起传输"))?;
+        if offset > total {
+            return Err(resume_mismatch());
+        }
+        verify_resume_prefix(cancel, &mut local, &mut remote, offset, total, progress).await?;
+        let source_after = local.metadata().await.context("读取本地文件信息失败")?;
+        let target_after = transfer_io(cancel, sftp.metadata(remote_path))
+            .await
+            .context("读取远程文件信息失败")?;
+        if local_changed(&source_before, &source_after)
+            || remote_changed(&target_before, &target_after)
+        {
+            return Err(anyhow!("续传期间文件已变化，请重新发起传输"));
+        }
+        offset
+    } else {
+        0
+    };
 
     let mut buf = vec![0u8; TRANSFER_CHUNK];
-    let mut transferred: u64 = 0;
-    let mut last_emit: u64 = 0;
+    let mut last_emit = transferred;
     let mut last_emit_at = tokio::time::Instant::now();
     loop {
         if cancel.load(Ordering::Relaxed) {
@@ -1697,7 +1827,7 @@ async fn upload_inner(
         {
             last_emit = transferred;
             last_emit_at = tokio::time::Instant::now();
-            let _ = progress.add(TransferProgress {
+            progress(TransferProgress {
                 transferred,
                 total,
                 completed: false,
@@ -1710,14 +1840,71 @@ async fn upload_inner(
     transfer_io(cancel, remote.shutdown())
         .await
         .context("关闭远程文件失败")?;
-    if transferred != total {
-        return Err(anyhow!("本地文件大小已变化，上传未完成"));
+    let source_after = local.metadata().await.context("读取本地文件信息失败")?;
+    if transferred != total || local_changed(&source_before, &source_after) {
+        return Err(anyhow!("本地文件已变化，上传未完成"));
     }
-    let _ = progress.add(TransferProgress {
+    progress(TransferProgress {
         transferred,
         total,
         completed: true,
     });
+    Ok(())
+}
+
+fn resume_mismatch() -> anyhow::Error {
+    anyhow!("续传文件与源文件不一致，请重新发起传输并确认覆盖")
+}
+
+fn local_changed(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {
+    before.len() != after.len() || before.modified().ok() != after.modified().ok()
+}
+
+fn remote_changed(before: &FileAttributes, after: &FileAttributes) -> bool {
+    before.size != after.size || before.mtime != after.mtime
+}
+
+fn is_missing_remote_file(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<russh_sftp::client::error::Error>(),
+        Some(russh_sftp::client::error::Error::Status(status))
+            if status.status_code == StatusCode::NoSuchFile
+    )
+}
+
+async fn verify_resume_prefix(
+    cancel: &AtomicBool,
+    source: &mut (impl tokio::io::AsyncRead + Unpin),
+    target: &mut (impl tokio::io::AsyncRead + Unpin),
+    offset: u64,
+    total: u64,
+    progress: &(impl Fn(TransferProgress) + Sync),
+) -> Result<()> {
+    let mut source_buf = vec![0u8; TRANSFER_CHUNK];
+    let mut target_buf = vec![0u8; TRANSFER_CHUNK];
+    let mut checked = 0;
+    let mut last_emit = 0;
+    while checked < offset {
+        let len = (offset - checked).min(TRANSFER_CHUNK as u64) as usize;
+        transfer_io(cancel, source.read_exact(&mut source_buf[..len]))
+            .await
+            .context("读取续传源文件失败")?;
+        transfer_io(cancel, target.read_exact(&mut target_buf[..len]))
+            .await
+            .context("读取续传目标文件失败")?;
+        if source_buf[..len] != target_buf[..len] {
+            return Err(resume_mismatch());
+        }
+        checked += len as u64;
+        if checked - last_emit >= PROGRESS_EMIT_EVERY || checked == offset {
+            last_emit = checked;
+            progress(TransferProgress {
+                transferred: checked,
+                total,
+                completed: false,
+            });
+        }
+    }
     Ok(())
 }
 
@@ -1742,6 +1929,10 @@ async fn shell_tx(session_id: u32) -> Result<mpsc::Sender<ShellCmd>> {
         .and_then(|e| e.shell_tx.clone())
         .ok_or_else(|| anyhow!("终端未启动或会话不存在: {session_id}"))
 }
+
+#[cfg(test)]
+#[path = "sftp_transfer_tests.rs"]
+mod transfer_tests;
 
 #[cfg(test)]
 mod tests {
@@ -4889,6 +5080,67 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
         assert!(SESSIONS.lock().await.contains_key(&id));
         ssh_disconnect(id).await.unwrap();
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn sftp_closed_handle_reports_reconnect_and_fresh_connection_works() {
+        let (port, fingerprint, _, server) = local_server().await;
+        let handshake = ssh_handshake("127.0.0.1".into(), port).await.unwrap();
+        let id = ssh_authenticate(
+            handshake.session_id,
+            fingerprint,
+            "test".into(),
+            "secret".into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            sftp_canonicalize(id, ".".into()).await.unwrap(),
+            "/gateway-test"
+        );
+        // 模拟事件循环退出，但注册表仍持有原句柄的断线状态。
+        let handle = SESSIONS.lock().await.get(&id).unwrap().handle.clone();
+        handle
+            .read()
+            .await
+            .disconnect(russh::Disconnect::ByApplication, "test", "en")
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !handle.read().await.is_closed() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            sftp_canonicalize(id, ".".into())
+                .await
+                .unwrap_err()
+                .to_string(),
+            SSH_CONNECTION_CLOSED
+        );
+        ssh_disconnect(id).await.unwrap();
+        assert!(!SESSIONS.lock().await.contains_key(&id));
+        server.abort();
+
+        let (port, fingerprint, _, server) = local_server().await;
+        let handshake = ssh_handshake("127.0.0.1".into(), port).await.unwrap();
+        let replacement = ssh_authenticate(
+            handshake.session_id,
+            fingerprint,
+            "test".into(),
+            "secret".into(),
+        )
+        .await
+        .unwrap();
+        assert_ne!(replacement, id);
+        assert_eq!(
+            sftp_canonicalize(replacement, ".".into()).await.unwrap(),
+            "/gateway-test"
+        );
+        ssh_disconnect(replacement).await.unwrap();
+        server.abort();
     }
 
     #[tokio::test]

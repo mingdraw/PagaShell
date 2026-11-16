@@ -181,6 +181,7 @@ abstract class RustLibApi extends BaseApi {
     required int transferId,
     required String remotePath,
     required String localPath,
+    required bool resume,
   });
 
   Future<List<SftpEntry>> crateApiSshSftpListDir({
@@ -210,6 +211,7 @@ abstract class RustLibApi extends BaseApi {
     required int transferId,
     required String localPath,
     required String remotePath,
+    required bool resume,
   });
 
   Future<int> crateApiSshSshAuthenticate({
@@ -1077,6 +1079,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     required int transferId,
     required String remotePath,
     required String localPath,
+    required bool resume,
   }) {
     final progress = RustStreamSink<TransferProgress>();
     unawaited(
@@ -1088,6 +1091,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             sse_encode_u_32(transferId, serializer);
             sse_encode_String(remotePath, serializer);
             sse_encode_String(localPath, serializer);
+            sse_encode_bool(resume, serializer);
             sse_encode_StreamSink_transfer_progress_Sse(progress, serializer);
             pdeCallFfi(
               generalizedFrbRustBinding,
@@ -1101,7 +1105,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             decodeErrorData: null,
           ),
           constMeta: kCrateApiSshSftpDownloadConstMeta,
-          argValues: [sessionId, transferId, remotePath, localPath, progress],
+          argValues: [
+            sessionId,
+            transferId,
+            remotePath,
+            localPath,
+            resume,
+            progress,
+          ],
           apiImpl: this,
         ),
       ),
@@ -1116,6 +1127,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       "transferId",
       "remotePath",
       "localPath",
+      "resume",
       "progress",
     ],
   );
@@ -1266,6 +1278,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     required int transferId,
     required String localPath,
     required String remotePath,
+    required bool resume,
   }) {
     final progress = RustStreamSink<TransferProgress>();
     unawaited(
@@ -1277,6 +1290,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             sse_encode_u_32(transferId, serializer);
             sse_encode_String(localPath, serializer);
             sse_encode_String(remotePath, serializer);
+            sse_encode_bool(resume, serializer);
             sse_encode_StreamSink_transfer_progress_Sse(progress, serializer);
             pdeCallFfi(
               generalizedFrbRustBinding,
@@ -1290,7 +1304,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             decodeErrorData: null,
           ),
           constMeta: kCrateApiSshSftpUploadConstMeta,
-          argValues: [sessionId, transferId, localPath, remotePath, progress],
+          argValues: [
+            sessionId,
+            transferId,
+            localPath,
+            remotePath,
+            resume,
+            progress,
+          ],
           apiImpl: this,
         ),
       ),
@@ -1305,6 +1326,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       "transferId",
       "localPath",
       "remotePath",
+      "resume",
       "progress",
     ],
   );

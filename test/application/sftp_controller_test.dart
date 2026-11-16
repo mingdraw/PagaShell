@@ -15,10 +15,12 @@ class _Session implements SshEngineSession {
   final pending = <String, Completer<List<SftpDirEntry>>>{};
   List<SftpDirEntry> result = [];
   Object? error;
+  Object? canonicalizeError;
   bool canonicalizeFails = false;
 
   @override
   Future<String> canonicalize(String path) async {
+    if (canonicalizeError case final failure?) throw failure;
     if (canonicalizeFails) throw StateError('server-error');
     return '/home/test';
   }
@@ -143,5 +145,94 @@ void main() {
     engine.error = StateError('sensitive-server-error');
     await controller.initialize();
     expect(controller.error.value, '无法读取远程目录，请重试');
+  });
+
+  test('连接失效后刷新重建连接并保留当前目录，重复刷新不重复连接', () async {
+    final replacement = _Session()..result = [_file('reconnected')];
+    final connected = Completer<SshEngineSession>();
+    var connections = 0;
+    controller.onClose();
+    controller = SftpController(
+      engine: engine,
+      reconnect: () {
+        connections++;
+        return connected.future;
+      },
+    );
+    await controller.initialize();
+    await controller.enter('nested');
+    engine.error = const SshEngineException('Channel send error');
+    await controller.refreshDirectory(reconnectIfNeeded: false);
+    expect(controller.needsReconnect.value, isTrue);
+    expect(controller.error.value, SshEngineException.connectionClosedMessage);
+    expect(connections, 0);
+    final refresh = controller.refreshDirectory();
+    await controller.refreshDirectory();
+    expect(connections, 1);
+    expect(controller.reconnecting.value, isTrue);
+    connected.complete(replacement);
+    await refresh;
+    expect(controller.engine, same(replacement));
+    expect(replacement.requests, ['/home/test/nested']);
+    expect(controller.cwd.value, '/home/test/nested');
+    expect(controller.entries.single.name, 'reconnected');
+    expect(controller.needsReconnect.value, isFalse);
+    expect(controller.loading.value, isFalse);
+  });
+
+  test('普通权限错误刷新不重连；重连失败每次刷新只尝试一次', () async {
+    var connections = 0;
+    controller.onClose();
+    controller = SftpController(
+      engine: engine,
+      reconnect: () async {
+        connections++;
+        throw const SshEngineException('网络不可用');
+      },
+    );
+    await controller.initialize();
+    engine.error = const SshEngineException('没有访问权限');
+    await controller.refreshDirectory();
+    expect(connections, 0);
+    expect(controller.needsReconnect.value, isFalse);
+    engine.error = const SshEngineException('Channel send error');
+    await controller.refreshDirectory();
+    expect(connections, 1);
+    expect(controller.needsReconnect.value, isTrue);
+    expect(controller.error.value, '网络不可用');
+    expect(controller.loading.value, isFalse);
+    await controller.createDir('blocked');
+    expect(engine.operations, isEmpty);
+    await controller.refreshDirectory();
+    expect(connections, 2);
+  });
+
+  test('初次打开连接已断开不回退根目录，用户刷新后恢复家目录', () async {
+    engine.canonicalizeError = const SshEngineException('Channel send error');
+    final replacement = _Session();
+    controller.onClose();
+    controller = SftpController(
+      engine: engine,
+      reconnect: () async => replacement,
+    );
+    await controller.initialize();
+    expect(engine.requests, isEmpty);
+    expect(controller.needsReconnect.value, isTrue);
+    await controller.refreshDirectory();
+    expect(controller.cwd.value, '/home/test');
+    expect(replacement.requests, ['/home/test']);
+  });
+
+  test('替换连接后旧请求的迟到结果不覆盖新连接目录', () async {
+    await controller.initialize();
+    engine.pending['/home/test/slow'] = Completer();
+    final slow = controller.enter('slow');
+    final replacement = _Session()..result = [_file('fresh')];
+    controller.replaceEngine(replacement);
+    await controller.refreshDirectory(reconnectIfNeeded: false);
+    engine.pending['/home/test/slow']!.complete([_file('stale')]);
+    await slow;
+    expect(controller.cwd.value, '/home/test');
+    expect(controller.entries.single.name, 'fresh');
   });
 }

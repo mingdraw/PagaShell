@@ -77,12 +77,14 @@ class SftpPanel extends StatefulWidget {
     required this.localFiles,
     this.directoryPicker = getDirectoryPath,
     this.active = true,
+    this.onReconnect,
   });
 
   final Session session;
   final LocalFileRepository localFiles;
   final LocalDirectoryPicker directoryPicker;
   final bool active;
+  final Future<SshEngineSession> Function()? onReconnect;
 
   @override
   State<SftpPanel> createState() => _SftpPanelState();
@@ -112,7 +114,15 @@ class _SftpPanelState extends State<SftpPanel> {
 
   void _bindBrowser() {
     _tag = 'sftp-${widget.session.id}-${identityHashCode(this)}';
-    _browser = Get.put(SftpController(engine: _engine), tag: _tag);
+    _browser = Get.put(
+      SftpController(
+        engine: _engine,
+        reconnect: widget.onReconnect == null
+            ? null
+            : () => widget.onReconnect!(),
+      ),
+      tag: _tag,
+    );
     _local = Get.put(LocalFileController(files: widget.localFiles), tag: _tag);
     final local = _local;
     final revision = local.navigationRevision;
@@ -135,10 +145,12 @@ class _SftpPanelState extends State<SftpPanel> {
       _transferPane.collapse();
     }
     if (oldWidget.session.id != widget.session.id ||
-        oldWidget.session.engineSession != widget.session.engineSession ||
         oldWidget.localFiles != widget.localFiles) {
       _releaseBrowser();
       _bindBrowser();
+    } else if (!identical(_browser.engine, _engine)) {
+      _browser.replaceEngine(_engine);
+      unawaited(_browser.refreshDirectory(reconnectIfNeeded: false));
     }
   }
 
@@ -401,6 +413,11 @@ class _SftpPanelState extends State<SftpPanel> {
     if (!mounted || data.sessionId != widget.session.id || batch.cancelled) {
       return false;
     }
+    if (widget.session.phase != SessionPhase.ready ||
+        _browser.needsReconnect.value ||
+        _browser.reconnecting.value) {
+      return false;
+    }
     if (directory.isEmpty) {
       AppNotice.error('请先打开目标目录'.tr);
       return false;
@@ -428,8 +445,7 @@ class _SftpPanelState extends State<SftpPanel> {
           .tasksOf(sessionId)
           .any(
             (task) =>
-                (task.status.value == TransferStatus.running ||
-                    task.retrying.value) &&
+                (task.status.value.active || task.retrying.value) &&
                 task.conflictsWithTarget(
                   kind: upload ? TransferKind.upload : TransferKind.download,
                   remotePath: remotePath,
@@ -501,7 +517,13 @@ class _SftpPanelState extends State<SftpPanel> {
         if (action == null) return false;
         if (action == _FileConflictAction.skip) return true;
       }
-      if (!mounted || browser != _browser || local != _local) {
+      if (!mounted ||
+          browser != _browser ||
+          local != _local ||
+          !identical(engine, _engine) ||
+          widget.session.phase != SessionPhase.ready ||
+          browser.needsReconnect.value ||
+          browser.reconnecting.value) {
         return false;
       }
       if (isRunning()) return true;
@@ -546,10 +568,8 @@ class _SftpPanelState extends State<SftpPanel> {
             );
       if (upload) onUploadStarted?.call();
       _refreshAfterTransfer(task);
-      if (data.isDirectory && task.status.value == TransferStatus.running) {
-        await task.status.stream.firstWhere(
-          (status) => status != TransferStatus.running,
-        );
+      if (data.isDirectory && task.status.value.active) {
+        await task.status.stream.firstWhere((status) => !status.active);
       }
       return !batch.cancelled && task.status.value != TransferStatus.cancelled;
     } on Object catch (e) {
@@ -575,18 +595,18 @@ class _SftpPanelState extends State<SftpPanel> {
       if (!mounted) return;
       unawaited(
         task.kind == TransferKind.upload
-            ? _browser.refreshDirectory()
+            ? _browser.refreshDirectory(reconnectIfNeeded: false)
             : _local.refreshDirectory(),
       );
     }
 
-    if (task.status.value != TransferStatus.running) {
+    if (!task.status.value.active) {
       refresh();
       return;
     }
     late Worker worker;
     worker = ever(task.status, (status) {
-      if (status == TransferStatus.running) return;
+      if (status.active) return;
       if (status != TransferStatus.failed) {
         worker.dispose();
         _transferWorkers.remove(worker);
@@ -1026,7 +1046,7 @@ class _TransferRow extends StatelessWidget {
       child: Obx(() {
         final status = task.status.value;
         final icon = switch (status) {
-          TransferStatus.running =>
+          TransferStatus.queued || TransferStatus.running =>
             task.kind == TransferKind.upload
                 ? AppIcons.upload
                 : AppIcons.download,
@@ -1053,6 +1073,7 @@ class _TransferRow extends StatelessWidget {
                   ? '传输未完成，请检查连接后重试'.tr
                   : failureReason,
             TransferStatus.cancelled => '已取消'.tr,
+            TransferStatus.queued => '等待传输'.tr,
             _ => formatFileSize(task.transferred.value),
           },
           key: ValueKey('sftp-transfer-label-${task.id}'),
@@ -1068,15 +1089,14 @@ class _TransferRow extends StatelessWidget {
               key: ValueKey('sftp-transfer-action-${task.id}'),
               icon: icon,
               color: color,
-              hoverIcon: status == TransferStatus.running
-                  ? AppIcons.x
-                  : AppIcons.rotateCw,
+              hoverIcon: status.active ? AppIcons.x : AppIcons.rotateCw,
               semanticLabel: switch (status) {
-                TransferStatus.running => '停止传输'.tr,
+                TransferStatus.queued || TransferStatus.running => '停止传输'.tr,
                 TransferStatus.failed => '重试传输'.tr,
                 _ => '',
               },
               onPressed: switch (status) {
+                TransferStatus.queued ||
                 TransferStatus.running => () => controller.cancel(task.id),
                 TransferStatus.failed
                     when !task.retrying.value && controller.canRetry(task) =>

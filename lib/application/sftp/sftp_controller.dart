@@ -6,13 +6,16 @@ import '../../domain/ssh/ssh_engine.dart';
 
 /// 每个文件传输标签独立的远程浏览状态；连接归会话所有。
 class SftpController extends GetxController {
-  SftpController({required this.engine});
+  SftpController({required this.engine, this.reconnect});
 
-  final SshEngineSession engine;
+  SshEngineSession engine;
+  final Future<SshEngineSession> Function()? reconnect;
   final cwd = ''.obs;
   final entries = <SftpDirEntry>[].obs;
   final loading = true.obs;
   final error = RxnString();
+  final needsReconnect = false.obs;
+  final reconnecting = false.obs;
   int _request = 0;
   bool _disposed = false;
 
@@ -27,7 +30,13 @@ class SftpController extends GetxController {
     String home;
     try {
       home = await engine.canonicalize('.');
-    } on Object {
+    } on Object catch (e) {
+      if (_disposed || request != _request) return;
+      if (e is SshEngineException && e.isConnectionClosed) {
+        _recordError(e, '无法读取远程目录，请重试');
+        loading.value = false;
+        return;
+      }
       home = '/';
     }
     if (_disposed || request != _request) return;
@@ -39,18 +48,61 @@ class SftpController extends GetxController {
   static String join(String directory, String name) =>
       directory == '/' ? '/$name' : '$directory/$name';
 
-  Future<void> refreshDirectory() =>
-      cwd.value.isEmpty ? initialize() : _load(cwd.value);
+  /// 只有用户主动刷新才尝试重连；传输完成后的后台刷新不发起连接。
+  Future<void> refreshDirectory({bool reconnectIfNeeded = true}) async {
+    if (_disposed || reconnecting.value) return;
+    if (!needsReconnect.value) {
+      await (cwd.value.isEmpty ? initialize() : _load(cwd.value));
+    }
+    if (!_disposed && needsReconnect.value && reconnectIfNeeded) {
+      await _reconnect();
+    }
+  }
 
-  Future<void> enter(String name) => _load(pathOf(name));
+  void replaceEngine(SshEngineSession replacement) {
+    if (_disposed || identical(engine, replacement)) return;
+    _request++;
+    engine = replacement;
+    needsReconnect.value = false;
+    error.value = null;
+  }
 
-  Future<void> navigate(String path) => _load(path);
+  Future<void> _reconnect() async {
+    final connect = reconnect;
+    if (connect == null || reconnecting.value) return;
+    reconnecting.value = true;
+    loading.value = true;
+    error.value = null;
+    _request++;
+    try {
+      final replacement = await connect();
+      if (_disposed) return;
+      replaceEngine(replacement);
+      await (cwd.value.isEmpty ? initialize() : _load(cwd.value));
+    } on Object catch (e) {
+      if (_disposed) return;
+      needsReconnect.value = true;
+      _recordError(e, '重新连接失败，请刷新重试');
+    } finally {
+      if (!_disposed) {
+        reconnecting.value = false;
+        loading.value = false;
+      }
+    }
+  }
+
+  Future<void> enter(String name) => navigate(pathOf(name));
+
+  Future<void> navigate(String path) async {
+    if (needsReconnect.value || reconnecting.value) return;
+    await _load(path);
+  }
 
   Future<void> up() async {
     final path = cwd.value;
     if (path.isEmpty || path == '/') return;
     final cut = path.lastIndexOf('/');
-    await _load(cut <= 0 ? '/' : path.substring(0, cut));
+    await navigate(cut <= 0 ? '/' : path.substring(0, cut));
   }
 
   Future<void> _load(String path) async {
@@ -71,7 +123,7 @@ class SftpController extends GetxController {
       entries.assignAll(result);
     } on Object catch (e) {
       if (_disposed || request != _request) return;
-      error.value = e is SshEngineException ? e.message : '无法读取远程目录，请重试';
+      _recordError(e, '无法读取远程目录，请重试');
     } finally {
       if (!_disposed && request == _request) loading.value = false;
     }
@@ -87,14 +139,30 @@ class SftpController extends GetxController {
       _run(() => engine.remove(pathOf(entry.name), isDir: entry.isDir));
 
   Future<void> _run(Future<void> Function() action) async {
-    if (_disposed) return;
+    if (_disposed || needsReconnect.value || reconnecting.value) return;
+    final activeEngine = engine;
     try {
       await action();
-      if (!_disposed) await refreshDirectory();
-    } on Object catch (e) {
-      if (!_disposed) {
-        error.value = e is SshEngineException ? e.message : '远程文件操作失败，请重试';
+      if (!_disposed && identical(activeEngine, engine)) {
+        await refreshDirectory(reconnectIfNeeded: false);
       }
+    } on Object catch (e) {
+      if (!_disposed && identical(activeEngine, engine)) {
+        _recordError(e, '远程文件操作失败，请重试');
+      }
+    }
+  }
+
+  void _recordError(Object failure, String fallback) {
+    if (failure is SshEngineException) {
+      if (failure.isConnectionClosed) {
+        needsReconnect.value = true;
+        error.value = SshEngineException.connectionClosedMessage;
+      } else {
+        error.value = failure.message;
+      }
+    } else {
+      error.value = fallback;
     }
   }
 

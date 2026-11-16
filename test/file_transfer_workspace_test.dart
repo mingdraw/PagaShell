@@ -15,6 +15,7 @@ import 'package:pagashell/application/session/session_controller.dart';
 import 'package:pagashell/domain/entities/host.dart';
 import 'package:pagashell/domain/ssh/host_key.dart';
 import 'package:pagashell/domain/ssh/ssh_engine.dart';
+import 'package:pagashell/presentation/sftp/file_browser_pane.dart';
 import 'package:pagashell/presentation/sftp/sftp_panel.dart';
 import 'package:pagashell/presentation/shell/connect_flow.dart';
 import 'package:pagashell/presentation/theme/app_theme.dart';
@@ -290,6 +291,61 @@ void main() {
     await tester.pumpAndSettle();
     expect(engine.sessions.first.closes, 1);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('连接通道关闭后刷新重连，保留标签、两侧目录和其他终端连接', (tester) async {
+    final (engine, _) = await pumpApp(tester);
+    await menuAction(tester, '新建会话');
+    final terminal = engine.sessions.single;
+    await menuAction(tester, '文件传输');
+    final controller = Get.find<SessionController>();
+    final id = controller.activeSessionId.value;
+    final panelState = tester.state(find.byType(SftpPanel));
+    Finder pane(FileBrowserSide side) => find.byWidgetPredicate(
+      (widget) => widget is FileBrowserPane && widget.side == side,
+    );
+    tester
+        .widget<FileBrowserPane>(pane(FileBrowserSide.local))
+        .onNavigate('/local/downloads');
+    tester
+        .widget<FileBrowserPane>(pane(FileBrowserSide.remote))
+        .onNavigate('/home/test/logs');
+    await tester.pumpAndSettle();
+    final stale = engine.sessions.last;
+    stale.listFailure = const SshEngineException('Channel send error');
+    tester
+        .widget<FileBrowserPane>(pane(FileBrowserSide.remote))
+        .onNavigate('/home/test/logs');
+    await tester.pumpAndSettle();
+    expect(
+      find.text(SshEngineException.connectionClosedMessage),
+      findsOneWidget,
+    );
+    await tester.tap(
+      find.descendant(
+        of: pane(FileBrowserSide.remote),
+        matching: findAppIconButton('刷新'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(engine.sessions, hasLength(3));
+    expect(stale.closes, 1);
+    expect(terminal.closes, 0);
+    expect(controller.activeSessionId.value, id);
+    expect(tester.state(find.byType(SftpPanel)), same(panelState));
+    expect(
+      tester.widget<FileBrowserPane>(pane(FileBrowserSide.remote)).cwd,
+      '/home/test/logs',
+    );
+    expect(
+      tester.widget<FileBrowserPane>(pane(FileBrowserSide.local)).cwd,
+      '/local/downloads',
+    );
+    expect(find.text('app.log'), findsOneWidget);
+    expect(find.text(SshEngineException.connectionClosedMessage), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.runAsync(controller.closeAll);
+    await tester.pumpAndSettle();
   });
 
   testWidgets('标签支持向左右拖到邻项前后，保持选中项及终端和传输页面状态', (tester) async {

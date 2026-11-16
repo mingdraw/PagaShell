@@ -14,6 +14,7 @@ class _ManualSession extends FakeSftpSession {
 
   final attempts = <StreamController<SftpTransferProgress>>[];
   final cancelled = <String>[];
+  final resumed = <String>[];
 
   @override
   Stream<SftpTransferProgress> upload(String localPath, String remotePath) {
@@ -23,6 +24,15 @@ class _ManualSession extends FakeSftpSession {
     );
     attempts.add(events);
     return events.stream;
+  }
+
+  @override
+  Stream<SftpTransferProgress> uploadResuming(
+    String localPath,
+    String remotePath,
+  ) {
+    resumed.add(localPath);
+    return upload(localPath, remotePath);
   }
 }
 
@@ -142,23 +152,24 @@ void main() {
       remotePath: '/home/test/downloads',
       isDirectory: true,
     );
-    await _until(() => engine.attempts.length == 1);
-    expect(task.currentPath.value, '/local/downloads/a.txt');
+    await _until(() => engine.attempts.length == 2);
     engine.attempts.first.add(
       const SftpTransferProgress(transferred: 5, total: 10),
     );
     await Future<void>.delayed(TransferController.progressInterval);
+    expect(task.currentPath.value, '/local/downloads/a.txt');
     expect(task.total.value, 30);
     expect(task.transferred.value, 5);
+    engine.attempts.last.add(
+      const SftpTransferProgress(transferred: 5, total: 20),
+    );
+    await Future<void>.delayed(TransferController.progressInterval);
+    expect(task.currentPath.value, '/local/downloads/b.txt');
+    expect(task.transferred.value, 10);
     engine.attempts.first.add(
       const SftpTransferProgress(transferred: 10, total: 10),
     );
     await engine.attempts.first.close();
-    await _until(() => engine.attempts.length == 2);
-    expect(task.currentPath.value, '/local/downloads/b.txt');
-    engine.attempts.last.add(
-      const SftpTransferProgress(transferred: 5, total: 20),
-    );
     await Future<void>.delayed(TransferController.progressInterval);
     expect(task.transferred.value, 15);
     expect(task.total.value, 30);
@@ -170,12 +181,15 @@ void main() {
     expect(task.transferred.value, 30);
   });
 
-  test('取消目录任务会取消当前文件流并停止后续文件，完成清理后释放权限', () async {
+  test('取消目录任务会取消所有在途文件并停止排队文件，完成清理后释放权限', () async {
     final files = InMemoryLocalFileRepository()
       ..putFile('/local/downloads/a.txt', 10)
-      ..putFile('/local/downloads/b.txt', 20);
+      ..putFile('/local/downloads/b.txt', 20)
+      ..putFile('/local/downloads/c.txt', 30)
+      ..putFile('/local/downloads/d.txt', 40);
     final engine = _ManualSession(localFiles: files);
-    final transfers = controller();
+    final transfers = TransferController(maxConcurrentFiles: 2);
+    addTearDown(transfers.onClose);
     var released = 0;
     final task = transfers.startUpload(
       sessionId: 's',
@@ -188,11 +202,14 @@ void main() {
         released++;
       },
     );
-    await _until(() => engine.attempts.isNotEmpty);
+    await _until(() => engine.attempts.length == 2);
     await transfers.cancel(task.id).timeout(const Duration(seconds: 2));
     expect(task.status.value, TransferStatus.cancelled);
-    expect(engine.cancelled, ['/local/downloads/a.txt']);
-    expect(engine.uploads, hasLength(1));
+    expect(
+      engine.cancelled,
+      containsAll(['/local/downloads/a.txt', '/local/downloads/b.txt']),
+    );
+    expect(engine.uploads, hasLength(2));
     expect(released, 1);
   });
 
@@ -237,6 +254,82 @@ void main() {
       () => task.status.value == TransferStatus.done && released == 2,
     );
     expect(task.transferred.value, 10);
+    expect(engine.resumed, ['/local/downloads/a.txt']);
+  });
+
+  test('目录和独立文件共享会话并发上限，完成后才启动排队文件', () async {
+    final files = InMemoryLocalFileRepository()
+      ..putFile('/local/downloads/a.txt', 10)
+      ..putFile('/local/downloads/b.txt', 20)
+      ..putFile('/local/downloads/c.txt', 30);
+    final engine = _ManualSession(localFiles: files);
+    final transfers = TransferController(maxConcurrentFiles: 2);
+    addTearDown(transfers.onClose);
+    final directory = transfers.startUpload(
+      sessionId: 's',
+      engineSession: engine,
+      localFiles: files,
+      localPath: '/local/downloads',
+      remotePath: '/home/test/downloads',
+      isDirectory: true,
+    );
+    await _until(() => engine.attempts.length == 2);
+    final single = transfers.startUpload(
+      sessionId: 's',
+      engineSession: engine,
+      localPath: '/local/upload.txt',
+      remotePath: '/home/test/upload.txt',
+    );
+    expect(engine.attempts, hasLength(2));
+    expect(single.status.value, TransferStatus.queued);
+    engine.attempts[0].add(
+      const SftpTransferProgress(transferred: 10, total: 10),
+    );
+    await engine.attempts[0].close();
+    await _until(() => engine.attempts.length == 3);
+    expect(single.status.value, TransferStatus.running);
+    expect(engine.uploads[2].$1, '/local/upload.txt');
+    expect(directory.status.value, TransferStatus.running);
+    await transfers.cancelSession('s');
+  });
+
+  test('目录失败后重试已启动的文件，进度按所有文件累计', () async {
+    final files = InMemoryLocalFileRepository()
+      ..putFile('/local/downloads/a.txt', 10)
+      ..putFile('/local/downloads/b.txt', 20);
+    final engine = _ManualSession(localFiles: files);
+    final transfers = controller();
+    final task = transfers.startUpload(
+      sessionId: 's',
+      engineSession: engine,
+      localFiles: files,
+      localPath: '/local/downloads',
+      remotePath: '/home/test/downloads',
+      isDirectory: true,
+    );
+    await _until(() => engine.attempts.length == 2);
+    engine.attempts[0].add(
+      const SftpTransferProgress(transferred: 10, total: 10),
+    );
+    await engine.attempts[0].close();
+    engine.attempts[1].addError(const SshEngineException('断网'));
+    await _until(() => task.status.value == TransferStatus.failed);
+    await transfers.retry(task.id);
+    await _until(() => engine.attempts.length == 4);
+    expect(
+      engine.resumed,
+      containsAll(['/local/downloads/a.txt', '/local/downloads/b.txt']),
+    );
+    engine.attempts[2].add(
+      const SftpTransferProgress(transferred: 10, total: 10),
+    );
+    engine.attempts[3].add(
+      const SftpTransferProgress(transferred: 20, total: 20),
+    );
+    await Future.wait([engine.attempts[2].close(), engine.attempts[3].close()]);
+    await _until(() => task.status.value == TransferStatus.done);
+    expect(task.total.value, 30);
+    expect(task.transferred.value, 30);
   });
 
   test('合并同名目录，文件可跳过或覆盖；取消决策停止任务', () async {

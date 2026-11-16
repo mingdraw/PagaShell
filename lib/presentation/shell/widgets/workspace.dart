@@ -220,10 +220,7 @@ class _WelcomeView extends StatelessWidget {
                 children: [
                   shadcn.PrimaryButton(
                     onPressed: () => showCommandPalette(context),
-                    leading: const AppIcon(
-                      AppIcons.arrowUpRight,
-                      size: 16,
-                    ),
+                    leading: const AppIcon(AppIcons.arrowUpRight, size: 16),
                     child: Text('快速连接'.tr),
                   ),
                   shadcn.GhostButton(
@@ -316,6 +313,39 @@ class _SessionView extends StatelessWidget {
     if (session.kind == SessionKind.dynamicProxy) {
       return DynamicProxyPanel(session: session);
     }
+    if (session.kind == SessionKind.fileTransfer &&
+        session.engineSession != null) {
+      // 认证期间保留两侧浏览器；指纹确认仍覆盖在原面板之上。
+      return Stack(
+        fit: StackFit.expand,
+        children: [
+          SftpPanel(
+            key: ValueKey('sftp-${session.id}'),
+            session: session,
+            active: active && !session.phase.isBusy,
+            localFiles: Get.find<LocalFileRepository>(),
+            onReconnect: () =>
+                Get.find<SessionController>().reconnectFileTransfer(session.id),
+          ),
+          if (session.phase == SessionPhase.hostKeyPending &&
+              session.hostKeyReview != null)
+            ColoredBox(
+              color: AppTheme.background(context),
+              child: HostKeyConfirmation(
+                review: session.hostKeyReview!,
+                onDecision: (trust) => Get.find<SessionController>()
+                    .confirmHostKey(session.id, trust: trust),
+              ),
+            ),
+          if (session.phase == SessionPhase.failed &&
+              session.hostKeyFailure != null)
+            ColoredBox(
+              color: AppTheme.background(context),
+              child: _FailedView(session: session),
+            ),
+        ],
+      );
+    }
     return switch (session.phase) {
       SessionPhase.failed => _FailedView(session: session),
       SessionPhase.hostKeyPending when session.hostKeyReview != null =>
@@ -346,15 +376,6 @@ class _SessionView extends StatelessWidget {
                 ),
           onError: (message) =>
               Get.find<SessionController>().desktopFailed(session.id, message),
-        ),
-      SessionPhase.ready
-          when session.kind == SessionKind.fileTransfer &&
-              session.engineSession != null =>
-        SftpPanel(
-          key: ValueKey('sftp-${session.id}'),
-          session: session,
-          active: active,
-          localFiles: Get.find<LocalFileRepository>(),
         ),
       SessionPhase.ready || SessionPhase.closed when session.terminal != null =>
         _TerminalHost(session: session, active: active),

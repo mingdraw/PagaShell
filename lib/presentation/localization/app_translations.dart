@@ -1322,6 +1322,21 @@ class AppTranslations extends Translations {
         'The saved host key has been updated. Retry the connection.',
     '无法清除主机指纹，请重试': 'Unable to clear the host key. Please try again.',
     '无法读取远程目录，请重试': 'Unable to read the remote directory. Please try again.',
+    '等待传输': 'Waiting to transfer',
+    '当前引擎不支持断点续传，请重新发起传输':
+        'This engine cannot resume transfers. Start a new transfer.',
+    '续传文件与源文件不一致，请重新发起传输并确认覆盖': 'The partial file does not match the source. Start a new transfer and confirm overwrite.',
+    '续传期间文件已变化，请重新发起传输':
+        'The file changed during resume. Start a new transfer.',
+    '无法确认续传文件大小，请重新发起传输':
+        'Cannot verify the partial file size. Start a new transfer.',
+    '本地文件已变化，上传未完成': 'The local file changed before the upload completed.',
+    '远程文件已变化，下载未完成': 'The remote file changed before the download completed.',
+    'SSH连接已断开，请刷新重新连接': 'SSH disconnected. Refresh to reconnect.',
+    '重新连接失败，请刷新重试': 'Could not reconnect. Refresh to try again.',
+    '无法重新连接，请关闭文件传输标签后重试':
+        'Could not reconnect. Close the file transfer tab and try again.',
+    '文件传输标签已关闭': 'The file transfer tab is closed.',
     '远程文件操作失败，请重试': 'The remote file operation failed. Please try again.',
     '服务器未提供主机密钥': 'The server did not provide a host key',
     '密码认证过程出错': 'Password authentication failed',

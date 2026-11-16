@@ -1,11 +1,12 @@
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pagashell/application/transfer/directory_transfer.dart';
 import 'package:pagashell/application/transfer/transfer_controller.dart';
 import 'package:pagashell/domain/ssh/ssh_engine.dart';
 
 /// 进度流可控的假引擎会话（每个实例承载一次传输）。
-class _FakeTransferSession implements SshEngineSession {
+class _FakeTransferSession implements SshEngineSession, ResumableSftpSession {
   final StreamController<SftpTransferProgress> progress =
       StreamController<SftpTransferProgress>();
   String? lastRemotePath;
@@ -30,6 +31,18 @@ class _FakeTransferSession implements SshEngineSession {
     lastLocalPath = localPath;
     return progress.stream;
   }
+
+  @override
+  Stream<SftpTransferProgress> downloadResuming(
+    String remotePath,
+    String localPath,
+  ) => download(remotePath, localPath);
+
+  @override
+  Stream<SftpTransferProgress> uploadResuming(
+    String localPath,
+    String remotePath,
+  ) => upload(localPath, remotePath);
 
   @override
   void write(String data) {}
@@ -59,9 +72,15 @@ class _FakeTransferSession implements SshEngineSession {
 class _RetrySession extends _FakeTransferSession {
   final attempts = <StreamController<SftpTransferProgress>>[];
   final targets = <(String, String)>[];
+  final resumes = <bool>[];
 
-  Stream<SftpTransferProgress> _open(String local, String remote) {
+  Stream<SftpTransferProgress> _open(
+    String local,
+    String remote, {
+    bool resume = false,
+  }) {
     targets.add((local, remote));
+    resumes.add(resume);
     final attempt = StreamController<SftpTransferProgress>();
     attempts.add(attempt);
     return attempt.stream;
@@ -76,6 +95,18 @@ class _RetrySession extends _FakeTransferSession {
       _open(localPath, remotePath);
 
   @override
+  Stream<SftpTransferProgress> uploadResuming(
+    String localPath,
+    String remotePath,
+  ) => _open(localPath, remotePath, resume: true);
+
+  @override
+  Stream<SftpTransferProgress> downloadResuming(
+    String remotePath,
+    String localPath,
+  ) => _open(localPath, remotePath, resume: true);
+
+  @override
   void dispose() {
     for (final attempt in attempts) {
       unawaited(attempt.close());
@@ -86,6 +117,66 @@ class _RetrySession extends _FakeTransferSession {
 
 void main() {
   for (final upload in [true, false]) {
+    test('${upload ? '上传' : '下载'}重连等待旧任务收尾，保留记录并使用新连接重试', () async {
+      final controller = TransferController();
+      final old = _RetrySession();
+      final replacement = _RetrySession();
+      final other = _RetrySession();
+      addTearDown(controller.onClose);
+      addTearDown(old.dispose);
+      addTearDown(replacement.dispose);
+      addTearDown(other.dispose);
+      final cleanup = Completer<void>();
+      final task = upload
+          ? controller.startUpload(
+              sessionId: 's1',
+              engineSession: old,
+              localPath: '/local/a',
+              remotePath: '/remote/a',
+              releaseSource: () => cleanup.future,
+            )
+          : controller.startDownload(
+              sessionId: 's1',
+              engineSession: old,
+              localPath: '/local/a',
+              remotePath: '/remote/a',
+            );
+      final otherTask = controller.startUpload(
+        sessionId: 's2',
+        engineSession: other,
+        localPath: '/local/b',
+        remotePath: '/remote/b',
+      );
+      old.attempts.single.onCancel = () => cleanup.future;
+      var finished = false;
+      final interrupted = controller.interruptSession('s1').then((_) {
+        finished = true;
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(task.status.value, TransferStatus.failed);
+      expect(task.error.value, SshEngineException.connectionClosedMessage);
+      expect(otherTask.status.value, TransferStatus.running);
+      expect(controller.canRetry(task), isFalse);
+      await controller.retry(task.id);
+      expect(old.attempts, hasLength(1));
+      expect(finished, isFalse);
+      cleanup.complete();
+      await interrupted;
+      controller.bindSession('s1', replacement);
+      expect(controller.canRetry(task), isTrue);
+      expect(replacement.attempts, isEmpty);
+      await controller.retry(task.id);
+      expect(replacement.targets, [('/local/a', '/remote/a')]);
+      expect(old.attempts, hasLength(1));
+      expect(task.status.value, TransferStatus.running);
+      replacement.attempts.single.add(
+        const SftpTransferProgress(transferred: 100, total: 100),
+      );
+      await replacement.attempts.single.close();
+      await Future<void>.delayed(Duration.zero);
+      expect(task.status.value, TransferStatus.done);
+    });
+
     test('${upload ? '上传' : '下载'}失败后原任务重试，清零进度错误且连点只启动一次', () async {
       final controller = TransferController();
       final session = _RetrySession();
@@ -117,6 +208,7 @@ void main() {
         ('/local/a', '/remote/a'),
         ('/local/a', '/remote/a'),
       ]);
+      expect(session.resumes, [false, true]);
       expect(task.status.value, TransferStatus.running);
       expect(task.error.value, isNull);
       expect(task.transferred.value, 0);
@@ -126,11 +218,177 @@ void main() {
         const SftpTransferProgress(transferred: 100, total: 100),
       );
       await session.attempts.last.close();
+      await Future<void>.delayed(Duration.zero);
       expect(task.status.value, TransferStatus.done);
       await controller.retry(task.id);
       expect(session.attempts, hasLength(2));
     });
   }
+
+  test('每个会话限制并发，排队任务可取消并在关闭时释放权限', () async {
+    final controller = TransferController(maxConcurrentFiles: 2);
+    final session = _RetrySession();
+    final other = _RetrySession();
+    addTearDown(controller.onClose);
+    addTearDown(session.dispose);
+    addTearDown(other.dispose);
+    var releases = 0;
+    var acquisitions = 0;
+    TransferTask start(String name, {bool withAccess = false}) =>
+        controller.startUpload(
+          sessionId: 's1',
+          engineSession: session,
+          localPath: '/local/$name',
+          remotePath: '/remote/$name',
+          releaseSource: withAccess ? () async => releases++ : null,
+          acquireSource: withAccess
+              ? () async {
+                  acquisitions++;
+                  return () async {
+                    releases++;
+                  };
+                }
+              : null,
+        );
+    final first = start('a');
+    final second = start('b');
+    final queued = start('c', withAccess: true);
+    final fourth = start('d');
+    final waiting = start('e');
+    final isolated = controller.startUpload(
+      sessionId: 's2',
+      engineSession: other,
+      localPath: '/local/other',
+      remotePath: '/remote/other',
+    );
+    expect(session.attempts, hasLength(2));
+    expect(first.status.value, TransferStatus.running);
+    expect(second.status.value, TransferStatus.running);
+    expect(queued.status.value, TransferStatus.queued);
+    expect(fourth.status.value, TransferStatus.queued);
+    expect(isolated.status.value, TransferStatus.running);
+    controller.clearFinished(sessionId: 's1');
+    expect(controller.tasksOf('s1'), hasLength(5));
+    await controller.cancel(queued.id);
+    expect(queued.status.value, TransferStatus.cancelled);
+    expect(releases, 1);
+    await controller.retry(queued.id);
+    expect(acquisitions, 0);
+    expect(queued.status.value, TransferStatus.cancelled);
+    expect(session.attempts, hasLength(2));
+    session.attempts.first.add(
+      const SftpTransferProgress(transferred: 1, total: 1),
+    );
+    await session.attempts.first.close();
+    await Future<void>.delayed(Duration.zero);
+    expect(session.targets.last, ('/local/d', '/remote/d'));
+    expect(fourth.status.value, TransferStatus.running);
+    expect(waiting.status.value, TransferStatus.queued);
+    await controller.cancelSession('s1');
+    expect(session.attempts, hasLength(3));
+    expect(queued.status.value, TransferStatus.cancelled);
+    expect(releases, 1);
+    expect(isolated.status.value, TransferStatus.running);
+  });
+
+  test('重连后仅续传已启动的文件，排队未启动的文件从头开始', () async {
+    final controller = TransferController(maxConcurrentFiles: 1);
+    final old = _RetrySession();
+    final replacement = _RetrySession();
+    addTearDown(controller.onClose);
+    addTearDown(old.dispose);
+    addTearDown(replacement.dispose);
+    final first = controller.startDownload(
+      sessionId: 's',
+      engineSession: old,
+      localPath: '/local/a',
+      remotePath: '/remote/a',
+    );
+    final queued = controller.startDownload(
+      sessionId: 's',
+      engineSession: old,
+      localPath: '/local/b',
+      remotePath: '/remote/b',
+    );
+    expect(old.attempts, hasLength(1));
+    expect(queued.status.value, TransferStatus.queued);
+    await controller.interruptSession('s');
+    expect(first.status.value, TransferStatus.failed);
+    expect(queued.status.value, TransferStatus.failed);
+    controller.bindSession('s', replacement);
+    await controller.retry(queued.id);
+    await controller.retry(first.id);
+    expect(replacement.resumes, [false]);
+    expect(first.status.value, TransferStatus.queued);
+    replacement.attempts.first.add(
+      const SftpTransferProgress(transferred: 1, total: 1),
+    );
+    await replacement.attempts.first.close();
+    await Future<void>.delayed(Duration.zero);
+    expect(replacement.resumes, [false, true]);
+    expect(first.status.value, TransferStatus.running);
+  });
+
+  test('排队上传的权限只在获得并发位置时重新获取', () async {
+    final controller = TransferController(maxConcurrentFiles: 1);
+    final session = _RetrySession();
+    addTearDown(controller.onClose);
+    addTearDown(session.dispose);
+    var acquired = 0;
+    var released = 0;
+    controller.startUpload(
+      sessionId: 's',
+      engineSession: session,
+      localPath: '/local/a',
+      remotePath: '/remote/a',
+    );
+    final queued = controller.startUpload(
+      sessionId: 's',
+      engineSession: session,
+      localPath: '/local/b',
+      remotePath: '/remote/b',
+      releaseSource: () async {
+        released++;
+      },
+      acquireSource: () async {
+        acquired++;
+        return () async {
+          released++;
+        };
+      },
+    );
+    await Future<void>.delayed(Duration.zero);
+    expect(queued.status.value, TransferStatus.queued);
+    expect(released, 1);
+    expect(acquired, 0);
+    session.attempts.first.add(
+      const SftpTransferProgress(transferred: 1, total: 1),
+    );
+    await session.attempts.first.close();
+    await Future<void>.delayed(Duration.zero);
+    expect(acquired, 1);
+    expect(session.targets.last, ('/local/b', '/remote/b'));
+    await controller.cancel(queued.id);
+    expect(released, 2);
+  });
+
+  test('目录取消决定等待所有文件流结束后退出且保留取消状态', () async {
+    // 目录级并发取消行为由 directory_transfer_test 覆盖；此处校验错误分支。
+    final controller = TransferController();
+    final session = _RetrySession();
+    addTearDown(controller.onClose);
+    addTearDown(session.dispose);
+    final task = controller.startUpload(
+      sessionId: 's',
+      engineSession: session,
+      localPath: '/local/a',
+      remotePath: '/remote/a',
+    );
+    session.attempts.first.addError(const DirectoryTransferCancelled());
+    await Future<void>.delayed(Duration.zero);
+    expect(task.status.value, TransferStatus.cancelled);
+    expect(controller.canRetry(task), isFalse);
+  });
 
   test('重试等待前次取消清理并重新获得源权限，关闭标签时迟到的权限会释放', () async {
     final controller = TransferController();

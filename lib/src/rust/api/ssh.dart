@@ -10,7 +10,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'page.dart';
 import 'terminal.dart';
 
-// These functions are ignored because they are not marked as `pub`: `ack`, `attempted`, `authenticate_inner`, `authenticate`, `begin_frame`, `bind_forward_ports`, `desktop_tunnel`, `disconnect_handle`, `docker_api_channel`, `download_inner`, `due`, `expire_sync`, `feed`, `finish`, `flush`, `forward_listener`, `handshake`, `is_closed`, `load_private_key`, `new`, `open_sftp_inner`, `open_sftp`, `pending`, `process_exec`, `process_target_command`, `read_only_exec`, `register_transfer`, `remove_dir_recursive`, `resize`, `server_status_command`, `shell_tx`, `spawn_port_forwards`, `start_docker_terminal_output`, `start_page_port_forwards`, `start_port_forwards`, `start_shell_output_with_command`, `start_shell_output`, `terminate_process_command`, `transfer_cleanup`, `transfer_io`, `unregister_transfer`, `upload_inner`
+// These functions are ignored because they are not marked as `pub`: `ack`, `attempted`, `authenticate_inner`, `authenticate`, `begin_frame`, `bind_forward_ports`, `desktop_tunnel`, `disconnect_handle`, `docker_api_channel`, `download_inner`, `due`, `expire_sync`, `feed`, `finish`, `flush`, `forward_listener`, `handshake`, `is_closed`, `is_missing_remote_file`, `load_private_key`, `local_changed`, `new`, `open_sftp_inner`, `open_sftp`, `pending`, `process_exec`, `process_target_command`, `read_only_exec`, `register_transfer`, `remote_changed`, `remove_dir_recursive`, `resize`, `resume_mismatch`, `server_status_command`, `sftp_client_config`, `shell_tx`, `spawn_port_forwards`, `start_docker_terminal_output`, `start_page_port_forwards`, `start_port_forwards`, `start_shell_output_with_command`, `start_shell_output`, `terminate_process_command`, `transfer_cleanup`, `transfer_file`, `transfer_io`, `unregister_transfer`, `upload_inner`, `verify_resume_prefix`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Credentials`, `ForwardTransport`, `FrameAcks`, `FramePacer`, `PageForwardEntry`, `PendingSession`, `PinningHandler`, `ReadOnlyExecPolicy`, `SessionEntry`, `ShellCmd`, `ShellOutput`, `TransferTimeout`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `check_server_key`, `clone`, `clone`, `fmt`, `fmt`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
@@ -238,32 +238,36 @@ Future<void> sftpCancelTransfer({required int transferId}) =>
 
 /// 下载远程文件到本地，进度经 [progress] 流回 Dart（约每 512KB 一次）。
 ///
-/// 取消或失败时删除本地半成品文件并以错误结束。
+/// 失败或中断保留本地已写入文件，失败以错误结束。
 Stream<TransferProgress> sftpDownload({
   required int sessionId,
   required int transferId,
   required String remotePath,
   required String localPath,
+  required bool resume,
 }) => RustLib.instance.api.crateApiSshSftpDownload(
   sessionId: sessionId,
   transferId: transferId,
   remotePath: remotePath,
   localPath: localPath,
+  resume: resume,
 );
 
 /// 上传本地文件到远程路径，进度经 [progress] 流回 Dart。
 ///
-/// 取消或失败时删除远端半成品文件并以错误结束。
+/// 失败或中断保留远端已写入文件，失败以错误结束。
 Stream<TransferProgress> sftpUpload({
   required int sessionId,
   required int transferId,
   required String localPath,
   required String remotePath,
+  required bool resume,
 }) => RustLib.instance.api.crateApiSshSftpUpload(
   sessionId: sessionId,
   transferId: transferId,
   localPath: localPath,
   remotePath: remotePath,
+  resume: resume,
 );
 
 /// 本地监听固定绑定所有 IPv4 网卡（*）。

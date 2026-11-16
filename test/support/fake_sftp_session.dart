@@ -7,7 +7,11 @@ import 'fixture_terminal.dart';
 import 'in_memory_local_file_repository.dart';
 
 class FakeSftpSession
-    implements SshEngineSession, TerminalScreenSource, DockerTerminalSource {
+    implements
+        SshEngineSession,
+        ResumableSftpSession,
+        TerminalScreenSource,
+        DockerTerminalSource {
   FakeSftpSession({this.localFiles});
 
   final InMemoryLocalFileRepository? localFiles;
@@ -28,6 +32,7 @@ class FakeSftpSession
   int shellStarts = 0;
   final dockerShellStarts = <DockerTerminalTarget>[];
   Object? dockerShellFailure;
+  Object? listFailure;
 
   @override
   Stream<TerminalFrame> startDockerTerminalShell({
@@ -64,8 +69,10 @@ class FakeSftpSession
   Future<String> canonicalize(String path) async => '/home/test';
 
   @override
-  Future<List<SftpDirEntry>> listDir(String path) async =>
-      List.of(fs[path] ?? (throw const SshEngineException('目录不存在')));
+  Future<List<SftpDirEntry>> listDir(String path) async {
+    if (listFailure case final failure?) throw failure;
+    return List.of(fs[path] ?? (throw const SshEngineException('目录不存在')));
+  }
 
   @override
   Future<void> createDir(String path) async {
@@ -103,6 +110,12 @@ class FakeSftpSession
   }
 
   @override
+  Stream<SftpTransferProgress> downloadResuming(
+    String remotePath,
+    String localPath,
+  ) => download(remotePath, localPath);
+
+  @override
   Stream<SftpTransferProgress> upload(
     String localPath,
     String remotePath,
@@ -118,6 +131,12 @@ class FakeSftpSession
     parent.add(SftpDirEntry(name: name, isDir: false, size: size));
     yield SftpTransferProgress(transferred: size, total: size);
   }
+
+  @override
+  Stream<SftpTransferProgress> uploadResuming(
+    String localPath,
+    String remotePath,
+  ) => upload(localPath, remotePath);
 
   @override
   void write(String data) {}

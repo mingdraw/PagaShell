@@ -85,7 +85,7 @@ abstract interface class SshEngineSession {
 
   /// 下载远程文件到本地路径，流式返回进度。
   ///
-  /// 取消订阅即取消传输，半成品文件由引擎清理；失败以错误结束流。
+  /// 取消订阅即停止传输；失败或中断保留目标端已写入的文件，失败以错误结束流。
   Stream<SftpTransferProgress> download(String remotePath, String localPath);
 
   /// 上传本地文件到远程路径，流式返回进度。语义同 [download]。
@@ -101,6 +101,19 @@ abstract interface class SshEngineSession {
   Future<void> remove(String path, {required bool isDir});
 
   Future<void> close();
+}
+
+/// 可安全续传的 SFTP 引擎；续传前必须校验目标文件已有内容。
+abstract interface class ResumableSftpSession {
+  Stream<SftpTransferProgress> downloadResuming(
+    String remotePath,
+    String localPath,
+  );
+
+  Stream<SftpTransferProgress> uploadResuming(
+    String localPath,
+    String remotePath,
+  );
 }
 
 /// 独立网关转发连接；不需要目标服务的 SSH 登录信息。
@@ -163,8 +176,16 @@ class SftpDirEntry {
 class SshEngineException implements Exception {
   const SshEngineException(this.message, [this.cause]);
 
+  static const connectionClosedMessage = 'SSH连接已断开，请刷新重新连接';
+
   final String message;
   final Object? cause;
+
+  /// 连接句柄已失效；目录不存在或权限不足仍属于普通文件操作错误。
+  bool get isConnectionClosed =>
+      message == connectionClosedMessage ||
+      message == 'Channel send error' ||
+      message.startsWith('会话不存在: ');
 
   @override
   String toString() => 'SshEngineException: $message';

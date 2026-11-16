@@ -7,17 +7,38 @@ import 'package:path/path.dart' as p;
 import '../../domain/repositories/local_file_repository.dart';
 import '../../domain/ssh/ssh_engine.dart';
 import 'directory_transfer.dart';
+import 'transfer_limiter.dart';
 
 enum TransferKind { upload, download }
 
-enum TransferStatus { running, done, failed, cancelled }
+enum TransferStatus {
+  queued,
+  running,
+  done,
+  failed,
+  cancelled;
+
+  bool get active => this == queued || this == running;
+}
 
 typedef TransferSourceAccess = Future<Future<void> Function()> Function();
 
 class _TransferRequest {
-  const _TransferRequest(this.open, this.acquireSource);
-  final Stream<SftpTransferProgress> Function() open;
+  _TransferRequest(this.engine, this.open, this.acquireSource);
+  SshEngineSession engine;
+  final Stream<SftpTransferProgress> Function(
+    SshEngineSession engine,
+    bool resume,
+  )
+  open;
   final TransferSourceAccess? acquireSource;
+  bool started = false;
+  bool needsInitialAccess = false;
+}
+
+class _TransferAcquisition {
+  final done = Completer<void>();
+  bool cancelled = false;
 }
 
 /// 单个传输任务。进度/状态字段为响应式，UI 可直接在 Obx 中绑定。
@@ -77,8 +98,11 @@ class TransferTask {
 ///
 /// 引擎会话由调用方（SFTP 面板）传入，本控制器无静态依赖。
 class TransferController extends GetxController {
-  TransferController({Duration Function()? elapsed})
-    : _elapsed = elapsed ?? _monotonicClock();
+  TransferController({
+    Duration Function()? elapsed,
+    this.maxConcurrentFiles = 3,
+  }) : assert(maxConcurrentFiles > 0),
+       _elapsed = elapsed ?? _monotonicClock();
 
   static Duration Function() _monotonicClock() {
     final clock = Stopwatch()..start();
@@ -86,6 +110,7 @@ class TransferController extends GetxController {
   }
 
   final Duration Function() _elapsed;
+  final int maxConcurrentFiles;
   static const _rateWindow = Duration(seconds: 3);
 
   /// 进度写入 Rx 的最小间隔。引擎每 512KB 上报一次，高吞吐时可达每秒数百次，
@@ -104,8 +129,18 @@ class TransferController extends GetxController {
   final Map<String, _TransferRequest> _requests = {};
   final Map<String, Future<void>> _cleanup = {};
   final Map<String, Object> _retryAttempts = {};
+  final Set<String> _disconnectedSessions = {};
+  final Map<String, TransferLimiter> _limiters = {};
+  final Map<String, Completer<void>> _pendingInitialAccess = {};
+  final Map<String, _TransferAcquisition> _acquiring = {};
+  final Set<String> _closingSessions = {};
   bool _disposed = false;
   int _nextId = 1;
+
+  TransferLimiter _limiter(String sessionId) => _limiters.putIfAbsent(
+    sessionId,
+    () => TransferLimiter(maxConcurrentFiles),
+  );
 
   /// 某会话的任务（新任务在前，供面板传输条展示）。
   List<TransferTask> tasksOf(String sessionId) =>
@@ -195,9 +230,11 @@ class TransferController extends GetxController {
     DirectoryConflictResolver? onConflict,
     DirectoryAccessRequest? authorizeLocalDirectory,
   }) {
-    Stream<SftpTransferProgress> open() => isDirectory
+    final directoryState = DirectoryTransferState();
+    Stream<SftpTransferProgress> open(SshEngineSession engine, bool resume) =>
+        isDirectory
         ? transferDirectory(
-            engine: engineSession,
+            engine: engine,
             localFiles:
                 localFiles ?? (throw ArgumentError.notNull('localFiles')),
             localPath: localPath,
@@ -205,8 +242,18 @@ class TransferController extends GetxController {
             upload: false,
             onConflict: onConflict,
             authorizeLocalDirectory: authorizeLocalDirectory,
+            state: directoryState,
+            resume: resume,
+            scheduleFile: (open) => _limiter(sessionId).schedule(open),
+            maxPendingFiles: maxConcurrentFiles,
           )
-        : engineSession.download(remotePath, localPath);
+        : openSftpFile(
+            engine: engine,
+            localPath: localPath,
+            remotePath: remotePath,
+            upload: false,
+            resume: resume,
+          );
     return _start(
       sessionId: sessionId,
       kind: TransferKind.download,
@@ -214,8 +261,7 @@ class TransferController extends GetxController {
       remotePath: remotePath,
       localPath: localPath,
       isDirectory: isDirectory,
-      progress: open(),
-      request: _TransferRequest(open, null),
+      request: _TransferRequest(engineSession, open, null),
     );
   }
 
@@ -231,9 +277,11 @@ class TransferController extends GetxController {
     DirectoryConflictResolver? onConflict,
     DirectoryAccessRequest? authorizeLocalDirectory,
   }) {
-    Stream<SftpTransferProgress> open() => isDirectory
+    final directoryState = DirectoryTransferState();
+    Stream<SftpTransferProgress> open(SshEngineSession engine, bool resume) =>
+        isDirectory
         ? transferDirectory(
-            engine: engineSession,
+            engine: engine,
             localFiles:
                 localFiles ?? (throw ArgumentError.notNull('localFiles')),
             localPath: localPath,
@@ -241,8 +289,18 @@ class TransferController extends GetxController {
             upload: true,
             onConflict: onConflict,
             authorizeLocalDirectory: authorizeLocalDirectory,
+            state: directoryState,
+            resume: resume,
+            scheduleFile: (open) => _limiter(sessionId).schedule(open),
+            maxPendingFiles: maxConcurrentFiles,
           )
-        : engineSession.upload(localPath, remotePath);
+        : openSftpFile(
+            engine: engine,
+            localPath: localPath,
+            remotePath: remotePath,
+            upload: true,
+            resume: resume,
+          );
     return _start(
       sessionId: sessionId,
       kind: TransferKind.upload,
@@ -250,9 +308,8 @@ class TransferController extends GetxController {
       remotePath: remotePath,
       localPath: localPath,
       isDirectory: isDirectory,
-      progress: open(),
       releaseSource: releaseSource,
-      request: _TransferRequest(open, acquireSource),
+      request: _TransferRequest(engineSession, open, acquireSource),
     );
   }
 
@@ -268,7 +325,6 @@ class TransferController extends GetxController {
     required String fileName,
     required String remotePath,
     required String localPath,
-    required Stream<SftpTransferProgress> progress,
     bool isDirectory = false,
     Future<void> Function()? releaseSource,
     required _TransferRequest request,
@@ -284,17 +340,130 @@ class TransferController extends GetxController {
     );
     tasks.insert(0, task);
     _requests[task.id] = request;
-    if (releaseSource != null) _sourceReleases[task.id] = releaseSource;
-    _listen(task, progress);
+    if (releaseSource != null) {
+      _sourceReleases[task.id] = releaseSource;
+    }
+    _launch(task, request, resume: false);
     return task;
   }
 
-  void _listen(TransferTask task, Stream<SftpTransferProgress> progress) {
-    _rateSamples[task.id] = ListQueue()..add((time: _elapsed(), bytes: 0));
+  void _launch(
+    TransferTask task,
+    _TransferRequest request, {
+    required bool resume,
+  }) {
+    Stream<SftpTransferProgress> open() {
+      request.started = true;
+      return request.open(request.engine, resume);
+    }
+
+    Stream<SftpTransferProgress> openWithAccess() {
+      if (!request.needsInitialAccess) return open();
+      final cancelled = Completer<void>();
+      StreamSubscription<SftpTransferProgress>? source;
+      var finished = false;
+      late final StreamController<SftpTransferProgress> output;
+
+      Future<void> start() async {
+        Future<void> Function()? release;
+        final acquisition = _TransferAcquisition();
+        _acquiring[task.id] = acquisition;
+        try {
+          await _pendingInitialAccess[task.id]?.future;
+          if (cancelled.isCompleted || acquisition.cancelled) return;
+          release = await request.acquireSource!();
+          if (cancelled.isCompleted || acquisition.cancelled) return;
+          _sourceReleases[task.id] = release;
+          release = null;
+          request.needsInitialAccess = false;
+          source = open().listen(
+            output.add,
+            onError: output.addError,
+            onDone: () {
+              finished = true;
+              unawaited(output.close());
+            },
+          );
+        } on Object catch (error, stack) {
+          if (!cancelled.isCompleted) {
+            output.addError(error, stack);
+            finished = true;
+            unawaited(output.close());
+          }
+        } finally {
+          try {
+            await release?.call();
+          } finally {
+            if (identical(_acquiring[task.id], acquisition)) {
+              _acquiring.remove(task.id);
+            }
+            acquisition.done.complete();
+          }
+        }
+      }
+
+      output = StreamController<SftpTransferProgress>(
+        sync: true,
+        onListen: () => unawaited(start()),
+        onCancel: () async {
+          if (!cancelled.isCompleted) cancelled.complete();
+          final acquisition = _acquiring[task.id];
+          if (acquisition != null) acquisition.cancelled = true;
+          if (!finished) await source?.cancel();
+        },
+      );
+      return output.stream;
+    }
+
+    final progress = task.isDirectory
+        ? open()
+        : _limiter(task.sessionId).schedule(
+            openWithAccess,
+            onQueued: () {
+              if (task.status.value.active) {
+                task.status.value = TransferStatus.queued;
+              }
+              if (_sourceReleases.containsKey(task.id) &&
+                  request.acquireSource != null) {
+                request.needsInitialAccess = true;
+                final pending = Completer<void>();
+                _pendingInitialAccess[task.id] = pending;
+                unawaited(() async {
+                  try {
+                    await _releaseSource(task.id);
+                  } on Object {
+                    // 由系统回收权限；后续获取仍单独校验。
+                  } finally {
+                    if (identical(_pendingInitialAccess[task.id], pending)) {
+                      _pendingInitialAccess.remove(task.id);
+                    }
+                    pending.complete();
+                  }
+                }());
+              }
+              _finishRate(task);
+            },
+            onStarted: () {
+              if (task.status.value == TransferStatus.queued) {
+                task.status.value = TransferStatus.running;
+              }
+              _startRate(task);
+            },
+          );
+    _listen(task, progress);
+  }
+
+  void _startRate(TransferTask task) {
+    _rateSamples[task.id] = ListQueue()
+      ..add((time: _elapsed(), bytes: task.transferred.value));
     _rateTimer ??= Timer.periodic(
       const Duration(milliseconds: 500),
       (_) => _sampleRates(),
     );
+  }
+
+  void _listen(TransferTask task, Stream<SftpTransferProgress> progress) {
+    if (task.isDirectory) _startRate(task);
 
     _subs[task.id] = progress.listen(
       (p) => _onProgress(task, p),
@@ -329,15 +498,57 @@ class TransferController extends GetxController {
   }
 
   bool canRetry(TransferTask task) =>
-      !_disposed && _requests.containsKey(task.id);
+      !_disposed &&
+      !_disconnectedSessions.contains(task.sessionId) &&
+      _requests.containsKey(task.id);
 
-  /// 原任务从头传输，防止连点以及同一目标的并行写入。
+  /// 重连前等待旧传输收尾，保留失败记录与请求，供新连接手动重试。
+  Future<void> interruptSession(String sessionId) async {
+    _disconnectedSessions.add(sessionId);
+    _limiters[sessionId]?.pause();
+    final pending = <Future<void>>[];
+    for (final task in tasksOf(sessionId)) {
+      final initialAccess = _pendingInitialAccess[task.id];
+      _retryAttempts.remove(task.id);
+      _acquiring[task.id]?.cancelled = true;
+      task.retrying.value = false;
+      if (task.status.value.active) {
+        final sub = _subs.remove(task.id);
+        _flushProgress(task);
+        task.error.value = SshEngineException.connectionClosedMessage;
+        task.status.value = TransferStatus.failed;
+        _finishRate(task);
+        _cleanup[task.id] = sub == null
+            ? _releaseSource(task.id)
+            : sub.cancel().whenComplete(() => _releaseSource(task.id));
+      }
+      if (_cleanup[task.id] case final cleanup?) pending.add(cleanup);
+      if (initialAccess != null) pending.add(initialAccess.future);
+      if (_acquiring[task.id] case final acquisition?) {
+        pending.add(acquisition.done.future);
+      }
+    }
+    await Future.wait(pending);
+  }
+
+  void bindSession(String sessionId, SshEngineSession engine) {
+    if (_disposed || _closingSessions.contains(sessionId)) return;
+    for (final task in tasksOf(sessionId)) {
+      _requests[task.id]?.engine = engine;
+    }
+    _disconnectedSessions.remove(sessionId);
+    _limiters[sessionId]?.resume();
+  }
+
+  /// 失败任务从已校验的位置续传，防止连点及同一目标的并行写入。
   Future<void> retry(String taskId) async {
     final task = tasks.firstWhereOrNull((task) => task.id == taskId);
     final request = _requests[taskId];
     if (_disposed ||
         task == null ||
         request == null ||
+        _disconnectedSessions.contains(task.sessionId) ||
+        _closingSessions.contains(task.sessionId) ||
         task.status.value != TransferStatus.failed ||
         task.retrying.value) {
       return;
@@ -347,8 +558,7 @@ class TransferController extends GetxController {
           other.id != taskId &&
           other.sessionId == task.sessionId &&
           other.kind == task.kind &&
-          (other.status.value == TransferStatus.running ||
-              other.retrying.value) &&
+          (other.status.value.active || other.retrying.value) &&
           other.conflictsWithTarget(
             kind: task.kind,
             localPath: task.localPath,
@@ -360,17 +570,23 @@ class TransferController extends GetxController {
     final attempt = Object();
     _retryAttempts[taskId] = attempt;
     task.retrying.value = true;
+    final acquisition = _TransferAcquisition();
+    _acquiring[taskId] = acquisition;
     bool current() =>
         !_disposed &&
         identical(_retryAttempts[taskId], attempt) &&
+        !acquisition.cancelled &&
+        !_disconnectedSessions.contains(task.sessionId) &&
         _requests.containsKey(taskId);
     Future<void> Function()? release;
     try {
       await _cleanup[taskId];
       if (!current()) return;
+      await _pendingInitialAccess[taskId]?.future;
+      if (!current()) return;
       release = await request.acquireSource?.call();
       if (!current() || targetBusy()) return;
-      final progress = request.open();
+      final resume = request.started;
       task.transferred.value = 0;
       task.total.value = 0;
       task.currentPath.value = task.kind == TransferKind.upload
@@ -380,23 +596,34 @@ class TransferController extends GetxController {
       task.error.value = null;
       task.status.value = TransferStatus.running;
       if (release != null) _sourceReleases[taskId] = release;
+      request.needsInitialAccess = false;
       release = null;
-      _listen(task, progress);
+      if (identical(_acquiring[taskId], acquisition)) {
+        _acquiring.remove(taskId);
+      }
+      _launch(task, request, resume: resume);
     } on Object catch (e) {
       if (current()) {
         task.error.value = _errorMessage(e);
         task.status.value = TransferStatus.failed;
       }
     } finally {
-      await release?.call();
-      if (identical(_retryAttempts[taskId], attempt)) {
-        _retryAttempts.remove(taskId);
-        task.retrying.value = false;
+      try {
+        await release?.call();
+      } finally {
+        if (identical(_retryAttempts[taskId], attempt)) {
+          _retryAttempts.remove(taskId);
+          task.retrying.value = false;
+        }
+        if (identical(_acquiring[taskId], acquisition)) {
+          _acquiring.remove(taskId);
+        }
+        acquisition.done.complete();
       }
     }
   }
 
-  /// 取消进行中的任务；引擎侧会停止传输并清理半成品文件。
+  /// 取消进行中的任务；引擎侧停止传输并释放句柄，保留已写入的文件。
   Future<void> cancel(String taskId) async {
     final sub = _subs.remove(taskId);
     if (sub == null) return;
@@ -409,24 +636,34 @@ class TransferController extends GetxController {
         break;
       }
     }
-    try {
-      await sub.cancel();
-    } finally {
-      await _releaseSource(taskId);
-    }
+    final cleanup = sub.cancel().whenComplete(() => _releaseSource(taskId));
+    _cleanup[taskId] = cleanup;
+    await cleanup;
+    await _pendingInitialAccess[taskId]?.future;
   }
 
   /// 关闭文件传输标签时，只取消该连接的在途任务。
   Future<void> cancelSession(String sessionId) async {
+    _closingSessions.add(sessionId);
+    _limiters[sessionId]?.pause();
+    final initialAccess = [
+      for (final task in tasksOf(sessionId))
+        if (_pendingInitialAccess[task.id] case final pending?) pending.future,
+    ];
     for (final task in tasksOf(sessionId)) {
       _retryAttempts.remove(task.id);
+      _acquiring[task.id]?.cancelled = true;
       task.retrying.value = false;
       _requests.remove(task.id);
     }
     await Future.wait([
       for (final task in tasksOf(sessionId))
-        if (task.status.value == TransferStatus.running) cancel(task.id),
+        if (task.status.value.active) cancel(task.id) else ?_cleanup[task.id],
+      ...initialAccess,
     ]);
+    _disconnectedSessions.remove(sessionId);
+    _limiters.remove(sessionId);
+    _closingSessions.remove(sessionId);
   }
 
   /// 清掉已结束（完成/失败/取消）的任务。
@@ -434,7 +671,7 @@ class TransferController extends GetxController {
     final finished = tasks
         .where(
           (task) =>
-              task.status.value != TransferStatus.running &&
+              !task.status.value.active &&
               !task.retrying.value &&
               (sessionId == null || task.sessionId == sessionId),
         )
@@ -450,7 +687,15 @@ class TransferController extends GetxController {
   void onClose() {
     _disposed = true;
     _requests.clear();
+    _disconnectedSessions.clear();
+    for (final limiter in _limiters.values) {
+      limiter.pause();
+    }
+    _limiters.clear();
     _retryAttempts.clear();
+    for (final acquisition in _acquiring.values) {
+      acquisition.cancelled = true;
+    }
     _rateTimer?.cancel();
     _rateTimer = null;
     _rateSamples.clear();

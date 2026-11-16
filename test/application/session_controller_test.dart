@@ -1207,6 +1207,75 @@ void main() {
       await controller.closeActive();
     });
 
+    test('文件传输刷新重连等待旧连接关闭、保留凭据网关且重复调用去重', () async {
+      final known = _KnownHosts()..stored = _key;
+      final engine = _FakeEngine(hostKey: _key);
+      final controller = SessionController(engine: engine, knownHosts: known);
+      await controller.open(_host, _credentials);
+      final terminal = engine.created.single;
+      final closed = Completer<void>();
+      engine.nextCloseGate = closed;
+      const login = SshCredentials.password('secret', username: 'deploy');
+      const gateway = SshGateway(
+        host: Host(id: 'gw', name: 'gateway', hostname: 'gateway.test'),
+        credentials: _credentials,
+      );
+      final id = await controller.open(
+        _host.copyWith(gatewayId: 'gw'),
+        login,
+        gateway: gateway,
+        kind: SessionKind.fileTransfer,
+      );
+      final previous = engine.created.last;
+      final reconnect = controller.reconnectFileTransfer(id);
+      expect(controller.reconnectFileTransfer(id), same(reconnect));
+      await _flush();
+      expect(previous.closes, 1);
+      expect(engine.created, hasLength(2));
+      expect(controller.activeSession!.phase, SessionPhase.reconnecting);
+      closed.complete();
+      final replacement = await reconnect;
+      expect(engine.created, hasLength(3));
+      expect(replacement, same(engine.created.last));
+      expect(controller.activeSession!.id, id);
+      expect(controller.activeSession!.phase, SessionPhase.ready);
+      expect(controller.activeSession!.loginUsername, 'deploy');
+      expect(engine.logins.last, same(login));
+      expect(engine.gateways.last, same(gateway));
+      expect(engine.authentications, 3);
+      expect(engine.created.last.shellStarts, 0);
+      expect(terminal.closed, isFalse);
+      await controller.closeAll();
+    });
+
+    test('文件传输重连失败停止尝试，可再次手动重连；关闭标签释放迟到连接', () async {
+      final engine = _FakeEngine();
+      final controller = SessionController(engine: engine);
+      final id = await controller.open(
+        _host,
+        _credentials,
+        kind: SessionKind.fileTransfer,
+      );
+      engine.nextConnectionFailure = const SshEngineException('网络不可用');
+      await expectLater(
+        controller.reconnectFileTransfer(id),
+        throwsA(isA<SshEngineException>()),
+      );
+      expect(controller.activeSession!.phase, SessionPhase.failed);
+      expect(controller.activeSession!.error, '网络不可用');
+      expect(engine.logins, hasLength(2));
+      await controller.reconnectFileTransfer(id);
+      expect(controller.activeSession!.phase, SessionPhase.ready);
+      final gate = engine.connectGate = Completer<void>();
+      final reconnect = controller.reconnectFileTransfer(id);
+      await _flush();
+      await controller.close(id);
+      gate.complete();
+      await expectLater(reconnect, throwsA(isA<SshEngineException>()));
+      expect(controller.sessions, isEmpty);
+      expect(engine.created.last.closed, isTrue);
+    });
+
     test('同主机终端退出保留文件传输标签与连接', () async {
       final engine = _FakeEngine();
       final controller = SessionController(engine: engine);

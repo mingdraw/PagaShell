@@ -655,6 +655,15 @@ class SessionController extends GetxController {
   /// 认证失败后先重新输入密码；其他失败沿用当前会话凭据。
   Future<void> retry(String id) async {
     final session = _find(id);
+    if (session?.kind == SessionKind.fileTransfer &&
+        session?.engineSession != null) {
+      try {
+        await reconnectFileTransfer(id);
+      } on SshEngineException {
+        // 失败状态已写入会话，继续使用既有失败界面。
+      }
+      return;
+    }
     final credentials = _runtimes[id]?.credentials;
     if (session == null ||
         session.kind == SessionKind.portForward ||
@@ -681,6 +690,70 @@ class SessionController extends GetxController {
       credentials,
       passwordRequest: session.passwordRequest,
     );
+  }
+
+  /// 文件传输独立重连：同一标签的重复请求共用一次连接尝试。
+  Future<SshEngineSession> reconnectFileTransfer(String id) {
+    final runtime = _runtimes[id];
+    if (runtime?.fileTransferReconnect case final pending?) return pending;
+    final session = _find(id);
+    final credentials = runtime?.credentials;
+    if (_disposed ||
+        session == null ||
+        session.kind != SessionKind.fileTransfer ||
+        session.engineSession == null ||
+        session.phase.isBusy ||
+        credentials == null) {
+      return Future.error(const SshEngineException('无法重新连接，请关闭文件传输标签后重试'));
+    }
+    final pending = _reconnectFileTransfer(session, credentials);
+    runtime!.fileTransferReconnect = pending;
+    void clear() {
+      if (identical(runtime.fileTransferReconnect, pending)) {
+        runtime.fileTransferReconnect = null;
+      }
+    }
+
+    unawaited(pending.then((_) => clear(), onError: (Object _) => clear()));
+    return pending;
+  }
+
+  Future<SshEngineSession> _reconnectFileTransfer(
+    Session previous,
+    SshCredentials credentials,
+  ) async {
+    final id = previous.id;
+    _update(id, (s) => s.copyWith(phase: SessionPhase.reconnecting));
+    try {
+      await _transfers?.interruptSession(id);
+      try {
+        await previous.engineSession!.close();
+      } on Object {
+        // 旧连接已经失效，仍继续通过正常认证流程建立新连接。
+      }
+      if (_disposed || _find(id) == null) {
+        throw const SshEngineException('文件传输标签已关闭');
+      }
+      await _connect(id, previous.host, credentials);
+      final current = _find(id);
+      if (current != null &&
+          current.phase == SessionPhase.ready &&
+          current.engineSession != null) {
+        return current.engineSession!;
+      }
+      throw SshEngineException(current?.error ?? '重新连接失败，请刷新重试');
+    } on Object catch (e) {
+      final failure = e is SshEngineException
+          ? e
+          : const SshEngineException('重新连接失败，请刷新重试');
+      if (!_disposed) {
+        _update(
+          id,
+          (s) => s.copyWith(phase: SessionPhase.failed, error: failure.message),
+        );
+      }
+      throw failure;
+    }
   }
 
   /// 仅清除本次失败涉及的旧 SSH 指纹，重连后仍须明确确认新指纹。
@@ -1002,6 +1075,9 @@ class SessionController extends GetxController {
       }
 
       if (terminal == null) {
+        if (_find(id)?.kind == SessionKind.fileTransfer) {
+          _transfers?.bindSession(id, engineSession);
+        }
         _update(
           id,
           (s) => s.copyWith(
@@ -1448,7 +1524,7 @@ class SessionController extends GetxController {
     if (session.kind == SessionKind.dynamicProxy) {
       await _releaseProxyResources(session.id);
     }
-    // 先取消传输，让引擎清理半成品，再断开连接。
+    // 先停止传输并释放文件句柄，再断开连接；保留目标端已写入文件。
     await _transfers?.cancelSession(session.id);
     // 原生输出或 async* 转发流可能需要断开连接后才结束；先发起取消，
     // 同时断开连接，再一起等待，避免取消与断开互相等待。

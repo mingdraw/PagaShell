@@ -9,6 +9,7 @@ class _SessionRuntime {
   Completer<String?>? passwordDecision;
   StreamSubscription<Object?>? outputSubscription;
   Future<void>? shellCleanup;
+  Future<SshEngineSession>? fileTransferReconnect;
   StreamSubscription<PortForwardEvent>? forwardSubscription;
   Future<void>? forwardCleanup;
   Future<void>? proxyCleanup;

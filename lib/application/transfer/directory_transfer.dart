@@ -7,6 +7,7 @@ import 'package:path/path.dart' as p;
 import '../../domain/entities/local_file_entry.dart';
 import '../../domain/repositories/local_file_repository.dart';
 import '../../domain/ssh/ssh_engine.dart';
+import 'transfer_limiter.dart';
 
 enum DirectoryConflictAction { overwrite, skip, cancel }
 
@@ -14,6 +15,34 @@ typedef DirectoryConflictResolver = Future<DirectoryConflictAction> Function(
   String name,
 );
 typedef DirectoryAccessRequest = Future<bool> Function(String path);
+typedef DirectoryFileScheduler = Stream<SftpTransferProgress> Function(
+  Stream<SftpTransferProgress> Function() open,
+);
+
+/// 只记录本次目录任务实际启动过的目标，避免重试时跳过其他文件的覆盖确认。
+class DirectoryTransferState {
+  final Set<String> _started = {};
+}
+
+Stream<SftpTransferProgress> openSftpFile({
+  required SshEngineSession engine,
+  required String localPath,
+  required String remotePath,
+  required bool upload,
+  required bool resume,
+}) {
+  if (!resume) {
+    return upload
+        ? engine.upload(localPath, remotePath)
+        : engine.download(remotePath, localPath);
+  }
+  if (engine case final ResumableSftpSession resumable) {
+    return upload
+        ? resumable.uploadResuming(localPath, remotePath)
+        : resumable.downloadResuming(remotePath, localPath);
+  }
+  return Stream.error(const SshEngineException('当前引擎不支持断点续传，请重新发起传输'));
+}
 
 class DirectoryTransferCancelled implements Exception {
   const DirectoryTransferCancelled();
@@ -21,23 +50,80 @@ class DirectoryTransferCancelled implements Exception {
 
 class _DirectoryCancellation {
   bool cancelled = false;
-  StreamIterator<SftpTransferProgress>? currentFile;
+  Object? failure;
+  StackTrace? failureStack;
+  final currentFiles = <StreamIterator<SftpTransferProgress>>{};
+  final _fileCancellations =
+      <StreamIterator<SftpTransferProgress>, Future<void>>{};
   Future<void>? currentDirectoryWrite;
   final _cancelled = Completer<void>();
+
+  bool get stopped => cancelled || failure != null;
+
+  void _signal() {
+    if (!_cancelled.isCompleted) _cancelled.complete();
+  }
 
   void cancel() {
     if (cancelled) return;
     cancelled = true;
-    _cancelled.complete();
+    _signal();
+  }
+
+  void fail(Object error, StackTrace stack) {
+    if (stopped) return;
+    failure = error;
+    failureStack = stack;
+    _signal();
+    unawaited(stopFiles());
+  }
+
+  void check() {
+    if (failure case final error?) {
+      Error.throwWithStackTrace(error, failureStack!);
+    }
+    if (cancelled) throw const DirectoryTransferCancelled();
+  }
+
+  Future<void> cancelFile(StreamIterator<SftpTransferProgress> file) {
+    if (_fileCancellations[file] case final pending?) return pending;
+    // 先登记 Future，避免同步取消引发其他文件收尾时重复取消同一流。
+    final completed = Completer<void>();
+    _fileCancellations[file] = completed.future;
+    unawaited(() async {
+      try {
+        await file.cancel();
+        completed.complete();
+      } on Object catch (error, stack) {
+        completed.completeError(error, stack);
+      }
+    }());
+    return completed.future;
+  }
+
+  Future<void> stopFiles() async {
+    await Future.wait([
+      for (final file in currentFiles.toList())
+        () async {
+          try {
+            await cancelFile(file);
+          } on Object {
+            // 关闭剩余传输时保留最初的错误。
+          }
+        }(),
+    ]);
   }
 
   Future<T> wait<T>(Future<T> operation) => Future.any([
     operation,
-    _cancelled.future.then<T>((_) => throw const DirectoryTransferCancelled()),
+    _cancelled.future.then<T>((_) {
+      check();
+      throw const DirectoryTransferCancelled();
+    }),
   ]);
 
   Future<void> writeDirectory(Future<void> Function() write) async {
-    if (cancelled) throw const DirectoryTransferCancelled();
+    check();
     final pending = write();
     currentDirectoryWrite = pending;
     try {
@@ -45,7 +131,7 @@ class _DirectoryCancellation {
     } finally {
       currentDirectoryWrite = null;
     }
-    if (cancelled) throw const DirectoryTransferCancelled();
+    check();
   }
 }
 
@@ -65,6 +151,10 @@ Stream<SftpTransferProgress> transferDirectory({
   required bool upload,
   DirectoryConflictResolver? onConflict,
   DirectoryAccessRequest? authorizeLocalDirectory,
+  DirectoryTransferState? state,
+  bool resume = false,
+  DirectoryFileScheduler? scheduleFile,
+  int maxPendingFiles = 12,
 }) {
   final cancellation = _DirectoryCancellation();
   StreamSubscription<SftpTransferProgress>? subscription;
@@ -81,6 +171,10 @@ Stream<SftpTransferProgress> transferDirectory({
             upload: upload,
             onConflict: onConflict,
             authorizeLocalDirectory: authorizeLocalDirectory,
+            state: state,
+            resume: resume,
+            scheduleFile: scheduleFile,
+            maxPendingFiles: maxPendingFiles,
             cancellation: cancellation,
           ).listen(
             (event) {
@@ -98,8 +192,8 @@ Stream<SftpTransferProgress> transferDirectory({
     onCancel: () async {
       cancellation.cancel();
       if (completed) return;
-      // async* 在等待下一块数据时不会自行取消内层流，显式唤醒当前文件。
-      await cancellation.currentFile?.cancel();
+      // async* 在等待下一块数据时不会自行取消内层流，显式唤醒全部文件。
+      await cancellation.stopFiles();
       // mkdir 接口无法中断；已发出的创建请求收尾后才释放源目录权限。
       try {
         await cancellation.currentDirectoryWrite;
@@ -121,6 +215,10 @@ Stream<SftpTransferProgress> _transferDirectory({
   required _DirectoryCancellation cancellation,
   DirectoryConflictResolver? onConflict,
   DirectoryAccessRequest? authorizeLocalDirectory,
+  DirectoryTransferState? state,
+  required bool resume,
+  DirectoryFileScheduler? scheduleFile,
+  required int maxPendingFiles,
 }) async* {
   Future<List<LocalFileEntry>> listLocal(String path) async {
     try {
@@ -248,68 +346,152 @@ Stream<SftpTransferProgress> _transferDirectory({
     yield progress(sourceOf(directory));
   }
 
-  for (final file in files) {
-    final source = sourceOf(file);
-    final target = upload ? file.remotePath : file.localPath;
-    final parent = upload
-        ? p.posix.dirname(target)
-        : localFiles.parentOf(target);
-    final name = upload ? p.posix.basename(target) : p.basename(target);
-    final entries = await targetEntries(parent);
-    yield progress(source);
-    if (entries.containsKey(name)) {
-      if (entries[name]!) {
-        throw const SshEngineException('目标文件与目录类型不一致');
-      }
-      if (onConflict == null) {
-        throw const SshEngineException('目标文件已存在');
-      }
-      final decision = await cancellation.wait(onConflict(name));
-      // 决策返回后先检查取消，避免取消任务仍打开下一份文件。
-      yield progress(source);
-      if (decision == DirectoryConflictAction.cancel) {
-        throw const DirectoryTransferCancelled();
-      }
-      if (decision == DirectoryConflictAction.skip) {
-        total -= file.size;
-        yield progress(source);
-        continue;
-      }
+  Stream<SftpTransferProgress> runFiles() {
+    final fallbackLimiter = TransferLimiter(1);
+    final DirectoryFileScheduler schedule =
+        scheduleFile ?? (open) => fallbackLimiter.schedule(open);
+    final workers = <Future<void>>{};
+    late final StreamController<SftpTransferProgress> output;
+    Future<void>? work;
+    var finished = false;
+
+    void emit(String path) {
+      if (!cancellation.stopped) output.add(progress(path));
     }
-    var fileSize = file.size;
-    SftpTransferProgress? last;
-    final stream = upload
-        ? engine.upload(file.localPath, file.remotePath)
-        : engine.download(file.remotePath, file.localPath);
-    final current = StreamIterator(stream);
-    cancellation.currentFile = current;
-    try {
-      while (await current.moveNext()) {
-        if (cancellation.cancelled) return;
-        final event = current.current;
-        last = event;
-        if (event.total != fileSize) {
-          total += event.total - fileSize;
-          fileSize = event.total;
+
+    Future<void> transferOne(
+      _Entry file,
+      String source,
+      String target,
+      String name,
+      Map<String, bool> entries,
+      bool resumeFile,
+    ) async {
+      var fileSize = file.size;
+      var fileTransferred = 0;
+      SftpTransferProgress? last;
+      final current = StreamIterator(
+        schedule(() {
+          state?._started.add(target);
+          return openSftpFile(
+            engine: engine,
+            localPath: file.localPath,
+            remotePath: file.remotePath,
+            upload: upload,
+            resume: resumeFile,
+          );
+        }),
+      );
+      cancellation.currentFiles.add(current);
+      var ended = false;
+      try {
+        while (await cancellation.wait(current.moveNext())) {
+          cancellation.check();
+          final event = current.current;
+          last = event;
+          if (event.total != fileSize) {
+            total += event.total - fileSize;
+            fileSize = event.total;
+          }
+          transferred += event.transferred - fileTransferred;
+          fileTransferred = event.transferred;
+          emit(source);
         }
-        yield SftpTransferProgress(
-          transferred: transferred + event.transferred,
-          total: total,
-          currentPath: source,
-        );
+        ended = true;
+        cancellation.check();
+        if (last == null || last.transferred < fileSize) {
+          throw const SshEngineException('传输未完成，请检查连接后重试');
+        }
+        entries[name] = false;
+        emit(source);
+      } on Object catch (error, stack) {
+        cancellation.fail(error, stack);
+      } finally {
+        if (!ended) {
+          try {
+            await cancellation.cancelFile(current);
+          } on Object catch (error, stack) {
+            cancellation.fail(error, stack);
+          }
+        }
+        cancellation.currentFiles.remove(current);
+        unawaited(cancellation._fileCancellations.remove(current));
       }
-    } finally {
-      cancellation.currentFile = null;
-      // 正常结束/出错时 StreamIterator 已取消其订阅；主动取消的清理
-      // 由外层 onCancel 等待，避免再次等待同一个已结束的订阅。
-      unawaited(current.cancel());
     }
-    if (cancellation.cancelled) return;
-    if (last == null || last.transferred < fileSize) {
-      throw const SshEngineException('传输未完成，请检查连接后重试');
+
+    Future<void> run() async {
+      try {
+        for (final file in files) {
+          cancellation.check();
+          final source = sourceOf(file);
+          final target = upload ? file.remotePath : file.localPath;
+          final parent = upload
+              ? p.posix.dirname(target)
+              : localFiles.parentOf(target);
+          final name = upload ? p.posix.basename(target) : p.basename(target);
+          final entries = await targetEntries(parent);
+          final resumeFile =
+              resume && (state?._started.contains(target) ?? false);
+          emit(source);
+          if (entries.containsKey(name)) {
+            if (entries[name]!) {
+              throw const SshEngineException('目标文件与目录类型不一致');
+            }
+            if (!resumeFile) {
+              if (onConflict == null) {
+                throw const SshEngineException('目标文件已存在');
+              }
+              final decision = await cancellation.wait(onConflict(name));
+              cancellation.check();
+              emit(source);
+              if (decision == DirectoryConflictAction.cancel) {
+                throw const DirectoryTransferCancelled();
+              }
+              if (decision == DirectoryConflictAction.skip) {
+                total -= file.size;
+                emit(source);
+                continue;
+              }
+            }
+          }
+          final worker = transferOne(
+            file,
+            source,
+            target,
+            name,
+            entries,
+            resumeFile,
+          );
+          workers.add(worker);
+          unawaited(worker.whenComplete(() => workers.remove(worker)));
+          // 不为超大目录同时创建无界数量的排队流。
+          if (workers.length >= maxPendingFiles) {
+            await cancellation.wait(Future.any(workers));
+          }
+        }
+      } on Object catch (error, stack) {
+        cancellation.fail(error, stack);
+      }
+      if (cancellation.stopped) await cancellation.stopFiles();
+      await Future.wait(workers);
+      if (!cancellation.cancelled && cancellation.failure != null) {
+        output.addError(cancellation.failure!, cancellation.failureStack);
+      }
+      finished = true;
+      unawaited(output.close());
     }
-    transferred += last.transferred;
-    entries[name] = false;
-    yield progress(source);
+
+    output = StreamController<SftpTransferProgress>(
+      onListen: () => work = run(),
+      onCancel: () async {
+        if (finished) return;
+        cancellation.cancel();
+        await cancellation.stopFiles();
+        await work;
+      },
+    );
+    return output.stream;
   }
+
+  yield* runFiles();
 }

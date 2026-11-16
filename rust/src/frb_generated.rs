@@ -883,6 +883,7 @@ fn wire__crate__api__ssh__sftp_download_impl(
             let api_transfer_id = <u32>::sse_decode(&mut deserializer);
             let api_remote_path = <String>::sse_decode(&mut deserializer);
             let api_local_path = <String>::sse_decode(&mut deserializer);
+            let api_resume = <bool>::sse_decode(&mut deserializer);
             let api_progress = <StreamSink<
                 crate::api::ssh::TransferProgress,
                 flutter_rust_bridge::for_generated::SseCodec,
@@ -897,6 +898,7 @@ fn wire__crate__api__ssh__sftp_download_impl(
                                 api_transfer_id,
                                 api_remote_path,
                                 api_local_path,
+                                api_resume,
                                 api_progress,
                             )
                             .await;
@@ -1090,6 +1092,7 @@ fn wire__crate__api__ssh__sftp_upload_impl(
             let api_transfer_id = <u32>::sse_decode(&mut deserializer);
             let api_local_path = <String>::sse_decode(&mut deserializer);
             let api_remote_path = <String>::sse_decode(&mut deserializer);
+            let api_resume = <bool>::sse_decode(&mut deserializer);
             let api_progress = <StreamSink<
                 crate::api::ssh::TransferProgress,
                 flutter_rust_bridge::for_generated::SseCodec,
@@ -1104,6 +1107,7 @@ fn wire__crate__api__ssh__sftp_upload_impl(
                                 api_transfer_id,
                                 api_local_path,
                                 api_remote_path,
+                                api_resume,
                                 api_progress,
                             )
                             .await;

@@ -683,6 +683,7 @@ class _RustDesktopSession implements RdpEngineSession {
 class _RustEngineSession
     implements
         SshEngineSession,
+        ResumableSftpSession,
         ServerStatusSource,
         ProcessManagerSource,
         NetworkPortsSource,
@@ -1044,7 +1045,20 @@ class _RustEngineSession
       _guard(() => rust.sftpCanonicalize(sessionId: _sessionId, path: path));
 
   @override
-  Stream<SftpTransferProgress> download(String remotePath, String localPath) {
+  Stream<SftpTransferProgress> download(String remotePath, String localPath) =>
+      _download(remotePath, localPath, resume: false);
+
+  @override
+  Stream<SftpTransferProgress> downloadResuming(
+    String remotePath,
+    String localPath,
+  ) => _download(remotePath, localPath, resume: true);
+
+  Stream<SftpTransferProgress> _download(
+    String remotePath,
+    String localPath, {
+    required bool resume,
+  }) {
     final transferId = _nextTransferId++;
     return _wrapTransfer(
       transferId,
@@ -1053,12 +1067,26 @@ class _RustEngineSession
         transferId: transferId,
         remotePath: remotePath,
         localPath: localPath,
+        resume: resume,
       ),
     );
   }
 
   @override
-  Stream<SftpTransferProgress> upload(String localPath, String remotePath) {
+  Stream<SftpTransferProgress> upload(String localPath, String remotePath) =>
+      _upload(localPath, remotePath, resume: false);
+
+  @override
+  Stream<SftpTransferProgress> uploadResuming(
+    String localPath,
+    String remotePath,
+  ) => _upload(localPath, remotePath, resume: true);
+
+  Stream<SftpTransferProgress> _upload(
+    String localPath,
+    String remotePath, {
+    required bool resume,
+  }) {
     final transferId = _nextTransferId++;
     return _wrapTransfer(
       transferId,
@@ -1067,6 +1095,7 @@ class _RustEngineSession
         transferId: transferId,
         localPath: localPath,
         remotePath: remotePath,
+        resume: resume,
       ),
     );
   }
@@ -1087,7 +1116,7 @@ class _RustEngineSession
 
   /// 把 Rust 进度流包装为 domain 流：
   /// 监听方取消订阅（且传输未结束）时向 Rust 发取消指令，
-  /// Rust 侧停止传输并清理半成品；错误统一转成 [SshEngineException]。
+  /// Rust 侧停止传输并保留已写入文件；错误统一转成 [SshEngineException]。
   Stream<SftpTransferProgress> _wrapTransfer(
     int transferId,
     Stream<rust.TransferProgress> inner,

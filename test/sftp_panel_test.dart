@@ -1054,17 +1054,25 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 250));
     final task = Get.find<TransferController>().tasks.single;
-    expect(engine.attempts, hasLength(1));
+    expect(engine.attempts, hasLength(2));
     await tester.tap(findAppIconButton('展开传输进度'));
     await tester.pump();
     final path = find.byKey(ValueKey('sftp-transfer-path-${task.id}'));
+    engine.attempts.first.add(
+      const SftpTransferProgress(transferred: 5, total: 10),
+    );
+    await tester.pump();
     expect(tester.widget<Text>(path).data, '/local/downloads/a.txt');
+    engine.attempts.last.add(
+      const SftpTransferProgress(transferred: 5, total: 20),
+    );
+    await tester.pump();
+    expect(tester.widget<Text>(path).data, '/local/downloads/b.txt');
     engine.attempts.first.add(
       const SftpTransferProgress(transferred: 10, total: 10),
     );
     unawaited(engine.attempts.first.close());
-    await pumpUntil(tester, () => engine.attempts.length == 2);
-    expect(tester.widget<Text>(path).data, '/local/downloads/b.txt');
+    await tester.pump();
     final bar = find.byKey(ValueKey('sftp-transfer-progress-${task.id}'));
     expect(tester.getRect(path).top, greaterThan(tester.getRect(bar).bottom));
     engine.attempts.last.add(
@@ -1087,6 +1095,39 @@ void main() {
     await tester.pumpAndSettle();
     expect(tester.widget<Text>(singlePath).data, '/local/upload.txt');
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('超出并发上限的文件显示等待状态，停止后不会启动', (tester) async {
+    final files = InMemoryLocalFileRepository();
+    final engine = _RetryUploadSession(localFiles: files);
+    addTearDown(engine.disposeUploads);
+    await pumpPanel(tester, files: files, sshEngine: engine);
+    final controller = Get.find<TransferController>();
+    for (var index = 0; index < 4; index++) {
+      controller.startUpload(
+        sessionId: 's1',
+        engineSession: engine,
+        localPath: '/local/file-$index',
+        remotePath: '/home/test/file-$index',
+      );
+    }
+    await tester.pump();
+    expect(engine.attempts, hasLength(3));
+    final waiting = controller.tasks.first;
+    expect(waiting.status.value, TransferStatus.queued);
+    await tester.tap(findAppIconButton('展开传输进度'));
+    await tester.pump();
+    expect(find.text('等待传输'), findsOneWidget);
+    final action = find.byKey(ValueKey('sftp-transfer-action-${waiting.id}'));
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer(location: tester.getCenter(action));
+    await tester.pump();
+    await tester.tap(action);
+    await tester.pump();
+    expect(waiting.status.value, TransferStatus.cancelled);
+    expect(engine.attempts, hasLength(3));
+    await mouse.removePointer();
+    await tester.runAsync(() => controller.cancelSession('s1'));
   });
 
   testWidgets('目录内同名文件支持跳过且后续沿用决定，保留已有目录内容', (tester) async {
