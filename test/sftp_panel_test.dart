@@ -62,6 +62,18 @@ class _RetryUploadSession extends FakeSftpSession {
   }
 }
 
+class _TrackingDeleteSession extends FakeSftpSession {
+  _TrackingDeleteSession({required super.localFiles});
+
+  final removedKinds = <(String, bool)>[];
+
+  @override
+  Future<void> remove(String path, {required bool isDir}) async {
+    removedKinds.add((path, isDir));
+    await super.remove(path, isDir: isDir);
+  }
+}
+
 void main() {
   setUpAll(DesktopDrop.instance.init);
   tearDown(Get.reset);
@@ -73,6 +85,7 @@ void main() {
     InMemoryLocalFileRepository? files,
     LocalDirectoryPicker directoryPicker = getDirectoryPath,
     shadcn.ThemeData? theme,
+    Locale? locale,
     bool active = true,
     FakeSftpSession? sshEngine,
   }) async {
@@ -88,6 +101,7 @@ void main() {
     await tester.pumpWidget(
       ShadcnTestApp(
         theme: theme,
+        locale: locale,
         home: shadcn.Scaffold(
           child: SftpPanel(
             session: session,
@@ -710,6 +724,130 @@ void main() {
     }
     expect(engine.removed, isEmpty);
     expect(fileIn('remote', 'readme.txt'), findsOneWidget);
+  });
+
+  for (final local in [true, false]) {
+    testWidgets('${local ? '本地' : '远程'}多选文件和目录后右键批量删除，取消不产生更改', (tester) async {
+      final files = InMemoryLocalFileRepository()
+        ..putFile('/local/downloads/nested.txt', 10);
+      final engine = _TrackingDeleteSession(localFiles: files);
+      await pumpPanel(tester, files: files, sshEngine: engine);
+      final side = local ? 'local' : 'remote';
+      final directory = local ? 'downloads' : 'logs';
+      final name = local ? 'upload.txt' : 'readme.txt';
+      await selectFile(tester, side, directory);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+      await selectFile(tester, side, name);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+      final selected = selectedPaths(side);
+      expect(selected, hasLength(2));
+      for (final cancel in [true, false]) {
+        await tester.tap(
+          fileIn(side, directory),
+          buttons: kSecondaryMouseButton,
+        );
+        await tester.pumpAndSettle();
+        expect(selectedPaths(side), selected);
+        await tester.tap(find.text('删除'));
+        await tester.pumpAndSettle();
+        expect(find.text('删除选中的 2 项？'), findsOneWidget);
+        expect(find.text('将递归删除所选目录及其全部内容，此操作不可撤销。'), findsOneWidget);
+        await tester.tap(find.text(cancel ? '取消' : '删除'));
+        await tester.pumpAndSettle();
+        if (cancel) {
+          expect(fileIn(side, directory), findsOneWidget);
+          expect(fileIn(side, name), findsOneWidget);
+          expect(engine.removedKinds, isEmpty);
+        }
+      }
+      expect(fileIn(side, directory), findsNothing);
+      expect(fileIn(side, name), findsNothing);
+      if (local) {
+        expect(files.fs.containsKey('/local/downloads'), isFalse);
+        expect(engine.removedKinds, isEmpty);
+        expect(fileIn('remote', 'readme.txt'), findsOneWidget);
+      } else {
+        expect(engine.removedKinds, [
+          ('/home/test/logs', true),
+          ('/home/test/readme.txt', false),
+        ]);
+        expect(fileIn('local', 'upload.txt'), findsOneWidget);
+      }
+    });
+
+    testWidgets('${local ? '本地' : '远程'}右键未选中的文件仅删除该文件', (tester) async {
+      final files = InMemoryLocalFileRepository()
+        ..putFile('/local/a.txt', 1)
+        ..putFile('/local/b.txt', 2);
+      final engine = _TrackingDeleteSession(localFiles: files)
+        ..fs['/home/test']!.addAll([_file('a.txt', 1), _file('b.txt', 2)]);
+      await pumpPanel(tester, files: files, sshEngine: engine);
+      final side = local ? 'local' : 'remote';
+      final other = local ? 'upload.txt' : 'readme.txt';
+      await selectFile(tester, side, 'a.txt');
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await selectFile(tester, side, 'b.txt');
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      expect(selectedPaths(side), hasLength(2));
+      await tester.tap(fileIn(side, other), buttons: kSecondaryMouseButton);
+      await tester.pumpAndSettle();
+      expect(selectedPaths(side), hasLength(1));
+      await tester.tap(find.text('删除'));
+      await tester.pumpAndSettle();
+      expect(find.text('删除「$other」？'), findsOneWidget);
+      await tester.tap(find.text('删除'));
+      await tester.pumpAndSettle();
+      expect(fileIn(side, other), findsNothing);
+      expect(fileIn(side, 'a.txt'), findsOneWidget);
+      expect(fileIn(side, 'b.txt'), findsOneWidget);
+      if (!local) {
+        expect(engine.removedKinds, [('/home/test/readme.txt', false)]);
+      }
+    });
+  }
+
+  testWidgets('远程删除确认期间连接更替，不对旧连接或新连接执行删除', (tester) async {
+    final files = InMemoryLocalFileRepository();
+    final first = _TrackingDeleteSession(localFiles: files);
+    await pumpPanel(tester, files: files, sshEngine: first);
+    await selectFile(tester, 'remote', 'logs');
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    await selectFile(tester, 'remote', 'readme.txt');
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.tap(fileIn('remote', 'logs'), buttons: kSecondaryMouseButton);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('删除'));
+    await tester.pumpAndSettle();
+    expect(find.text('删除选中的 2 项？'), findsOneWidget);
+    final tag =
+        'sftp-s1-${identityHashCode(tester.state(find.byType(SftpPanel)))}';
+    final replacement = _TrackingDeleteSession(localFiles: files);
+    Get.find<SftpController>(tag: tag).replaceEngine(replacement);
+    await tester.tap(find.text('删除'));
+    await tester.pumpAndSettle();
+    expect(first.removedKinds, isEmpty);
+    expect(replacement.removedKinds, isEmpty);
+  });
+
+  testWidgets('英文界面 Shift 多选文件时显示批量删除确认', (tester) async {
+    final files = InMemoryLocalFileRepository()
+      ..putFile('/local/a.txt', 1)
+      ..putFile('/local/b.txt', 2);
+    await pumpPanel(tester, files: files, locale: const Locale('en', 'US'));
+    await selectFile(tester, 'local', 'a.txt');
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    await selectFile(tester, 'local', 'b.txt');
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.tap(fileIn('local', 'a.txt'), buttons: kSecondaryMouseButton);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Delete'));
+    await tester.pumpAndSettle();
+    expect(find.text('Delete 2 selected items?'), findsOneWidget);
+    expect(find.text('This action cannot be undone.'), findsOneWidget);
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(fileIn('local', 'a.txt'), findsOneWidget);
+    expect(fileIn('local', 'b.txt'), findsOneWidget);
   });
 
   testWidgets('本地隐藏文件和目录默认不可见，开关显示后关闭会清除隐藏文件选择', (tester) async {

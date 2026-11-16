@@ -1322,6 +1322,9 @@ class AppTranslations extends Translations {
         'The saved host key has been updated. Retry the connection.',
     '无法清除主机指纹，请重试': 'Unable to clear the host key. Please try again.',
     '无法读取远程目录，请重试': 'Unable to read the remote directory. Please try again.',
+    '删除选中的 @count 项？': 'Delete @count selected items?',
+    '将递归删除所选目录及其全部内容，此操作不可撤销。': 'Selected folders and their contents will be deleted recursively. This cannot be undone.',
+    '部分文件删除失败，请重试': 'Some items could not be deleted. Please try again.',
     '等待传输': 'Waiting to transfer',
     '当前引擎不支持断点续传，请重新发起传输':
         'This engine cannot resume transfers. Start a new transfer.',

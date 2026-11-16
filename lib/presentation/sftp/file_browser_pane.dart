@@ -100,7 +100,7 @@ class FileBrowserPane extends StatefulWidget {
   final VoidCallback? onUploadDirectory;
   final VoidCallback? onMkdir;
   final ValueChanged<FileBrowserEntry>? onRename;
-  final ValueChanged<FileBrowserEntry>? onDelete;
+  final ValueChanged<List<FileBrowserEntry>>? onDelete;
   final bool showHidden;
   final ValueChanged<bool>? onShowHiddenChanged;
   final bool active;
@@ -150,7 +150,7 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
   VoidCallback? get onUpload => widget.onUpload;
   VoidCallback? get onMkdir => widget.onMkdir;
   ValueChanged<FileBrowserEntry>? get onRename => widget.onRename;
-  ValueChanged<FileBrowserEntry>? get onDelete => widget.onDelete;
+  ValueChanged<List<FileBrowserEntry>>? get onDelete => widget.onDelete;
 
   List<FileBrowserEntry> get _selectedEntries => [
     for (final entry in entries)
@@ -841,7 +841,7 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
         case 'rename':
           onRename?.call(entry);
         case 'delete':
-          onDelete?.call(entry);
+          onDelete?.call(_filesFor(entry));
       }
     }
 

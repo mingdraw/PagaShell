@@ -51,6 +51,33 @@ class LocalFileController extends GetxController {
   Future<void> remove(LocalFileEntry entry) =>
       _run(() => files.remove(entry.path, isDir: entry.isDir));
 
+  /// 同一目录批量删除，完成后只刷新一次；失败项仍保留在列表中。
+  Future<void> removeMany(List<LocalFileEntry> selected) async {
+    if (_disposed || selected.isEmpty) return;
+    final directory = cwd.value;
+    final revision = navigationRevision;
+    bool current() =>
+        !_disposed && revision == navigationRevision && cwd.value == directory;
+    var failed = false;
+    for (final entry in List<LocalFileEntry>.of(selected)) {
+      if (!current()) return;
+      try {
+        await files.remove(entry.path, isDir: entry.isDir);
+      } on Object {
+        failed = true;
+      }
+    }
+    if (!current()) return;
+    await refreshDirectory();
+    if (!_disposed &&
+        navigationRevision == revision + 1 &&
+        cwd.value == directory &&
+        error.value == null &&
+        failed) {
+      error.value = '部分文件删除失败，请重试';
+    }
+  }
+
   Future<void> _run(Future<void> Function() action) async {
     if (_disposed) return;
     final directory = cwd.value;

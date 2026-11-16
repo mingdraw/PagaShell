@@ -15,6 +15,20 @@ class _DelayedFiles extends InMemoryLocalFileRepository {
       (pending[path] ??= Completer<List<LocalFileEntry>>()).future;
 }
 
+class _RemovingFiles extends InMemoryLocalFileRepository {
+  final attempts = <String>[];
+  final failures = <String>{};
+  Completer<void>? gate;
+
+  @override
+  Future<void> remove(String path, {required bool isDir}) async {
+    attempts.add(path);
+    await gate?.future;
+    if (failures.contains(path)) throw StateError('delete denied');
+    await super.remove(path, isDir: isDir);
+  }
+}
+
 void main() {
   test('默认过滤点开头和系统隐藏条目，开关保留原始目录和完整条目', () async {
     final files = InMemoryLocalFileRepository()
@@ -71,6 +85,56 @@ void main() {
       'downloads',
       'other.txt',
     ]);
+    controller.onClose();
+  });
+
+  test('批量删除继续处理其他文件，失败项保留且刷新后显示错误', () async {
+    final files = _RemovingFiles()
+      ..putFile('/local/a.txt', 1)
+      ..putFile('/local/b.txt', 1)
+      ..putFile('/local/c.txt', 1)
+      ..failures.add('/local/b.txt');
+    final controller = LocalFileController(files: files);
+    await controller.navigate('/local');
+    final selected = controller.entries
+        .where((entry) => ['a.txt', 'b.txt', 'c.txt'].contains(entry.name))
+        .toList();
+    final revision = controller.navigationRevision;
+    await controller.removeMany(selected);
+    expect(files.attempts, ['/local/a.txt', '/local/b.txt', '/local/c.txt']);
+    expect(controller.entries.map((entry) => entry.name), contains('b.txt'));
+    expect(
+      controller.entries.map((entry) => entry.name),
+      isNot(contains('a.txt')),
+    );
+    expect(
+      controller.entries.map((entry) => entry.name),
+      isNot(contains('c.txt')),
+    );
+    expect(controller.navigationRevision, revision + 1);
+    expect(controller.error.value, '部分文件删除失败，请重试');
+    controller.onClose();
+  });
+
+  test('批量删除期间切换目录后，不再启动剩余删除', () async {
+    final files = _RemovingFiles()
+      ..putFile('/local/a.txt', 1)
+      ..putFile('/local/b.txt', 1)
+      ..gate = Completer<void>();
+    final controller = LocalFileController(files: files);
+    await controller.navigate('/local');
+    final selected = controller.entries
+        .where((entry) => ['a.txt', 'b.txt'].contains(entry.name))
+        .toList();
+    final deleting = controller.removeMany(selected);
+    expect(files.attempts, ['/local/a.txt']);
+    await controller.navigate('/local/downloads');
+    files.gate!.complete();
+    await deleting;
+    expect(files.attempts, ['/local/a.txt']);
+    expect(controller.cwd.value, '/local/downloads');
+    expect(controller.error.value, isNull);
+    expect(files.fs['/local']!.map((entry) => entry.name), contains('b.txt'));
     controller.onClose();
   });
 

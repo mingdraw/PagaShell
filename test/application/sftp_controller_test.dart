@@ -16,6 +16,8 @@ class _Session implements SshEngineSession {
   List<SftpDirEntry> result = [];
   Object? error;
   Object? canonicalizeError;
+  final removeFailures = <String, Object>{};
+  Completer<void>? removeGate;
   bool canonicalizeFails = false;
 
   @override
@@ -39,8 +41,13 @@ class _Session implements SshEngineSession {
   Future<void> rename(String oldPath, String newPath) async =>
       operations.add('rename:$oldPath:$newPath');
   @override
-  Future<void> remove(String path, {required bool isDir}) async =>
-      operations.add('remove:$path:$isDir');
+  Future<void> remove(String path, {required bool isDir}) async {
+    operations.add('remove:$path:$isDir');
+    await removeGate?.future;
+    if (removeFailures[path] case final failure?) throw failure;
+    result.removeWhere((entry) => path == '/home/test/${entry.name}');
+  }
+
   @override
   Future<void> close() async => operations.add('close');
   @override
@@ -124,6 +131,52 @@ void main() {
       'remove:/home/test/deploy:true',
     ]);
     expect(engine.requests, hasLength(4));
+  });
+
+  test('远程批量删除跳过失败项并继续，刷新后显示失败提示', () async {
+    engine.result = [_file('a'), _file('b'), _file('c')];
+    engine.removeFailures['/home/test/b'] = const SshEngineException('没有权限');
+    await controller.initialize();
+    await controller.removeMany(List.of(controller.entries));
+    expect(engine.operations, [
+      'remove:/home/test/a:false',
+      'remove:/home/test/b:false',
+      'remove:/home/test/c:false',
+    ]);
+    expect(controller.entries.map((entry) => entry.name), ['b']);
+    expect(engine.requests, ['/home/test', '/home/test']);
+    expect(controller.error.value, '部分文件删除失败，请重试');
+  });
+
+  test('远程批量删除遇连接失效立即停止，保留未完成条目并允许重连', () async {
+    engine.result = [_file('a'), _file('b'), _file('c')];
+    engine.removeFailures['/home/test/b'] = const SshEngineException(
+      'Channel send error',
+    );
+    await controller.initialize();
+    await controller.removeMany(List.of(controller.entries));
+    expect(engine.operations, [
+      'remove:/home/test/a:false',
+      'remove:/home/test/b:false',
+    ]);
+    expect(controller.entries.map((entry) => entry.name), ['b', 'c']);
+    expect(controller.needsReconnect.value, isTrue);
+    expect(controller.error.value, SshEngineException.connectionClosedMessage);
+    expect(engine.requests, ['/home/test']);
+  });
+
+  test('远程批量删除时连接被替换，不再删除旧连接的剩余条目', () async {
+    engine.result = [_file('a'), _file('b')];
+    engine.removeGate = Completer<void>();
+    await controller.initialize();
+    final deleting = controller.removeMany(List.of(controller.entries));
+    expect(engine.operations, ['remove:/home/test/a:false']);
+    final replacement = _Session();
+    controller.replaceEngine(replacement);
+    engine.removeGate!.complete();
+    await deleting;
+    expect(engine.operations, ['remove:/home/test/a:false']);
+    expect(replacement.operations, isEmpty);
   });
 
   test('面板关闭后忽略在途请求，不再发起浏览或操作', () async {

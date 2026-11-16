@@ -105,6 +105,8 @@ class _SftpPanelState extends State<SftpPanel> {
   bool _transferExpanded = false;
   double _expandedTransferHeight = AppTheme.transferProgressDefaultHeight;
   bool _choosingLocalDirectory = false;
+  bool _deletingLocal = false;
+  bool _deletingRemote = false;
 
   @override
   void initState() {
@@ -659,39 +661,90 @@ class _SftpPanelState extends State<SftpPanel> {
     modified: entry.modified,
   );
 
-  Future<void> _delete(FileBrowserEntry entry, {bool local = false}) async {
+  Future<void> _delete(
+    List<FileBrowserEntry> entries, {
+    bool local = false,
+  }) async {
+    if (entries.isEmpty || (local ? _deletingLocal : _deletingRemote)) return;
     final browser = _browser;
     final localBrowser = _local;
     final directory = local ? localBrowser.cwd.value : browser.cwd.value;
-    final ok = await AppNavigation.dialog<bool>(
-      AppDialog(
-        title: Text('删除「@name」？'.trParams({'name': entry.name})),
-        content: Text(entry.isDir ? '将递归删除该目录及其全部内容。'.tr : '该操作不可撤销。'.tr),
-        actions: [
-          shadcn.OutlineButton(
-            onPressed: () => AppNavigation.closeDialog(result: false),
-            child: Text('取消'.tr),
-          ),
-          shadcn.PrimaryButton(
-            onPressed: () => AppNavigation.closeDialog(result: true),
-            child: Text('删除'.tr),
-          ),
-        ],
-      ),
-    );
-    if (!(ok ?? false) ||
-        !mounted ||
-        browser != _browser ||
-        localBrowser != _local ||
-        directory != (local ? localBrowser.cwd.value : browser.cwd.value)) {
-      return;
-    }
+    final revision = local
+        ? localBrowser.navigationRevision
+        : browser.navigationRevision;
+    final engine = browser.engine;
+    final selected = List<FileBrowserEntry>.of(entries);
+    final single = selected.length == 1;
+    final hasDirectory = selected.any((entry) => entry.isDir);
     if (local) {
-      await localBrowser.remove(_localEntry(entry));
+      _deletingLocal = true;
     } else {
-      await browser.remove(
-        SftpDirEntry(name: entry.name, isDir: entry.isDir, size: entry.size),
+      _deletingRemote = true;
+    }
+    try {
+      final ok = await AppNavigation.dialog<bool>(
+        AppDialog(
+          title: Text(
+            single
+                ? '删除「@name」？'.trParams({'name': selected.single.name})
+                : '删除选中的 @count 项？'.trParams({'count': '${selected.length}'}),
+          ),
+          content: Text(
+            hasDirectory
+                ? (single ? '将递归删除该目录及其全部内容。' : '将递归删除所选目录及其全部内容，此操作不可撤销。').tr
+                : '该操作不可撤销。'.tr,
+          ),
+          actions: [
+            shadcn.OutlineButton(
+              onPressed: () => AppNavigation.closeDialog(result: false),
+              child: Text('取消'.tr),
+            ),
+            shadcn.PrimaryButton(
+              onPressed: () => AppNavigation.closeDialog(result: true),
+              child: Text('删除'.tr),
+            ),
+          ],
+        ),
       );
+      if (!(ok ?? false) ||
+          !mounted ||
+          browser != _browser ||
+          localBrowser != _local ||
+          directory != (local ? localBrowser.cwd.value : browser.cwd.value) ||
+          revision !=
+              (local
+                  ? localBrowser.navigationRevision
+                  : browser.navigationRevision) ||
+          (!local && !identical(engine, browser.engine))) {
+        return;
+      }
+      if (local) {
+        if (single) {
+          await localBrowser.remove(_localEntry(selected.single));
+        } else {
+          await localBrowser.removeMany(selected.map(_localEntry).toList());
+        }
+      } else {
+        final remote = [
+          for (final entry in selected)
+            SftpDirEntry(
+              name: entry.name,
+              isDir: entry.isDir,
+              size: entry.size,
+            ),
+        ];
+        if (single) {
+          await browser.remove(remote.single);
+        } else {
+          await browser.removeMany(remote);
+        }
+      }
+    } finally {
+      if (local) {
+        _deletingLocal = false;
+      } else {
+        _deletingRemote = false;
+      }
     }
   }
 

@@ -19,6 +19,9 @@ class SftpController extends GetxController {
   int _request = 0;
   bool _disposed = false;
 
+  /// 确认或批量操作期间检查是否发生过目录导航或连接更替。
+  int get navigationRevision => _request;
+
   @override
   void onInit() {
     super.onInit();
@@ -137,6 +140,63 @@ class SftpController extends GetxController {
 
   Future<void> remove(SftpDirEntry entry) =>
       _run(() => engine.remove(pathOf(entry.name), isDir: entry.isDir));
+
+  /// 同一连接、同一目录中的批量删除；连接失效时停止后续请求。
+  Future<void> removeMany(List<SftpDirEntry> selected) async {
+    if (_disposed ||
+        needsReconnect.value ||
+        reconnecting.value ||
+        selected.isEmpty) {
+      return;
+    }
+    final directory = cwd.value;
+    final revision = _request;
+    final activeEngine = engine;
+    bool current() =>
+        !_disposed &&
+        revision == _request &&
+        cwd.value == directory &&
+        identical(activeEngine, engine) &&
+        !needsReconnect.value &&
+        !reconnecting.value;
+    final removed = <String>{};
+    var failed = false;
+    for (final entry in List<SftpDirEntry>.of(selected)) {
+      if (!current()) return;
+      try {
+        if (entry.name.isEmpty ||
+            entry.name == '.' ||
+            entry.name == '..' ||
+            entry.name.contains('/')) {
+          throw const SshEngineException('文件传输路径无效');
+        }
+        await activeEngine.remove(
+          join(directory, entry.name),
+          isDir: entry.isDir,
+        );
+        removed.add(entry.name);
+      } on Object catch (e) {
+        if (!current()) return;
+        if (e is SshEngineException && e.isConnectionClosed) {
+          // 无法刷新失效连接，先从当前列表移除已确认成功的条目。
+          entries.removeWhere((entry) => removed.contains(entry.name));
+          _recordError(e, '远程文件操作失败，请重试');
+          return;
+        }
+        failed = true;
+      }
+    }
+    if (!current()) return;
+    await refreshDirectory(reconnectIfNeeded: false);
+    if (!_disposed &&
+        revision + 1 == _request &&
+        cwd.value == directory &&
+        identical(activeEngine, engine) &&
+        error.value == null &&
+        failed) {
+      error.value = '部分文件删除失败，请重试';
+    }
+  }
 
   Future<void> _run(Future<void> Function() action) async {
     if (_disposed || needsReconnect.value || reconnecting.value) return;
