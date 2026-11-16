@@ -289,6 +289,30 @@ class UpdaterHelperTests(unittest.TestCase):
         self.run_helper("Extract")
         self.assertEqual((self.source / "data/flutter_assets/asset").read_text(), "valid")
 
+    @unittest.skipUnless(WINDOWS, "Windows ZIP extraction")
+    def test_windows_extract_works_with_broken_archive_module(self):
+        # Simulate a host whose Expand-Archive module calls an unavailable .NET overload.
+        self.script.write_text(
+            self.script.read_text(encoding="utf-8").replace(
+                "$ErrorActionPreference = 'Stop'\n",
+                "$ErrorActionPreference = 'Stop'\n"
+                "function Expand-Archive { throw 'Archive module unavailable' }\n",
+                1,
+            ),
+            encoding="utf-8",
+        )
+        with zipfile.ZipFile(self.archive, "w") as archive:
+            archive.writestr("bundle/data/flutter_assets/asset", "valid")
+        self.run_helper("Extract")
+        self.assertEqual((self.source / "data/flutter_assets/asset").read_text(), "valid")
+
+    @unittest.skipUnless(WINDOWS, "Windows ZIP extraction")
+    def test_windows_extract_does_not_overwrite_existing_files(self):
+        with zipfile.ZipFile(self.archive, "w") as archive:
+            archive.writestr("bundle/version", "overwritten")
+        self.run_helper("Extract", success=False)
+        self.assertEqual((self.source / "version").read_text(), "new")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

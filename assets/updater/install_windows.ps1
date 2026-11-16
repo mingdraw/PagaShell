@@ -25,8 +25,10 @@ if ($Mode -eq 'Extract') {
         throw 'Unexpected archive path'
       }
     }
+    # Windows PowerShell uses .NET Framework, which provides this two-argument
+    # overload even when the installed Expand-Archive module expects a newer one.
+    [IO.Compression.ZipFileExtensions]::ExtractToDirectory($zip, $config.stage)
   } finally { $zip.Dispose() }
-  Expand-Archive -LiteralPath $config.archive -DestinationPath $config.stage
   return
 }
 
