@@ -127,8 +127,13 @@ _Binding _binding(
   final port = int.tryParse(endpoint.substring(split + 1));
   if (port == null || port < 1 || port > 65535) _invalid();
   var host = endpoint.substring(0, split);
-  if (host.startsWith('[') && host.endsWith(']')) {
-    host = host.substring(1, host.length - 1);
+  if (host.startsWith('[')) {
+    final end = host.indexOf(']');
+    if (end < 0) _invalid();
+    final suffix = host.substring(end + 1);
+    if (suffix.isNotEmpty && !suffix.startsWith('%')) _invalid();
+    // ss may place the interface outside the brackets: [fe80::1]%ens18.
+    host = '${host.substring(1, end)}$suffix';
   }
   if (host == '*') host = ipv6 ? '::' : '0.0.0.0';
   // lsof can report an IPv6 socket's mapped address as a plain IPv4 literal.

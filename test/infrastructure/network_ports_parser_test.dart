@@ -4,6 +4,89 @@ import 'package:pagashell/domain/ssh/ssh_engine.dart';
 import 'package:pagashell/infrastructure/ssh/network_ports_parser.dart';
 
 void main() {
+  test('Rocky Linux 9.8 ss 6.17 网卡标识位于 IPv6 方括号外时完整解析全部端口', () {
+    final sample = parseNetworkPorts(r'''PAGA_NETWORK_PORTS_V1
+ACCESS FULL
+SS4
+udp UNCONN 0 0 127.0.0.1:323 0.0.0.0:* users:(("chronyd",pid=856,fd=5))
+tcp LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:(("sshd",pid=916,fd=7))
+tcp LISTEN 0 511 0.0.0.0:80 0.0.0.0:* users:(("nginx",pid=59043,fd=6),("nginx",pid=59042,fd=6),("nginx",pid=59041,fd=6),("nginx",pid=59040,fd=6),("nginx",pid=59039,fd=6),("nginx",pid=59038,fd=6),("nginx",pid=59037,fd=6),("nginx",pid=59036,fd=6),("nginx",pid=25415,fd=6))
+tcp LISTEN 0 1024 0.0.0.0:9100 0.0.0.0:* users:(("supervisord",pid=2681281,fd=4))
+tcp LISTEN 0 4096 127.0.0.1:7001 0.0.0.0:* users:(("minio",pid=2681284,fd=10))
+tcp LISTEN 0 511 0.0.0.0:6379 0.0.0.0:* users:(("redis-server",pid=2681286,fd=6))
+tcp LISTEN 0 4096 0.0.0.0:7010 0.0.0.0:* users:(("minio",pid=2681284,fd=12))
+SS6
+udp UNCONN 0 0 *:56441 *:* users:(("java",pid=1950259,fd=57))
+udp UNCONN 0 0 [::1]:323 [::]:* users:(("chronyd",pid=856,fd=6))
+udp UNCONN 0 0 [fe80::1234:5678:9abc:def0]%ens18:546 [::]:* users:(("NetworkManager",pid=903,fd=29))
+tcp LISTEN 0 128 [::]:22 [::]:* users:(("sshd",pid=916,fd=8))
+tcp LISTEN 0 1024 *:3306 *:* users:(("mysqld",pid=16522,fd=24))
+tcp LISTEN 0 4096 [::1]:7001 [::]:* users:(("minio",pid=2681284,fd=11))
+tcp LISTEN 0 4096 *:7001 *:* users:(("minio",pid=2681284,fd=9))
+tcp LISTEN 0 4096 *:7000 *:* users:(("java",pid=1950259,fd=50))
+END_PORTS
+''');
+    expect(sample.ports, hasLength(11));
+    final dhcp = sample.ports.singleWhere((port) => port.port == 546);
+    expect(dhcp.protocol, NetworkPortProtocol.udp);
+    expect(dhcp.addresses.single.ipv6, isTrue);
+    expect(dhcp.addresses.single.address, 'fe80::1234:5678:9abc:def0%ens18');
+    expect(
+      dhcp.addresses.single.endpoint(546),
+      '[fe80::1234:5678:9abc:def0%ens18]:546',
+    );
+    expect(dhcp.processes.single.name, 'NetworkManager');
+    expect(dhcp.processes.single.pid, 903);
+    expect(
+      sample.ports.singleWhere((port) => port.port == 80).processes,
+      hasLength(9),
+    );
+    expect(
+      sample.ports.singleWhere((port) => port.port == 7001).addresses,
+      hasLength(3),
+    );
+    expect(
+      sample.ports.singleWhere((port) => port.port == 22).addresses,
+      hasLength(2),
+    );
+  });
+
+  for (final host in [
+    '[fe80::1]%ens18',
+    '[fe80::1%ens18]',
+    'fe80::1%ens18',
+    '[fe80::1]%2',
+  ]) {
+    test('IPv6 区域标识兼容 $host', () {
+      final sample = parseNetworkPorts(
+        'PAGA_NETWORK_PORTS_V1\nACCESS FULL\nSS6\nudp UNCONN 0 0 $host:546 [::]:*\nEND_PORTS\n',
+      );
+      final address = sample.ports.single.addresses.single;
+      expect(address.ipv6, isTrue);
+      expect(
+        address.address,
+        host.endsWith('%2') ? 'fe80::1%2' : 'fe80::1%ens18',
+      );
+      expect(sample.ports.single.port, 546);
+    });
+  }
+
+  test('IPv6 区域标识的括号或后缀损坏时仍报错', () {
+    for (final host in [
+      '[fe80::1]ens18',
+      '[fe80::1]%',
+      '[fe80::1%ens18]%eth0',
+      '[fe80::1',
+    ]) {
+      expect(
+        () => parseNetworkPorts(
+          'PAGA_NETWORK_PORTS_V1\nACCESS FULL\nSS6\nudp UNCONN 0 0 $host:546 [::]:*\nEND_PORTS\n',
+        ),
+        throwsA(isA<SshEngineException>()),
+      );
+    }
+  });
+
   test('Linux 双栈按端口和进程集合合并，保留作用域和多个进程，排除已连接 UDP', () {
     final sample = parseNetworkPorts(r'''PAGA_NETWORK_PORTS_V1
 ACCESS FULL
