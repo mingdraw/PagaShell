@@ -399,10 +399,25 @@ void main() {
       colors.destructive,
     );
     expect(find.text('写入远程文件失败'), findsOneWidget);
-    final failureLabel = find.byKey(ValueKey('sftp-transfer-label-${task.id}'));
+    final sizeLabel = find.byKey(ValueKey('sftp-transfer-label-${task.id}'));
+    final failureLabel = find.byKey(ValueKey('sftp-transfer-error-${task.id}'));
+    final path = find.byKey(ValueKey('sftp-transfer-path-${task.id}'));
+    expect(tester.widget<Text>(sizeLabel).data, '25 B');
     expect(
-      tester.getRect(failureLabel).left,
+      tester.getRect(sizeLabel).left,
       greaterThan(tester.getRect(bar).right),
+    );
+    expect(
+      tester.getRect(failureLabel).top,
+      greaterThan(tester.getRect(bar).bottom),
+    );
+    expect(
+      tester.getCenter(failureLabel).dy,
+      closeTo(tester.getCenter(path).dy, 0.5),
+    );
+    expect(
+      tester.getRect(path).right,
+      lessThanOrEqualTo(tester.getRect(failureLabel).left),
     );
     expect(tester.widget<Text>(failureLabel).style!.color, colors.destructive);
     final row = find.byKey(ValueKey('sftp-transfer-row-${task.id}'));
@@ -423,7 +438,7 @@ void main() {
     final centerY = tester
         .getCenter(find.byKey(ValueKey('sftp-transfer-content-${task.id}')))
         .dy;
-    expect(tester.getCenter(failureLabel).dy, closeTo(centerY, 0.5));
+    expect(tester.getCenter(sizeLabel).dy, closeTo(centerY, 0.5));
     expect(tester.getCenter(bar).dy, closeTo(centerY, 0.5));
     expect(
       tester
@@ -438,6 +453,8 @@ void main() {
     task.error.value = List.filled(20, '写入远程文件失败').join('，');
     await tester.pumpAndSettle();
     expect(tester.getSize(failureLabel).width, lessThanOrEqualTo(220));
+    expect(tester.widget<Text>(failureLabel).overflow, TextOverflow.ellipsis);
+    expect(tester.widget<Text>(sizeLabel).data, '25 B');
     expect(tester.getSize(bar).width, greaterThan(0));
     expect(tester.takeException(), isNull);
     final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
@@ -458,6 +475,10 @@ void main() {
     expect(controller.tasks, [task]);
     expect(findAppIconButton('重试传输'), findsNothing);
     expect(find.text('写入远程文件失败'), findsNothing);
+    expect(
+      find.byKey(ValueKey('sftp-transfer-error-${task.id}')),
+      findsNothing,
+    );
     expect(engine.uploads, [
       ('/external/retry.txt', '/home/test/retry.txt'),
       ('/external/retry.txt', '/home/test/retry.txt'),

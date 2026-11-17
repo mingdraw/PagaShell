@@ -1119,12 +1119,11 @@ class _TransferRow extends StatelessWidget {
         final failureReason = rawFailureReason == null
             ? null
             : AppTranslations.error(rawFailureReason);
+        final failureMessage = failureReason == null || failureReason.isEmpty
+            ? '传输未完成，请检查连接后重试'.tr
+            : failureReason;
         final label = Text(
           switch (status) {
-            TransferStatus.failed =>
-              failureReason == null || failureReason.isEmpty
-                  ? '传输未完成，请检查连接后重试'.tr
-                  : failureReason,
             TransferStatus.cancelled => '已取消'.tr,
             TransferStatus.queued => '等待传输'.tr,
             _ => formatFileSize(task.transferred.value),
@@ -1197,13 +1196,7 @@ class _TransferRow extends StatelessWidget {
             const SizedBox(width: 8),
             ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 220),
-              child: status == TransferStatus.failed
-                  ? shadcn.Tooltip(
-                      tooltip: (_) =>
-                          shadcn.TooltipContainer(child: Text(label.data!)),
-                      child: label,
-                    )
-                  : label,
+              child: label,
             ),
           ],
         );
@@ -1217,18 +1210,56 @@ class _TransferRow extends StatelessWidget {
               padding: const EdgeInsets.only(left: 32),
               child: SizedBox(
                 height: 14,
-                child: shadcn.Tooltip(
-                  tooltip: (_) => shadcn.TooltipContainer(child: Text(path)),
-                  child: Text(
-                    path,
-                    key: ValueKey('sftp-transfer-path-${task.id}'),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 10,
-                      color: colors.mutedForeground,
-                    ),
-                  ),
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    final gap = math.min(8.0, constraints.maxWidth);
+                    final errorWidth = math.min(
+                      220.0,
+                      math.max(0.0, (constraints.maxWidth - gap) / 2),
+                    );
+                    return Row(
+                      children: [
+                        Expanded(
+                          child: shadcn.Tooltip(
+                            tooltip: (_) =>
+                                shadcn.TooltipContainer(child: Text(path)),
+                            child: Text(
+                              path,
+                              key: ValueKey('sftp-transfer-path-${task.id}'),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 10,
+                                color: colors.mutedForeground,
+                              ),
+                            ),
+                          ),
+                        ),
+                        if (status == TransferStatus.failed) ...[
+                          SizedBox(width: gap),
+                          ConstrainedBox(
+                            constraints: BoxConstraints(maxWidth: errorWidth),
+                            child: shadcn.Tooltip(
+                              tooltip: (_) => shadcn.TooltipContainer(
+                                child: Text(failureMessage),
+                              ),
+                              child: Text(
+                                failureMessage,
+                                key: ValueKey('sftp-transfer-error-${task.id}'),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                textAlign: TextAlign.right,
+                                style: TextStyle(
+                                  fontSize: 10,
+                                  color: colors.destructive,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
+                    );
+                  },
                 ),
               ),
             ),
