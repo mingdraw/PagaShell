@@ -42,6 +42,8 @@ Dart 使用两空格缩进，文件名采用 `snake_case.dart`，类型名采用
 
 ## 提交与 Pull Request 规范
 
+GitHub 相关操作可以使用 GitHub CLI（`gh`），包括管理 Issue、Pull Request、Release，以及触发和查看 GitHub Actions 工作流。
+
 Windows 测试分支统一命名为 `test/windows`。
 
 当前检出的仓库尚无提交历史。遵循 `CONTRIBUTING.md` 中的 Conventional Commits 约定，例如 `feat: ...`、`fix: ...`、`docs: ...`。每个 PR 聚焦一件事，说明行为变更、关联相关 Issue、列出验证结果；界面变更附截图。提交前运行静态分析和测试。
