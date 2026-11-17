@@ -137,7 +137,7 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
     if (selected.kind == SessionKind.containerTerminal) {
       return Column(
         children: [
-          _toolbar(_splitButtons(controller, selected)),
+          _toolbar(selected, _splitButtons(controller, selected)),
           Expanded(child: _layout(widget.tab.layout, sessions)),
         ],
       );
@@ -199,95 +199,226 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
             ),
           ],
         ),
-        toolbarBuilder: (context, panel, canExpand, toggle) => _toolbar([
-          ..._splitButtons(controller, selected),
-          const SizedBox(width: 4),
-          _toolbarButton(
-            name: 'open-sftp',
-            label: '文件传输'.tr,
-            onPressed: controller.canOpenFileTransfer(selected.id)
-                ? () => unawaited(controller.openFileTransfer(selected.id))
-                : null,
-            icon: AppIcons.folderOpen,
-          ),
-          const SizedBox(width: 4),
-          _toolbarButton(
-            name: 'toolbar-docker',
-            label:
-                (panel == TerminalSidePanelKind.docker
-                        ? '折叠 Docker 管理'
-                        : '展开 Docker 管理')
-                    .tr,
-            tooltip: 'Docker 管理'.tr,
-            onPressed:
-                canExpand &&
-                    (dockerSource != null ||
-                        panel == TerminalSidePanelKind.docker)
-                ? () => toggle(TerminalSidePanelKind.docker)
-                : null,
-            icon: AppIcons.container,
-          ),
-          const SizedBox(width: 4),
-          _toolbarButton(
-            name: 'toolbar-processes',
-            label:
-                (panel == TerminalSidePanelKind.processes ? '折叠进程管理' : '展开进程管理')
-                    .tr,
-            tooltip: '进程管理'.tr,
-            onPressed:
-                canExpand &&
-                    (processSource != null ||
-                        panel == TerminalSidePanelKind.processes)
-                ? () => toggle(TerminalSidePanelKind.processes)
-                : null,
-            icon: AppIcons.processes,
-          ),
-          const SizedBox(width: 4),
-          _toolbarButton(
-            name: 'toolbar-network-ports',
-            label:
-                (panel == TerminalSidePanelKind.networkPorts
-                        ? '折叠网络端口'
-                        : '展开网络端口')
-                    .tr,
-            tooltip: '网络端口'.tr,
-            onPressed:
-                canExpand &&
-                    (portsSource != null ||
-                        panel == TerminalSidePanelKind.networkPorts)
-                ? () => toggle(TerminalSidePanelKind.networkPorts)
-                : null,
-            icon: AppIcons.networkPorts,
-          ),
-          const SizedBox(width: 4),
-          _toolbarButton(
-            name: 'toolbar-status',
-            label: (panel == TerminalSidePanelKind.status ? '折叠服务状态' : '展开服务状态')
-                .tr,
-            tooltip: '服务状态'.tr,
-            onPressed:
-                canExpand &&
-                    (statusSource != null ||
-                        panel == TerminalSidePanelKind.status)
-                ? () => toggle(TerminalSidePanelKind.status)
-                : null,
-            icon: AppIcons.statusOverview,
-          ),
-        ]),
+        toolbarBuilder: (context, panel, canExpand, toggle) => _toolbar(
+          selected,
+          [
+            ..._splitButtons(controller, selected),
+            _toolbarDivider(),
+            _toolbarButton(
+              name: 'open-sftp',
+              label: '文件传输'.tr,
+              onPressed: controller.canOpenFileTransfer(selected.id)
+                  ? () => unawaited(controller.openFileTransfer(selected.id))
+                  : null,
+              icon: AppIcons.folderOpen,
+            ),
+            _toolbarDivider(),
+            _toolbarButton(
+              name: 'toolbar-docker',
+              label:
+                  (panel == TerminalSidePanelKind.docker
+                          ? '折叠 Docker 管理'
+                          : '展开 Docker 管理')
+                      .tr,
+              tooltip: 'Docker 管理'.tr,
+              selected: panel == TerminalSidePanelKind.docker,
+              onPressed:
+                  canExpand &&
+                      (dockerSource != null ||
+                          panel == TerminalSidePanelKind.docker)
+                  ? () => toggle(TerminalSidePanelKind.docker)
+                  : null,
+              icon: AppIcons.container,
+            ),
+            const SizedBox(width: 4),
+            _toolbarButton(
+              name: 'toolbar-processes',
+              label:
+                  (panel == TerminalSidePanelKind.processes
+                          ? '折叠进程管理'
+                          : '展开进程管理')
+                      .tr,
+              tooltip: '进程管理'.tr,
+              selected: panel == TerminalSidePanelKind.processes,
+              onPressed:
+                  canExpand &&
+                      (processSource != null ||
+                          panel == TerminalSidePanelKind.processes)
+                  ? () => toggle(TerminalSidePanelKind.processes)
+                  : null,
+              icon: AppIcons.processes,
+            ),
+            const SizedBox(width: 4),
+            _toolbarButton(
+              name: 'toolbar-network-ports',
+              label:
+                  (panel == TerminalSidePanelKind.networkPorts
+                          ? '折叠网络端口'
+                          : '展开网络端口')
+                      .tr,
+              tooltip: '网络端口'.tr,
+              selected: panel == TerminalSidePanelKind.networkPorts,
+              onPressed:
+                  canExpand &&
+                      (portsSource != null ||
+                          panel == TerminalSidePanelKind.networkPorts)
+                  ? () => toggle(TerminalSidePanelKind.networkPorts)
+                  : null,
+              icon: AppIcons.networkPorts,
+            ),
+            const SizedBox(width: 4),
+            _toolbarButton(
+              name: 'toolbar-status',
+              label:
+                  (panel == TerminalSidePanelKind.status ? '折叠服务状态' : '展开服务状态')
+                      .tr,
+              tooltip: '服务状态'.tr,
+              selected: panel == TerminalSidePanelKind.status,
+              onPressed:
+                  canExpand &&
+                      (statusSource != null ||
+                          panel == TerminalSidePanelKind.status)
+                  ? () => toggle(TerminalSidePanelKind.status)
+                  : null,
+              icon: AppIcons.statusOverview,
+            ),
+          ],
+        ),
         terminal: _layout(widget.tab.layout, sessions),
       ),
     );
   }
 
-  Widget _toolbar(List<Widget> children) => Container(
-    key: const ValueKey('terminal-toolbar'),
-    height: AppTheme.terminalToolbarHeight,
-    padding: const EdgeInsets.symmetric(horizontal: 6),
-    decoration: const BoxDecoration(
-      color: AppTheme.terminalBackground,
-      border: Border(bottom: BorderSide(color: AppTheme.terminalBorder)),
-    ),
-    child: Row(mainAxisAlignment: MainAxisAlignment.end, children: children),
+  Widget _toolbar(Session selected, List<Widget> actions) {
+    final paneIndex =
+        widget.sessions.indexWhere((item) => item.id == selected.id) + 1;
+    final statusColor = switch (selected.phase) {
+      SessionPhase.ready => StatusColors.ready,
+      SessionPhase.failed => StatusColors.failed,
+      SessionPhase.closed => StatusColors.closed,
+      _ => StatusColors.connecting,
+    };
+    return Container(
+      key: const ValueKey('terminal-toolbar'),
+      height: AppTheme.terminalToolbarHeight,
+      padding: const EdgeInsets.symmetric(horizontal: 6),
+      decoration: const BoxDecoration(
+        color: AppTheme.terminalBackground,
+        border: Border(bottom: BorderSide(color: AppTheme.terminalBorder)),
+      ),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          if (constraints.maxWidth < 260) {
+            return Align(
+              alignment: Alignment.centerRight,
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                reverse: true,
+                child: Row(mainAxisSize: MainAxisSize.min, children: actions),
+              ),
+            );
+          }
+          return Row(
+            children: [
+              Expanded(
+                child: LayoutBuilder(
+                  builder: (context, contextConstraints) {
+                    if (contextConstraints.maxWidth < 40) {
+                      return const SizedBox.shrink();
+                    }
+                    final showAddress =
+                        contextConstraints.maxWidth >= 180 &&
+                        selected.kind != SessionKind.containerTerminal &&
+                        selected.address.isNotEmpty;
+                    final showPaneBadge =
+                        contextConstraints.maxWidth >= 140 &&
+                        widget.sessions.length > 1 &&
+                        paneIndex > 0;
+                    return Padding(
+                      padding: const EdgeInsets.only(left: 6, right: 8),
+                      child: Row(
+                        key: const ValueKey('terminal-toolbar-context'),
+                        children: [
+                          Container(
+                            width: 7,
+                            height: 7,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: statusColor,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Flexible(
+                            child: Text(
+                              selected.title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w500,
+                                color: AppTheme.terminalForeground,
+                              ),
+                            ),
+                          ),
+                          if (showAddress) ...[
+                            const SizedBox(width: 8),
+                            Flexible(
+                              child: Text(
+                                selected.address,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontSize: 11,
+                                  color: AppTheme.terminalMutedForeground,
+                                ),
+                              ),
+                            ),
+                          ],
+                          if (showPaneBadge) ...[
+                            const SizedBox(width: 8),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 6,
+                                vertical: 2,
+                              ),
+                              decoration: BoxDecoration(
+                                color: AppTheme.terminalControlBackground,
+                                border: Border.all(
+                                  color: AppTheme.terminalBorder,
+                                ),
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: Text(
+                                '窗格 @index/@total'.trParams({
+                                  'index': '$paneIndex',
+                                  'total': '${widget.sessions.length}',
+                                }),
+                                style: const TextStyle(
+                                  fontSize: 10,
+                                  color: AppTheme.terminalMutedForeground,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ),
+              ...actions,
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _toolbarDivider() => Container(
+    width: 1,
+    height: 14,
+    margin: const EdgeInsets.symmetric(horizontal: 4),
+    color: AppTheme.terminalBorder,
   );
 
   List<Widget> _splitButtons(SessionController controller, Session selected) {
@@ -329,14 +460,27 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
     required AppIcons icon,
     required VoidCallback? onPressed,
     String? tooltip,
-  }) => SizedBox.square(
-    dimension: AppTheme.terminalToolbarButtonSize,
+    bool selected = false,
+  }) => Container(
+    width: AppTheme.terminalToolbarButtonSize,
+    height: AppTheme.terminalToolbarButtonSize,
+    decoration: selected
+        ? BoxDecoration(
+            color: AppTheme.terminalControlBackground,
+            border: Border.all(color: AppTheme.terminalSelectedBorder),
+            borderRadius: BorderRadius.circular(6),
+          )
+        : null,
     child: AppIconButton(
       key: ValueKey('terminal-$name'),
       semanticLabel: label,
       tooltip: tooltip ?? label,
       onPressed: onPressed,
-      icon: AppIcon(icon, size: 16),
+      icon: AppIcon(
+        icon,
+        size: 16,
+        color: selected ? AppTheme.terminalForeground : null,
+      ),
     ),
   );
 }

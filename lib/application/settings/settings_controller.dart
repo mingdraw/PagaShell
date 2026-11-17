@@ -16,6 +16,7 @@ class SettingsController extends GetxController {
   /// 侧边栏是否显示，从 [sidebarState] 派生。标题栏、标签栏、AI 工作区等
   /// 只关心显隐，单独订阅它，展开/折叠文件夹时不再跟着重建。
   final sidebarVisible = true.obs;
+  final sidebarWidth = SidebarState.defaultWidth.obs;
   final isLoaded = false.obs;
   final automaticUpdates = true.obs;
   final savingAutomaticUpdates = false.obs;
@@ -49,6 +50,7 @@ class SettingsController extends GetxController {
           if (!isClosed) {
             sidebarState.value = saved;
             sidebarVisible.value = saved.visible;
+            sidebarWidth.value = saved.width;
           }
         },
         // 显示偏好不可读时保留默认布局，不影响主题和启动。
@@ -96,6 +98,12 @@ class SettingsController extends GetxController {
     return _saveSidebarState(sidebarState.value.withVisibility(visible));
   }
 
+  Future<void> setSidebarWidth(double width) {
+    final next = sidebarState.value.withWidth(width);
+    if (sidebarState.value.width == next.width) return _pendingSidebarSave;
+    return _saveSidebarState(next);
+  }
+
   Future<void> setSidebarSectionExpanded(
     SidebarSection section,
     bool expanded,
@@ -106,9 +114,18 @@ class SettingsController extends GetxController {
     return _saveSidebarState(sidebarState.value.withSection(section, expanded));
   }
 
+  Future<void> recordRecentHost(String hostId) {
+    final current = sidebarState.value.recentHostIds;
+    if (current.isNotEmpty && current.first == hostId) {
+      return _pendingSidebarSave;
+    }
+    return _saveSidebarState(sidebarState.value.withRecentHost(hostId));
+  }
+
   Future<void> _saveSidebarState(SidebarState state) {
     sidebarState.value = state;
     sidebarVisible.value = state.visible;
+    sidebarWidth.value = state.width;
     // 点击立即更新界面，快照按顺序写入，避免快速操作后旧状态覆盖新状态。
     final save = _pendingSidebarSave.then((_) async {
       await ready;

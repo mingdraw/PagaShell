@@ -48,7 +48,16 @@ class SessionController extends GetxController {
 
   final RxList<Session> sessions = <Session>[].obs;
   final RxnString activeSessionId = RxnString();
+  final RxList<String> recentHostIds = <String>[].obs;
   final _tabState = _SessionTabs();
+
+  void _recordRecentHost(String hostId) {
+    recentHostIds.remove(hostId);
+    recentHostIds.insert(0, hostId);
+    if (recentHostIds.length > 20) {
+      recentHostIds.removeRange(20, recentHostIds.length);
+    }
+  }
 
   List<SessionTab> get tabs => _tabState.list(sessions);
   String? get activeTabId => tabForSession(activeSessionId.value)?.id;
@@ -319,6 +328,9 @@ class SessionController extends GetxController {
       sessions.insert(index + 1, session);
     } else {
       sessions.add(session);
+    }
+    if (kind != SessionKind.containerTerminal) {
+      _recordRecentHost(host.id);
     }
     activeSessionId.value = id;
     _runtimes[id]?.credentials = credentials;

@@ -24,7 +24,6 @@ import 'package:pagashell/domain/ssh/ssh_engine.dart';
 import 'package:pagashell/presentation/components/app_icon_button.dart';
 import 'package:pagashell/presentation/components/app_text_form_field.dart';
 import 'package:pagashell/presentation/terminal/docker_manager_panel.dart';
-import 'package:pagashell/presentation/terminal/terminal_tab_workspace.dart';
 import 'package:pagashell/presentation/theme/app_theme.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
@@ -1763,11 +1762,12 @@ void main() {
     await tester.pumpAndSettle();
   });
 
-  testWidgets('工具栏靠右且无标题，关闭按钮悬浮，工具栏与状态面板不随外壳主题变色', (tester) async {
+  testWidgets('工具栏左侧展示上下文、按钮靠右对齐且激活面板高亮，关闭按钮悬浮，不随外壳主题变色', (tester) async {
     final (controller, engine, captureKey) = await _mount(tester);
     final first = await controller.open(_host, _credentials);
     await tester.pumpAndSettle();
     final toolbar = find.byKey(const ValueKey('terminal-toolbar'));
+    final contextBar = find.byKey(const ValueKey('terminal-toolbar-context'));
     final toolbarBounds = tester.getRect(toolbar);
     final buttonBounds = [
       tester.getRect(_button('split-horizontal')),
@@ -1779,9 +1779,17 @@ void main() {
       tester.getRect(_button('toolbar-status')),
     ];
     expect(
-      find.descendant(of: toolbar, matching: find.byType(Text)),
-      findsNothing,
+      find.descendant(of: contextBar, matching: find.text(_host.name)),
+      findsOneWidget,
     );
+    expect(
+      find.descendant(
+        of: contextBar,
+        matching: find.text('rocky@example.test'),
+      ),
+      findsOneWidget,
+    );
+    expect(tester.getRect(contextBar).right, lessThan(buttonBounds.first.left));
     expect(buttonBounds.first.left, greaterThan(toolbarBounds.center.dx));
     expect(buttonBounds.last.right, closeTo(toolbarBounds.right - 6, 1));
     for (final bounds in buttonBounds) {
@@ -1805,10 +1813,14 @@ void main() {
     await tester.tap(_button('split-horizontal'));
     await tester.pumpAndSettle();
     final second = controller.activeSessionId.value!;
-    final workspace = find.byType(TerminalTabWorkspace);
     expect(
-      find.descendant(of: workspace, matching: find.text('rocky@example.test')),
-      findsNothing,
+      find.descendant(
+        of: contextBar,
+        matching: find.text(
+          '窗格 @index/@total'.trParams({'index': '2', 'total': '2'}),
+        ),
+      ),
+      findsOneWidget,
     );
     for (final id in [first, second]) {
       final paneBounds = tester.getRect(_pane(id));
@@ -1822,6 +1834,16 @@ void main() {
     }
     await tester.tap(_button('toolbar-status'));
     await tester.pumpAndSettle();
+    final statusButtonWrapper = tester.widget<Container>(
+      find
+          .ancestor(
+            of: _button('toolbar-status'),
+            matching: find.byType(Container),
+          )
+          .first,
+    );
+    final statusDecoration = statusButtonWrapper.decoration! as BoxDecoration;
+    expect(statusDecoration.color, AppTheme.terminalControlBackground);
     await tester.pump(const Duration(seconds: 3));
     await tester.pumpAndSettle();
     final state = tester.state<TerminalViewState>(

@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
@@ -25,6 +26,7 @@ import '../../../domain/services/identity_tree.dart';
 import '../../../domain/ssh/ssh_engine.dart';
 import '../../../domain/vault/secret_store.dart';
 import '../../components/app_icon.dart';
+import '../../components/app_icon_button.dart';
 import '../../components/app_list_row.dart';
 import '../../components/app_menu.dart';
 import '../../components/app_tree_drag.dart';
@@ -47,6 +49,11 @@ class Sidebar extends StatefulWidget {
 
 class _SidebarState extends State<Sidebar> {
   late final _settings = Get.find<SettingsController>();
+  late final _hostController = Get.find<HostController>();
+  late final TextEditingController _searchController = TextEditingController(
+    text: _hostController.searchQuery.value,
+  );
+  final _searchFocus = FocusNode();
   bool get _hostsExpanded =>
       _settings.sidebarState.value.isSectionExpanded(SidebarSection.services);
   bool get _identitiesExpanded =>
@@ -56,6 +63,27 @@ class _SidebarState extends State<Sidebar> {
   final _dragAnchor = TreeDragAnchor();
   final _identityDragAnchor = TreeDragAnchor();
   final _gatewayDragAnchor = TreeDragAnchor();
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    _searchFocus.dispose();
+    super.dispose();
+  }
+
+  void _clearSearch() {
+    _searchController.clear();
+    _hostController.searchQuery.value = '';
+    _searchFocus.requestFocus();
+  }
+
+  void _handleSearchEscape() {
+    if (_searchController.text.isNotEmpty) {
+      _clearSearch();
+    } else {
+      _searchFocus.unfocus();
+    }
+  }
 
   void _setGroupExpanded(SidebarSection section, bool expanded) {
     unawaited(
@@ -100,30 +128,55 @@ class _SidebarState extends State<Sidebar> {
     return ColoredBox(
       color: AppTheme.sidebar(context),
       child: SizedBox(
-        width: AppTheme.sidebarWidth,
+        width: double.infinity,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Padding(
               padding: const EdgeInsets.fromLTRB(10, 8, 10, 4),
-              child: shadcn.TextField(
-                onChanged: (v) => hostController.searchQuery.value = v,
-                borderRadius: AppTheme.sidebarSearchRadius,
-                filled: true,
-                padding: AppTheme.sidebarSearchPadding,
-                style: const TextStyle(
-                  fontSize: AppTheme.sidebarSearchFontSize,
-                ),
-                hintText: '搜索服务'.tr,
-                placeholder: Text('搜索服务'.tr),
-                features: const [
-                  shadcn.InputFeature.leading(
-                    AppIcon(
-                      AppIcons.search,
-                      size: AppTheme.sidebarSearchIconSize,
+              child: CallbackShortcuts(
+                bindings: {
+                  const SingleActivator(LogicalKeyboardKey.escape):
+                      _handleSearchEscape,
+                },
+                child: ValueListenableBuilder<TextEditingValue>(
+                  valueListenable: _searchController,
+                  builder: (context, value, _) => shadcn.TextField(
+                    controller: _searchController,
+                    focusNode: _searchFocus,
+                    onChanged: (v) => hostController.searchQuery.value = v,
+                    borderRadius: AppTheme.sidebarSearchRadius,
+                    filled: true,
+                    padding: AppTheme.sidebarSearchPadding,
+                    style: const TextStyle(
+                      fontSize: AppTheme.sidebarSearchFontSize,
                     ),
+                    hintText: '搜索服务'.tr,
+                    placeholder: Text('搜索服务'.tr),
+                    features: [
+                      const shadcn.InputFeature.leading(
+                        AppIcon(
+                          AppIcons.search,
+                          size: AppTheme.sidebarSearchIconSize,
+                        ),
+                      ),
+                      if (value.text.isNotEmpty)
+                        shadcn.InputFeature.trailing(
+                          SizedBox.square(
+                            dimension: 18,
+                            child: AppIconButton.text(
+                              key: const ValueKey('sidebar-search-clear'),
+                              semanticLabel: '清空搜索'.tr,
+                              tooltip: '清空搜索'.tr,
+                              density: shadcn.ButtonDensity.compact,
+                              onPressed: _clearSearch,
+                              icon: const AppIcon(AppIcons.x, size: 12),
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
-                ],
+                ),
               ),
             ),
             Expanded(
@@ -772,8 +825,55 @@ class _EmptyIdentitiesHint extends StatelessWidget {
   }
 }
 
-/// 凭证项：双击编辑；右键菜单：编辑、复制、删除。
-class _IdentityTile extends StatelessWidget {
+class _SidebarQuickActionButton extends StatelessWidget {
+  const _SidebarQuickActionButton({
+    required this.icon,
+    required this.label,
+    required this.onPressed,
+    super.key,
+  });
+
+  final AppIcons icon;
+  final String label;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) => SizedBox.square(
+    dimension: 22,
+    child: AppIconButton.text(
+      semanticLabel: label,
+      tooltip: label,
+      density: shadcn.ButtonDensity.compact,
+      onPressed: onPressed,
+      icon: AppIcon(icon, size: 13),
+    ),
+  );
+}
+
+Widget _hoverTitleWithType(
+  BuildContext context,
+  Widget title, {
+  required bool showType,
+  required String typeLabel,
+  required Key typeKey,
+}) {
+  if (!showType) return title;
+  final colors = shadcn.Theme.of(context).colorScheme;
+  return Row(
+    children: [
+      Flexible(child: title),
+      const SizedBox(width: 6),
+      Text(
+        typeLabel,
+        key: typeKey,
+        style: TextStyle(fontSize: 11, color: colors.mutedForeground),
+      ),
+    ],
+  );
+}
+
+/// 凭证项：双击编辑；悬停显示类型与编辑按钮；右键菜单：编辑、复制、删除。
+class _IdentityTile extends StatefulWidget {
   const _IdentityTile({
     required this.identity,
     required this.depth,
@@ -785,56 +885,127 @@ class _IdentityTile extends StatelessWidget {
   final int depth;
   final TreeDragAnchor dragAnchor;
 
-  Future<void> _onAction(BuildContext context, String action) async {
+  @override
+  State<_IdentityTile> createState() => _IdentityTileState();
+}
+
+/// 手动判定双击：不用 GestureDetector.onDoubleTap，避免手势仲裁给单击及行内快捷按钮加 ~300ms 延迟。
+class _DoubleTapTracker {
+  Timer? _timer;
+  bool _pending = false;
+
+  bool hit() {
+    if (_pending) {
+      _pending = false;
+      _timer?.cancel();
+      _timer = null;
+      return true;
+    }
+    _pending = true;
+    _timer?.cancel();
+    _timer = Timer(const Duration(milliseconds: 300), () {
+      _pending = false;
+    });
+    return false;
+  }
+
+  void dispose() {
+    _timer?.cancel();
+    _timer = null;
+    _pending = false;
+  }
+}
+
+class _IdentityTileState extends State<_IdentityTile> {
+  final _doubleTap = _DoubleTapTracker();
+  bool _hovered = false;
+
+  @override
+  void dispose() {
+    _doubleTap.dispose();
+    super.dispose();
+  }
+
+  void _handleTap() {
+    if (_doubleTap.hit()) {
+      unawaited(showIdentityEditDialog(context, identity: widget.identity));
+    }
+  }
+
+  Future<void> _onAction(String action) async {
     switch (action) {
       case 'edit':
-        await showIdentityEditDialog(context, identity: identity);
+        await showIdentityEditDialog(context, identity: widget.identity);
       case 'copy':
-        await showIdentityEditDialog(context, copyFrom: identity);
+        await showIdentityEditDialog(context, copyFrom: widget.identity);
       case 'delete':
-        await confirmDeleteIdentity(context, identity);
+        await confirmDeleteIdentity(context, widget.identity);
     }
   }
 
   @override
   Widget build(BuildContext context) {
     final colors = shadcn.Theme.of(context).colorScheme;
+    final identity = widget.identity;
     final actions = [('edit', '编辑'.tr), ('copy', '复制'.tr), ('delete', '删除'.tr)];
-    final row = AppListRow(
+
+    final titleText = Text(
+      identity.name,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: const TextStyle(fontSize: 13),
+    );
+
+    Widget buildRow({required bool showQuickActions}) => AppListRow(
       minHeight: AppTheme.sidebarItemHeight,
-      contentPadding: EdgeInsets.only(left: 14.0 + depth * 14, right: 4),
+      contentPadding: EdgeInsets.only(left: 14.0 + widget.depth * 14, right: 4),
       leading: AppIcon(
         AppIcons.fileKey,
         size: AppTheme.sidebarIconSize,
         color: colors.primary,
       ),
-      title: Text(
-        identity.name,
-        overflow: TextOverflow.ellipsis,
-        style: const TextStyle(fontSize: 13),
+      title: _hoverTitleWithType(
+        context,
+        titleText,
+        showType: showQuickActions,
+        typeLabel: identity.serviceType.label,
+        typeKey: ValueKey('identity-type-${identity.id}'),
       ),
-      subtitle: Text(
-        identity.serviceType.label,
-        style: TextStyle(fontSize: 11, color: colors.mutedForeground),
-      ),
+      trailing: showQuickActions
+          ? _SidebarQuickActionButton(
+              key: ValueKey('identity-quick-edit-${identity.id}'),
+              icon: AppIcons.pencil,
+              label: '编辑'.tr,
+              onPressed: () => unawaited(
+                showIdentityEditDialog(context, identity: identity),
+              ),
+            )
+          : null,
+      onTap: _handleTap,
     );
+
+    final previewRow = buildRow(showQuickActions: false);
+    final row = buildRow(showQuickActions: _hovered);
     final item = IdentityTreeItem.identity(identity.id);
     return IdentityTreeDropTarget(
       item: item,
       parentId: identity.folderId,
-      depth: depth,
+      depth: widget.depth,
       tree: Get.find<IdentityTreeController>(),
-      dragAnchor: dragAnchor,
+      dragAnchor: widget.dragAnchor,
       child: IdentityTreeDraggable(
         item: item,
-        dragAnchor: dragAnchor,
-        preview: row,
-        child: shadcn.ContextMenu(
-          items: appMenuItems(actions, (action) => _onAction(context, action)),
-          child: GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onDoubleTap: () =>
-                showIdentityEditDialog(context, identity: identity),
+        dragAnchor: widget.dragAnchor,
+        preview: previewRow,
+        child: MouseRegion(
+          onEnter: (_) {
+            if (!_hovered) setState(() => _hovered = true);
+          },
+          onExit: (_) {
+            if (_hovered) setState(() => _hovered = false);
+          },
+          child: shadcn.ContextMenu(
+            items: appMenuItems(actions, _onAction),
             child: row,
           ),
         ),
@@ -868,19 +1039,25 @@ class _HostTile extends StatefulWidget {
 }
 
 class _HostTileState extends State<_HostTile> {
-  /// 手动判定双击：不用 onDoubleTap，避免手势仲裁给单击加 ~300ms 延迟。
-  DateTime? _lastTapAt;
+  final _doubleTap = _DoubleTapTracker();
+  bool _hovered = false;
+
+  @override
+  void dispose() {
+    _doubleTap.dispose();
+    super.dispose();
+  }
 
   void _handleTap() {
-    final now = DateTime.now();
-    final isDoubleTap =
-        _lastTapAt != null &&
-        now.difference(_lastTapAt!) < const Duration(milliseconds: 300);
-    _lastTapAt = now;
-
-    if (isDoubleTap) {
-      connectToHost(context, widget.host);
-    } else {
+    if (_doubleTap.hit()) {
+      if (widget.gateway) {
+        unawaited(
+          showHostEditDialog(context, host: widget.host, gateway: true),
+        );
+      } else {
+        unawaited(connectToHost(context, widget.host));
+      }
+    } else if (!widget.gateway) {
       Get.find<SessionController>().focusExisting(
         widget.host.id,
         kind: widget.host.isDesktop
@@ -947,42 +1124,163 @@ class _HostTileState extends State<_HostTile> {
       ('copy', '复制'.tr),
       ('delete', '删除'.tr),
     ];
-    final leading = AppIcon(
+    final baseIcon = AppIcon(
       widget.gateway
           ? AppIcons.network
           : AppIcons.forServiceType(host.serviceType),
       size: AppTheme.sidebarIconSize,
       color: host.colorValue != null ? Color(host.colorValue!) : colors.primary,
     );
-    final title = Text(
+    final titleText = Text(
       host.name,
+      maxLines: 1,
       overflow: TextOverflow.ellipsis,
       style: const TextStyle(fontSize: 13),
     );
-    final row = AppListRow(
+
+    Widget buildRow({
+      required bool showQuickActions,
+      required bool showStatus,
+      Color? statusColor,
+      int sessionCount = 0,
+    }) => AppListRow(
       minHeight: AppTheme.sidebarItemHeight,
       contentPadding: EdgeInsets.only(left: 14.0 + widget.depth * 14, right: 4),
-      leading: leading,
-      title: title,
-      onTap: widget.gateway ? null : _handleTap,
-    );
-    final tile = shadcn.ContextMenu(
-      items: appMenuItems(actions, _onMenuAction),
-      child: widget.gateway
-          ? GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onDoubleTap: () =>
-                  showHostEditDialog(context, host: widget.host, gateway: true),
-              child: row,
+      leading: showStatus && statusColor != null
+          ? Stack(
+              clipBehavior: Clip.none,
+              children: [
+                baseIcon,
+                Positioned(
+                  right: -2,
+                  bottom: -2,
+                  child: Container(
+                    key: ValueKey('host-status-dot-${host.id}'),
+                    width: 7,
+                    height: 7,
+                    decoration: BoxDecoration(
+                      color: statusColor,
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: AppTheme.sidebar(context),
+                        width: 1.5,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
             )
-          : row,
+          : baseIcon,
+      title: _hoverTitleWithType(
+        context,
+        titleText,
+        showType: widget.gateway && showQuickActions,
+        typeLabel: host.gatewayType.label,
+        typeKey: ValueKey('gateway-type-${host.id}'),
+      ),
+      trailing: showQuickActions
+          ? Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (!widget.gateway && !host.isDesktop)
+                  _SidebarQuickActionButton(
+                    key: ValueKey('host-quick-sftp-${host.id}'),
+                    icon: AppIcons.folderOpen,
+                    label: '文件传输'.tr,
+                    onPressed: () => unawaited(
+                      connectToHost(
+                        context,
+                        host,
+                        kind: SessionKind.fileTransfer,
+                      ),
+                    ),
+                  ),
+                if (widget.gateway) ...[
+                  _SidebarQuickActionButton(
+                    key: ValueKey('gateway-quick-forward-${host.id}'),
+                    icon: AppIcons.arrowLeftRight,
+                    label: '端口转发'.tr,
+                    onPressed: () =>
+                        Get.find<SessionController>().openForward(host),
+                  ),
+                  _SidebarQuickActionButton(
+                    key: ValueKey('gateway-quick-proxy-${host.id}'),
+                    icon: AppIcons.proxy,
+                    label: '动态代理'.tr,
+                    onPressed: () =>
+                        Get.find<SessionController>().openProxy(host),
+                  ),
+                ],
+                _SidebarQuickActionButton(
+                  key: ValueKey('host-quick-edit-${host.id}'),
+                  icon: AppIcons.pencil,
+                  label: '编辑'.tr,
+                  onPressed: () => unawaited(
+                    showHostEditDialog(
+                      context,
+                      host: host,
+                      gateway: widget.gateway,
+                    ),
+                  ),
+                ),
+              ],
+            )
+          : showStatus && sessionCount > 1
+          ? Padding(
+              padding: const EdgeInsets.only(right: 4),
+              child: Text(
+                '$sessionCount',
+                key: ValueKey('host-session-count-${host.id}'),
+                style: TextStyle(fontSize: 11, color: colors.mutedForeground),
+              ),
+            )
+          : null,
+      onTap: _handleTap,
+    );
+    final previewRow = buildRow(showQuickActions: false, showStatus: false);
+    final Widget row = Get.isRegistered<SessionController>()
+        ? Obx(() {
+            final hostSessions = Get.find<SessionController>().sessions
+                .where(
+                  (s) =>
+                      s.host.id == host.id &&
+                      s.kind != SessionKind.containerTerminal &&
+                      s.phase != SessionPhase.closed,
+                )
+                .toList();
+            final statusColor = hostSessions.isEmpty
+                ? null
+                : hostSessions.any((s) => s.phase == SessionPhase.ready)
+                ? StatusColors.ready
+                : hostSessions.any((s) => s.phase.isBusy)
+                ? StatusColors.connecting
+                : StatusColors.failed;
+            return buildRow(
+              showQuickActions: _hovered,
+              showStatus: true,
+              statusColor: statusColor,
+              sessionCount: hostSessions.length,
+            );
+          })
+        : buildRow(showQuickActions: _hovered, showStatus: true);
+    final tile = MouseRegion(
+      onEnter: (_) {
+        if (!_hovered) setState(() => _hovered = true);
+      },
+      onExit: (_) {
+        if (_hovered) setState(() => _hovered = false);
+      },
+      child: shadcn.ContextMenu(
+        items: appMenuItems(actions, _onMenuAction),
+        child: row,
+      ),
     );
 
     final item = HostTreeItem.host(host.id);
     final draggable = HostTreeDraggable(
       item: item,
       dragAnchor: widget.dragAnchor,
-      preview: row,
+      preview: previewRow,
       child: tile,
     );
     if (!widget.reorderable) return draggable;

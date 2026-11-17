@@ -9,8 +9,6 @@ import 'package:pagashell/application/session/session_controller.dart';
 import 'package:pagashell/domain/entities/host.dart';
 import 'package:pagashell/presentation/configuration/configuration_transfer_dialog.dart';
 import 'package:pagashell/presentation/shell/widgets/sidebar.dart';
-import 'package:pagashell/presentation/shell/widgets/status_bar.dart';
-import 'package:pagashell/presentation/shell/widgets/title_bar.dart';
 import 'package:pagashell/presentation/shell/widgets/window_controls.dart';
 import 'package:pagashell/presentation/shell/widgets/workspace.dart';
 import 'package:pagashell/presentation/theme/app_theme.dart';
@@ -158,18 +156,17 @@ void main() {
       );
       double opacity() => tester.widget<FadeTransition>(fade).opacity.value;
       final fillState = tester.state(fill);
-      final expandedLeft = tester.getRect(toggle).left;
-      final collapsedLeft = platform == TargetPlatform.macOS
+      final fixedLeft = platform == TargetPlatform.macOS
           ? AppTheme.macWindowControlsWidth
           : 0.0;
+      expect(tester.getRect(toggle).left, fixedLeft);
       expect(opacity(), 0);
       for (final expanded in [false, true]) {
         await tester.tap(toggle);
         await tester.pump();
         await tester.pump(AppTheme.sidebarTransitionDuration ~/ 2);
         final moving = tester.getRect(toggle);
-        expect(moving.left, greaterThan(collapsedLeft));
-        expect(moving.left, lessThan(expandedLeft));
+        expect(moving.left, fixedLeft);
         expect(opacity(), greaterThan(0));
         expect(opacity(), lessThan(1));
         expect(tester.state(fill), same(fillState));
@@ -179,20 +176,16 @@ void main() {
         );
         await tester.pumpAndSettle();
         expect(opacity(), expanded ? 0 : 1);
-        expect(
-          tester.getRect(toggle).left,
-          expanded ? expandedLeft : collapsedLeft,
-        );
+        expect(tester.getRect(toggle).left, fixedLeft);
       }
       await tester.tap(toggle);
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 80));
       final reversingOpacity = opacity();
-      final reversingLeft = tester.getRect(toggle).left;
       await tester.tap(toggle);
       await tester.pump();
       expect(opacity(), closeTo(reversingOpacity, 0.001));
-      expect(tester.getRect(toggle).left, closeTo(reversingLeft, 0.001));
+      expect(tester.getRect(toggle).left, fixedLeft);
       await tester.pumpAndSettle();
       expect(opacity(), 0);
       expect(tester.state(fill), same(fillState));
@@ -272,9 +265,6 @@ void main() {
             closeTo(defaultHeight + AppTheme.sessionPaneTopMargin, 1),
           );
           expect(toggle, findsOneWidget);
-          final titleBar = find.byType(TitleBar);
-          expect(titleBar, findsNothing);
-          expect(find.byType(StatusBar), findsNothing);
           final workspace = find.byType(Workspace);
           expect(
             tester.getTopLeft(workspace),

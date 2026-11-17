@@ -60,8 +60,11 @@ class DriftSettingsRepository implements SettingsRepository {
       if (decoded is! Map<String, dynamic>) return SidebarState();
       final sections = decoded['sections'];
       final folders = decoded['folders'];
+      final recentHosts = decoded['recentHosts'];
+      final width = decoded['width'];
       return SidebarState(
         visible: decoded['visible'] is bool ? decoded['visible'] as bool : true,
+        width: width is num ? width.toDouble() : SidebarState.defaultWidth,
         sections: {
           for (final section in SidebarSection.values)
             if (sections is Map<String, dynamic> &&
@@ -76,6 +79,9 @@ class DriftSettingsRepository implements SettingsRepository {
                   .whereType<String>()
                   .toSet(),
         },
+        recentHostIds: recentHosts is List
+            ? recentHosts.whereType<String>().toList()
+            : const [],
       );
     } on FormatException {
       return SidebarState();
@@ -90,6 +96,7 @@ class DriftSettingsRepository implements SettingsRepository {
           key: _sidebarStateKey,
           value: jsonEncode({
             'visible': state.visible,
+            'width': state.width,
             'sections': {
               for (final entry in state.sections.entries)
                 entry.key.name: entry.value,
@@ -98,6 +105,7 @@ class DriftSettingsRepository implements SettingsRepository {
               for (final entry in state.folders.entries)
                 entry.key.name: entry.value.toList(),
             },
+            'recentHosts': state.recentHostIds,
           }),
         ),
       );

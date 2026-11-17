@@ -4,11 +4,15 @@ import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
+import '../../../application/hosts/host_controller.dart';
 import '../../../application/session/session.dart';
 import '../../../application/session/session_controller.dart';
 import '../../../application/session/session_layout.dart';
+import '../../../application/settings/settings_controller.dart';
+import '../../../domain/entities/host.dart';
 import '../../../domain/repositories/local_file_repository.dart';
 import '../../components/app_icon.dart';
+import '../../components/app_list_row.dart';
 import '../../forward/forward_session_panel.dart';
 import '../../hosts/host_edit_dialog.dart';
 import '../../localization/app_translations.dart';
@@ -22,6 +26,7 @@ import '../../terminal/app_terminal_view.dart';
 import '../../terminal/terminal_tab_workspace.dart';
 import '../../theme/app_theme.dart';
 import '../command_palette.dart';
+import '../connect_flow.dart';
 import '../session_close_confirmation.dart';
 import 'session_tab_pane.dart';
 
@@ -171,6 +176,30 @@ class _WorkspaceState extends State<Workspace> {
 class _WelcomeView extends StatelessWidget {
   const _WelcomeView();
 
+  List<Host> _recentHosts() {
+    if (!Get.isRegistered<HostController>()) return const [];
+    final byId = {
+      for (final host in Get.find<HostController>().hosts) host.id: host,
+    };
+    if (byId.isEmpty) return const [];
+    final recentIds = <String>[
+      if (Get.isRegistered<SessionController>())
+        ...Get.find<SessionController>().recentHostIds,
+      if (Get.isRegistered<SettingsController>())
+        ...Get.find<SettingsController>().sidebarState.value.recentHostIds,
+    ];
+    final result = <Host>[];
+    final seen = <String>{};
+    for (final id in recentIds) {
+      final host = byId[id];
+      if (host != null && seen.add(id)) {
+        result.add(host);
+        if (result.length >= 4) break;
+      }
+    }
+    return result;
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = shadcn.Theme.of(context);
@@ -182,7 +211,7 @@ class _WelcomeView extends StatelessWidget {
       child: SingleChildScrollView(
         padding: const EdgeInsets.all(28),
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 480),
+          constraints: const BoxConstraints(maxWidth: 540),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
@@ -230,7 +259,68 @@ class _WelcomeView extends StatelessWidget {
                   ),
                 ],
               ),
-              const SizedBox(height: 32),
+              if (Get.isRegistered<HostController>())
+                Obx(() {
+                  final hosts = _recentHosts();
+                  if (hosts.isEmpty) return const SizedBox.shrink();
+                  return Padding(
+                    key: const ValueKey('welcome-recent-hosts'),
+                    padding: const EdgeInsets.only(top: 28),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                '最近连接'.tr,
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                  color: colors.mutedForeground,
+                                ),
+                              ),
+                            ),
+                            shadcn.GhostButton(
+                              size: shadcn.ButtonSize.small,
+                              onPressed: () => showCommandPalette(context),
+                              child: Text(
+                                '查看全部'.tr,
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: colors.mutedForeground,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 10),
+                        LayoutBuilder(
+                          builder: (context, constraints) {
+                            const spacing = 10.0;
+                            final columns = constraints.maxWidth >= 420 ? 2 : 1;
+                            final cardWidth =
+                                (constraints.maxWidth -
+                                    spacing * (columns - 1)) /
+                                columns;
+                            return Wrap(
+                              spacing: spacing,
+                              runSpacing: spacing,
+                              children: [
+                                for (final host in hosts)
+                                  SizedBox(
+                                    width: cardWidth,
+                                    child: _WelcomeHostCard(host: host),
+                                  ),
+                              ],
+                            );
+                          },
+                        ),
+                      ],
+                    ),
+                  );
+                }),
+              const SizedBox(height: 24),
               shadcn.Card(
                 theme: const shadcn.CardTheme(padding: EdgeInsets.all(20)),
                 child: Column(
@@ -244,6 +334,12 @@ class _WelcomeView extends StatelessWidget {
                     _ShortcutHint(
                       keys: '${modifier}N',
                       label: '新建服务'.tr,
+                      style: hintStyle,
+                    ),
+                    const SizedBox(height: 14),
+                    _ShortcutHint(
+                      keys: '$modifier,',
+                      label: '打开设置'.tr,
                       style: hintStyle,
                     ),
                   ],
@@ -265,6 +361,77 @@ class _WelcomeView extends StatelessWidget {
                     ),
                   ),
                 ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _WelcomeHostCard extends StatelessWidget {
+  const _WelcomeHostCard({required this.host});
+
+  final Host host;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = shadcn.Theme.of(context).colorScheme;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: AppTheme.surface(context),
+        border: Border.all(color: AppTheme.border(context)),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: AppSurfaceAction(
+        key: ValueKey('welcome-host-${host.id}'),
+        borderRadius: BorderRadius.circular(10),
+        onTap: () => unawaited(connectToHost(context, host)),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          child: Row(
+            children: [
+              AppIcon(
+                AppIcons.forServiceType(host.serviceType),
+                size: 18,
+                color: host.colorValue != null
+                    ? Color(host.colorValue!)
+                    : colors.primary,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      host.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      host.address,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: colors.mutedForeground,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 6),
+              AppIcon(
+                AppIcons.arrowRight,
+                size: 14,
+                color: colors.mutedForeground,
               ),
             ],
           ),

@@ -98,8 +98,6 @@ abstract final class AppTheme {
   static const double macWindowControlsWidth = 76;
   static const double windowButtonWidth = 44;
   static const double windowDragWidth = 64;
-  static const double statusBarHeight = 28;
-  static const double statusBarIconSize = 14;
   static const double toolbarIconSize = 15;
   static const double terminalToolbarHeight = 36;
   static const double terminalToolbarButtonSize = 28;
@@ -129,6 +127,9 @@ abstract final class AppTheme {
   static const double transferProgressMinHeight = 96;
   static const double transferProgressRowHeight = 50;
   static const double sidebarWidth = 264;
+  static const double sidebarMinWidth = 200;
+  static const double sidebarMaxWidth = 420;
+  static const double sidebarResizeWidth = 5;
   static const double sidebarFooterHeight = 40;
   static const double settingsDialogMaxWidth = 600;
   static const double proxyModeCardWidth = 320;

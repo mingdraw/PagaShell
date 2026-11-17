@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
@@ -381,7 +382,7 @@ class _SessionTabPaneState extends State<SessionTabPane> {
   }
 }
 
-class _SessionTab extends StatelessWidget {
+class _SessionTab extends StatefulWidget {
   const _SessionTab({
     required this.session,
     required this.tab,
@@ -392,7 +393,15 @@ class _SessionTab extends StatelessWidget {
   final SessionTab tab;
   final bool active;
 
-  Color get _statusColor => switch (session.phase) {
+  @override
+  State<_SessionTab> createState() => _SessionTabState();
+}
+
+class _SessionTabState extends State<_SessionTab> {
+  bool _hovered = false;
+  bool _middleButtonDown = false;
+
+  Color get _statusColor => switch (widget.session.phase) {
     SessionPhase.ready => StatusColors.ready,
     SessionPhase.failed => StatusColors.failed,
     SessionPhase.closed => StatusColors.closed,
@@ -402,40 +411,74 @@ class _SessionTab extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = shadcn.Theme.of(context).colorScheme;
-    return ConstrainedBox(
-      constraints: const BoxConstraints(minWidth: AppTheme.sessionTabMinWidth),
-      child: shadcn.Label(
-        leading: AppIcon(
-          switch (session.kind) {
-            SessionKind.fileTransfer => AppIcons.folderOpen,
-            SessionKind.portForward => AppIcons.arrowLeftRight,
-            SessionKind.dynamicProxy => AppIcons.proxy,
-            SessionKind.terminal => AppIcons.terminal,
-            SessionKind.containerTerminal => AppIcons.container,
-            SessionKind.remoteDesktop => AppIcons.forServiceType(
-              session.host.serviceType,
-            ),
-          },
-          size: 14,
-          color: _statusColor,
-        ),
-        trailing: AppIconButton(
-          key: ValueKey('session-tab-close-${tab.id}'),
-          semanticLabel: '关闭标签'.tr,
-          density: shadcn.ButtonDensity.compact,
-          onPressed: () =>
+    final session = widget.session;
+    final tab = widget.tab;
+    return MouseRegion(
+      onEnter: (_) {
+        if (!_hovered) setState(() => _hovered = true);
+      },
+      onExit: (_) {
+        if (_hovered) setState(() => _hovered = false);
+      },
+      child: Listener(
+        behavior: HitTestBehavior.translucent,
+        onPointerDown: (event) {
+          _middleButtonDown = event.buttons == kMiddleMouseButton;
+        },
+        onPointerUp: (_) {
+          if (_middleButtonDown) {
+            _middleButtonDown = false;
+            unawaited(
               requestSessionTabClose(Get.find<SessionController>(), [tab.id]),
-          icon: const AppIcon(AppIcons.x, size: 12),
-        ),
+            );
+          }
+        },
+        onPointerCancel: (_) => _middleButtonDown = false,
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 140),
-          child: Text(
-            tab.sessionIds.length > 1
-                ? '${session.title} · ${tab.sessionIds.length}'
-                : session.title,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              color: active ? colors.foreground : colors.mutedForeground,
+          constraints: const BoxConstraints(
+            minWidth: AppTheme.sessionTabMinWidth,
+          ),
+          child: shadcn.Label(
+            leading: AppIcon(
+              switch (session.kind) {
+                SessionKind.fileTransfer => AppIcons.folderOpen,
+                SessionKind.portForward => AppIcons.arrowLeftRight,
+                SessionKind.dynamicProxy => AppIcons.proxy,
+                SessionKind.terminal => AppIcons.terminal,
+                SessionKind.containerTerminal => AppIcons.container,
+                SessionKind.remoteDesktop => AppIcons.forServiceType(
+                  session.host.serviceType,
+                ),
+              },
+              size: 14,
+              color: _statusColor,
+            ),
+            trailing: Opacity(
+              opacity: widget.active || _hovered ? 1.0 : 0.0,
+              child: AppIconButton(
+                key: ValueKey('session-tab-close-${tab.id}'),
+                semanticLabel: '关闭标签'.tr,
+                density: shadcn.ButtonDensity.compact,
+                onPressed: () => requestSessionTabClose(
+                  Get.find<SessionController>(),
+                  [tab.id],
+                ),
+                icon: const AppIcon(AppIcons.x, size: 12),
+              ),
+            ),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 140),
+              child: Text(
+                tab.sessionIds.length > 1
+                    ? '${session.title} · ${tab.sessionIds.length}'
+                    : session.title,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: widget.active
+                      ? colors.foreground
+                      : colors.mutedForeground,
+                ),
+              ),
             ),
           ),
         ),

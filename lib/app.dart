@@ -44,6 +44,7 @@ class _PagaShellAppState extends State<PagaShellApp> {
       return shadcn.ShadcnApp(
         title: 'PagaShell',
         debugShowCheckedModeBanner: false,
+        enableScrollInterception: false,
         locale: Get.locale ?? AppTranslations.defaultLocale,
         supportedLocales: AppTranslations.supportedLocales,
         themeMode: switch (_settings.themeMode.value) {

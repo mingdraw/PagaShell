@@ -2,8 +2,10 @@ import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
+import '../../application/folders/folder_controller.dart';
 import '../../application/gateways/gateway_controller.dart';
 import '../../application/hosts/host_controller.dart';
+import '../../domain/entities/folder.dart';
 import '../../domain/entities/host.dart';
 import '../../domain/entities/proxy_config.dart';
 import '../../domain/vault/secret_store.dart';
@@ -42,6 +44,18 @@ Future<void> showHostEditDialog(
 
 /// 登录方式：直接维护本服务的用户名密码，或复用已有凭证。
 enum _AuthMode { password, identity }
+
+final class _FolderOption {
+  const _FolderOption(this.id);
+
+  final String? id;
+
+  @override
+  bool operator ==(Object other) => other is _FolderOption && other.id == id;
+
+  @override
+  int get hashCode => id.hashCode;
+}
 
 class HostEditDialog extends StatefulWidget {
   const HostEditDialog({
@@ -553,7 +567,14 @@ class _HostEditDialogState extends State<HostEditDialog> {
                     ),
                     child: Text('高级选项'.tr),
                   ),
-                  if (_advancedExpanded) _gatewayField(),
+                  if (_advancedExpanded) ...[
+                    if (Get.isRegistered<FolderController>() &&
+                        Get.find<FolderController>().folders.isNotEmpty) ...[
+                      _folderField(),
+                      const SizedBox(height: 12),
+                    ],
+                    _gatewayField(),
+                  ],
                 ],
                 const SizedBox(height: 8),
                 if (_error != null)
@@ -605,6 +626,53 @@ class _HostEditDialogState extends State<HostEditDialog> {
         ],
       ),
     );
+  }
+
+  Widget _folderField() {
+    final folderController = Get.find<FolderController>();
+    return Obx(() {
+      final folders = folderController.folders.toList();
+      final byId = {for (final f in folders) f.id: f};
+      String pathOf(Folder folder) {
+        final parts = <String>[folder.name];
+        var parentId = folder.parentId;
+        final visited = <String>{folder.id};
+        while (parentId != null && visited.add(parentId)) {
+          final parent = byId[parentId];
+          if (parent == null) break;
+          parts.insert(0, parent.name);
+          parentId = parent.parentId;
+        }
+        return parts.join(' / ');
+      }
+
+      final currentId = _folderId != null && byId.containsKey(_folderId)
+          ? _folderId
+          : null;
+      return AppSelectField<_FolderOption>(
+        key: ValueKey('host-folder-select-$currentId'),
+        initialValue: _FolderOption(currentId),
+        label: '所属目录'.tr,
+        items: [
+          AppSelectOption(
+            value: const _FolderOption(null),
+            child: Text('根目录（未分组）'.tr),
+          ),
+          for (final folder in folders)
+            AppSelectOption(
+              value: _FolderOption(folder.id),
+              child: Text(pathOf(folder), overflow: TextOverflow.ellipsis),
+            ),
+        ],
+        onChanged: _saving
+            ? null
+            : (selected) {
+                if (selected != null) {
+                  setState(() => _folderId = selected.id);
+                }
+              },
+      );
+    });
   }
 
   Widget _gatewayField() {

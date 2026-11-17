@@ -79,10 +79,11 @@ class _AgentWorkspaceState extends State<AgentWorkspace> {
     return Obx(() {
       final state = settings.state.value;
       final sidebarVisible = generalSettings.sidebarVisible.value;
+      final currentSidebarWidth = generalSettings.sidebarWidth.value;
       return LayoutBuilder(
         builder: (context, constraints) {
           final visible = state.panelVisible && !fullscreen;
-          final sidebarWidth = sidebarVisible ? AppTheme.sidebarWidth : 0.0;
+          final sidebarWidth = sidebarVisible ? currentSidebarWidth : 0.0;
           final compact =
               constraints.maxWidth - sidebarWidth <
               AppTheme.agentMinWidth +
@@ -211,17 +212,11 @@ class _AgentWorkspaceState extends State<AgentWorkspace> {
                     panel,
                   ],
                 ),
-                // 开关持续挂载，让图标渐变和位置移动沿用同一段动画状态。
+                // 开关固定在窗口左上角（macOS 红绿灯右侧），不跟随侧边栏宽度移动。
                 if (!fullscreen)
-                  AnimatedPositioned(
-                    duration: duration,
-                    curve: Curves.easeInOutCubic,
+                  Positioned(
                     top: AppTheme.sessionPaneTopMargin,
-                    left: sidebarVisible && !(visible && compact)
-                        ? AppTheme.sidebarWidth - headerControlSize - 8
-                        : isMac
-                        ? AppTheme.macWindowControlsWidth
-                        : 0,
+                    left: isMac ? AppTheme.macWindowControlsWidth : 0,
                     height: headerControlSize,
                     child: const WindowHeaderButton(
                       child: SidebarToggleButton(),

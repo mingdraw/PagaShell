@@ -1378,5 +1378,20 @@ class AppTranslations extends Translations {
     '终端未启动或会话不存在: @value':
         'Terminal not started or session does not exist: @value',
     '删除失败: @value': 'Unable to delete: @value',
+    '清空搜索': 'Clear search',
+    '最近连接': 'Recent connections',
+    '查看全部': 'View all',
+    '打开设置': 'Open settings',
+    '窗格 @index/@total': 'Pane @index/@total',
+    '切换标签': 'Switch tab',
+    '最近': 'Recent',
+    '已连接': 'Connected',
+    '内置能力': 'Capabilities',
+    '常见提问': 'Suggested prompts',
+    '回车连接 · ⌘↵ 文件传输 · ⇧↵ 新建会话': '↵ Connect · ⌘↵ File transfer · ⇧↵ New session',
+    '回车连接 · Ctrl+↵ 文件传输 · ⇧↵ 新建会话':
+        '↵ Connect · Ctrl+↵ File transfer · ⇧↵ New session',
+    '所属目录': 'Folder',
+    '根目录（未分组）': 'Root (ungrouped)',
   };
 }

@@ -61,6 +61,7 @@ void main() {
     await repository.saveSidebarState(
       SidebarState(
         visible: false,
+        width: 320,
         sections: {
           SidebarSection.services: false,
           SidebarSection.identities: true,
@@ -71,6 +72,7 @@ void main() {
           SidebarSection.identities: {'same-id'},
           SidebarSection.gateways: {},
         },
+        recentHostIds: const ['host-2', 'host-1'],
       ),
     );
     await db.close();
@@ -79,6 +81,7 @@ void main() {
     final settings = DriftSettingsRepository(reopened);
     final state = await settings.readSidebarState();
     expect(state.visible, isFalse);
+    expect(state.width, 320);
     expect(state.isSectionExpanded(SidebarSection.services), isFalse);
     expect(state.isSectionExpanded(SidebarSection.identities), isTrue);
     expect(state.isSectionExpanded(SidebarSection.gateways), isFalse);
@@ -88,6 +91,7 @@ void main() {
     });
     expect(state.expandedFolders(SidebarSection.identities), {'same-id'});
     expect(state.expandedFolders(SidebarSection.gateways), isEmpty);
+    expect(state.recentHostIds, ['host-2', 'host-1']);
     expect(await settings.readThemeMode(), AppThemeMode.dark);
   });
 

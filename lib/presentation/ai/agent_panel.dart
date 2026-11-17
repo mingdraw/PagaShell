@@ -12,6 +12,7 @@ import '../../domain/ai/ai_model.dart';
 import '../components/app_dialog.dart';
 import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
+import '../components/app_list_row.dart';
 import '../components/app_menu.dart';
 import '../navigation/app_navigation.dart';
 import '../navigation/app_notice.dart';
@@ -106,17 +107,31 @@ class _AgentPanelState extends State<AgentPanel> {
                 Expanded(
                   child: Obx(() {
                     final model = _agent.currentModel?.model ?? '未选择模型'.tr;
-                    return shadcn.Tooltip(
-                      tooltip: (_) =>
-                          shadcn.TooltipContainer(child: Text(model)),
-                      child: Text(
-                        model,
-                        key: const ValueKey('agent-model-name'),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: colors.mutedForeground,
+                    return Align(
+                      alignment: Alignment.centerLeft,
+                      child: shadcn.Tooltip(
+                        tooltip: (_) =>
+                            shadcn.TooltipContainer(child: Text(model)),
+                        child: AppSurfaceAction(
+                          key: const ValueKey('agent-model-trigger'),
+                          borderRadius: BorderRadius.circular(6),
+                          onTap: () => unawaited(showSettingsDialog(ai: true)),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 6,
+                              vertical: 2,
+                            ),
+                            child: Text(
+                              model,
+                              key: const ValueKey('agent-model-name'),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: colors.mutedForeground,
+                              ),
+                            ),
+                          ),
                         ),
                       ),
                     );
@@ -217,10 +232,7 @@ class _AgentPanelState extends State<AgentPanel> {
                     child: Row(
                       children: [
                         _agent.waitingForApproval.value
-                            ? const AppIcon(
-                                AppIcons.shieldCheck,
-                                size: 12,
-                              )
+                            ? const AppIcon(AppIcons.shieldCheck, size: 12)
                             : const SizedBox(
                                 width: 12,
                                 height: 12,
@@ -434,57 +446,175 @@ class _AgentPanelState extends State<AgentPanel> {
     }),
   );
 
-  Widget _welcome() => SingleChildScrollView(
-    padding: const EdgeInsets.all(18),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        const SizedBox(height: 12),
-        Text(
-          '你的运维助手'.tr,
-          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
-        ),
-        const SizedBox(height: 10),
-        Text(
-          '解答工具使用、分析 SSH/RDP 问题，并生成可确认的命令建议。'.tr,
-          style: TextStyle(
-            fontSize: 12,
-            height: 1.7,
-            color: shadcn.Theme.of(context).colorScheme.mutedForeground,
-          ),
-        ),
-        const SizedBox(height: 20),
-        for (final skill in AgentSkill.builtIn) ...[
-          shadcn.OutlineBadge(child: Text(skill.title.tr)),
+  Widget _welcome() {
+    final colors = shadcn.Theme.of(context).colorScheme;
+    const prompts = [
+      (
+        icon: AppIcons.folderOpen,
+        prompt: '如何使用 PagaShell 的文件传输和端口转发？',
+        subtitle: '服务、凭证、网关、终端、文件传输和端口转发',
+      ),
+      (
+        icon: AppIcons.terminal,
+        prompt: '帮我排查 SSH 连接失败',
+        subtitle: 'Linux/macOS 排障、资源、网络、服务与安全命令建议',
+      ),
+      (
+        icon: AppIcons.rdp,
+        prompt: '如何排查 Windows RDP 登录问题？',
+        subtitle: 'Windows 远程桌面、NLA、证书、连通性与分辨率排障',
+      ),
+    ];
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(18),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
           const SizedBox(height: 8),
-        ],
-        const SizedBox(height: 12),
-        for (final prompt in [
-          '如何使用 PagaShell 的文件传输和端口转发？',
-          '帮我排查 SSH 连接失败',
-          '如何排查 Windows RDP 登录问题？',
-        ]) ...[
-          shadcn.GhostButton(
-            onPressed: () {
-              _input.text = prompt.tr;
-              _focus.requestFocus();
-            },
-            child: Text(prompt.tr, style: const TextStyle(fontSize: 12)),
+          Row(
+            children: [
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: AppTheme.surface(context),
+                  border: Border.all(color: AppTheme.border(context)),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const AppIcon(AppIcons.bot, size: 18),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  '你的运维助手'.tr,
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
           ),
+          const SizedBox(height: 10),
+          Text(
+            '解答工具使用、分析 SSH/RDP 问题，并生成可确认的命令建议。'.tr,
+            style: TextStyle(
+              fontSize: 12,
+              height: 1.7,
+              color: colors.mutedForeground,
+            ),
+          ),
+          const SizedBox(height: 18),
+          Text(
+            '内置能力'.tr,
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              color: colors.mutedForeground,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              for (final skill in AgentSkill.builtIn)
+                shadcn.Tooltip(
+                  tooltip: (_) => shadcn.TooltipContainer(
+                    child: Text(skill.description.tr),
+                  ),
+                  child: shadcn.OutlineBadge(child: Text(skill.title.tr)),
+                ),
+            ],
+          ),
+          const SizedBox(height: 18),
+          Text(
+            '常见提问'.tr,
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              color: colors.mutedForeground,
+            ),
+          ),
+          const SizedBox(height: 8),
+          for (var i = 0; i < prompts.length; i++) ...[
+            DecoratedBox(
+              decoration: BoxDecoration(
+                color: AppTheme.surface(context),
+                border: Border.all(color: AppTheme.border(context)),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: AppSurfaceAction(
+                key: ValueKey('agent-welcome-prompt-$i'),
+                borderRadius: BorderRadius.circular(8),
+                onTap: () {
+                  final text = prompts[i].prompt.tr;
+                  _input.value = TextEditingValue(
+                    text: text,
+                    selection: TextSelection.collapsed(offset: text.length),
+                  );
+                  _focus.requestFocus();
+                },
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 8,
+                  ),
+                  child: Row(
+                    children: [
+                      AppIcon(prompts[i].icon, size: 15, color: colors.primary),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              prompts[i].prompt.tr,
+                              style: const TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              prompts[i].subtitle.tr,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 10.5,
+                                color: colors.mutedForeground,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      AppIcon(
+                        AppIcons.arrowRight,
+                        size: 13,
+                        color: colors.mutedForeground,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+          ],
           const SizedBox(height: 6),
+          Obx(
+            () => Get.find<AiSettingsController>().state.value.apiConfig == null
+                ? shadcn.OutlineButton(
+                    key: const ValueKey('agent-configure-model'),
+                    onPressed: () => unawaited(showSettingsDialog(ai: true)),
+                    child: Text('配置 AI 模型'.tr),
+                  )
+                : const SizedBox.shrink(),
+          ),
         ],
-        const SizedBox(height: 12),
-        Obx(
-          () => Get.find<AiSettingsController>().state.value.apiConfig == null
-              ? shadcn.OutlineButton(
-                  onPressed: () => unawaited(showSettingsDialog(ai: true)),
-                  child: Text('配置 AI 模型'.tr),
-                )
-              : const SizedBox.shrink(),
-        ),
-      ],
-    ),
-  );
+      ),
+    );
+  }
 
   Widget _entry(AgentEntry entry) {
     if (entry.command != null) {

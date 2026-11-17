@@ -487,8 +487,15 @@ class _AnimatedSidebar extends StatelessWidget {
   }
 }
 
-class _SidebarPanel extends StatelessWidget {
+class _SidebarPanel extends StatefulWidget {
   const _SidebarPanel();
+
+  @override
+  State<_SidebarPanel> createState() => _SidebarPanelState();
+}
+
+class _SidebarPanelState extends State<_SidebarPanel> {
+  double? _dragWidth;
 
   @override
   Widget build(BuildContext context) {
@@ -496,37 +503,87 @@ class _SidebarPanel extends StatelessWidget {
     final settings = Get.find<SettingsController>();
     final hiddenForSpace =
         AgentSidebarScope.maybeOf(context)?.sidebarHiddenForSpace ?? false;
-    return SizedBox(
-      width: AppTheme.sidebarWidth,
-      child: ColoredBox(
-        color: AppTheme.sidebar(context),
-        child: Column(
+    return Obx(() {
+      final width = (_dragWidth ?? settings.sidebarWidth.value).clamp(
+        AppTheme.sidebarMinWidth,
+        AppTheme.sidebarMaxWidth,
+      );
+      return SizedBox(
+        width: width,
+        child: Stack(
+          fit: StackFit.expand,
           children: [
-            SizedBox(
-              height: AppTheme.windowHeaderHeight,
-              child: Row(
+            ColoredBox(
+              color: AppTheme.sidebar(context),
+              child: Column(
                 children: [
-                  if (isMac)
-                    const SizedBox(width: AppTheme.macWindowControlsWidth),
-                  const Expanded(child: WindowDragArea()),
-                  if (AgentSidebarScope.maybeOf(context) == null)
-                    Obx(
-                      () => Offstage(
-                        offstage:
-                            !settings.sidebarVisible.value || hiddenForSpace,
-                        child: const WindowHeaderButton(
-                          child: SidebarToggleButton(),
-                        ),
-                      ),
+                  SizedBox(
+                    height: AppTheme.windowHeaderHeight,
+                    child: Row(
+                      children: [
+                        if (isMac)
+                          const SizedBox(
+                            width: AppTheme.macWindowControlsWidth,
+                          ),
+                        if (AgentSidebarScope.maybeOf(context) == null)
+                          Offstage(
+                            offstage:
+                                !settings.sidebarVisible.value ||
+                                hiddenForSpace,
+                            child: const WindowHeaderButton(
+                              child: SidebarToggleButton(),
+                            ),
+                          ),
+                        const Expanded(child: WindowDragArea()),
+                      ],
                     ),
-                  const SizedBox(width: 8),
+                  ),
+                  const Expanded(child: Sidebar()),
                 ],
               ),
             ),
-            const Expanded(child: Sidebar()),
+            Positioned(
+              top: AppTheme.windowHeaderHeight,
+              right: 0,
+              bottom: 0,
+              width: AppTheme.sidebarResizeWidth,
+              child: MouseRegion(
+                cursor: SystemMouseCursors.resizeColumn,
+                child: GestureDetector(
+                  key: const ValueKey('sidebar-resize-handle'),
+                  behavior: HitTestBehavior.opaque,
+                  onHorizontalDragUpdate: (details) {
+                    final next = (width + details.delta.dx).clamp(
+                      AppTheme.sidebarMinWidth,
+                      AppTheme.sidebarMaxWidth,
+                    );
+                    setState(() => _dragWidth = next);
+                    settings.sidebarWidth.value = next;
+                  },
+                  onHorizontalDragEnd: (_) {
+                    final saved = _dragWidth;
+                    setState(() => _dragWidth = null);
+                    if (saved != null) {
+                      unawaited(
+                        settings.setSidebarWidth(saved).catchError((Object _) {
+                          if (context.mounted) {
+                            AppNotice.error('保存失败，请重试'.tr);
+                          }
+                        }),
+                      );
+                    }
+                  },
+                  onHorizontalDragCancel: () => setState(() {
+                    _dragWidth = null;
+                    settings.sidebarWidth.value =
+                        settings.sidebarState.value.width;
+                  }),
+                ),
+              ),
+            ),
           ],
         ),
-      ),
-    );
+      );
+    });
   }
 }

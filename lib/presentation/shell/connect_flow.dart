@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
@@ -7,6 +9,7 @@ import '../../application/hosts/host_controller.dart';
 import '../../application/identities/identity_controller.dart';
 import '../../application/session/session.dart';
 import '../../application/session/session_controller.dart';
+import '../../application/settings/settings_controller.dart';
 import '../../domain/entities/host.dart';
 import '../../domain/entities/identity.dart';
 import '../../domain/ssh/ssh_engine.dart';
@@ -118,6 +121,13 @@ Future<void> _connectToHost(
   // 准备凭据及网关期间可能已有同类标签打开，创建前再检查一次。
   if (!forceNew && sessionController.focusExisting(host.id, kind: kind)) {
     return;
+  }
+  if (Get.isRegistered<SettingsController>()) {
+    unawaited(
+      Get.find<SettingsController>()
+          .recordRecentHost(host.id)
+          .catchError((Object _) {}),
+    );
   }
   await sessionController.open(
     login.$1,
@@ -390,9 +400,7 @@ class _ConnectDialogState extends State<_ConnectDialog> {
                       suffixIcon: AppIconButton(
                         density: shadcn.ButtonDensity.compact,
                         icon: AppIcon(
-                          _obscure
-                              ? AppIcons.eyeOff
-                              : AppIcons.eye,
+                          _obscure ? AppIcons.eyeOff : AppIcons.eye,
                           size: AppTheme.inputIconSize,
                         ),
                         onPressed: () => setState(() => _obscure = !_obscure),
