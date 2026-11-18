@@ -9,10 +9,12 @@ import '../../application/ai/agent_controller.dart';
 import '../../application/ai/ai_settings_controller.dart';
 import '../../application/settings/settings_controller.dart';
 import '../../domain/ai/ai_model.dart';
+import '../../domain/entities/app_proxy_settings.dart';
 import '../../domain/entities/app_theme_mode.dart';
 import '../components/app_dialog.dart';
 import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
+import '../components/app_radio_card_field.dart';
 import '../components/app_select_field.dart';
 import '../components/app_text_form_field.dart';
 import '../localization/app_translations.dart';
@@ -21,25 +23,49 @@ import '../navigation/app_notice.dart';
 import '../theme/app_theme.dart';
 import 'about_settings_section.dart';
 
-Future<void> showSettingsDialog({bool ai = false}) =>
-    AppNavigation.dialog<void>(SettingsDialog(initialTab: ai ? 1 : 0));
+Future<void> showSettingsDialog({bool ai = false, bool proxy = false}) =>
+    AppNavigation.dialog<void>(
+      SettingsDialog(initialTab: ai ? 2 : (proxy ? 1 : 0)),
+    );
 
 class SettingsDialog extends StatefulWidget {
   const SettingsDialog({this.initialTab = 0, super.key});
+
   final int initialTab;
+
   @override
   State<SettingsDialog> createState() => _SettingsDialogState();
 }
 
 class _SettingsDialogState extends State<SettingsDialog> {
+  static const _generalTab = 0;
+  static const _proxyTab = 1;
+  static const _aiTab = 2;
+  static const _aboutTab = 3;
+
   late int _tab = widget.initialTab;
   final _form = GlobalKey<FormState>();
   final _url = TextEditingController();
   final _model = TextEditingController();
   final _key = TextEditingController();
   final _modelFocus = FocusNode();
+  late final _appSettings = Get.find<SettingsController>();
   late final _settings = Get.find<AiSettingsController>();
   AiModelConfig? _config;
+
+  final _proxyForm = GlobalKey<FormState>();
+  final _proxyAddress = TextEditingController();
+  final _proxyUsername = TextEditingController();
+  final _proxyPassword = TextEditingController();
+  AppProxyMode _proxyMode = AppProxyMode.auto;
+  AppProxyProtocol _proxyProtocol = AppProxyProtocol.http;
+  bool _hasSavedProxyPassword = false;
+  bool _clearSavedProxyPassword = false;
+  bool _obscureProxyPassword = true;
+  bool _updatingProxy = false;
+  String? _proxyError;
+  String? _proxySuccess;
+
   AiApiFormat _format = AiApiFormat.openai;
   String _lastModelText = '';
   bool _updating = false;
@@ -53,7 +79,9 @@ class _SettingsDialogState extends State<SettingsDialog> {
   String? _modelsError;
   String? _error;
   String? _success;
-  bool get _busy => _saving || _testing;
+
+  bool get _busy =>
+      _saving || _testing || _appSettings.savingProxySettings.value;
 
   @override
   void initState() {
@@ -62,20 +90,61 @@ class _SettingsDialogState extends State<SettingsDialog> {
     _key.addListener(_invalidateModels);
     _model.addListener(_modelChanged);
     _modelFocus.addListener(_focusChanged);
+    _proxyAddress.addListener(_proxyFieldChanged);
+    _proxyUsername.addListener(_proxyFieldChanged);
+    _proxyPassword.addListener(_proxyPasswordChanged);
     unawaited(_initialize());
   }
 
   Future<void> _initialize() async {
-    await _settings.ready;
+    await (_appSettings.ready, _settings.ready).wait;
     if (!mounted) return;
     _config = _settings.state.value.apiConfig;
+    _syncAiFields(_config);
+    _syncProxyFields(_appSettings.proxySettings.value);
+    setState(() {});
+  }
+
+  void _syncAiFields(AiModelConfig? config) {
     _updating = true;
-    _format = _config?.format ?? AiApiFormat.openai;
-    _url.text = _config?.baseUrl ?? '';
-    _model.text = _config?.model ?? '';
+    _format = config?.format ?? AiApiFormat.openai;
+    _url.text = config?.baseUrl ?? '';
+    _model.text = config?.model ?? '';
     _lastModelText = _model.text;
     _updating = false;
-    setState(() {});
+  }
+
+  void _syncProxyFields(AppProxySettings settings) {
+    _updatingProxy = true;
+    _proxyMode = settings.mode;
+    _proxyProtocol = settings.protocol;
+    _proxyAddress.text = settings.address;
+    _proxyUsername.text = settings.username;
+    _proxyPassword.clear();
+    _hasSavedProxyPassword = settings.hasSavedPassword;
+    _clearSavedProxyPassword = false;
+    _updatingProxy = false;
+  }
+
+  void _proxyFieldChanged() {
+    if (_updatingProxy) return;
+    if (_proxyError != null || _proxySuccess != null) {
+      setState(() {
+        _proxyError = null;
+        _proxySuccess = null;
+      });
+    }
+  }
+
+  void _proxyPasswordChanged() {
+    if (_updatingProxy) return;
+    setState(() {
+      if (_proxyPassword.text.isNotEmpty) {
+        _clearSavedProxyPassword = false;
+      }
+      _proxyError = null;
+      _proxySuccess = null;
+    });
   }
 
   void _invalidateModels() {
@@ -109,11 +178,57 @@ class _SettingsDialogState extends State<SettingsDialog> {
     _key.removeListener(_invalidateModels);
     _model.removeListener(_modelChanged);
     _modelFocus.removeListener(_focusChanged);
+    _proxyAddress.removeListener(_proxyFieldChanged);
+    _proxyUsername.removeListener(_proxyFieldChanged);
+    _proxyPassword.removeListener(_proxyPasswordChanged);
     _modelFocus.dispose();
-    for (final controller in [_url, _model, _key]) {
+    for (final controller in [
+      _url,
+      _model,
+      _key,
+      _proxyAddress,
+      _proxyUsername,
+      _proxyPassword,
+    ]) {
       controller.dispose();
     }
     super.dispose();
+  }
+
+  void _selectProxyMode(AppProxyMode mode) {
+    if (_busy) return;
+    setState(() {
+      _proxyMode = mode;
+      _proxyError = null;
+      _proxySuccess = null;
+    });
+  }
+
+  Future<void> _saveProxy() async {
+    if (_busy) return;
+    if (_proxyMode == AppProxyMode.manual &&
+        !(_proxyForm.currentState?.validate() ?? false)) {
+      return;
+    }
+    setState(() {
+      _proxyError = null;
+      _proxySuccess = null;
+    });
+    try {
+      await _appSettings.saveProxySettings(
+        mode: _proxyMode,
+        protocol: _proxyProtocol,
+        address: _proxyAddress.text,
+        username: _proxyUsername.text,
+        password: _proxyPassword.text,
+        clearPassword: _clearSavedProxyPassword,
+      );
+      if (!mounted) return;
+      _syncProxyFields(_appSettings.proxySettings.value);
+      setState(() => _proxySuccess = '代理设置已保存');
+    } on ProxySettingsException catch (e) {
+      if (mounted) setState(() => _proxyError = e.message);
+    }
   }
 
   Future<void> _save() async {
@@ -216,36 +331,48 @@ class _SettingsDialogState extends State<SettingsDialog> {
 
   @override
   Widget build(BuildContext context) => Obx(() {
-    final ready = _settings.isLoaded.value && !_settings.loadFailed.value;
+    final aiReady = _settings.isLoaded.value && !_settings.loadFailed.value;
+    final proxyReady =
+        _appSettings.isLoaded.value && !_appSettings.proxyLoadFailed.value;
+    final savingProxy = _appSettings.savingProxySettings.value;
+    final busy = _saving || _testing || savingProxy;
+    final feedback = switch (_tab) {
+      _proxyTab => _feedbackBanner(context, _proxyError, _proxySuccess),
+      _aiTab => _feedbackBanner(context, _error, _success),
+      _ => null,
+    };
     return PopScope(
-      canPop: !_saving,
+      canPop: !_saving && !savingProxy,
       child: AppDialog(
         maxWidth: AppTheme.settingsDialogMaxWidth,
         title: Text('设置'.tr),
         scrollable: true,
-        feedback: _tab != 1 ? null : _feedback(context),
+        feedback: feedback,
         content: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             shadcn.Tabs(
               index: _tab,
               onChanged: (value) {
-                if (!_busy) setState(() => _tab = value);
+                if (!busy) setState(() => _tab = value);
               },
               children: [
                 shadcn.TabItem(child: Text('通用'.tr)),
+                shadcn.TabItem(child: Text('代理'.tr)),
                 shadcn.TabItem(child: Text('AI 设置'.tr)),
                 shadcn.TabItem(child: Text('关于'.tr)),
               ],
             ),
             const SizedBox(height: 24),
-            if (_tab == 0)
+            if (_tab == _generalTab)
               _GeneralSettings(
                 onLocaleChanged: () {
                   if (mounted) setState(() {});
                 },
               )
-            else if (_tab == 2)
+            else if (_tab == _proxyTab)
+              _proxySection(context, busy: busy)
+            else if (_tab == _aboutTab)
               const AboutSettingsSection()
             else if (!_settings.isLoaded.value)
               const Center(child: shadcn.CircularProgressIndicator())
@@ -258,7 +385,9 @@ class _SettingsDialogState extends State<SettingsDialog> {
                     onPressed: () async {
                       try {
                         await _settings.reload();
-                        await _initialize();
+                        _config = _settings.state.value.apiConfig;
+                        _syncAiFields(_config);
+                        if (mounted) setState(() {});
                       } on Object {
                         AppNotice.error('AI 设置读取失败，请重试');
                       }
@@ -268,24 +397,32 @@ class _SettingsDialogState extends State<SettingsDialog> {
                 ],
               )
             else
-              _aiForm(context),
+              _aiForm(context, busy: busy),
           ],
         ),
         actions: [
-          if (_tab == 1 && ready)
+          if (_tab == _proxyTab && proxyReady)
+            shadcn.PrimaryButton(
+              key: const ValueKey('proxy-save'),
+              onPressed: busy ? null : _saveProxy,
+              child: Text((savingProxy ? '保存中' : '保存').tr),
+            ),
+          if (_tab == _aiTab && aiReady)
             shadcn.OutlineButton(
               key: const ValueKey('ai-model-test'),
-              onPressed: _busy ? null : _test,
+              onPressed: busy ? null : _test,
               child: Text((_testing ? '正在测试' : '测试连接').tr),
             ),
-          if (_tab == 1 && ready)
+          if (_tab == _aiTab && aiReady)
             shadcn.PrimaryButton(
               key: const ValueKey('ai-model-save'),
-              onPressed: _busy ? null : _save,
+              onPressed: busy ? null : _save,
               child: Text((_saving ? '保存中' : '保存').tr),
             ),
           shadcn.OutlineButton(
-            onPressed: _saving ? null : AppNavigation.closeDialog<void>,
+            onPressed: _saving || savingProxy
+                ? null
+                : AppNavigation.closeDialog<void>,
             child: Text('关闭'.tr),
           ),
         ],
@@ -293,16 +430,20 @@ class _SettingsDialogState extends State<SettingsDialog> {
     );
   });
 
-  Widget? _feedback(BuildContext context) {
-    if (_error != null) {
+  Widget? _feedbackBanner(
+    BuildContext context,
+    String? error,
+    String? success,
+  ) {
+    if (error != null) {
       return Text(
-        _error!.tr,
+        error.tr,
         style: TextStyle(
           color: shadcn.Theme.of(context).colorScheme.destructive,
         ),
       );
     }
-    if (_success == null) return null;
+    if (success == null) return null;
     return Row(
       children: [
         const AppIcon(
@@ -311,12 +452,184 @@ class _SettingsDialogState extends State<SettingsDialog> {
           color: StatusColors.ready,
         ),
         const SizedBox(width: 8),
-        Expanded(child: Text(_success!.tr)),
+        Expanded(child: Text(success.tr)),
       ],
     );
   }
 
-  Widget _aiForm(BuildContext context) => Form(
+  Widget _proxySection(BuildContext context, {required bool busy}) {
+    if (!_appSettings.isLoaded.value) {
+      return const Center(child: shadcn.CircularProgressIndicator());
+    }
+    if (_appSettings.proxyLoadFailed.value) {
+      return Column(
+        children: [
+          Text('代理设置读取失败，请重试'.tr),
+          const SizedBox(height: 12),
+          shadcn.OutlineButton(
+            onPressed: () async {
+              try {
+                await _appSettings.reloadProxySettings();
+                _syncProxyFields(_appSettings.proxySettings.value);
+                if (mounted) setState(() {});
+              } on Object {
+                AppNotice.error('代理设置读取失败，请重试');
+              }
+            },
+            child: Text('重试'.tr),
+          ),
+        ],
+      );
+    }
+    final muted = shadcn.Theme.of(context).colorScheme.mutedForeground;
+    final modeHint = switch (_proxyMode) {
+      AppProxyMode.auto => '自动使用系统代理，未配置系统代理时直接连接。',
+      AppProxyMode.off => '不使用代理，直接发起网络请求。',
+      AppProxyMode.manual => '通过指定的代理服务器发起应用内网络请求。',
+    };
+    return Form(
+      key: _proxyForm,
+      child: Column(
+        key: const ValueKey('proxy-settings'),
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          AppRadioCardField<AppProxyMode>(
+            key: ValueKey('proxy-mode-${_proxyMode.name}'),
+            label: '代理模式'.tr,
+            initialValue: _proxyMode,
+            items: [
+              AppRadioCardOption(
+                value: AppProxyMode.auto,
+                child: Text('自动'.tr),
+              ),
+              AppRadioCardOption(value: AppProxyMode.off, child: Text('关闭'.tr)),
+              AppRadioCardOption(
+                value: AppProxyMode.manual,
+                child: Text('手动设置'.tr),
+              ),
+            ],
+            onChanged: busy ? null : _selectProxyMode,
+          ),
+          const SizedBox(height: 12),
+          Text(
+            modeHint.tr,
+            style: TextStyle(fontSize: 12, height: 1.6, color: muted),
+          ),
+          if (_proxyMode == AppProxyMode.manual) ...[
+            const SizedBox(height: 20),
+            AppSelectField<AppProxyProtocol>(
+              key: ValueKey('proxy-protocol-${_proxyProtocol.name}'),
+              label: '代理协议'.tr,
+              initialValue: _proxyProtocol,
+              items: [
+                for (final protocol in AppProxyProtocol.values)
+                  AppSelectOption(value: protocol, child: Text(protocol.label)),
+              ],
+              onChanged: busy
+                  ? null
+                  : (value) {
+                      if (value == null) return;
+                      setState(() {
+                        _proxyProtocol = value;
+                        _proxyError = null;
+                        _proxySuccess = null;
+                      });
+                    },
+            ),
+            const SizedBox(height: 16),
+            AppTextFormField(
+              key: const ValueKey('proxy-address'),
+              controller: _proxyAddress,
+              enabled: !busy,
+              smartPunctuation: false,
+              autocorrect: false,
+              decoration: AppInputDecoration(
+                labelText: '代理地址'.tr,
+                hintText: '127.0.0.1:7890',
+                helperText: '填写主机与端口，例如 127.0.0.1:7890'.tr,
+              ),
+              validator: (value) =>
+                  AppProxySettings.validateAddress(value ?? '')?.tr,
+            ),
+            const SizedBox(height: 16),
+            AppTextFormField(
+              key: const ValueKey('proxy-username'),
+              controller: _proxyUsername,
+              enabled: !busy,
+              smartPunctuation: false,
+              autocorrect: false,
+              decoration: AppInputDecoration(
+                labelText: '用户名'.tr,
+                hintText: '可选'.tr,
+              ),
+              validator: (value) =>
+                  AppProxySettings.validateCredential(value ?? '')?.tr,
+            ),
+            const SizedBox(height: 16),
+            AppTextFormField(
+              key: const ValueKey('proxy-password'),
+              controller: _proxyPassword,
+              enabled: !busy,
+              obscureText: _obscureProxyPassword,
+              enableSuggestions: false,
+              autocorrect: false,
+              smartPunctuation: false,
+              decoration: AppInputDecoration(
+                labelText: '密码'.tr,
+                hintText: '可选'.tr,
+                labelTrailing:
+                    _hasSavedProxyPassword &&
+                        !_clearSavedProxyPassword &&
+                        _proxyPassword.text.isEmpty
+                    ? AppIconButton(
+                        key: const ValueKey('proxy-password-clear'),
+                        density: shadcn.ButtonDensity.compact,
+                        icon: const AppIcon(
+                          AppIcons.x,
+                          size: AppTheme.inputIconSize,
+                        ),
+                        semanticLabel: '清除已保存密码'.tr,
+                        onPressed: busy
+                            ? null
+                            : () => setState(() {
+                                _clearSavedProxyPassword = true;
+                                _proxyError = null;
+                                _proxySuccess = null;
+                              }),
+                      )
+                    : null,
+                helperText:
+                    (_clearSavedProxyPassword
+                            ? '将在保存后清除已保存密码'
+                            : _hasSavedProxyPassword
+                            ? '留空则保持不变'
+                            : '仅加密保存在本机，留空表示无需认证')
+                        .tr,
+                suffixIcon: AppIconButton(
+                  key: const ValueKey('proxy-password-visibility'),
+                  density: shadcn.ButtonDensity.compact,
+                  icon: AppIcon(
+                    _obscureProxyPassword ? AppIcons.eyeOff : AppIcons.eye,
+                    size: AppTheme.inputIconSize,
+                  ),
+                  semanticLabel: (_obscureProxyPassword ? '显示密码' : '隐藏密码').tr,
+                  onPressed: busy
+                      ? null
+                      : () => setState(
+                          () => _obscureProxyPassword = !_obscureProxyPassword,
+                        ),
+                ),
+              ),
+              validator: (value) =>
+                  AppProxySettings.validateCredential(value ?? '')?.tr,
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _aiForm(BuildContext context, {required bool busy}) => Form(
     key: _form,
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -338,7 +651,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
             for (final format in AiApiFormat.values)
               AppSelectOption(value: format, child: Text(format.label)),
           ],
-          onChanged: _busy
+          onChanged: busy
               ? null
               : (value) {
                   if (value == null) return;
@@ -350,7 +663,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
         AppTextFormField(
           key: const ValueKey('ai-model-url'),
           controller: _url,
-          enabled: !_busy,
+          enabled: !busy,
           smartPunctuation: false,
           autocorrect: false,
           decoration: AppInputDecoration(
@@ -366,7 +679,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
         AppTextFormField(
           key: const ValueKey('ai-model-key'),
           controller: _key,
-          enabled: !_busy,
+          enabled: !busy,
           obscureText: _obscureKey,
           enableSuggestions: false,
           autocorrect: false,
@@ -382,7 +695,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
                 size: AppTheme.inputIconSize,
               ),
               semanticLabel: (_obscureKey ? '显示 API Key' : '隐藏 API Key').tr,
-              onPressed: _busy
+              onPressed: busy
                   ? null
                   : () => setState(() => _obscureKey = !_obscureKey),
             ),
@@ -395,7 +708,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
             mode: shadcn.AutoCompleteMode.replaceAll,
             popoverConstraints: BoxConstraints(maxHeight: 200),
           ),
-          suggestions: !_busy && _modelFocus.hasFocus
+          suggestions: !busy && _modelFocus.hasFocus
               ? _models
                     .where(
                       (model) =>
@@ -411,7 +724,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
             key: const ValueKey('ai-model-id'),
             controller: _model,
             focusNode: _modelFocus,
-            enabled: !_busy,
+            enabled: !busy,
             smartPunctuation: false,
             autocorrect: false,
             decoration: AppInputDecoration(
@@ -429,7 +742,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
                         size: AppTheme.inputIconSize,
                       ),
                 semanticLabel: (_refreshing ? '正在获取模型' : '刷新模型列表').tr,
-                onPressed: _busy || _refreshing ? null : _refreshModels,
+                onPressed: busy || _refreshing ? null : _refreshModels,
               ),
               helperText: '从下拉列表选择，或手动填写模型 ID'.tr,
               suffixIcon: AppIconButton(
@@ -440,7 +753,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
                   size: AppTheme.inputIconSize,
                 ),
                 semanticLabel: '选择模型'.tr,
-                onPressed: _busy || _models.isEmpty
+                onPressed: busy || _models.isEmpty
                     ? null
                     : () {
                         _modelFocus.requestFocus();
@@ -468,7 +781,9 @@ class _SettingsDialogState extends State<SettingsDialog> {
 
 class _GeneralSettings extends StatelessWidget {
   const _GeneralSettings({required this.onLocaleChanged});
+
   final VoidCallback onLocaleChanged;
+
   @override
   Widget build(BuildContext context) {
     final settings = Get.find<SettingsController>();

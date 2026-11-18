@@ -1,3 +1,4 @@
+import 'package:pagashell/domain/entities/app_proxy_settings.dart';
 import 'package:pagashell/domain/entities/app_theme_mode.dart';
 import 'package:pagashell/domain/entities/sidebar_state.dart';
 import 'package:pagashell/domain/repositories/settings_repository.dart';
@@ -6,11 +7,13 @@ class InMemorySettingsRepository implements SettingsRepository {
   InMemorySettingsRepository({
     this.themeMode = AppThemeMode.system,
     this.automaticUpdates = true,
+    this.proxySettings = const AppProxySettings(),
     SidebarState? sidebarState,
   }) : sidebarState = sidebarState ?? SidebarState();
 
   AppThemeMode themeMode;
   bool automaticUpdates;
+  AppProxySettings proxySettings;
 
   @override
   Future<bool> readAutomaticUpdates() async => automaticUpdates;
@@ -32,4 +35,11 @@ class InMemorySettingsRepository implements SettingsRepository {
   @override
   Future<void> saveSidebarState(SidebarState state) async =>
       sidebarState = state;
+
+  @override
+  Future<AppProxySettings> readProxySettings() async => proxySettings;
+
+  @override
+  Future<void> saveProxySettings(AppProxySettings settings) async =>
+      proxySettings = settings;
 }

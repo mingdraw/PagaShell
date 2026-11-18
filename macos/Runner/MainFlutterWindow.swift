@@ -1,3 +1,4 @@
+import CFNetwork
 import Cocoa
 import FlutterMacOS
 import Darwin
@@ -300,6 +301,19 @@ private final class MacSystemProxy {
   }
 
   func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+    if call.method == "resolve" {
+      guard let args = call.arguments as? [String: Any],
+            let rawUrl = args["url"] as? String,
+            let url = URL(string: rawUrl) else {
+        result(FlutterError(code: "proxy_failed", message: "Invalid proxy lookup request", details: nil))
+        return
+      }
+      queue.async {
+        let resolved = self.resolve(url: url)
+        DispatchQueue.main.async { result(resolved) }
+      }
+      return
+    }
     guard let args = call.arguments as? [String: Any], let id = args["owner"] as? String,
           call.method == "enable" || call.method == "restore" else {
       result(FlutterMethodNotImplemented)
@@ -459,5 +473,94 @@ private final class MacSystemProxy {
     preferences = nil
     if let authorization = authorization { AuthorizationFree(authorization, []) }
     authorization = nil
+  }
+
+  private func resolve(url: URL) -> [String: Any]? {
+    guard let settings = CFNetworkCopySystemProxySettings()?.takeRetainedValue(),
+          let proxies = CFNetworkCopyProxiesForURL(url as CFURL, settings).takeRetainedValue() as? [[String: Any]] else {
+      return nil
+    }
+    for proxy in proxies {
+      guard let type = proxy[kCFProxyTypeKey as String] as? String else { continue }
+      if type == (kCFProxyTypeNone as String) { return nil }
+      if type == (kCFProxyTypeAutoConfigurationURL as String),
+         let pacURL = proxy[kCFProxyAutoConfigurationURLKey as String] as? URL,
+         let pacProxy = resolvePAC(url: url, pacURL: pacURL) {
+        return pacProxy
+      }
+      if let mapped = mapProxyEntry(proxy, type: type) { return mapped }
+    }
+    return nil
+  }
+
+  private func mapProxyEntry(_ proxy: [String: Any], type: String) -> [String: Any]? {
+    let protocolName: String
+    if type == (kCFProxyTypeHTTP as String) || type == (kCFProxyTypeHTTPS as String) {
+      // macOS Secure Web Proxy (HTTPS) is an HTTP CONNECT proxy for https:// targets.
+      protocolName = "http"
+    } else if type == (kCFProxyTypeSOCKS as String) {
+      protocolName = "socks5"
+    } else {
+      return nil
+    }
+    guard let host = proxy[kCFProxyHostNameKey as String] as? String,
+          !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+          let port = proxy[kCFProxyPortNumberKey as String] as? Int,
+          (1...65535).contains(port) else {
+      return nil
+    }
+    return ["protocol": protocolName, "host": host, "port": port]
+  }
+
+  private final class PacBox {
+    var proxies: [[String: Any]]?
+    let runLoop: CFRunLoop
+    init(runLoop: CFRunLoop) { self.runLoop = runLoop }
+  }
+
+  private func resolvePAC(url: URL, pacURL: URL) -> [String: Any]? {
+    let runLoop = CFRunLoopGetCurrent()!
+    let box = PacBox(runLoop: runLoop)
+    let boxPtr = Unmanaged.passRetained(box).toOpaque()
+    var context = CFStreamClientContext(
+      version: 0,
+      info: boxPtr,
+      retain: { info in
+        guard let info = info else { return nil }
+        _ = Unmanaged<PacBox>.fromOpaque(info).retain()
+        return info
+      },
+      release: { info in
+        guard let info = info else { return }
+        Unmanaged<PacBox>.fromOpaque(info).release()
+      },
+      copyDescription: nil
+    )
+    let callback: CFProxyAutoConfigurationResultCallback = { client, proxyList, _ in
+      let box = Unmanaged<PacBox>.fromOpaque(client).takeUnretainedValue()
+      if let list = proxyList as? [[String: Any]] {
+        box.proxies = list
+      }
+      CFRunLoopStop(box.runLoop)
+    }
+    let source = CFNetworkExecuteProxyAutoConfigurationURL(
+      pacURL as CFURL,
+      url as CFURL,
+      callback,
+      &context
+    )
+    Unmanaged<PacBox>.fromOpaque(boxPtr).release()
+    let mode = CFRunLoopMode("pagashell.pac" as CFString)
+    CFRunLoopAddSource(runLoop, source, mode)
+    CFRunLoopRunInMode(mode, 2.0, false)
+    CFRunLoopRemoveSource(runLoop, source, mode)
+    CFRunLoopSourceInvalidate(source)
+    guard let proxies = box.proxies else { return nil }
+    for proxy in proxies {
+      guard let type = proxy[kCFProxyTypeKey as String] as? String else { continue }
+      if type == (kCFProxyTypeNone as String) { return nil }
+      if let mapped = mapProxyEntry(proxy, type: type) { return mapped }
+    }
+    return nil
   }
 }

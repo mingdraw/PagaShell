@@ -1,15 +1,27 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:math';
 
 import 'package:get/get.dart';
 
+import '../../domain/entities/app_proxy_settings.dart';
 import '../../domain/entities/app_theme_mode.dart';
 import '../../domain/entities/sidebar_state.dart';
 import '../../domain/repositories/settings_repository.dart';
+import '../../domain/vault/secret_store.dart';
+
+class ProxySettingsException implements Exception {
+  const ProxySettingsException(this.message);
+  final String message;
+  @override
+  String toString() => message;
+}
 
 class SettingsController extends GetxController {
-  SettingsController({required this._repository});
+  SettingsController({required this._repository, this._secretStore});
 
   final SettingsRepository _repository;
+  final SecretStore? _secretStore;
   final themeMode = AppThemeMode.system.obs;
   final sidebarState = SidebarState().obs;
 
@@ -21,9 +33,13 @@ class SettingsController extends GetxController {
   final isLoaded = false.obs;
   final automaticUpdates = true.obs;
   final savingAutomaticUpdates = false.obs;
+  final proxySettings = const AppProxySettings().obs;
+  final proxyLoadFailed = false.obs;
+  final savingProxySettings = false.obs;
   late final Future<void> ready = _load();
   Future<void> _pendingSave = Future<void>.value();
   Future<void> _pendingSidebarSave = Future<void>.value();
+  Future<void> _pendingProxySave = Future<void>.value();
   final _sidebarFolders = <SidebarSection, RxSet<String>>{};
   final _sidebarWorkers = <Worker>[];
 
@@ -37,7 +53,7 @@ class SettingsController extends GetxController {
   }
 
   Future<void> _load() async {
-    // 三项偏好相互独立，并行读取；各自失败只回退该项，不影响其他项与启动。
+    // 各项偏好相互独立，并行读取；各自失败只回退该项，不影响其他项与启动。
     await (
       _repository.readThemeMode().then<void>(
         (saved) {
@@ -67,12 +83,24 @@ class SettingsController extends GetxController {
           if (!isClosed) automaticUpdates.value = false;
         },
       ),
+      _repository.readProxySettings().then<void>(
+        (saved) {
+          if (!isClosed) proxySettings.value = saved;
+        },
+        onError: (Object _) {
+          if (!isClosed) proxyLoadFailed.value = true;
+        },
+      ),
     ).wait;
     if (isClosed) return;
     for (final entry in _sidebarFolders.entries) {
       entry.value.assignAll(sidebarState.value.expandedFolders(entry.key));
     }
     isLoaded.value = true;
+    if (!proxyLoadFailed.value &&
+        proxySettings.value.pendingSecretDeletes.isNotEmpty) {
+      unawaited(_cleanProxySecrets().catchError((Object _) {}));
+    }
   }
 
   /// 追踪共享目录控制器的展开集合，覆盖点击、新建与拖入后的自动展开。
@@ -191,4 +219,166 @@ class SettingsController extends GetxController {
     );
     return save;
   }
+
+  Future<String?> readProxyPassword() async {
+    await ready;
+    final ref = proxySettings.value.passwordSecretRef;
+    if (ref.isEmpty || _secretStore == null) return null;
+    return _secretStore.read(ref);
+  }
+
+  Future<void> reloadProxySettings() => _queueProxy(() async {
+    final saved = await _repository.readProxySettings();
+    if (isClosed) return;
+    proxySettings.value = saved;
+    proxyLoadFailed.value = false;
+    await _cleanProxySecrets();
+  }, allowFailedLoad: true);
+
+  Future<void> saveProxySettings({
+    required AppProxyMode mode,
+    AppProxyProtocol? protocol,
+    String? address,
+    String? username,
+    String? password,
+    bool clearPassword = false,
+  }) => _queueProxy(() async {
+    final current = proxySettings.value;
+    if (mode != AppProxyMode.manual) {
+      final next = current.copyWith(mode: mode);
+      await _repository.saveProxySettings(next);
+      if (!isClosed) proxySettings.value = next;
+      return;
+    }
+
+    final nextProtocol = protocol ?? current.protocol;
+    final trimmedAddress = (address ?? current.address).trim();
+    final addressError = AppProxySettings.validateAddress(trimmedAddress);
+    if (addressError != null) {
+      throw ProxySettingsException(addressError);
+    }
+    final nextUsername = (username ?? current.username).trim();
+    final usernameError = AppProxySettings.validateCredential(nextUsername);
+    if (usernameError != null) {
+      throw ProxySettingsException(usernameError);
+    }
+    final rawPassword = password ?? '';
+    if (rawPassword.isNotEmpty) {
+      final passwordError = AppProxySettings.validateCredential(rawPassword);
+      if (passwordError != null) {
+        throw ProxySettingsException(passwordError);
+      }
+    }
+
+    final replacingPassword = rawPassword.isNotEmpty;
+    final removingPassword = clearPassword && !replacingPassword;
+    var nextSecretRef = current.passwordSecretRef;
+    final pendingDeletes = [...current.pendingSecretDeletes];
+    if (replacingPassword) {
+      final store = _secretStore;
+      if (store == null) {
+        throw const ProxySettingsException('代理设置保存失败，请重试');
+      }
+      final ref = 'proxy-auth-${_randomId()}';
+      await _commitProxy(
+        current.copyWith(pendingSecretDeletes: [...pendingDeletes, ref]),
+      );
+      try {
+        await store.put(ref, rawPassword);
+      } on Object {
+        await _cleanProxySecrets();
+        rethrow;
+      }
+      if (current.passwordSecretRef.isNotEmpty) {
+        pendingDeletes.add(current.passwordSecretRef);
+      }
+      nextSecretRef = ref;
+    } else if (removingPassword && current.passwordSecretRef.isNotEmpty) {
+      pendingDeletes.add(current.passwordSecretRef);
+      nextSecretRef = '';
+    }
+
+    final next = AppProxySettings(
+      mode: AppProxyMode.manual,
+      protocol: nextProtocol,
+      address: trimmedAddress,
+      username: nextUsername,
+      passwordSecretRef: nextSecretRef,
+      pendingSecretDeletes: pendingDeletes
+          .where((ref) => ref != nextSecretRef)
+          .toList(),
+    );
+    try {
+      await _repository.saveProxySettings(next);
+    } on Object {
+      if (replacingPassword) await _cleanProxySecrets();
+      rethrow;
+    }
+    if (!isClosed) proxySettings.value = next;
+    await _cleanProxySecrets();
+  });
+
+  Future<void> _queueProxy(
+    Future<void> Function() action, {
+    bool allowFailedLoad = false,
+  }) {
+    final result = _pendingProxySave.then((_) async {
+      await ready;
+      if (isClosed) return;
+      savingProxySettings.value = true;
+      try {
+        if (proxyLoadFailed.value && !allowFailedLoad) {
+          throw const ProxySettingsException('代理设置读取失败，请重试');
+        }
+        try {
+          await action();
+        } on ProxySettingsException {
+          rethrow;
+        } on Object {
+          throw const ProxySettingsException('代理设置保存失败，请重试');
+        }
+      } finally {
+        if (!isClosed) savingProxySettings.value = false;
+      }
+    });
+    _pendingProxySave = result.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace _) {},
+    );
+    return result;
+  }
+
+  Future<void> _commitProxy(AppProxySettings next) async {
+    await _repository.saveProxySettings(next);
+    if (!isClosed) proxySettings.value = next;
+  }
+
+  Future<void> _cleanProxySecrets() async {
+    final store = _secretStore;
+    if (store == null) return;
+    final current = proxySettings.value;
+    if (current.pendingSecretDeletes.isEmpty) return;
+    final remaining = <String>[];
+    for (final ref in current.pendingSecretDeletes.toSet()) {
+      if (ref == current.passwordSecretRef) continue;
+      try {
+        await store.delete(ref);
+      } on Object {
+        remaining.add(ref);
+      }
+    }
+    if (remaining.length != current.pendingSecretDeletes.length) {
+      try {
+        await _commitProxy(
+          proxySettings.value.copyWith(pendingSecretDeletes: remaining),
+        );
+      } on Object {
+        /* 已保存待删引用，重启后重试。 */
+      }
+    }
+  }
+
+  static String _randomId() => base64UrlEncode(
+    List<int>.generate(18, (_) => Random.secure().nextInt(256)),
+  );
 }

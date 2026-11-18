@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import '../../domain/entities/app_proxy_settings.dart';
 import '../../domain/entities/app_theme_mode.dart';
 import '../../domain/entities/sidebar_state.dart';
 import '../../domain/repositories/settings_repository.dart';
@@ -12,6 +13,7 @@ class DriftSettingsRepository implements SettingsRepository {
   static const _themeModeKey = 'theme_mode';
   static const _sidebarStateKey = 'sidebar_state';
   static const _automaticUpdatesKey = 'automatic_updates';
+  static const _proxySettingsKey = 'proxy_settings';
 
   @override
   Future<bool> readAutomaticUpdates() async {
@@ -111,6 +113,62 @@ class DriftSettingsRepository implements SettingsRepository {
                 entry.key.name: entry.value.toList(),
             },
             'recentHosts': state.recentHostIds,
+          }),
+        ),
+      );
+
+  @override
+  Future<AppProxySettings> readProxySettings() async {
+    final row = await (_db.select(
+      _db.appSettings,
+    )..where((s) => s.key.equals(_proxySettingsKey))).getSingleOrNull();
+    if (row == null) return const AppProxySettings();
+    final Object? decoded = jsonDecode(row.value);
+    if (decoded is! Map<String, dynamic>) {
+      throw const FormatException('Invalid proxy settings');
+    }
+    final modeName = decoded['mode'];
+    final protocolName = decoded['protocol'];
+    final mode = AppProxyMode.values
+        .where((value) => value.name == modeName)
+        .firstOrNull;
+    final protocol = AppProxyProtocol.values
+        .where((value) => value.name == protocolName)
+        .firstOrNull;
+    if (mode == null || protocol == null) {
+      throw const FormatException('Invalid proxy settings');
+    }
+    return AppProxySettings(
+      mode: mode,
+      protocol: protocol,
+      address: decoded['address'] is String ? decoded['address'] as String : '',
+      username: decoded['username'] is String
+          ? decoded['username'] as String
+          : '',
+      passwordSecretRef: decoded['passwordSecretRef'] is String
+          ? decoded['passwordSecretRef'] as String
+          : '',
+      pendingSecretDeletes: decoded['pendingSecretDeletes'] is List
+          ? (decoded['pendingSecretDeletes'] as List<dynamic>)
+                .whereType<String>()
+                .toList()
+          : const [],
+    );
+  }
+
+  @override
+  Future<void> saveProxySettings(AppProxySettings settings) => _db
+      .into(_db.appSettings)
+      .insertOnConflictUpdate(
+        AppSettingsCompanion.insert(
+          key: _proxySettingsKey,
+          value: jsonEncode({
+            'mode': settings.mode.name,
+            'protocol': settings.protocol.name,
+            'address': settings.address,
+            'username': settings.username,
+            'passwordSecretRef': settings.passwordSecretRef,
+            'pendingSecretDeletes': settings.pendingSecretDeletes,
           }),
         ),
       );

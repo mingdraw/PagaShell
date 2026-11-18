@@ -157,7 +157,10 @@ class InMemoryBinding extends Bindings {
     Get.put<LocalFileRepository>(localFiles);
     Get.put<SettingsRepository>(settingsRepository);
     final settings = Get.put(
-      SettingsController(repository: settingsRepository),
+      SettingsController(
+        repository: settingsRepository,
+        secretStore: secretStore,
+      ),
     );
     final aiSettings = Get.put(
       AiSettingsController(

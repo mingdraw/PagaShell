@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pagashell/domain/entities/app_proxy_settings.dart';
 import 'package:pagashell/domain/entities/app_theme_mode.dart';
 import 'package:pagashell/domain/entities/host.dart';
 import 'package:pagashell/domain/entities/sidebar_state.dart';
@@ -179,5 +180,38 @@ void main() {
       await DriftSettingsRepository(reopened).readThemeMode(),
       AppThemeMode.dark,
     );
+  });
+
+  test('代理设置默认自动，支持持久化且损坏配置抛出异常', () async {
+    final db = AppDatabase.forTesting(NativeDatabase.memory());
+    addTearDown(db.close);
+    final repository = DriftSettingsRepository(db);
+    final initial = await repository.readProxySettings();
+    expect(initial.mode, AppProxyMode.auto);
+    expect(initial.protocol, AppProxyProtocol.http);
+
+    const saved = AppProxySettings(
+      mode: AppProxyMode.manual,
+      protocol: AppProxyProtocol.socks5,
+      address: '127.0.0.1:1080',
+      username: 'alice',
+      passwordSecretRef: 'proxy-auth-1',
+      pendingSecretDeletes: ['old-ref'],
+    );
+    await repository.saveProxySettings(saved);
+    final loaded = await repository.readProxySettings();
+    expect(loaded.mode, AppProxyMode.manual);
+    expect(loaded.protocol, AppProxyProtocol.socks5);
+    expect(loaded.address, '127.0.0.1:1080');
+    expect(loaded.username, 'alice');
+    expect(loaded.passwordSecretRef, 'proxy-auth-1');
+    expect(loaded.pendingSecretDeletes, ['old-ref']);
+
+    await db
+        .into(db.appSettings)
+        .insertOnConflictUpdate(
+          AppSettingsCompanion.insert(key: 'proxy_settings', value: 'broken'),
+        );
+    await expectLater(repository.readProxySettings(), throwsFormatException);
   });
 }

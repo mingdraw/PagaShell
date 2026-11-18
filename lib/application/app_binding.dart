@@ -32,6 +32,7 @@ import '../infrastructure/db/drift_settings_repository.dart';
 import '../infrastructure/files/io_local_file_repository.dart';
 import '../infrastructure/files/system_clipboard.dart';
 import '../infrastructure/proxy/desktop_system_proxy.dart';
+import '../infrastructure/proxy/desktop_system_proxy_lookup.dart';
 import '../infrastructure/ssh/rust_ssh_engine.dart';
 import '../infrastructure/updates/desktop_update_installer.dart';
 import '../infrastructure/vault/encrypted_secret_store.dart';
@@ -49,6 +50,7 @@ import 'identities/identity_controller.dart';
 import 'identities/identity_folder_controller.dart';
 import 'identities/identity_tree_controller.dart';
 import 'network/app_connect.dart';
+import 'network/app_proxy_resolver.dart';
 import 'session/session_controller.dart';
 import 'settings/settings_controller.dart';
 import 'transfer/transfer_controller.dart';
@@ -161,12 +163,21 @@ class AppBinding extends Bindings {
       IoLocalFileRepository(userHomeDirectory: localHomeDirectory),
       permanent: true,
     );
-    // 仅注册工厂，不创建连接或发起后台请求；首次显式使用时才初始化。
-    Get.lazyPut<GetConnect>(AppConnect.new, fenix: true);
-
     final settings = Get.put<SettingsController>(
-      SettingsController(repository: settingsRepository),
+      SettingsController(
+        repository: settingsRepository,
+        secretStore: secretStore,
+      ),
       permanent: true,
+    );
+    final proxyResolver = AppProxyResolver(
+      settings: settings,
+      systemLookup: DesktopSystemProxyLookup(),
+    );
+    // 仅注册工厂，不创建连接或发起后台请求；首次显式使用时才初始化。
+    Get.lazyPut<GetConnect>(
+      () => AppConnect(proxyResolver: proxyResolver),
+      fenix: true,
     );
     Get.put<AppUpdateController>(
       AppUpdateController(
@@ -174,6 +185,7 @@ class AppBinding extends Bindings {
         createDownloadConnect: () => AppConnect(
           followRedirects: true,
           timeout: const Duration(seconds: 30),
+          proxyResolver: proxyResolver,
         ),
         settings: settings,
         installer: DesktopUpdateInstaller(),
@@ -188,7 +200,10 @@ class AppBinding extends Bindings {
       permanent: true,
     );
     Get.lazyPut<GetConnect>(
-      () => AppConnect(timeout: const Duration(seconds: 90)),
+      () => AppConnect(
+        timeout: const Duration(seconds: 90),
+        proxyResolver: proxyResolver,
+      ),
       tag: 'ai',
       fenix: true,
     );
