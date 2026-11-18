@@ -1,3 +1,4 @@
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
@@ -7,6 +8,7 @@ import '../../domain/ai/agent_conversation.dart';
 import '../components/app_dialog.dart';
 import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
+import '../components/app_text_form_field.dart';
 import '../navigation/app_navigation.dart';
 import '../theme/app_theme.dart';
 
@@ -23,11 +25,32 @@ class _AgentHistoryDialog extends StatefulWidget {
 
 class _AgentHistoryDialogState extends State<_AgentHistoryDialog> {
   final _deleting = <String>{};
+  final _search = TextEditingController();
+  final _searchFocus = FocusNode();
 
   @override
   void initState() {
     super.initState();
     widget.agent.loadConversations();
+  }
+
+  @override
+  void dispose() {
+    _search.dispose();
+    _searchFocus.dispose();
+    super.dispose();
+  }
+
+  void _clearSearch() {
+    _search.clear();
+    _searchFocus.requestFocus();
+  }
+
+  bool _matches(AgentConversation item, String query) {
+    if (query.isEmpty) return true;
+    final lower = query.toLowerCase();
+    return item.title.toLowerCase().contains(lower) ||
+        item.model.toLowerCase().contains(lower);
   }
 
   Future<void> _delete(AgentConversation conversation) async {
@@ -92,96 +115,195 @@ class _AgentHistoryDialogState extends State<_AgentHistoryDialog> {
                     ? const Center(child: shadcn.CircularProgressIndicator())
                     : conversations.isEmpty
                     ? Center(child: Text('暂无历史对话'.tr))
-                    : ListView.separated(
-                        key: const ValueKey('agent-history-list'),
-                        // 滚动条覆盖列表边缘，为整行及删除按钮预留独立空间。
-                        padding: AppTheme.dialogScrollPadding(context),
-                        itemCount: conversations.length,
-                        separatorBuilder: (_, _) => const SizedBox(height: 6),
-                        itemBuilder: (_, index) {
-                          final item = conversations[index];
-                          final deleting = _deleting.contains(item.id);
-                          return Row(
+                    : ValueListenableBuilder<TextEditingValue>(
+                        valueListenable: _search,
+                        builder: (context, value, _) {
+                          final query = value.text.trim();
+                          final filtered = conversations
+                              .where((item) => _matches(item, query))
+                              .toList(growable: false);
+                          return Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
                             children: [
-                              Expanded(
-                                child: shadcn.GhostButton(
-                                  key: ValueKey(
-                                    'agent-history-open-${item.id}',
-                                  ),
-                                  onPressed: deleting
-                                      ? null
-                                      : () {
-                                          if (agent.openConversation(item.id)) {
-                                            AppNavigation.closeDialog(
-                                              result: true,
-                                            );
-                                          }
-                                        },
-                                  child: SizedBox(
-                                    width: double.infinity,
-                                    child: Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.stretch,
-                                      children: [
-                                        Row(
-                                          children: [
-                                            Expanded(
-                                              child: Text(
-                                                item.title,
-                                                maxLines: 1,
-                                                overflow: TextOverflow.ellipsis,
+                              CallbackShortcuts(
+                                bindings: value.text.isEmpty
+                                    ? const {}
+                                    : {
+                                        const SingleActivator(
+                                          LogicalKeyboardKey.escape,
+                                        ): _clearSearch,
+                                      },
+                                child: AppTextFormField(
+                                  key: const ValueKey('agent-history-search'),
+                                  controller: _search,
+                                  focusNode: _searchFocus,
+                                  compact: true,
+                                  decoration: AppInputDecoration(
+                                    hintText: '搜索对话标题或模型'.tr,
+                                    suffixIcon: value.text.isEmpty
+                                        ? const AppIcon(
+                                            AppIcons.search,
+                                            size: 14,
+                                          )
+                                        : SizedBox.square(
+                                            dimension: 18,
+                                            child: AppIconButton.text(
+                                              key: const ValueKey(
+                                                'agent-history-search-clear',
+                                              ),
+                                              semanticLabel: '清空搜索'.tr,
+                                              tooltip: '清空搜索'.tr,
+                                              density:
+                                                  shadcn.ButtonDensity.compact,
+                                              onPressed: _clearSearch,
+                                              icon: const AppIcon(
+                                                AppIcons.x,
+                                                size: 12,
                                               ),
                                             ),
-                                            if (agent
-                                                    .currentConversationId
-                                                    .value ==
-                                                item.id) ...[
-                                              const SizedBox(width: 8),
-                                              Text(
-                                                '当前对话'.tr,
-                                                style: TextStyle(
-                                                  fontSize: 10,
-                                                  color: muted,
-                                                ),
-                                              ),
-                                            ],
-                                          ],
-                                        ),
-                                        const SizedBox(height: 5),
-                                        Text(
-                                          '${item.updatedAt.toLocal().toString().substring(0, 16)} · ${item.model}',
-                                          maxLines: 1,
-                                          overflow: TextOverflow.ellipsis,
-                                          style: TextStyle(
-                                            fontSize: 11,
-                                            color: muted,
                                           ),
-                                        ),
-                                        const SizedBox(height: 3),
-                                        Text(
-                                          '@count 条消息'.trParams({
-                                            'count': '${item.messages.length}',
-                                          }),
-                                          style: TextStyle(
-                                            fontSize: 10,
-                                            color: muted,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
                                   ),
                                 ),
                               ),
-                              AppIconButton(
-                                key: ValueKey(
-                                  'agent-history-delete-${item.id}',
-                                ),
-                                semanticLabel: '删除对话'.tr,
-                                tooltip: '删除对话'.tr,
-                                icon: const AppIcon(AppIcons.trash2, size: 15),
-                                onPressed: deleting
-                                    ? null
-                                    : () => _delete(item),
+                              const SizedBox(height: 8),
+                              Expanded(
+                                child: filtered.isEmpty
+                                    ? Center(
+                                        child: Text(
+                                          '无匹配对话'.tr,
+                                          style: TextStyle(
+                                            fontSize: 13,
+                                            color: muted,
+                                          ),
+                                        ),
+                                      )
+                                    : ListView.separated(
+                                        key: const ValueKey(
+                                          'agent-history-list',
+                                        ),
+                                        // 滚动条覆盖列表边缘，为整行及删除按钮预留独立空间。
+                                        padding: AppTheme.dialogScrollPadding(
+                                          context,
+                                        ),
+                                        itemCount: filtered.length,
+                                        separatorBuilder: (_, _) =>
+                                            const SizedBox(height: 6),
+                                        itemBuilder: (_, index) {
+                                          final item = filtered[index];
+                                          final deleting = _deleting.contains(
+                                            item.id,
+                                          );
+                                          final isCurrent =
+                                              agent
+                                                  .currentConversationId
+                                                  .value ==
+                                              item.id;
+                                          return Row(
+                                            children: [
+                                              Expanded(
+                                                child: shadcn.GhostButton(
+                                                  key: ValueKey(
+                                                    'agent-history-open-${item.id}',
+                                                  ),
+                                                  onPressed: deleting
+                                                      ? null
+                                                      : () {
+                                                          if (agent
+                                                              .openConversation(
+                                                                item.id,
+                                                              )) {
+                                                            AppNavigation.closeDialog(
+                                                              result: true,
+                                                            );
+                                                          }
+                                                        },
+                                                  child: SizedBox(
+                                                    width: double.infinity,
+                                                    child: Column(
+                                                      crossAxisAlignment:
+                                                          CrossAxisAlignment
+                                                              .stretch,
+                                                      children: [
+                                                        Row(
+                                                          children: [
+                                                            Expanded(
+                                                              child: Text(
+                                                                item.title,
+                                                                maxLines: 1,
+                                                                overflow:
+                                                                    TextOverflow
+                                                                        .ellipsis,
+                                                              ),
+                                                            ),
+                                                            if (isCurrent) ...[
+                                                              const SizedBox(
+                                                                width: 8,
+                                                              ),
+                                                              shadcn.OutlineBadge(
+                                                                key: ValueKey(
+                                                                  'agent-history-current-${item.id}',
+                                                                ),
+                                                                child: Text(
+                                                                  '当前对话'.tr,
+                                                                  style:
+                                                                      const TextStyle(
+                                                                        fontSize:
+                                                                            10,
+                                                                      ),
+                                                                ),
+                                                              ),
+                                                            ],
+                                                          ],
+                                                        ),
+                                                        const SizedBox(
+                                                          height: 5,
+                                                        ),
+                                                        Text(
+                                                          '${item.updatedAt.toLocal().toString().substring(0, 16)} · ${item.model}',
+                                                          maxLines: 1,
+                                                          overflow: TextOverflow
+                                                              .ellipsis,
+                                                          style: TextStyle(
+                                                            fontSize: 11,
+                                                            color: muted,
+                                                          ),
+                                                        ),
+                                                        const SizedBox(
+                                                          height: 3,
+                                                        ),
+                                                        Text(
+                                                          '@count 条消息'.trParams({
+                                                            'count':
+                                                                '${item.messages.length}',
+                                                          }),
+                                                          style: TextStyle(
+                                                            fontSize: 10,
+                                                            color: muted,
+                                                          ),
+                                                        ),
+                                                      ],
+                                                    ),
+                                                  ),
+                                                ),
+                                              ),
+                                              AppIconButton(
+                                                key: ValueKey(
+                                                  'agent-history-delete-${item.id}',
+                                                ),
+                                                semanticLabel: '删除对话'.tr,
+                                                tooltip: '删除对话'.tr,
+                                                icon: const AppIcon(
+                                                  AppIcons.trash2,
+                                                  size: 15,
+                                                ),
+                                                onPressed: deleting
+                                                    ? null
+                                                    : () => _delete(item),
+                                              ),
+                                            ],
+                                          );
+                                        },
+                                      ),
                               ),
                             ],
                           );

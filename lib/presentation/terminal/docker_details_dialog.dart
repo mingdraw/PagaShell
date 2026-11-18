@@ -4,6 +4,7 @@ import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import '../../domain/ssh/docker_manager.dart';
 import '../../domain/ssh/ssh_engine.dart';
+import '../components/app_copy_button.dart';
 import '../components/app_dialog.dart';
 import '../localization/app_translations.dart';
 import '../navigation/app_navigation.dart';
@@ -93,15 +94,20 @@ class _DockerDetailsDialogState extends State<DockerDetailsDialog> {
     crossAxisAlignment: CrossAxisAlignment.stretch,
     mainAxisSize: MainAxisSize.min,
     children: [
-      _row('名称'.tr, resource.name, 'name'),
+      _row('名称'.tr, resource.name, 'name', copyable: true),
       if (resource.kind != DockerResourceKind.compose)
-        _row('ID', resource.id, 'id'),
+        _row('ID', resource.id, 'id', copyable: true),
       for (final field in resource.fields.entries)
         _row(field.key.label, field.key.display(field.value), field.key.name),
     ],
   );
 
-  Widget _row(String label, String value, String name) => Padding(
+  Widget _row(
+    String label,
+    String value,
+    String name, {
+    bool copyable = false,
+  }) => Padding(
     padding: const EdgeInsets.only(bottom: 12),
     child: Row(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -118,6 +124,15 @@ class _DockerDetailsDialogState extends State<DockerDetailsDialog> {
             style: const TextStyle(fontSize: 12),
           ),
         ),
+        if (copyable) ...[
+          const SizedBox(width: 6),
+          AppCopyButton(
+            key: ValueKey('docker-detail-copy-$name'),
+            text: value,
+            size: 12,
+            semanticLabel: '复制 @label'.trParams({'label': label}),
+          ),
+        ],
       ],
     ),
   );

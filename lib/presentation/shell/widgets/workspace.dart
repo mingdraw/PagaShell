@@ -546,8 +546,46 @@ class _SessionView extends StatelessWidget {
         ),
       SessionPhase.ready || SessionPhase.closed when session.terminal != null =>
         _TerminalHost(session: session, active: active),
-      _ => const Center(child: shadcn.CircularProgressIndicator()),
+      _ => _ConnectingView(session: session),
     };
+  }
+}
+
+class _ConnectingView extends StatelessWidget {
+  const _ConnectingView({required this.session});
+
+  final Session session;
+
+  @override
+  Widget build(BuildContext context) {
+    final controller = Get.find<SessionController>();
+    final colors = shadcn.Theme.of(context).colorScheme;
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const shadcn.CircularProgressIndicator(),
+            const SizedBox(height: 16),
+            Text(
+              '正在连接到 @address…'.trParams({'address': session.address}),
+              key: const ValueKey('connecting-status-text'),
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 13, color: colors.mutedForeground),
+            ),
+            const SizedBox(height: 16),
+            shadcn.OutlineButton(
+              key: const ValueKey('connecting-cancel'),
+              onPressed: () => session.kind.isInteractiveTerminal
+                  ? controller.close(session.id)
+                  : requestSessionTabClose(controller, [session.id]),
+              child: Text('取消连接'.tr),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 

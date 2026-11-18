@@ -60,7 +60,7 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
   late final Future<bool> Function(Future<void> Function()) _updateExit;
   final _shortcutKeys = <PhysicalKeyboardKey>{};
   SessionController get _sessions => Get.find<SessionController>();
-  AppWindow get _window => Get.find<AppWindow>();
+  late final AppWindow _window = Get.find<AppWindow>();
 
   @override
   void initState() {
@@ -503,8 +503,6 @@ class _SidebarPanelState extends State<_SidebarPanel> {
   Widget build(BuildContext context) {
     final isMac = shadcn.Theme.of(context).platform == TargetPlatform.macOS;
     final settings = Get.find<SettingsController>();
-    final hiddenForSpace =
-        AgentSidebarScope.maybeOf(context)?.sidebarHiddenForSpace ?? false;
     return Obx(() {
       final width = (_dragWidth ?? settings.sidebarWidth.value).clamp(
         AppTheme.sidebarMinWidth,
@@ -526,15 +524,6 @@ class _SidebarPanelState extends State<_SidebarPanel> {
                         if (isMac)
                           const SizedBox(
                             width: AppTheme.macWindowControlsWidth,
-                          ),
-                        if (AgentSidebarScope.maybeOf(context) == null)
-                          Offstage(
-                            offstage:
-                                !settings.sidebarVisible.value ||
-                                hiddenForSpace,
-                            child: const WindowHeaderButton(
-                              child: SidebarToggleButton(),
-                            ),
                           ),
                         const Expanded(child: WindowDragArea()),
                       ],

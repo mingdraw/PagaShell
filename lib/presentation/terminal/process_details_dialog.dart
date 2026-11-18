@@ -4,6 +4,7 @@ import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import '../../domain/ssh/process_manager.dart';
 import '../../domain/ssh/ssh_engine.dart';
+import '../components/app_copy_button.dart';
 import '../components/app_dialog.dart';
 import '../localization/app_translations.dart';
 import '../navigation/app_navigation.dart';
@@ -97,7 +98,12 @@ class _ProcessDetailsDialogState extends State<ProcessDetailsDialog> {
       mainAxisSize: MainAxisSize.min,
       children: [
         _row('进程名称'.tr, name.isEmpty ? process.name : name),
-        _row('PID', '${process.pid}'),
+        _row(
+          'PID',
+          '${process.pid}',
+          copyable: true,
+          copyKey: const ValueKey('process-details-copy-pid'),
+        ),
         _row('父进程 PID'.tr, '${details.parentPid}'),
         _row('用户名'.tr, process.user),
         _row('进程状态'.tr, details.state),
@@ -114,12 +120,20 @@ class _ProcessDetailsDialogState extends State<ProcessDetailsDialog> {
           '执行路径'.tr,
           details.executablePath ?? '路径不可用'.tr,
           valueKey: const ValueKey('process-details-path'),
+          copyable: details.executablePath != null,
+          copyKey: const ValueKey('process-details-copy-path'),
         ),
       ],
     );
   }
 
-  Widget _row(String label, String value, {Key? valueKey}) => Padding(
+  Widget _row(
+    String label,
+    String value, {
+    Key? valueKey,
+    bool copyable = false,
+    Key? copyKey,
+  }) => Padding(
     padding: const EdgeInsets.only(bottom: 10),
     child: Row(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -136,6 +150,15 @@ class _ProcessDetailsDialogState extends State<ProcessDetailsDialog> {
             style: const TextStyle(fontSize: 12),
           ),
         ),
+        if (copyable) ...[
+          const SizedBox(width: 6),
+          AppCopyButton(
+            key: copyKey,
+            text: value,
+            size: 12,
+            semanticLabel: '复制 @label'.trParams({'label': label}),
+          ),
+        ],
       ],
     ),
   );

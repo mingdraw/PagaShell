@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
@@ -7,6 +8,8 @@ import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 import '../../application/session/session.dart';
 import '../../application/session/session_controller.dart';
 import '../components/app_dialog.dart';
+import '../components/app_icon.dart';
+import '../components/app_icon_button.dart';
 import '../components/app_text_form_field.dart';
 import '../navigation/app_navigation.dart';
 import '../theme/app_theme.dart';
@@ -22,7 +25,10 @@ class BatchCommandDialog extends StatefulWidget {
 
 class _BatchCommandDialogState extends State<BatchCommandDialog> {
   final _command = TextEditingController();
+  final _search = TextEditingController();
+  final _searchFocus = FocusNode();
   final _selected = <String>{};
+  bool _showSearch = false;
   String? _error;
   bool _submitted = false;
 
@@ -30,20 +36,56 @@ class _BatchCommandDialogState extends State<BatchCommandDialog> {
   void initState() {
     super.initState();
     _command.addListener(_onCommandChanged);
+    _search.addListener(_onSearchChanged);
   }
 
   void _onCommandChanged() => setState(() => _error = null);
+  void _onSearchChanged() => setState(() {});
 
   @override
   void dispose() {
     _command.dispose();
+    _search.dispose();
+    _searchFocus.dispose();
     super.dispose();
   }
 
+  void _toggleSearch() {
+    setState(() {
+      _showSearch = !_showSearch;
+      if (!_showSearch) {
+        _search.clear();
+      }
+    });
+    if (_showSearch) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _searchFocus.requestFocus();
+      });
+    }
+  }
+
+  void _clearSearch() {
+    _search.clear();
+    _searchFocus.requestFocus();
+  }
+
+  bool _matches(Session session, String query) {
+    if (query.isEmpty) return true;
+    final lower = query.toLowerCase();
+    return session.title.toLowerCase().contains(lower) ||
+        session.address.toLowerCase().contains(lower);
+  }
+
   void _submit() {
-    if (_submitted || _command.text.trim().isEmpty || _selected.isEmpty) return;
+    final validIds = widget.controller.commandSessions
+        .map((session) => session.id)
+        .toSet();
+    final activeTargets = _selected.intersection(validIds);
+    if (_submitted || _command.text.trim().isEmpty || activeTargets.isEmpty) {
+      return;
+    }
     final result = widget.controller.sendCommandToSessions(
-      _selected,
+      activeTargets,
       _command.text,
     );
     if (result.sent == 0) {
@@ -59,9 +101,16 @@ class _BatchCommandDialogState extends State<BatchCommandDialog> {
   @override
   Widget build(BuildContext context) => Obx(() {
     final sessions = widget.controller.commandSessions;
+    final query = _showSearch ? _search.text.trim() : '';
+    final filtered = sessions
+        .where((session) => _matches(session, query))
+        .toList(growable: false);
     final ids = sessions.map((session) => session.id).toSet();
+    final visibleIds = filtered.map((session) => session.id).toSet();
     final selectedCount = _selected.intersection(ids).length;
+    final visibleSelectedCount = _selected.intersection(visibleIds).length;
     final colors = shadcn.Theme.of(context).colorScheme;
+    final isMac = shadcn.Theme.of(context).platform == TargetPlatform.macOS;
     return AppDialog(
       title: Text('批量执行命令'.tr),
       maxWidth: AppTheme.batchCommandDialogMaxWidth,
@@ -82,23 +131,32 @@ class _BatchCommandDialogState extends State<BatchCommandDialog> {
                 ),
               ),
               if (sessions.isNotEmpty) ...[
-                const SizedBox(width: 12),
+                AppIconButton(
+                  key: const ValueKey('batch-command-search-toggle'),
+                  semanticLabel: '筛选终端'.tr,
+                  tooltip: '筛选终端'.tr,
+                  icon: const AppIcon(AppIcons.search, size: 15),
+                  onPressed: _toggleSearch,
+                ),
+                const SizedBox(width: 8),
                 shadcn.Checkbox(
-                  state: selectedCount == ids.length
+                  state:
+                      visibleIds.isNotEmpty &&
+                          visibleSelectedCount == visibleIds.length
                       ? shadcn.CheckboxState.checked
-                      : selectedCount == 0
+                      : visibleSelectedCount == 0
                       ? shadcn.CheckboxState.unchecked
                       : shadcn.CheckboxState.indeterminate,
-                  onChanged: (_) => setState(() {
-                    if (selectedCount == ids.length) {
-                      _selected.clear();
-                    } else {
-                      _selected
-                        ..clear()
-                        ..addAll(ids);
-                    }
-                    _error = null;
-                  }),
+                  onChanged: visibleIds.isEmpty
+                      ? null
+                      : (_) => setState(() {
+                          if (visibleSelectedCount == visibleIds.length) {
+                            _selected.removeAll(visibleIds);
+                          } else {
+                            _selected.addAll(visibleIds);
+                          }
+                          _error = null;
+                        }),
                   trailing: Text('全选'.tr, style: const TextStyle(fontSize: 12)),
                 ),
                 const SizedBox(width: 12),
@@ -109,12 +167,56 @@ class _BatchCommandDialogState extends State<BatchCommandDialog> {
               ],
             ],
           ),
+          if (_showSearch && sessions.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            CallbackShortcuts(
+              bindings: {
+                const SingleActivator(LogicalKeyboardKey.escape): () {
+                  if (_search.text.isNotEmpty) {
+                    _clearSearch();
+                  } else {
+                    _toggleSearch();
+                  }
+                },
+              },
+              child: AppTextFormField(
+                key: const ValueKey('batch-command-search'),
+                controller: _search,
+                focusNode: _searchFocus,
+                compact: true,
+                decoration: AppInputDecoration(
+                  hintText: '搜索终端名称或地址'.tr,
+                  suffixIcon: _search.text.isEmpty
+                      ? const AppIcon(AppIcons.search, size: 14)
+                      : SizedBox.square(
+                          dimension: 18,
+                          child: AppIconButton.text(
+                            key: const ValueKey('batch-command-search-clear'),
+                            semanticLabel: '清空搜索'.tr,
+                            tooltip: '清空搜索'.tr,
+                            density: shadcn.ButtonDensity.compact,
+                            onPressed: _clearSearch,
+                            icon: const AppIcon(AppIcons.x, size: 12),
+                          ),
+                        ),
+                ),
+              ),
+            ),
+          ],
           const SizedBox(height: 8),
           if (sessions.isEmpty)
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 16),
               child: Text(
                 '当前没有已连接的 SSH 终端'.tr,
+                style: TextStyle(fontSize: 13, color: colors.mutedForeground),
+              ),
+            )
+          else if (filtered.isEmpty)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 16),
+              child: Text(
+                '无匹配终端'.tr,
                 style: TextStyle(fontSize: 13, color: colors.mutedForeground),
               ),
             )
@@ -130,7 +232,7 @@ class _BatchCommandDialogState extends State<BatchCommandDialog> {
                 primary: false,
                 shrinkWrap: true,
                 padding: EdgeInsets.zero,
-                itemCount: (sessions.length + 1) ~/ 2,
+                itemCount: (filtered.length + 1) ~/ 2,
                 separatorBuilder: (_, _) =>
                     const SizedBox(height: AppTheme.batchCommandSessionItemGap),
                 itemBuilder: (context, index) {
@@ -138,13 +240,13 @@ class _BatchCommandDialogState extends State<BatchCommandDialog> {
                   return Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Expanded(child: _sessionRow(sessions[first])),
+                      Expanded(child: _sessionRow(filtered[first])),
                       const SizedBox(
                         width: AppTheme.batchCommandSessionColumnGap,
                       ),
                       Expanded(
-                        child: first + 1 < sessions.length
-                            ? _sessionRow(sessions[first + 1])
+                        child: first + 1 < filtered.length
+                            ? _sessionRow(filtered[first + 1])
                             : const SizedBox.shrink(),
                       ),
                     ],
@@ -153,25 +255,45 @@ class _BatchCommandDialogState extends State<BatchCommandDialog> {
               ),
             ),
           const SizedBox(height: 16),
-          AppTextFormField(
-            key: const ValueKey('batch-command-input'),
-            controller: _command,
-            autofocus: true,
-            enableSuggestions: false,
-            autocorrect: false,
-            smartPunctuation: false,
-            minLines: 3,
-            maxLines: 8,
-            decoration: AppInputDecoration(
-              labelText: '命令'.tr,
-              hintText: '输入单行或多行命令'.tr,
-              helperText: '在所选终端的当前会话中执行，结果在各页签中查看。'.tr,
+          CallbackShortcuts(
+            bindings: {
+              const SingleActivator(LogicalKeyboardKey.enter, meta: true):
+                  _submit,
+              const SingleActivator(LogicalKeyboardKey.enter, control: true):
+                  _submit,
+            },
+            child: AppTextFormField(
+              key: const ValueKey('batch-command-input'),
+              controller: _command,
+              autofocus: true,
+              enableSuggestions: false,
+              autocorrect: false,
+              smartPunctuation: false,
+              minLines: 3,
+              maxLines: 8,
+              decoration: AppInputDecoration(
+                labelText: '命令'.tr,
+                hintText: '输入单行或多行命令'.tr,
+                helperText: '在所选终端的当前会话中执行，结果在各页签中查看。'.tr,
+              ),
             ),
           ),
           const SizedBox(height: 6),
-          Text(
-            '请先确保所选终端处于命令提示符。'.tr,
-            style: TextStyle(fontSize: 12, color: colors.mutedForeground),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  '请先确保所选终端处于命令提示符。'.tr,
+                  style: TextStyle(fontSize: 12, color: colors.mutedForeground),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                (isMac ? '⌘↵ 执行' : 'Ctrl+↵ 执行').tr,
+                key: const ValueKey('batch-command-shortcut-hint'),
+                style: TextStyle(fontSize: 11, color: colors.mutedForeground),
+              ),
+            ],
           ),
           if (_error != null) ...[
             const SizedBox(height: 10),

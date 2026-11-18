@@ -3,7 +3,9 @@ import 'package:get/get.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import '../../domain/ssh/host_key.dart';
+import '../components/app_copy_button.dart';
 import '../components/app_icon.dart';
+import '../theme/app_theme.dart';
 
 /// 会话内确认界面，多个待确认连接可通过标签分别处理。
 class HostKeyConfirmation extends StatelessWidget {
@@ -49,8 +51,11 @@ class HostKeyConfirmation extends StatelessWidget {
                       .copyWith(fontWeight: FontWeight.w600),
                 ),
                 const SizedBox(height: 12),
-                shadcn.SelectableText(
+                _codeBox(
+                  context,
                   '${key.hostname}:${key.port} · ${key.keyType}',
+                  copyLabel: '复制主机信息'.tr,
+                  copyKey: const ValueKey('host-key-copy-host'),
                 ),
                 const SizedBox(height: 12),
                 Text(
@@ -62,11 +67,23 @@ class HostKeyConfirmation extends StatelessWidget {
                 if (changed) ...[
                   const SizedBox(height: 16),
                   Text('已保存指纹'.tr),
-                  shadcn.SelectableText(review.trusted!.fingerprint),
+                  const SizedBox(height: 6),
+                  _codeBox(
+                    context,
+                    review.trusted!.fingerprint,
+                    copyLabel: '复制已保存指纹'.tr,
+                    copyKey: const ValueKey('host-key-copy-trusted'),
+                  ),
                 ],
                 const SizedBox(height: 16),
                 Text(changed ? '本次服务器指纹'.tr : '服务器指纹'.tr),
-                shadcn.SelectableText(key.fingerprint),
+                const SizedBox(height: 6),
+                _codeBox(
+                  context,
+                  key.fingerprint,
+                  copyLabel: '复制服务器指纹'.tr,
+                  copyKey: const ValueKey('host-key-copy-fingerprint'),
+                ),
                 const SizedBox(height: 24),
                 Wrap(
                   spacing: 12,
@@ -90,4 +107,38 @@ class HostKeyConfirmation extends StatelessWidget {
       ),
     );
   }
+
+  Widget _codeBox(
+    BuildContext context,
+    String text, {
+    required String copyLabel,
+    Key? copyKey,
+  }) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+    decoration: BoxDecoration(
+      color: AppTheme.surface(context),
+      border: Border.all(color: AppTheme.border(context)),
+      borderRadius: BorderRadius.circular(6),
+    ),
+    child: Row(
+      children: [
+        Expanded(
+          child: shadcn.SelectableText(
+            text,
+            style: const TextStyle(
+              fontFamily: 'FiraCode Nerd Font Mono',
+              fontSize: 12,
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        AppCopyButton(
+          key: copyKey,
+          text: text,
+          size: 12,
+          semanticLabel: copyLabel,
+        ),
+      ],
+    ),
+  );
 }

@@ -12,6 +12,7 @@ import '../components/app_icon_button.dart';
 import '../navigation/app_notice.dart';
 import '../rdp/rdp_fullscreen_scope.dart';
 import '../shell/agent_sidebar_scope.dart';
+import '../shell/widgets/settings_menu_button.dart';
 import '../shell/widgets/window_controls.dart';
 import '../shell/widgets/workspace_header_actions.dart';
 import '../theme/app_theme.dart';
@@ -61,18 +62,15 @@ class _AgentWorkspaceState extends State<AgentWorkspace> {
   Widget build(BuildContext context) {
     final fullscreen = RdpFullscreenScope.maybeOf(context)?.fullscreen ?? false;
     if (!Get.isRegistered<AiSettingsController>()) {
-      return Row(
-        children: [
-          Offstage(offstage: fullscreen, child: widget.sidebar),
-          Expanded(child: widget.child),
-        ],
+      return LayoutBuilder(
+        builder: (context, constraints) =>
+            _buildLayout(context, constraints.maxWidth, fullscreen: fullscreen),
       );
     }
     final settings = Get.find<AiSettingsController>();
     final generalSettings = Get.find<SettingsController>();
     final theme = shadcn.Theme.of(context);
     final isMac = theme.platform == TargetPlatform.macOS;
-    final headerControlSize = AppTheme.windowHeaderControlSize(context);
     final duration = fullscreen || MediaQuery.disableAnimationsOf(context)
         ? Duration.zero
         : AppTheme.sidebarTransitionDuration;
@@ -102,10 +100,6 @@ class _AgentWorkspaceState extends State<AgentWorkspace> {
           final width = (_dragWidth ?? state.panelWidth).clamp(
             math.min(AppTheme.agentMinWidth, maxWidth),
             maxWidth,
-          );
-          final workspace = KeyedSubtree(
-            key: _workspaceKey,
-            child: widget.child,
           );
           final panel = TweenAnimationBuilder<double>(
             tween: Tween(begin: visible ? 1 : 0, end: visible ? 1 : 0),
@@ -195,54 +189,106 @@ class _AgentWorkspaceState extends State<AgentWorkspace> {
             ),
           );
           return AgentSidebarScope(
-            visible: visible,
             sidebarHiddenForSpace: visible && compact && sidebarVisible,
             showSidebar: () async {
               await settings.setPanel(visible: false);
               await generalSettings.setSidebarVisible(true);
             },
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Offstage(offstage: fullscreen, child: widget.sidebar),
-                    Expanded(child: workspace),
-                    panel,
-                  ],
-                ),
-                // 开关固定在窗口左上角（macOS 红绿灯右侧），不跟随侧边栏宽度移动。
-                if (!fullscreen)
-                  Positioned(
-                    top: AppTheme.sessionPaneTopMargin,
-                    left: isMac ? AppTheme.macWindowControlsWidth : 0,
-                    height: headerControlSize,
-                    child: const WindowHeaderButton(
-                      child: SidebarToggleButton(),
-                    ),
-                  ),
-                if (!fullscreen)
-                  Positioned(
-                    top: AppTheme.sessionPaneTopMargin,
-                    right: isMac ? 0 : AppTheme.windowButtonWidth * 3,
-                    height: headerControlSize,
-                    child: WorkspaceHeaderActions(
-                      agentButton: AgentToggleButton(expanded: visible),
-                    ),
-                  ),
-                if (!isMac && !fullscreen)
-                  Positioned(
-                    top: AppTheme.sessionPaneTopMargin,
-                    right: 0,
-                    height: headerControlSize,
-                    child: const WindowDragBlocker(child: WindowButtons()),
-                  ),
-              ],
+            child: _buildLayout(
+              context,
+              constraints.maxWidth,
+              fullscreen: fullscreen,
+              panel: panel,
+              agentButton: AgentToggleButton(expanded: visible),
             ),
           );
         },
       );
     });
+  }
+
+  Widget _buildLayout(
+    BuildContext context,
+    double windowWidth, {
+    required bool fullscreen,
+    Widget? panel,
+    Widget? agentButton,
+  }) {
+    final isMac = shadcn.Theme.of(context).platform == TargetPlatform.macOS;
+    final headerControlSize = AppTheme.windowHeaderControlSize(context);
+    final left = isMac ? AppTheme.macWindowControlsWidth : 0.0;
+    final captionWidth = isMac ? 0.0 : AppTheme.windowButtonWidth * 3;
+    final leadingWidth =
+        left + headerControlSize + WorkspaceHeaderActions.width(context);
+    final trailingWidth =
+        captionWidth + headerControlSize * (agentButton == null ? 1 : 2);
+    final workspace = KeyedSubtree(key: _workspaceKey, child: widget.child);
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Offstage(offstage: fullscreen, child: widget.sidebar),
+            Expanded(
+              child: LayoutBuilder(
+                builder: (context, afterSidebar) => Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Expanded(
+                      child: LayoutBuilder(
+                        builder: (context, center) {
+                          // 以侧栏本帧的可见宽度为准，标题按钮仍固定在窗口两端。
+                          final sidebarWidth =
+                              windowWidth - afterSidebar.maxWidth;
+                          final panelWidth =
+                              afterSidebar.maxWidth - center.maxWidth;
+                          return WorkspaceHeaderInsets(
+                            insets: EdgeInsets.only(
+                              left: math.max(0, leadingWidth - sidebarWidth),
+                              right: math.max(0, trailingWidth - panelWidth),
+                            ),
+                            child: workspace,
+                          );
+                        },
+                      ),
+                    ),
+                    ?panel,
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+        if (!fullscreen)
+          Positioned(
+            top: AppTheme.sessionPaneTopMargin,
+            left: left,
+            height: headerControlSize,
+            child: const Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                WindowHeaderButton(child: SidebarToggleButton()),
+                WorkspaceHeaderActions(),
+              ],
+            ),
+          ),
+        if (!fullscreen)
+          Positioned(
+            top: AppTheme.sessionPaneTopMargin,
+            right: 0,
+            height: headerControlSize,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (agentButton case final button?)
+                  WindowHeaderButton(child: button),
+                const WindowHeaderButton(child: SettingsMenuButton()),
+                if (!isMac) const WindowDragBlocker(child: WindowButtons()),
+              ],
+            ),
+          ),
+      ],
+    );
   }
 }

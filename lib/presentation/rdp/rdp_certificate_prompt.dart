@@ -7,9 +7,11 @@ import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 import '../../application/session/session.dart';
 import '../../application/session/session_controller.dart';
 import '../../domain/ssh/host_key.dart';
+import '../components/app_copy_button.dart';
 import '../components/app_dialog.dart';
 import '../components/app_icon.dart';
 import '../navigation/app_navigation.dart';
+import '../theme/app_theme.dart';
 import 'rdp_password_dialog.dart';
 
 /// Serialize RDP certificate and password prompts across all session tabs.
@@ -208,17 +210,32 @@ class _RdpCertificateDialogState extends State<RdpCertificateDialog> {
           ),
           if (_details) ...[
             const SizedBox(height: 16),
-            shadcn.SelectableText(
+            _codeBox(
+              context,
               '${key.hostname}:${key.port} · ${key.keyType}',
+              copyLabel: '复制主机信息'.tr,
+              copyKey: const ValueKey('rdp-cert-copy-host'),
             ),
             if (review.hasChanged) ...[
               const SizedBox(height: 12),
               Text('已保存指纹'.tr),
-              shadcn.SelectableText(review.trusted!.fingerprint),
+              const SizedBox(height: 6),
+              _codeBox(
+                context,
+                review.trusted!.fingerprint,
+                copyLabel: '复制已保存指纹'.tr,
+                copyKey: const ValueKey('rdp-cert-copy-trusted'),
+              ),
             ],
             const SizedBox(height: 12),
             Text('服务器指纹'.tr),
-            shadcn.SelectableText(key.fingerprint),
+            const SizedBox(height: 6),
+            _codeBox(
+              context,
+              key.fingerprint,
+              copyLabel: '复制服务器指纹'.tr,
+              copyKey: const ValueKey('rdp-cert-copy-fingerprint'),
+            ),
           ],
         ],
       ),
@@ -238,4 +255,38 @@ class _RdpCertificateDialogState extends State<RdpCertificateDialog> {
       ],
     );
   }
+
+  Widget _codeBox(
+    BuildContext context,
+    String text, {
+    required String copyLabel,
+    Key? copyKey,
+  }) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+    decoration: BoxDecoration(
+      color: AppTheme.surface(context),
+      border: Border.all(color: AppTheme.border(context)),
+      borderRadius: BorderRadius.circular(6),
+    ),
+    child: Row(
+      children: [
+        Expanded(
+          child: shadcn.SelectableText(
+            text,
+            style: const TextStyle(
+              fontFamily: 'FiraCode Nerd Font Mono',
+              fontSize: 12,
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        AppCopyButton(
+          key: copyKey,
+          text: text,
+          size: 12,
+          semanticLabel: copyLabel,
+        ),
+      ],
+    ),
+  );
 }

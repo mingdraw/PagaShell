@@ -829,9 +829,13 @@ ss -lntp
       final agentButtonBounds = tester.getRect(
         find.byKey(const ValueKey('agent-toggle')),
       );
+      final settingsButtonBounds = tester.getRect(
+        find.byKey(const ValueKey('app-settings-button')),
+      );
       expect(tester.getSize(viewport).width, 0);
+      expect(agentButtonBounds.right, settingsButtonBounds.left);
       expect(
-        tester.getRect(find.byKey(const ValueKey('app-settings-button'))).right,
+        settingsButtonBounds.right,
         windowButtons?.left ?? tester.view.physicalSize.width,
       );
 

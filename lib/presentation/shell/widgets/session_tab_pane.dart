@@ -21,8 +21,8 @@ import '../../navigation/app_navigation.dart';
 import '../../navigation/app_notice.dart';
 import '../../terminal/batch_command_dialog.dart';
 import '../../theme/app_theme.dart';
-import '../agent_sidebar_scope.dart';
 import '../session_close_confirmation.dart';
+import 'settings_menu_button.dart';
 import 'window_controls.dart';
 import 'workspace_header_actions.dart';
 
@@ -54,6 +54,7 @@ class _SessionTabPaneState extends State<SessionTabPane> {
   bool _revealScheduled = false;
   bool _ignoreSortFocus = false;
   double? _paneWidth;
+  EdgeInsets? _headerInsets;
   bool? _sidebarVisible;
 
   @override
@@ -156,26 +157,34 @@ class _SessionTabPaneState extends State<SessionTabPane> {
 
   @override
   Widget build(BuildContext context) {
+    final headerInsets = WorkspaceHeaderInsets.maybeOf(context);
+    if (headerInsets != null) return _layoutPane(headerInsets: headerInsets);
     final settings = Get.find<SettingsController>();
-    return Obx(() {
-      final sidebarVisible =
-          settings.sidebarVisible.value &&
-          !(AgentSidebarScope.maybeOf(context)?.sidebarHiddenForSpace ?? false);
-      return LayoutBuilder(
+    return Obx(
+      () => _layoutPane(sidebarVisible: settings.sidebarVisible.value),
+    );
+  }
+
+  Widget _layoutPane({EdgeInsets? headerInsets, bool sidebarVisible = false}) =>
+      LayoutBuilder(
         builder: (context, constraints) {
           if (_paneWidth != constraints.maxWidth ||
+              _headerInsets != headerInsets ||
               _sidebarVisible != sidebarVisible) {
             _paneWidth = constraints.maxWidth;
+            _headerInsets = headerInsets;
             _sidebarVisible = sidebarVisible;
             _scheduleReveal();
           }
-          return _buildPane(context, sidebarVisible);
+          return _buildPane(context, sidebarVisible, headerInsets);
         },
       );
-    });
-  }
 
-  Widget _buildPane(BuildContext context, bool sidebarVisible) {
+  Widget _buildPane(
+    BuildContext context,
+    bool sidebarVisible,
+    EdgeInsets? headerInsets,
+  ) {
     if (widget.fullscreen) return widget.child;
     final tabs = widget.tabs;
     final sessionsById = {
@@ -186,7 +195,6 @@ class _SessionTabPaneState extends State<SessionTabPane> {
     };
     final activeId = widget.activeId;
     final isMac = shadcn.Theme.of(context).platform == TargetPlatform.macOS;
-    final agentSidebar = AgentSidebarScope.maybeOf(context);
     final headerControlSize = AppTheme.windowHeaderControlSize(context);
     final paneRadius = AppTheme.sessionPaneRadius(context);
     final controller = Get.find<SessionController>();
@@ -198,7 +206,7 @@ class _SessionTabPaneState extends State<SessionTabPane> {
         child: Padding(
           padding: const EdgeInsets.only(top: AppTheme.sessionPaneTopMargin),
           child: shadcn.TabPane<String>(
-            borderRadius: AppTheme.sessionPaneRadius(context),
+            borderRadius: paneRadius,
             items: [
               for (final tab in tabs)
                 _tabItems.putIfAbsent(tab.id, () => shadcn.TabPaneData(tab.id)),
@@ -222,28 +230,23 @@ class _SessionTabPaneState extends State<SessionTabPane> {
             },
             backgroundColor: AppTheme.background(context),
             leading: [
-              if (agentSidebar != null)
-                AnimatedContainer(
-                  duration: MediaQuery.disableAnimationsOf(context)
-                      ? Duration.zero
-                      : AppTheme.sidebarTransitionDuration,
-                  curve: Curves.easeInOutCubic,
-                  width: sidebarVisible
-                      ? 0
-                      : math.max(
-                          0,
-                          (isMac ? AppTheme.macWindowControlsWidth : 0) +
-                              headerControlSize -
-                              paneRadius.bottomLeft.x,
-                        ),
-                ),
-              if (agentSidebar == null && isMac && !sidebarVisible)
-                const SizedBox(
-                  width: AppTheme.macWindowControlsWidth,
-                  child: WindowDragArea(),
-                ),
-              if (agentSidebar == null && !sidebarVisible)
-                const WindowDragBlocker(child: SidebarToggleButton()),
+              if (headerInsets != null)
+                SizedBox(
+                  width: math.max(
+                    0,
+                    headerInsets.left - paneRadius.bottomLeft.x,
+                  ),
+                )
+              else ...[
+                if (isMac && !sidebarVisible)
+                  const SizedBox(
+                    width: AppTheme.macWindowControlsWidth,
+                    child: WindowDragArea(),
+                  ),
+                if (!sidebarVisible)
+                  const WindowHeaderButton(child: SidebarToggleButton()),
+                const WorkspaceHeaderActions(),
+              ],
               if (tabs.isNotEmpty)
                 WindowDragBlocker(
                   child: AppMenuButton<String>(
@@ -298,27 +301,24 @@ class _SessionTabPaneState extends State<SessionTabPane> {
                 ),
             ],
             trailing: [
-              const SizedBox(
-                width: AppTheme.windowDragWidth,
-                child: WindowDragArea(),
-              ),
-              if (agentSidebar == null)
-                WorkspaceHeaderActions(
-                  agentButton: Get.isRegistered<AiSettingsController>()
-                      ? const AgentToggleButton()
-                      : null,
-                ),
-              if (!isMac && agentSidebar == null)
-                const WindowDragBlocker(child: WindowButtons()),
-              if (agentSidebar?.visible == false)
-                SizedBox(
-                  width: math.max(
+              Padding(
+                padding: EdgeInsets.only(
+                  right: math.max(
                     0,
-                    (isMac ? 0 : AppTheme.windowButtonWidth * 3) +
-                        headerControlSize * 4 -
-                        paneRadius.bottomRight.x,
+                    (headerInsets?.right ?? 0) - paneRadius.bottomRight.x,
                   ),
                 ),
+                child: const SizedBox(
+                  width: AppTheme.windowDragWidth,
+                  child: WindowDragArea(),
+                ),
+              ),
+              if (headerInsets == null) ...[
+                if (Get.isRegistered<AiSettingsController>())
+                  const WindowHeaderButton(child: AgentToggleButton()),
+                const WindowHeaderButton(child: SettingsMenuButton()),
+                if (!isMac) const WindowDragBlocker(child: WindowButtons()),
+              ],
             ],
             itemBuilder: (context, item, index) {
               final session = sessionsById[item.data]!;
@@ -398,14 +398,78 @@ class _SessionTab extends StatefulWidget {
 }
 
 class _SessionTabState extends State<_SessionTab> {
+  final _layerLink = LayerLink();
+  OverlayEntry? _tooltipEntry;
+  Timer? _tooltipTimer;
   bool _hovered = false;
   bool _middleButtonDown = false;
+
+  @override
+  void dispose() {
+    _hideTooltip();
+    super.dispose();
+  }
+
+  String _tooltipText() =>
+      '${widget.session.title} · ${widget.session.address} · $_kindLabel（$_phaseLabel）';
+
+  void _showTooltipLater() {
+    _tooltipTimer?.cancel();
+    _tooltipTimer = Timer(const Duration(milliseconds: 500), () {
+      if (!mounted || _tooltipEntry != null) return;
+      final overlay = Overlay.maybeOf(context);
+      if (overlay == null) return;
+      final entry = OverlayEntry(
+        builder: (_) => Positioned(
+          left: 0,
+          top: 0,
+          child: CompositedTransformFollower(
+            link: _layerLink,
+            targetAnchor: Alignment.bottomLeft,
+            followerAnchor: Alignment.topLeft,
+            offset: const Offset(0, 6),
+            child: IgnorePointer(
+              child: shadcn.TooltipContainer(child: Text(_tooltipText())),
+            ),
+          ),
+        ),
+      );
+      _tooltipEntry = entry;
+      overlay.insert(entry);
+    });
+  }
+
+  void _hideTooltip() {
+    _tooltipTimer?.cancel();
+    _tooltipTimer = null;
+    _tooltipEntry?.remove();
+    _tooltipEntry?.dispose();
+    _tooltipEntry = null;
+  }
 
   Color get _statusColor => switch (widget.session.phase) {
     SessionPhase.ready => StatusColors.ready,
     SessionPhase.failed => StatusColors.failed,
     SessionPhase.closed => StatusColors.closed,
     _ => StatusColors.connecting,
+  };
+
+  String get _kindLabel => switch (widget.session.kind) {
+    SessionKind.terminal => '终端'.tr,
+    SessionKind.containerTerminal => '容器终端'.tr,
+    SessionKind.fileTransfer => '文件传输'.tr,
+    SessionKind.portForward => '端口转发'.tr,
+    SessionKind.dynamicProxy => '动态代理'.tr,
+    SessionKind.remoteDesktop => '远程桌面'.tr,
+  };
+
+  String get _phaseLabel => switch (widget.session.phase) {
+    SessionPhase.ready => '已连接'.tr,
+    SessionPhase.failed => '失败'.tr,
+    SessionPhase.closed => '未启用'.tr,
+    SessionPhase.stopping => '正在停止'.tr,
+    SessionPhase.hostKeyPending => '等待确认主机指纹'.tr,
+    _ => '正在连接'.tr,
   };
 
   @override
@@ -418,11 +482,13 @@ class _SessionTabState extends State<_SessionTab> {
         if (!_hovered) setState(() => _hovered = true);
       },
       onExit: (_) {
+        _hideTooltip();
         if (_hovered) setState(() => _hovered = false);
       },
       child: Listener(
         behavior: HitTestBehavior.translucent,
         onPointerDown: (event) {
+          _hideTooltip();
           _middleButtonDown = event.buttons == kMiddleMouseButton;
         },
         onPointerUp: (_) {
@@ -466,17 +532,24 @@ class _SessionTabState extends State<_SessionTab> {
                 icon: const AppIcon(AppIcons.x, size: 12),
               ),
             ),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 140),
-              child: Text(
-                tab.sessionIds.length > 1
-                    ? '${session.title} · ${tab.sessionIds.length}'
-                    : session.title,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  color: widget.active
-                      ? colors.foreground
-                      : colors.mutedForeground,
+            child: MouseRegion(
+              onEnter: (_) => _showTooltipLater(),
+              onExit: (_) => _hideTooltip(),
+              child: CompositedTransformTarget(
+                link: _layerLink,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 140),
+                  child: Text(
+                    tab.sessionIds.length > 1
+                        ? '${session.title} · ${tab.sessionIds.length}'
+                        : session.title,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: widget.active
+                          ? colors.foreground
+                          : colors.mutedForeground,
+                    ),
+                  ),
                 ),
               ),
             ),
