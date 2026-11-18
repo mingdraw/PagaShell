@@ -192,9 +192,7 @@ class _PrivateKeyFieldsState extends State<PrivateKeyFields> {
                         setState(() => _obscurePassphrase = !_obscurePassphrase)
                   : null,
               icon: AppIcon(
-                _obscurePassphrase
-                    ? AppIcons.eyeOff
-                    : AppIcons.eye,
+                _obscurePassphrase ? AppIcons.eyeOff : AppIcons.eye,
                 size: AppTheme.inputIconSize,
               ),
             ),

@@ -6,9 +6,9 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
-import 'package:window_manager/window_manager.dart';
 
 import '../../../application/settings/settings_controller.dart';
+import '../../../domain/window/app_window.dart';
 import '../../components/app_icon.dart';
 import '../../components/app_icon_button.dart';
 import '../../components/app_list_row.dart';
@@ -87,11 +87,23 @@ class WindowDragArea extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (shadcn.Theme.of(context).platform != TargetPlatform.macOS) {
-      return const DragToMoveArea(child: SizedBox.expand());
-    }
+    final platform = shadcn.Theme.of(context).platform;
+    final isMac = platform == TargetPlatform.macOS;
+    final onRelease = platform == TargetPlatform.windows;
     return GestureDetector(
       behavior: HitTestBehavior.translucent,
+      onSecondaryTapDown: isMac || onRelease
+          ? null
+          : (details) => Get.find<AppWindow>().showSystemMenu(
+              details.globalPosition.dx,
+              details.globalPosition.dy,
+            ),
+      onSecondaryTapUp: !isMac && onRelease
+          ? (details) => Get.find<AppWindow>().showSystemMenu(
+              details.globalPosition.dx,
+              details.globalPosition.dy,
+            )
+          : null,
       onPanStart: (_) => unawaited(_startWindowDrag(context)),
       onDoubleTap: _toggleWindowMaximize,
       child: const SizedBox.expand(),
@@ -202,15 +214,16 @@ Future<void> _startWindowDrag(BuildContext context) async {
     await const MethodChannel('pagashell/window')
         .invokeMethod<void>('startWindowDrag');
   } else {
-    await windowManager.startDragging();
+    await Get.find<AppWindow>().startDragging();
   }
 }
 
 Future<void> _toggleWindowMaximize() async {
-  if (await windowManager.isMaximized()) {
-    await windowManager.unmaximize();
+  final window = Get.find<AppWindow>();
+  if (await window.isMaximized()) {
+    await window.unmaximize();
   } else {
-    await windowManager.maximize();
+    await window.maximize();
   }
 }
 
@@ -224,24 +237,18 @@ class WindowButtons extends StatelessWidget {
       _CaptionButton(
         icon: AppIcons.minus,
         semanticLabel: '最小化'.tr,
-        onPressed: windowManager.minimize,
+        onPressed: () => Get.find<AppWindow>().minimize(),
       ),
       _CaptionButton(
         icon: AppIcons.windowMaximize,
         semanticLabel: '最大化 / 还原'.tr,
-        onPressed: () async {
-          if (await windowManager.isMaximized()) {
-            await windowManager.unmaximize();
-          } else {
-            await windowManager.maximize();
-          }
-        },
+        onPressed: _toggleWindowMaximize,
       ),
       _CaptionButton(
         icon: AppIcons.x,
         semanticLabel: '关闭'.tr,
         hoverColor: const Color(0xFFE81123),
-        onPressed: windowManager.close,
+        onPressed: () => Get.find<AppWindow>().close(),
       ),
     ],
   );

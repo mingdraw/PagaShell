@@ -72,7 +72,10 @@ class AppRadioCardField<T> extends FormField<T> {
                                  mainAxisSize: MainAxisSize.min,
                                  children: [
                                    if (items[i].icon case final icon?) ...[
-                                     AppIcon(icon, size: AppTheme.inputIconSize),
+                                     AppIcon(
+                                       icon,
+                                       size: AppTheme.inputIconSize,
+                                     ),
                                      const SizedBox(width: 6),
                                    ],
                                    items[i].child,

@@ -13,21 +13,28 @@ import 'package:pagashell/presentation/shell/widgets/window_controls.dart';
 import 'package:pagashell/presentation/shell/widgets/workspace.dart';
 import 'package:pagashell/presentation/theme/app_theme.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
-import 'package:window_manager/window_manager.dart';
 
+import 'support/fake_app_window.dart';
 import 'support/in_memory_binding.dart';
 import 'support/shadcn_test_app.dart';
 
 void main() {
   tearDown(Get.reset);
 
-  Future<void> pumpApp(WidgetTester tester, TargetPlatform platform) async {
+  Future<void> pumpApp(
+    WidgetTester tester,
+    TargetPlatform platform, {
+    FakeAppWindow? appWindow,
+  }) async {
     tester.view.physicalSize = const Size(1280, 800);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
     await tester.pumpWidget(
-      PagaShellApp(binding: InMemoryBinding(), platform: platform),
+      PagaShellApp(
+        binding: InMemoryBinding(appWindow: appWindow),
+        platform: platform,
+      ),
     );
     await tester.pumpAndSettle();
   }
@@ -283,7 +290,7 @@ void main() {
           );
           expect(tester.state(find.byType(Sidebar)), same(sidebarState));
           expect(
-            find.ancestor(of: toggle, matching: find.byType(DragToMoveArea)),
+            find.ancestor(of: toggle, matching: find.byType(WindowDragArea)),
             findsNothing,
           );
           if (isMac) {
@@ -411,14 +418,8 @@ void main() {
   ]) {
     testWidgets('$platform 拖动标签只调整顺序，空白区域仍可拖动窗口', (tester) async {
       final calls = <String>[];
-      const channel = MethodChannel('window_manager');
+      final appWindow = FakeAppWindow();
       const nativeChannel = MethodChannel('pagashell/window');
-      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
-        call,
-      ) async {
-        calls.add(call.method);
-        return null;
-      });
       tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
         nativeChannel,
         (call) async {
@@ -428,17 +429,11 @@ void main() {
       );
       addTearDown(
         () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-          channel,
-          null,
-        ),
-      );
-      addTearDown(
-        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
           nativeChannel,
           null,
         ),
       );
-      await pumpApp(tester, platform);
+      await pumpApp(tester, platform, appWindow: appWindow);
       final controller = Get.find<SessionController>();
       controller.sessions.assignAll([
         for (final name in ['Alpha', 'Beta', 'Gamma'])
@@ -457,12 +452,13 @@ void main() {
             widget is shadcn.KeyedTabItem<String> && widget.tabKey == id,
       );
       expect(
-        find.ancestor(of: tab('Alpha'), matching: find.byType(DragToMoveArea)),
+        find.ancestor(of: tab('Alpha'), matching: find.byType(WindowDragArea)),
         findsNothing,
       );
       final source = tester.getRect(tab('Alpha'));
       final target = tester.getRect(tab('Gamma'));
       calls.clear();
+      appWindow.calls.clear();
       final gesture = await tester.startGesture(
         source.centerLeft + const Offset(32, 0),
         kind: PointerDeviceKind.mouse,
@@ -483,13 +479,20 @@ void main() {
       ]);
       expect(controller.activeSessionId.value, 'Alpha');
       expect(calls, isEmpty);
+      expect(appWindow.calls, isEmpty);
       calls.clear();
+      appWindow.calls.clear();
       await tester.drag(find.byType(WindowDragArea).last, const Offset(40, 0));
       await tester.pumpAndSettle();
-      expect(calls, [
-        platform == TargetPlatform.macOS ? 'startWindowDrag' : 'startDragging',
-      ]);
+      if (platform == TargetPlatform.macOS) {
+        expect(calls, ['startWindowDrag']);
+        expect(appWindow.calls, isEmpty);
+      } else {
+        expect(calls, isEmpty);
+        expect(appWindow.calls, ['startDragging']);
+      }
       calls.clear();
+      appWindow.calls.clear();
       final lastTab = tester.getRect(tab('Alpha'));
       final blankEnd =
           tester.getRect(find.byType(WindowDragArea).last).left - 8;
@@ -506,10 +509,15 @@ void main() {
       await tester.pump();
       await blankGesture.up();
       await tester.pumpAndSettle();
-      expect(calls, [
-        platform == TargetPlatform.macOS ? 'startWindowDrag' : 'startDragging',
-      ]);
+      if (platform == TargetPlatform.macOS) {
+        expect(calls, ['startWindowDrag']);
+        expect(appWindow.calls, isEmpty);
+      } else {
+        expect(calls, isEmpty);
+        expect(appWindow.calls, ['startDragging']);
+      }
       calls.clear();
+      appWindow.calls.clear();
       await tester.drag(findAppIconButton('关闭标签').first, const Offset(40, 0));
       await tester.dragFrom(
         tester.getCenter(find.byType(Workspace)),
@@ -517,6 +525,7 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(calls, isEmpty);
+      expect(appWindow.calls, isEmpty);
       expect(controller.sessions, hasLength(3));
       expect(tester.takeException(), isNull);
     });
@@ -526,25 +535,9 @@ void main() {
     testWidgets('macOS ${hasSessions ? '有' : '无'}标签时双击中间空白与顶部留白可放大还原', (
       tester,
     ) async {
-      final calls = <String>[];
+      final appWindow = FakeAppWindow();
       final nativeCalls = <String>[];
-      var maximized = false;
-      const channel = MethodChannel('window_manager');
       const nativeChannel = MethodChannel('pagashell/window');
-      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
-        call,
-      ) async {
-        calls.add(call.method);
-        switch (call.method) {
-          case 'isMaximized':
-            return maximized;
-          case 'maximize':
-            maximized = true;
-          case 'unmaximize':
-            maximized = false;
-        }
-        return null;
-      });
       tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
         nativeChannel,
         (call) async {
@@ -554,15 +547,11 @@ void main() {
       );
       addTearDown(() {
         tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-          channel,
-          null,
-        );
-        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
           nativeChannel,
           null,
         );
       });
-      await pumpApp(tester, TargetPlatform.macOS);
+      await pumpApp(tester, TargetPlatform.macOS, appWindow: appWindow);
       final controller = Get.find<SessionController>();
       if (hasSessions) {
         controller.sessions.assignAll([
@@ -577,7 +566,7 @@ void main() {
         controller.activate('Beta');
         await tester.pumpAndSettle();
       }
-      calls.clear();
+      appWindow.calls.clear();
       nativeCalls.clear();
 
       Future<void> doubleTapAt(Offset position) async {
@@ -596,13 +585,13 @@ void main() {
       );
       for (final position in [blank, topMargin, trailing.center]) {
         await doubleTapAt(position);
-        expect(calls, ['isMaximized', 'maximize']);
-        expect(maximized, isTrue);
-        calls.clear();
+        expect(appWindow.calls, ['isMaximized', 'maximize']);
+        expect(appWindow.maximized, isTrue);
+        appWindow.calls.clear();
         await doubleTapAt(position);
-        expect(calls, ['isMaximized', 'unmaximize']);
-        expect(maximized, isFalse);
-        calls.clear();
+        expect(appWindow.calls, ['isMaximized', 'unmaximize']);
+        expect(appWindow.maximized, isFalse);
+        appWindow.calls.clear();
       }
 
       if (hasSessions) {
@@ -615,44 +604,23 @@ void main() {
         expect(controller.sessions, hasLength(2));
       }
       await doubleTapAt(tester.getCenter(find.byType(Workspace)));
-      expect(calls, isEmpty);
+      expect(appWindow.calls, isEmpty);
       expect(nativeCalls, isEmpty);
       expect(tester.takeException(), isNull);
     });
   }
 
   testWidgets('Windows 窗口按钮调用原生操作，空白可拖动及双击缩放，交互按钮不触发拖动', (tester) async {
-    final calls = <String>[];
-    var maximized = false;
-    const channel = MethodChannel('window_manager');
-    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
-      call,
-    ) async {
-      calls.add(call.method);
-      switch (call.method) {
-        case 'isMaximized':
-          return maximized;
-        case 'maximize':
-          maximized = true;
-        case 'unmaximize':
-          maximized = false;
-      }
-      return null;
-    });
-    addTearDown(
-      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-        channel,
-        null,
-      ),
-    );
-    await pumpApp(tester, TargetPlatform.windows);
+    final appWindow = FakeAppWindow();
+    await pumpApp(tester, TargetPlatform.windows, appWindow: appWindow);
+    appWindow.calls.clear();
     await tester.tap(captionButton('最小化'));
     await tester.tap(captionButton('最大化 / 还原'));
     await tester.pumpAndSettle();
     await tester.tap(captionButton('最大化 / 还原'));
     await tester.tap(captionButton('关闭'));
     await tester.pumpAndSettle();
-    expect(calls, [
+    expect(appWindow.calls, [
       'minimize',
       'isMaximized',
       'maximize',
@@ -660,20 +628,20 @@ void main() {
       'unmaximize',
       'close',
     ]);
-    calls.clear();
+    appWindow.calls.clear();
     await tester.tap(findAppIconButton('隐藏侧边栏'));
     await tester.pumpAndSettle();
-    expect(calls, isEmpty);
+    expect(appWindow.calls, isEmpty);
     final dragArea = find.byType(WindowDragArea).last;
     await tester.drag(dragArea, const Offset(40, 0));
     await tester.pumpAndSettle();
-    expect(calls, ['startDragging']);
-    calls.clear();
+    expect(appWindow.calls, ['startDragging']);
+    appWindow.calls.clear();
     await tester.tap(dragArea);
     await tester.pump(const Duration(milliseconds: 100));
     await tester.tap(dragArea);
     await tester.pumpAndSettle();
-    expect(calls, ['isMaximized', 'maximize']);
+    expect(appWindow.calls, ['isMaximized', 'maximize']);
     expect(tester.takeException(), isNull);
   });
 }

@@ -16,6 +16,7 @@ import '../domain/repositories/local_file_repository.dart';
 import '../domain/repositories/settings_repository.dart';
 import '../domain/ssh/ssh_engine.dart';
 import '../domain/vault/secret_store.dart';
+import '../domain/window/app_window.dart';
 import '../infrastructure/db/app_database.dart';
 import '../infrastructure/db/drift_agent_conversation_repository.dart';
 import '../infrastructure/db/drift_ai_settings_repository.dart';
@@ -36,6 +37,7 @@ import '../infrastructure/updates/desktop_update_installer.dart';
 import '../infrastructure/vault/encrypted_secret_store.dart';
 import '../infrastructure/vault/encrypted_vault_storage.dart';
 import '../infrastructure/vault/secure_secret_store.dart';
+import '../infrastructure/window/native_app_window.dart';
 import 'ai/agent_controller.dart';
 import 'ai/ai_settings_controller.dart';
 import 'configuration/configuration_transfer.dart';
@@ -153,6 +155,7 @@ class AppBinding extends Bindings {
     Get.put<KnownHostRepository>(knownHosts, permanent: true);
     Get.put<SettingsRepository>(settingsRepository, permanent: true);
     Get.put<SshEngine>(sshEngine, permanent: true);
+    Get.put<AppWindow>(NativeAppWindow(), permanent: true);
     Get.put<LocalClipboard>(SystemClipboard(), permanent: true);
     Get.put<LocalFileRepository>(
       IoLocalFileRepository(userHomeDirectory: localHomeDirectory),

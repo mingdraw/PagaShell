@@ -13,7 +13,7 @@ PagaShell 是基于 Flutter 和 Rust 引擎的纯本地桌面 SSH/SFTP 客户端
 
 ## 构建、测试与开发命令
 
-安装 Flutter stable 3.47+、兼容的 Dart SDK（`^3.13.0`）、Rust 及目标桌面平台工具链。在仓库根目录执行：
+安装 Flutter stable 3.50+、兼容的 Dart SDK（`^3.14.0`）、Rust 及目标桌面平台工具链。在仓库根目录执行：
 
 ```bash
 flutter pub get                       # 安装 Dart 依赖

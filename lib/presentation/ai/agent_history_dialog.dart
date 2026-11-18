@@ -178,10 +178,7 @@ class _AgentHistoryDialogState extends State<_AgentHistoryDialog> {
                                 ),
                                 semanticLabel: '删除对话'.tr,
                                 tooltip: '删除对话'.tr,
-                                icon: const AppIcon(
-                                  AppIcons.trash2,
-                                  size: 15,
-                                ),
+                                icon: const AppIcon(AppIcons.trash2, size: 15),
                                 onPressed: deleting
                                     ? null
                                     : () => _delete(item),

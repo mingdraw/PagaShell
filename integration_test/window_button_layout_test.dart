@@ -13,17 +13,17 @@ void main() {
 
   testWidgets('macOS 原生窗口按钮在初次显示和缩放后垂直居中', (tester) async {
     await tester.pumpWidget(const shadcn.ShadcnApp(home: SizedBox()));
-    await windowManager.ensureInitialized();
+    final window = WindowManager.instance.getCurrent()!;
     const channel = MethodChannel('pagashell/window');
-    await windowManager.setTitleBarStyle(TitleBarStyle.hidden);
+    window.titleBarStyle = TitleBarStyle.hidden;
     await channel.invokeMethod<void>('setTitleBarHeight', {
       'height': AppTheme.windowHeaderHeight,
     });
 
-    final originalSize = await windowManager.getSize();
+    final originalSize = window.size.toSize();
     try {
       for (final size in [const Size(1200, 760), const Size(1000, 640)]) {
-        await windowManager.setSize(size);
+        window.setSize(size.toNative(), false);
         await tester.pumpAndSettle();
         final centers = await channel.invokeListMethod<double>(
           'getWindowButtonCenters',
@@ -36,7 +36,7 @@ void main() {
         );
       }
     } finally {
-      await windowManager.setSize(originalSize);
+      window.setSize(originalSize.toNative(), false);
     }
   }, skip: !Platform.isMacOS);
 }

@@ -12,6 +12,7 @@ import 'package:pagashell/application/session/session.dart';
 import 'package:pagashell/application/session/session_controller.dart';
 import 'package:pagashell/domain/entities/host.dart';
 import 'package:pagashell/domain/rdp/rdp_engine.dart';
+import 'package:pagashell/infrastructure/window/native_app_window.dart';
 import 'package:pagashell/presentation/rdp/rdp_desktop_panel.dart';
 import 'package:pagashell/presentation/shell/widgets/workspace.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
@@ -44,11 +45,15 @@ Future<void> _capture(WidgetTester tester, String name) async {
   }
 }
 
-Future<void> _waitForWindow(WidgetTester tester, bool fullscreen) async {
+Future<void> _waitForWindow(
+  WidgetTester tester,
+  Window window,
+  bool fullscreen,
+) async {
   for (var attempt = 0; attempt < 100; attempt++) {
     await tester.pump(const Duration(milliseconds: 100));
     final panel = tester.widget<RdpDesktopPanel>(find.byType(RdpDesktopPanel));
-    if (await windowManager.isFullScreen() == fullscreen &&
+    if (window.isFullScreen == fullscreen &&
         panel.fullscreen == fullscreen &&
         !panel.fullscreenBusy) {
       return;
@@ -61,19 +66,21 @@ void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
   testWidgets('原生桌面窗口全屏、悬浮退出与快捷键保持同一 RDP 会话', (tester) async {
-    await windowManager.ensureInitialized();
-    final originalFullscreen = await windowManager.isFullScreen();
-    final originalSize = await windowManager.getSize();
+    final window = WindowManager.instance.getCurrent()!;
+    final originalFullscreen = window.isFullScreen;
+    final originalSize = window.size.toSize();
     final desktop = FakeRdpSession();
     SessionController? sessions;
     try {
-      await windowManager.setTitleBarStyle(TitleBarStyle.hidden);
-      await windowManager.show();
-      await windowManager.focus();
+      window.titleBarStyle = TitleBarStyle.hidden;
+      window.show();
+      window.focus();
       await tester.pumpWidget(
         RepaintBoundary(
           key: const ValueKey('rdp-display-preview'),
-          child: PagaShellApp(binding: InMemoryBinding()),
+          child: PagaShellApp(
+            binding: InMemoryBinding(appWindow: NativeAppWindow()),
+          ),
         ),
       );
       await tester.pumpAndSettle();
@@ -109,13 +116,13 @@ void main() {
       await _capture(tester, 'window');
       final state = tester.state(find.byType(RdpDesktopPanel));
       await tester.tap(find.byKey(const ValueKey('rdp-enter-fullscreen')));
-      await _waitForWindow(tester, true);
+      await _waitForWindow(tester, window, true);
       expect(find.byType(shadcn.TabPane<Session>), findsNothing);
       expect(tester.getTopLeft(find.byType(Workspace)), Offset.zero);
       expect(tester.state(find.byType(RdpDesktopPanel)), same(state));
       await _capture(tester, 'fullscreen');
       await tester.tap(find.byKey(const ValueKey('rdp-exit-fullscreen')));
-      await _waitForWindow(tester, false);
+      await _waitForWindow(tester, window, false);
       expect(find.byType(shadcn.TabPane<Session>), findsOneWidget);
 
       await tester.tapAt(
@@ -127,7 +134,7 @@ void main() {
         await tester.sendKeyEvent(LogicalKeyboardKey.enter);
         await tester.sendKeyUpEvent(LogicalKeyboardKey.altLeft);
         await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
-        await _waitForWindow(tester, expected);
+        await _waitForWindow(tester, window, expected);
       }
       expect(tester.state(find.byType(RdpDesktopPanel)), same(state));
       expect(desktop.keys.where((k) => k.$1 == 0x1c), isEmpty);
@@ -135,9 +142,9 @@ void main() {
       expect(tester.takeException(), isNull);
     } finally {
       await sessions?.closeAll();
-      await windowManager.setFullScreen(originalFullscreen);
+      window.isFullScreen = originalFullscreen;
       await tester.pumpAndSettle();
-      if (!originalFullscreen) await windowManager.setSize(originalSize);
+      if (!originalFullscreen) window.setSize(originalSize.toNative(), false);
       await tester.pumpWidget(const SizedBox.shrink());
       Get.reset();
     }

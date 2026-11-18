@@ -16,10 +16,10 @@ import 'package:pagashell/domain/repositories/host_tree_repository.dart';
 import 'package:pagashell/domain/repositories/identity_tree_repository.dart';
 import 'package:pagashell/presentation/components/app_icon_button.dart';
 import 'package:pagashell/presentation/shell/widgets/sidebar.dart';
+import 'package:pagashell/presentation/shell/widgets/window_controls.dart';
 import 'package:pagashell/presentation/shell/widgets/workspace.dart';
 import 'package:pagashell/presentation/theme/app_theme.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
-import 'package:window_manager/window_manager.dart';
 
 import 'support/fixture_terminal.dart';
 
@@ -76,7 +76,7 @@ void main() {
     );
     expect(find.text('PagaShell'), findsNothing);
     expect(
-      find.ancestor(of: toggle, matching: find.byType(DragToMoveArea)),
+      find.ancestor(of: toggle, matching: find.byType(WindowDragArea)),
       findsNothing,
     );
     expect(tester.widget<AppIconButton>(toggle).tooltip, '隐藏侧边栏');

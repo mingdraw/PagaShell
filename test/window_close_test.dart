@@ -16,6 +16,7 @@ import 'package:pagashell/domain/ssh/ssh_engine.dart';
 import 'package:pagashell/domain/vault/secret_store.dart';
 import 'package:pagashell/presentation/shell/shell_page.dart';
 
+import 'support/fake_app_window.dart';
 import 'support/fixture_terminal.dart';
 
 import 'support/in_memory_agent_conversation_repository.dart';
@@ -69,7 +70,7 @@ class _ProxyRestoreSessions extends SessionController {
 }
 
 class _Binding extends InMemoryBinding {
-  _Binding({this.waitForAgent = false, this.sessions});
+  _Binding({this.waitForAgent = false, this.sessions, super.appWindow});
 
   final bool waitForAgent;
   final SessionController? sessions;
@@ -89,19 +90,15 @@ class _Binding extends InMemoryBinding {
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   const windowChannel = MethodChannel('pagashell/window');
-  const managerChannel = MethodChannel('window_manager');
-  const codec = StandardMethodCodec();
   final calls = <String>[];
+  late FakeAppWindow appWindow;
 
   setUp(() {
+    appWindow = FakeAppWindow();
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
     messenger.setMockMethodCallHandler(windowChannel, (call) async {
       calls.add('native:${call.method}');
-      return null;
-    });
-    messenger.setMockMethodCallHandler(managerChannel, (call) async {
-      calls.add('manager:${call.method}');
       return null;
     });
     calls.clear();
@@ -112,7 +109,6 @@ void main() {
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
     messenger.setMockMethodCallHandler(windowChannel, null);
-    messenger.setMockMethodCallHandler(managerChannel, null);
   });
 
   Future<void> pump(WidgetTester tester, {_Binding? binding}) async {
@@ -122,7 +118,7 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
     await tester.pumpWidget(
       PagaShellApp(
-        binding: binding ?? _Binding(),
+        binding: binding ?? _Binding(appWindow: appWindow),
         platform: defaultTargetPlatform,
       ),
     );
@@ -131,16 +127,11 @@ void main() {
       await tester.pumpWidget(const SizedBox.shrink());
     });
     calls.clear();
+    appWindow.calls.clear();
   }
 
   Future<void> requestClose(WidgetTester tester) async {
-    await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
-      'window_manager',
-      codec.encodeMethodCall(
-        const MethodCall('onEvent', {'eventName': 'close'}),
-      ),
-      null,
-    );
+    appWindow.requestClose();
   }
 
   testWidgets('Windows 空窗口通过原生窗口销毁流程退出，重复关闭只销毁一次', (tester) async {
@@ -153,7 +144,7 @@ void main() {
   }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
 
   testWidgets('等待 Agent 保存和 SSH 断开后才允许原生销毁', (tester) async {
-    final binding = _Binding(waitForAgent: true);
+    final binding = _Binding(waitForAgent: true, appWindow: appWindow);
     await pump(tester, binding: binding);
     final engine = _EngineSession();
     Get.find<SessionController>().sessions.add(
@@ -182,7 +173,7 @@ void main() {
   }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
 
   testWidgets('Agent 保存失败时可取消退出，确认仍然退出后才销毁窗口', (tester) async {
-    final binding = _Binding(waitForAgent: true);
+    final binding = _Binding(waitForAgent: true, appWindow: appWindow);
     await pump(tester, binding: binding);
     binding.exitAgent!.saving.complete(false);
     await requestClose(tester);
@@ -203,7 +194,10 @@ void main() {
 
   testWidgets('系统代理恢复失败保留窗口，恢复后可重新关闭', (tester) async {
     final sessions = _ProxyRestoreSessions();
-    await pump(tester, binding: _Binding(sessions: sessions));
+    await pump(
+      tester,
+      binding: _Binding(sessions: sessions, appWindow: appWindow),
+    );
     await requestClose(tester);
     await tester.pumpAndSettle();
     expect(calls, isEmpty);
@@ -223,7 +217,8 @@ void main() {
       await pump(tester);
       await requestClose(tester);
       await tester.pumpAndSettle();
-      expect(calls, ['manager:destroy']);
+      expect(appWindow.calls, ['destroy']);
+      expect(calls, isEmpty);
       expect(tester.takeException(), isNull);
     }, variant: TargetPlatformVariant.only(platform));
   }

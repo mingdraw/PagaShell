@@ -6,7 +6,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
-import 'package:window_manager/window_manager.dart';
 
 import '../../application/ai/agent_controller.dart';
 import '../../application/session/session.dart';
@@ -14,6 +13,7 @@ import '../../application/session/session_controller.dart';
 import '../../application/settings/settings_controller.dart';
 import '../../application/updates/app_update_controller.dart';
 import '../../domain/proxy/system_proxy.dart';
+import '../../domain/window/app_window.dart';
 import '../ai/agent_workspace.dart';
 import '../components/app_dialog.dart';
 import '../components/app_icon.dart';
@@ -44,7 +44,7 @@ class ShellPage extends StatefulWidget {
   State<ShellPage> createState() => _ShellPageState();
 }
 
-class _ShellPageState extends State<ShellPage> with WindowListener {
+class _ShellPageState extends State<ShellPage> with AppWindowListener {
   static const _windowChannel = MethodChannel('pagashell/window');
 
   String? _fullscreenId;
@@ -60,6 +60,7 @@ class _ShellPageState extends State<ShellPage> with WindowListener {
   late final Future<bool> Function(Future<void> Function()) _updateExit;
   final _shortcutKeys = <PhysicalKeyboardKey>{};
   SessionController get _sessions => Get.find<SessionController>();
+  AppWindow get _window => Get.find<AppWindow>();
 
   @override
   void initState() {
@@ -79,7 +80,7 @@ class _ShellPageState extends State<ShellPage> with WindowListener {
       }
     });
     FocusManager.instance.addEarlyKeyEventHandler(_handleShortcut);
-    windowManager.addListener(this);
+    _window.addListener(this);
     _lifecycle = AppLifecycleListener(
       onExitRequested: () async =>
           await _prepareExit() ? AppExitResponse.exit : AppExitResponse.cancel,
@@ -132,12 +133,12 @@ class _ShellPageState extends State<ShellPage> with WindowListener {
     _nativeTransition = transition;
     _nativeTarget = fullscreen;
     try {
-      await windowManager.setFullScreen(fullscreen);
+      await _window.setFullScreen(fullscreen);
       if (!mounted) return;
       await transition.future.timeout(
         const Duration(seconds: 3),
         onTimeout: () async {
-          if (await windowManager.isFullScreen() != fullscreen) {
+          if (await _window.isFullScreen() != fullscreen) {
             throw StateError('Window full screen transition was not confirmed');
           }
         },
@@ -196,8 +197,9 @@ class _ShellPageState extends State<ShellPage> with WindowListener {
   }
 
   @override
-  void onWindowClose() async {
-    await _exitApplication();
+  void onWindowCloseRequested(AppWindowCloseRequest request) {
+    request.cancel();
+    unawaited(_exitApplication());
   }
 
   Future<bool> _exitApplication({
@@ -216,7 +218,7 @@ class _ShellPageState extends State<ShellPage> with WindowListener {
         // destroy the view/plugins before its message loop and COM shut down.
         await _windowChannel.invokeMethod<void>('destroy');
       } else {
-        await windowManager.destroy();
+        await _window.destroy();
       }
       return true;
     } on Object {
@@ -293,7 +295,7 @@ class _ShellPageState extends State<ShellPage> with WindowListener {
     FocusManager.instance.removeEarlyKeyEventHandler(_handleShortcut);
     _lifecycle.dispose();
     _sessionChanges.dispose();
-    windowManager.removeListener(this);
+    _window.removeListener(this);
     if (!(_nativeTransition?.isCompleted ?? true)) {
       _nativeTransition!.complete();
     }

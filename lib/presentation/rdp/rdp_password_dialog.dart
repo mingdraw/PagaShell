@@ -94,9 +94,7 @@ class _RdpPasswordDialogState extends State<RdpPasswordDialog> {
                   semanticLabel: (_obscure ? '显示密码' : '隐藏密码').tr,
                   density: shadcn.ButtonDensity.compact,
                   icon: AppIcon(
-                    _obscure
-                        ? AppIcons.eyeOff
-                        : AppIcons.eye,
+                    _obscure ? AppIcons.eyeOff : AppIcons.eye,
                     size: AppTheme.inputIconSize,
                   ),
                   onPressed: () => setState(() => _obscure = !_obscure),

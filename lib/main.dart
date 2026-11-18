@@ -11,14 +11,10 @@ import 'src/rust/frb_generated.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // 三项初始化互不依赖，并行执行以缩短首帧前的等待。
-  final (_, _, homeDirectory) = await (
+  // 两项初始化互不依赖，并行执行以缩短首帧前的等待。
+  final (_, homeDirectory) = await (
     // 加载 Rust 引擎动态库并初始化 FFI 桥。
     RustLib.init(),
-    // 交给 ShellPage 等待本地对话写入后再关闭原生窗口。
-    windowManager.ensureInitialized().then(
-      (_) => windowManager.setPreventClose(true),
-    ),
     // 沙盒内 HOME 是容器目录；由系统账号记录取得真实用户目录。
     Platform.isMacOS
         ? const MethodChannel('pagashell/files')
@@ -26,23 +22,26 @@ Future<void> main() async {
         : Future<String?>.value(),
   ).wait;
 
-  const windowOptions = WindowOptions(
-    size: Size(1200, 760),
-    minimumSize: Size(860, 540),
-    center: true,
-    title: 'PagaShell',
-    titleBarStyle: TitleBarStyle.hidden,
-  );
-  await windowManager.waitUntilReadyToShow(windowOptions, () async {
-    if (Platform.isMacOS) {
-      await const MethodChannel('pagashell/window').invokeMethod<void>(
-        'setTitleBarHeight',
-        {'height': AppTheme.windowHeaderHeight},
-      );
-    }
-    await windowManager.show();
-    await windowManager.focus();
-  });
+  final window = WindowManager.instance.getCurrent();
+  if (window != null) {
+    window.titleBarStyle = TitleBarStyle.hidden;
+    window.isWindowControlButtonsVisible = true;
+    if (window.isFullScreen) window.isFullScreen = false;
+    if (window.isMaximized) window.unmaximize();
+    if (window.isMinimized) window.restore();
+    window.setSize(const Size(1200, 760).toNative(), false);
+    window.center();
+    window.minimumSize = const Size(860, 540).toNative();
+    window.title = 'PagaShell';
+  }
+  if (Platform.isMacOS) {
+    await const MethodChannel('pagashell/window').invokeMethod<void>(
+      'setTitleBarHeight',
+      {'height': AppTheme.windowHeaderHeight},
+    );
+  }
+  window?.show();
+  window?.focus();
 
   runApp(PagaShellApp(binding: AppBinding(localHomeDirectory: homeDirectory)));
 }

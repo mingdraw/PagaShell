@@ -35,9 +35,7 @@ class HostKeyConfirmation extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 AppIcon(
-                  changed
-                      ? AppIcons.triangleAlert
-                      : AppIcons.shieldCheck,
+                  changed ? AppIcons.triangleAlert : AppIcons.shieldCheck,
                   color: changed ? colors.destructive : colors.primary,
                   size: 40,
                 ),

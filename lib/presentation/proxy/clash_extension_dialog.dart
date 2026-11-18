@@ -81,10 +81,7 @@ class _ClashExtensionDialogState extends State<ClashExtensionDialog> {
       shadcn.PrimaryButton(
         key: const ValueKey('clash-extension-copy'),
         onPressed: _copy,
-        leading: AppIcon(
-          _copied ? AppIcons.check : AppIcons.copy,
-          size: 16,
-        ),
+        leading: AppIcon(_copied ? AppIcons.check : AppIcons.copy, size: 16),
         child: Text((_copied ? '已复制' : '复制脚本').tr),
       ),
     ],

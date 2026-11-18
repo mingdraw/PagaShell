@@ -34,9 +34,7 @@ AppIcons? _menuIcon(Object? action) => switch (action) {
   'new-host' => AppIcons.fileTerminal,
   'new-gateway' => AppIcons.network,
   'dynamic-proxy' => AppIcons.proxy,
-  'port-forward' ||
-  'new-forward' ||
-  'start' => AppIcons.arrowLeftRight,
+  'port-forward' || 'new-forward' || 'start' => AppIcons.arrowLeftRight,
   'stop' => AppIcons.square,
   'new-folder' || 'new-subfolder' => AppIcons.folderPlus,
   'new-identity' => AppIcons.fileKey,

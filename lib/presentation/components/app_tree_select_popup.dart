@@ -163,9 +163,7 @@ class _FolderOption extends StatelessWidget {
               child: Row(
                 children: [
                   AppIcon(
-                    expanded
-                        ? AppIcons.chevronDown
-                        : AppIcons.chevronRight,
+                    expanded ? AppIcons.chevronDown : AppIcons.chevronRight,
                     size: 16,
                   ),
                   const SizedBox(width: 2),

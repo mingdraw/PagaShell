@@ -30,6 +30,7 @@ import 'package:pagashell/domain/ssh/host_key.dart';
 import 'package:pagashell/domain/ssh/ssh_engine.dart';
 import 'package:pagashell/domain/vault/secret_store.dart';
 import 'package:pagashell/domain/vnc/vnc_engine.dart';
+import 'package:pagashell/domain/window/app_window.dart';
 import 'package:pagashell/infrastructure/db/in_memory_folder_repository.dart';
 import 'package:pagashell/infrastructure/db/in_memory_host_repository.dart';
 import 'package:pagashell/infrastructure/db/in_memory_host_tree_repository.dart';
@@ -38,6 +39,7 @@ import 'package:pagashell/infrastructure/db/in_memory_identity_repository.dart';
 import 'package:pagashell/infrastructure/db/in_memory_identity_tree_repository.dart';
 import 'package:pagashell/infrastructure/vault/in_memory_secret_store.dart';
 
+import 'fake_app_window.dart';
 import 'in_memory_agent_conversation_repository.dart';
 import 'in_memory_ai_settings_repository.dart';
 import 'in_memory_configuration_repository.dart';
@@ -53,9 +55,11 @@ class InMemoryBinding extends Bindings {
     this.vncEngine,
     this.knownHosts,
     this.systemProxy,
+    AppWindow? appWindow,
     LocalFileRepository? localFiles,
     SecretStore? secretStore,
   }) : settingsRepository = settingsRepository ?? InMemorySettingsRepository(),
+       appWindow = appWindow ?? FakeAppWindow(),
        secretStore = secretStore ?? InMemorySecretStore(),
        localFiles = localFiles ?? InMemoryLocalFileRepository();
 
@@ -65,6 +69,7 @@ class InMemoryBinding extends Bindings {
   final VncEngine? vncEngine;
   final KnownHostRepository? knownHosts;
   final SystemProxy? systemProxy;
+  final AppWindow appWindow;
   final SecretStore secretStore;
   final LocalFileRepository localFiles;
 
@@ -148,6 +153,7 @@ class InMemoryBinding extends Bindings {
     Get.put<IdentityFolderRepository>(identityFolders);
     Get.put<IdentityTreeRepository>(identityTree);
     Get.put<SshEngine>(sshEngine);
+    Get.put<AppWindow>(appWindow);
     Get.put<LocalFileRepository>(localFiles);
     Get.put<SettingsRepository>(settingsRepository);
     final settings = Get.put(

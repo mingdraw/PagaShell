@@ -23,6 +23,7 @@ import 'package:pagashell/presentation/navigation/app_navigation.dart';
 import 'package:pagashell/presentation/settings/settings_dialog.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
+import 'support/fake_app_window.dart';
 import 'support/in_memory_binding.dart';
 import 'support/in_memory_settings_repository.dart';
 import 'support/update_fixtures.dart';
@@ -102,6 +103,7 @@ class _UpdateBinding extends InMemoryBinding {
     String latest = '0.3.0',
     String notes = '修复终端问题',
     this.sessions,
+    super.appWindow,
   }) : connect = UpdateConnect(
          handler: () => Response(
            statusCode: 200,
@@ -475,28 +477,27 @@ void main() {
     testWidgets('$platform 更新退出先关闭会话，提交后再销毁原生窗口', (tester) async {
       final events = <String>[];
       final sessions = _ExitSessions(events);
-      final binding = _UpdateBinding(sessions: sessions);
+      final appWindow = FakeAppWindow();
+      final binding = _UpdateBinding(sessions: sessions, appWindow: appWindow);
       final messenger = tester.binding.defaultBinaryMessenger;
-      for (final name in ['pagashell/window', 'window_manager']) {
-        final channel = MethodChannel(name);
-        messenger.setMockMethodCallHandler(channel, (call) async {
-          if (call.method == 'destroy') events.add(name);
-          return null;
-        });
-        addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
-      }
+      const channel = MethodChannel('pagashell/window');
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        if (call.method == 'destroy') events.add('pagashell/window');
+        return null;
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
       await pump(tester, binding);
       final result = await binding.updates.exitForUpdate!(() async {
         events.add('commit');
       });
       expect(result, isTrue);
-      expect(events, [
-        'close-sessions',
-        'commit',
-        platform == TargetPlatform.windows
-            ? 'pagashell/window'
-            : 'window_manager',
-      ]);
+      if (platform == TargetPlatform.windows) {
+        expect(events, ['close-sessions', 'commit', 'pagashell/window']);
+        expect(appWindow.calls, isEmpty);
+      } else {
+        expect(events, ['close-sessions', 'commit']);
+        expect(appWindow.calls, ['destroy']);
+      }
     }, variant: TargetPlatformVariant.only(platform));
   }
 

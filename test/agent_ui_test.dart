@@ -857,10 +857,7 @@ ss -lntp
       final collapse = find.byKey(const ValueKey('agent-toggle'));
       expect(tester.getRect(collapse), agentButtonBounds);
       expect(
-        find.descendant(
-          of: collapse,
-          matching: findAppIcon(AppIcons.bot),
-        ),
+        find.descendant(of: collapse, matching: findAppIcon(AppIcons.bot)),
         findsOneWidget,
       );
       expect(

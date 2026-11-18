@@ -19,8 +19,8 @@ import 'package:pagashell/presentation/rdp/rdp_desktop_panel.dart';
 import 'package:pagashell/presentation/rdp/rdp_surface.dart';
 import 'package:pagashell/presentation/shell/widgets/sidebar.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
-import 'package:window_manager/window_manager.dart';
 
+import 'support/fake_app_window.dart';
 import 'support/fake_rdp_engine.dart';
 import 'support/in_memory_binding.dart';
 import 'support/shadcn_test_app.dart';
@@ -105,14 +105,18 @@ Future<FakeRdpSession> _panel(
 
 Future<SessionController> _shell(
   WidgetTester tester,
-  TargetPlatform platform,
-) async {
+  TargetPlatform platform, {
+  FakeAppWindow? appWindow,
+}) async {
   tester.view.physicalSize = const Size(1280, 800);
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
   await tester.pumpWidget(
-    PagaShellApp(binding: InMemoryBinding(), platform: platform),
+    PagaShellApp(
+      binding: InMemoryBinding(appWindow: appWindow),
+      platform: platform,
+    ),
   );
   await tester.pumpAndSettle();
   return Get.find<SessionController>();
@@ -148,50 +152,7 @@ Future<FakeRdpSession> _desktop(
   return desktop;
 }
 
-class _NativeWindow {
-  final requests = <bool>[];
-  bool fullscreen = false;
-  bool emitEvents = true;
-  bool failEnter = false;
-  bool failExit = false;
-
-  void event(bool entered) {
-    fullscreen = entered;
-    for (final listener in windowManager.listeners) {
-      if (entered) {
-        listener.onWindowEnterFullScreen();
-      } else {
-        listener.onWindowLeaveFullScreen();
-      }
-    }
-  }
-
-  void install(WidgetTester tester) {
-    const channel = MethodChannel('window_manager');
-    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
-      call,
-    ) async {
-      if (call.method == 'isFullScreen') return fullscreen;
-      if (call.method == 'setFullScreen') {
-        final target =
-            (call.arguments as Map<Object?, Object?>)['isFullScreen']! as bool;
-        requests.add(target);
-        if (target ? failEnter : failExit) {
-          throw PlatformException(code: 'test-window-error');
-        }
-        fullscreen = target;
-        if (emitEvents) event(target);
-      }
-      return null;
-    });
-    addTearDown(
-      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-        channel,
-        null,
-      ),
-    );
-  }
-}
+// 使用 FakeAppWindow 替代旧版 MethodChannel('window_manager') 桩。
 
 void main() {
   tearDown(() {
@@ -381,8 +342,8 @@ void main() {
     });
 
     testWidgets('$platform 全屏隐藏侧栏标签，悬浮框退出且保留画面和会话', (tester) async {
-      final native = _NativeWindow()..install(tester);
-      final sessions = await _shell(tester, platform);
+      final native = FakeAppWindow();
+      final sessions = await _shell(tester, platform, appWindow: native);
       final desktop = await _desktop(tester, sessions);
       final state = tester.state(find.byType(RdpDesktopPanel));
       final sidebar = tester.state(find.byType(Sidebar));
@@ -394,7 +355,7 @@ void main() {
       );
       await tester.tap(find.byKey(_enterKey));
       await tester.pumpAndSettle();
-      expect(native.requests, [true]);
+      expect(native.fullscreenRequests, [true]);
       expect(find.byKey(_exitKey).hitTestable(), findsOneWidget);
       expect(find.byType(shadcn.TabPane<String>), findsNothing);
       expect(find.byType(Sidebar), findsNothing);
@@ -412,7 +373,7 @@ void main() {
       expect(tester.getSize(find.byKey(_imageKey)), const Size(1600, 900));
       await tester.tap(find.byKey(_exitKey));
       await tester.pumpAndSettle();
-      expect(native.requests, [true, false]);
+      expect(native.fullscreenRequests, [true, false]);
       expect(find.byKey(_exitKey), findsNothing);
       expect(find.byType(shadcn.TabPane<String>), findsOneWidget);
       expect(tester.state(find.byType(Sidebar)), same(sidebar));
@@ -434,18 +395,21 @@ void main() {
   }
 
   testWidgets('原生全屏动画期间禁止重复请求，系统退出事件恢复页签', (tester) async {
-    final native = _NativeWindow()..emitEvents = false;
-    native.install(tester);
-    final sessions = await _shell(tester, TargetPlatform.macOS);
+    final native = FakeAppWindow()..emitFullscreenEvents = false;
+    final sessions = await _shell(
+      tester,
+      TargetPlatform.macOS,
+      appWindow: native,
+    );
     await _desktop(tester, sessions);
     await tester.tap(find.byKey(_enterKey));
     await tester.pump();
     await tester.tap(find.byKey(_exitKey));
     await tester.pump();
-    expect(native.requests, [true]);
-    native.event(true);
+    expect(native.fullscreenRequests, [true]);
+    native.emitFullScreen(true);
     await tester.pumpAndSettle();
-    native.event(false);
+    native.emitFullScreen(false);
     await tester.pumpAndSettle();
     expect(find.byKey(_exitKey), findsNothing);
     expect(find.byType(shadcn.TabPane<String>), findsOneWidget);
@@ -455,8 +419,12 @@ void main() {
   });
 
   testWidgets('英文小窗口自适应分辨率跟随全屏进出且控件可见', (tester) async {
-    final native = _NativeWindow()..install(tester);
-    final sessions = await _shell(tester, TargetPlatform.windows);
+    final native = FakeAppWindow();
+    final sessions = await _shell(
+      tester,
+      TargetPlatform.windows,
+      appWindow: native,
+    );
     tester.view.physicalSize = const Size(800, 600);
     unawaited(Get.updateLocale(const Locale('en', 'US')));
     await tester.pumpAndSettle();
@@ -482,7 +450,7 @@ void main() {
     expect(requested.$2, lessThan(600));
     await _frame(tester, desktop, requested.$1, requested.$2);
     expect(find.text('Fit to window').hitTestable(), findsOneWidget);
-    expect(native.requests, [true, false]);
+    expect(native.fullscreenRequests, [true, false]);
     expect(desktop.resizes, hasLength(3));
     expect(desktop.closes, 0);
     await sessions.closeAll();
@@ -491,23 +459,26 @@ void main() {
   });
 
   testWidgets('全屏命令失败可重试，退出失败保留悬浮入口', (tester) async {
-    final native = _NativeWindow()..failEnter = true;
-    native.install(tester);
-    final sessions = await _shell(tester, TargetPlatform.windows);
+    final native = FakeAppWindow()..failEnterFullScreen = true;
+    final sessions = await _shell(
+      tester,
+      TargetPlatform.windows,
+      appWindow: native,
+    );
     final desktop = await _desktop(tester, sessions);
     await tester.tap(find.byKey(_enterKey));
     await tester.pumpAndSettle();
     expect(find.byKey(_exitKey), findsNothing);
     expect(find.text('无法进入全屏，请重试'), findsOneWidget);
-    native.failEnter = false;
+    native.failEnterFullScreen = false;
     await tester.tap(find.byKey(_enterKey));
     await tester.pumpAndSettle();
-    native.failExit = true;
+    native.failExitFullScreen = true;
     await tester.tap(find.byKey(_exitKey));
     await tester.pumpAndSettle();
     expect(find.byKey(_exitKey).hitTestable(), findsOneWidget);
     expect(find.text('无法退出全屏，请重试'), findsOneWidget);
-    native.failExit = false;
+    native.failExitFullScreen = false;
     await tester.tap(find.byKey(_exitKey));
     await tester.pumpAndSettle();
     expect(find.byKey(_exitKey), findsNothing);
@@ -521,8 +492,12 @@ void main() {
 
   for (final change in ['close', 'fail', 'activate']) {
     testWidgets('全屏时 $change 当前桌面自动恢复普通窗口', (tester) async {
-      final native = _NativeWindow()..install(tester);
-      final sessions = await _shell(tester, TargetPlatform.linux);
+      final native = FakeAppWindow();
+      final sessions = await _shell(
+        tester,
+        TargetPlatform.linux,
+        appWindow: native,
+      );
       await _desktop(tester, sessions);
       await tester.tap(find.byKey(_enterKey));
       await tester.pumpAndSettle();
@@ -543,7 +518,7 @@ void main() {
           sessions.activate('other');
       }
       await tester.pumpAndSettle();
-      expect(native.requests, [true, false]);
+      expect(native.fullscreenRequests, [true, false]);
       expect(find.byKey(_exitKey), findsNothing);
       expect(find.byType(shadcn.TabPane<String>), findsOneWidget);
       await sessions.closeAll();
