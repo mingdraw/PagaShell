@@ -1,12 +1,10 @@
-import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
 import 'package:markdown/markdown.dart' as md;
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import '../theme/app_theme.dart';
-import 'app_icon.dart';
-import 'app_icon_button.dart';
+import 'app_copy_button.dart';
 
 /// 将 Markdown 语法树映射为原生组件；链接与图片保留可复制的文本。
 class AppMarkdown extends StatefulWidget {
@@ -354,11 +352,7 @@ class AppMarkdownCodeBlock extends StatelessWidget {
                   style: const TextStyle(fontSize: 11),
                 ),
               ),
-              AppIconButton(
-                semanticLabel: '复制'.tr,
-                icon: const AppIcon(AppIcons.copy, size: 13),
-                onPressed: () => Clipboard.setData(ClipboardData(text: code)),
-              ),
+              AppCopyButton(text: code),
             ],
           ),
         ),

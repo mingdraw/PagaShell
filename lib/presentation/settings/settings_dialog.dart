@@ -518,6 +518,26 @@ class _GeneralSettings extends StatelessWidget {
               onLocaleChanged();
             },
           ),
+          const SizedBox(height: 20),
+          AppSelectField<int>(
+            key: ValueKey(
+              'terminal-font-size-${settings.terminalFontSize.value.round()}',
+            ),
+            label: '终端字号'.tr,
+            initialValue: settings.terminalFontSize.value.round(),
+            items: [
+              for (final size in [10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24])
+                AppSelectOption(value: size, child: Text('$size px')),
+            ],
+            onChanged: (value) async {
+              if (value == null) return;
+              try {
+                await settings.setTerminalFontSize(value.toDouble());
+              } on Object {
+                AppNotice.error('保存失败，请重试'.tr);
+              }
+            },
+          ),
         ],
       ),
     );

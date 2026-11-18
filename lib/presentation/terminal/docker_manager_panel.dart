@@ -10,7 +10,6 @@ import '../../domain/ssh/ssh_engine.dart';
 import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
 import '../components/app_menu.dart';
-import '../components/app_text_form_field.dart';
 import '../localization/app_translations.dart';
 import '../navigation/app_navigation.dart';
 import '../navigation/app_notice.dart';
@@ -20,6 +19,7 @@ import 'docker_container_dialog.dart';
 import 'docker_details_dialog.dart';
 import 'docker_image_dialog.dart';
 import 'docker_resource_labels.dart';
+import 'terminal_search_field.dart';
 
 class DockerManagerPanel extends StatefulWidget {
   const DockerManagerPanel({
@@ -195,17 +195,12 @@ class _DockerManagerPanelState extends State<DockerManagerPanel> {
           const SizedBox(height: 10),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 10),
-            child: Semantics(
-              label: '搜索 Docker 资源'.tr,
-              child: AppTextFormField(
-                key: ValueKey('docker-search-${kind.name}'),
-                controller: _search[kind]!,
-                compact: true,
-                decoration: AppInputDecoration(
-                  hintText: '搜索名称、ID 或属性'.tr,
-                  suffixIcon: const AppIcon(AppIcons.search, size: 14),
-                ),
-              ),
+            child: TerminalSearchField(
+              fieldKey: ValueKey('docker-search-${kind.name}'),
+              clearKey: ValueKey('docker-search-${kind.name}-clear'),
+              controller: _search[kind]!,
+              semanticLabel: '搜索 Docker 资源'.tr,
+              hintText: '搜索名称、ID 或属性'.tr,
             ),
           ),
           Padding(

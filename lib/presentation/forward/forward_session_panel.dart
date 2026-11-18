@@ -16,6 +16,7 @@ import '../components/app_text_form_field.dart';
 import '../localization/app_translations.dart';
 import '../shell/connect_flow.dart';
 import '../ssh/host_key_confirmation.dart';
+import '../theme/app_theme.dart';
 
 class ForwardSessionPanel extends StatefulWidget {
   const ForwardSessionPanel({required this.session, super.key});
@@ -278,10 +279,7 @@ class _ForwardSessionPanelState extends State<ForwardSessionPanel> {
                             Expanded(child: local),
                             const Padding(
                               padding: EdgeInsets.fromLTRB(12, 9, 12, 0),
-                              child: AppIcon(
-                                AppIcons.arrowRight,
-                                size: 16,
-                              ),
+                              child: AppIcon(AppIcons.arrowRight, size: 16),
                             ),
                             Expanded(flex: 2, child: host),
                             const SizedBox(width: 12),
@@ -319,13 +317,13 @@ class _ForwardSessionPanelState extends State<ForwardSessionPanel> {
     final busy = session.phase.isBusy || _starting;
     final editable = !session.phase.isAlive && !_starting;
     final colors = shadcn.Theme.of(context).colorScheme;
-    final status = switch (session.phase) {
-      SessionPhase.ready => '正在监听',
-      SessionPhase.failed => '转发失败',
-      SessionPhase.closed => '未启用',
-      SessionPhase.stopping => '正在停止',
-      SessionPhase.hostKeyPending => '等待确认主机指纹',
-      _ => '正在连接',
+    final (status, statusColor) = switch (session.phase) {
+      SessionPhase.ready => ('正在监听', StatusColors.ready),
+      SessionPhase.failed => ('转发失败', StatusColors.failed),
+      SessionPhase.closed => ('未启用', StatusColors.closed),
+      SessionPhase.stopping => ('正在停止', StatusColors.connecting),
+      SessionPhase.hostKeyPending => ('等待确认主机指纹', StatusColors.connecting),
+      _ => ('正在连接', StatusColors.connecting),
     };
     final controller = Get.find<SessionController>();
     return Padding(
@@ -346,7 +344,24 @@ class _ForwardSessionPanelState extends State<ForwardSessionPanel> {
                   fontWeight: FontWeight.w600,
                 ),
               ),
-              shadcn.OutlineBadge(child: Text(status.tr)),
+              shadcn.OutlineBadge(
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      key: const ValueKey('forward-status-dot'),
+                      width: 6,
+                      height: 6,
+                      decoration: BoxDecoration(
+                        color: statusColor,
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Text(status.tr),
+                  ],
+                ),
+              ),
             ],
           ),
           const SizedBox(height: 12),

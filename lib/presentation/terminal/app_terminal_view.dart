@@ -1,6 +1,9 @@
 import 'package:flutter/widgets.dart';
+import 'package:get/get.dart';
 import 'package:pagashell/terminal/paga_terminal.dart';
 
+import '../../application/settings/settings_controller.dart';
+import '../../domain/entities/sidebar_state.dart';
 import '../theme/app_theme.dart';
 
 class AppTerminalView extends StatelessWidget {
@@ -15,18 +18,17 @@ class AppTerminalView extends StatelessWidget {
   final FocusNode focusNode;
   final bool active;
 
-  @override
-  Widget build(BuildContext context) => TerminalPane(
+  Widget _pane(double fontSize) => TerminalPane(
     terminal,
     focusNode: focusNode,
     active: active,
     backgroundColor: AppTheme.terminalBackground,
     selectionEdgeExtent: AppTheme.terminalSelectionEdgeExtent,
     selectionScrollInterval: AppTheme.terminalSelectionScrollInterval,
-    textStyle: const TerminalStyle(
-      fontSize: 13,
+    textStyle: TerminalStyle(
+      fontSize: fontSize,
       fontFamily: 'FiraCode Nerd Font Mono',
-      fontFamilyFallback: [
+      fontFamilyFallback: const [
         'MesloLGS NF',
         'Menlo',
         'PingFang SC',
@@ -37,4 +39,13 @@ class AppTerminalView extends StatelessWidget {
       ],
     ),
   );
+
+  @override
+  Widget build(BuildContext context) {
+    if (!Get.isRegistered<SettingsController>()) {
+      return _pane(SidebarState.defaultTerminalFontSize);
+    }
+    final settings = Get.find<SettingsController>();
+    return Obx(() => _pane(settings.terminalFontSize.value));
+  }
 }

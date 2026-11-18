@@ -477,15 +477,18 @@ class _DynamicProxyPanelState extends State<DynamicProxyPanel> {
     final busy = session.phase.isBusy || _starting;
     final controller = Get.find<SessionController>();
     final colors = shadcn.Theme.of(context).colorScheme;
-    final status = controller.proxyNeedsCleanup(session.id)
-        ? '系统代理待恢复'
+    final (status, statusColor) = controller.proxyNeedsCleanup(session.id)
+        ? ('系统代理待恢复', StatusColors.failed)
         : switch (session.phase) {
-            SessionPhase.ready => '正在监听',
-            SessionPhase.closed => '未启用',
-            SessionPhase.failed => '代理失败',
-            SessionPhase.stopping => '正在停止',
-            SessionPhase.hostKeyPending => '等待确认主机指纹',
-            _ => '正在连接',
+            SessionPhase.ready => ('正在监听', StatusColors.ready),
+            SessionPhase.closed => ('未启用', StatusColors.closed),
+            SessionPhase.failed => ('代理失败', StatusColors.failed),
+            SessionPhase.stopping => ('正在停止', StatusColors.connecting),
+            SessionPhase.hostKeyPending => (
+              '等待确认主机指纹',
+              StatusColors.connecting,
+            ),
+            _ => ('正在连接', StatusColors.connecting),
           };
     return Padding(
       padding: const EdgeInsets.all(24),
@@ -505,7 +508,24 @@ class _DynamicProxyPanelState extends State<DynamicProxyPanel> {
                   fontWeight: FontWeight.w600,
                 ),
               ),
-              shadcn.OutlineBadge(child: Text(status.tr)),
+              shadcn.OutlineBadge(
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      key: const ValueKey('proxy-status-dot'),
+                      width: 6,
+                      height: 6,
+                      decoration: BoxDecoration(
+                        color: statusColor,
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Text(status.tr),
+                  ],
+                ),
+              ),
             ],
           ),
           const SizedBox(height: 12),
@@ -581,10 +601,7 @@ class _DynamicProxyPanelState extends State<DynamicProxyPanel> {
                                   _changed();
                                 }
                               : null,
-                          leading: const AppIcon(
-                            AppIcons.plus,
-                            size: 16,
-                          ),
+                          leading: const AppIcon(AppIcons.plus, size: 16),
                           child: Text('添加规则'.tr),
                         ),
                       ),

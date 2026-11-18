@@ -2440,4 +2440,161 @@ void main() {
     expect(firstEngine.closes, 0);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('左右双栏支持拖拽调宽，传输汇总条点击任意文字区即可展开折叠', (tester) async {
+    tester.view.physicalSize = const Size(1200, 700);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await pumpPanel(tester);
+    final localWidthBefore = tester.getSize(pane('local')).width;
+    final remoteWidthBefore = tester.getSize(pane('remote')).width;
+    expect(localWidthBefore, closeTo(remoteWidthBefore, 2));
+
+    await tester.dragFrom(
+      tester.getCenter(find.byKey(const ValueKey('sftp-panes-resize-handle'))),
+      const Offset(80, 0),
+    );
+    await tester.pumpAndSettle();
+    expect(tester.getSize(pane('local')).width, greaterThan(localWidthBefore));
+    expect(tester.getSize(pane('remote')).width, lessThan(remoteWidthBefore));
+
+    expect(find.byKey(const ValueKey('sftp-transfer-list')), findsNothing);
+    final controller = Get.find<TransferController>();
+    controller.tasks.add(
+      TransferTask(
+          id: 'hdr-1',
+          sessionId: 's1',
+          kind: TransferKind.upload,
+          fileName: 'a.bin',
+          remotePath: '/a.bin',
+          localPath: '/local/a.bin',
+        )
+        ..total.value = 100
+        ..transferred.value = 40,
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('sftp-transfer-header-toggle')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('sftp-transfer-list')), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('sftp-transfer-header-toggle')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('sftp-transfer-list')), findsNothing);
+  });
+
+  testWidgets('文件列表表头支持按名称、大小、更新时间排序且目录始终置顶', (tester) async {
+    final files = InMemoryLocalFileRepository()
+      ..putFile('/local/small.txt', 10, modified: DateTime(2026, 1, 1))
+      ..putFile('/local/big.txt', 5000, modified: DateTime(2026, 3, 1))
+      ..putFile('/local/mid.txt', 500, modified: DateTime(2026, 2, 1));
+    await pumpPanel(tester, files: files);
+
+    double dyOf(String name) => tester.getTopLeft(fileIn('local', name)).dy;
+
+    // 默认目录在前
+    expect(dyOf('downloads'), lessThan(dyOf('big.txt')));
+
+    // 点击大小：降序（big -> mid -> upload(2048? wait small/mid/big)），目录仍在最前
+    await tester.tap(find.byKey(const ValueKey('sftp-local-sort-size')));
+    await tester.pumpAndSettle();
+    expect(dyOf('downloads'), lessThan(dyOf('big.txt')));
+    expect(dyOf('big.txt'), lessThan(dyOf('mid.txt')));
+    expect(dyOf('mid.txt'), lessThan(dyOf('small.txt')));
+
+    // 再次点击大小：升序
+    await tester.tap(find.byKey(const ValueKey('sftp-local-sort-size')));
+    await tester.pumpAndSettle();
+    expect(dyOf('downloads'), lessThan(dyOf('small.txt')));
+    expect(dyOf('small.txt'), lessThan(dyOf('mid.txt')));
+    expect(dyOf('mid.txt'), lessThan(dyOf('big.txt')));
+
+    // 点击更新时间：最新优先
+    await tester.tap(find.byKey(const ValueKey('sftp-local-sort-modified')));
+    await tester.pumpAndSettle();
+    expect(dyOf('downloads'), lessThan(dyOf('big.txt')));
+    expect(dyOf('big.txt'), lessThan(dyOf('mid.txt')));
+    expect(dyOf('mid.txt'), lessThan(dyOf('small.txt')));
+
+    // 点击名称：A-Z，再点 Z-A
+    await tester.tap(find.byKey(const ValueKey('sftp-local-sort-name')));
+    await tester.pumpAndSettle();
+    expect(dyOf('big.txt'), lessThan(dyOf('mid.txt')));
+    await tester.tap(find.byKey(const ValueKey('sftp-local-sort-name')));
+    await tester.pumpAndSettle();
+    expect(dyOf('small.txt'), lessThan(dyOf('mid.txt')));
+    expect(dyOf('mid.txt'), lessThan(dyOf('big.txt')));
+  });
+
+  testWidgets('支持路径直达输入、键盘 Enter/Backspace 导航与多选操作条批量删除/取消选择', (tester) async {
+    final files = InMemoryLocalFileRepository()
+      ..putFile('/local/a.txt', 120)
+      ..putFile('/local/b.txt', 240);
+    await pumpPanel(tester, files: files);
+
+    // 远程输入路径模式：Esc 取消不跳转
+    await tester.tap(find.byKey(const ValueKey('sftp-remote-edit-path')));
+    await tester.pumpAndSettle();
+    final remoteInput = find.byKey(const ValueKey('sftp-remote-path-input'));
+    expect(remoteInput, findsOneWidget);
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pumpAndSettle();
+    expect(remoteInput, findsNothing);
+    expect(find.byKey(const ValueKey('sftp-path-/home/test')), findsOneWidget);
+
+    // 远程输入路径直达 /home/test/logs
+    await tester.tap(find.byKey(const ValueKey('sftp-remote-edit-path')));
+    await tester.pumpAndSettle();
+    await tester.enterText(remoteInput, '/home/test/logs');
+    await tester.tap(find.byKey(const ValueKey('sftp-remote-path-submit')));
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('sftp-path-/home/test/logs')),
+      findsOneWidget,
+    );
+    expect(find.text('app.log'), findsOneWidget);
+
+    // 选中本地 downloads 目录后按 Enter 进入，按 Backspace 返回上一级
+    await selectFile(tester, 'local', 'downloads');
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('sftp-path-/local/downloads')),
+      findsOneWidget,
+    );
+    await tester.sendKeyEvent(LogicalKeyboardKey.backspace);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('sftp-path-/local')), findsOneWidget);
+
+    // 多选显示操作条并支持取消选择与批量删除
+    await selectFile(tester, 'local', 'a.txt');
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+    await selectFile(tester, 'local', 'b.txt');
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+    expect(
+      find.byKey(const ValueKey('sftp-local-selection-bar')),
+      findsOneWidget,
+    );
+    expect(find.text('已选 2 项 · 360 B'), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('sftp-local-selection-clear')));
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('sftp-local-selection-bar')),
+      findsNothing,
+    );
+
+    await selectFile(tester, 'local', 'a.txt');
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+    await selectFile(tester, 'local', 'b.txt');
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+    await tester.tap(find.byKey(const ValueKey('sftp-local-selection-delete')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('删除'));
+    await tester.pumpAndSettle();
+    expect(fileIn('local', 'a.txt'), findsNothing);
+    expect(fileIn('local', 'b.txt'), findsNothing);
+  });
 }

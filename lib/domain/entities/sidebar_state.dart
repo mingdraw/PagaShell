@@ -6,14 +6,22 @@ class SidebarState {
   static const double defaultWidth = 264;
   static const double minWidth = 200;
   static const double maxWidth = 420;
+  static const double defaultTerminalFontSize = 13;
+  static const double minTerminalFontSize = 10;
+  static const double maxTerminalFontSize = 24;
 
   SidebarState({
     this.visible = true,
     double width = defaultWidth,
+    double terminalFontSize = defaultTerminalFontSize,
     Map<SidebarSection, bool> sections = const {},
     Map<SidebarSection, Set<String>> folders = const {},
     List<String> recentHostIds = const [],
   }) : width = width.clamp(minWidth, maxWidth),
+       terminalFontSize = terminalFontSize.clamp(
+         minTerminalFontSize,
+         maxTerminalFontSize,
+       ),
        sections = Map.unmodifiable(sections),
        folders = Map.unmodifiable({
          for (final entry in folders.entries)
@@ -26,10 +34,12 @@ class SidebarState {
   final List<String> recentHostIds;
   final bool visible;
   final double width;
+  final double terminalFontSize;
 
   SidebarState withVisibility(bool visible) => SidebarState(
     visible: visible,
     width: width,
+    terminalFontSize: terminalFontSize,
     sections: sections,
     folders: folders,
     recentHostIds: recentHostIds,
@@ -38,6 +48,16 @@ class SidebarState {
   SidebarState withWidth(double width) => SidebarState(
     visible: visible,
     width: width,
+    terminalFontSize: terminalFontSize,
+    sections: sections,
+    folders: folders,
+    recentHostIds: recentHostIds,
+  );
+
+  SidebarState withTerminalFontSize(double fontSize) => SidebarState(
+    visible: visible,
+    width: width,
+    terminalFontSize: fontSize,
     sections: sections,
     folders: folders,
     recentHostIds: recentHostIds,
@@ -51,6 +71,7 @@ class SidebarState {
       SidebarState(
         visible: visible,
         width: width,
+        terminalFontSize: terminalFontSize,
         sections: {...sections, section: expanded},
         folders: folders,
         recentHostIds: recentHostIds,
@@ -60,6 +81,7 @@ class SidebarState {
       SidebarState(
         visible: visible,
         width: width,
+        terminalFontSize: terminalFontSize,
         sections: sections,
         folders: {...folders, section: expanded},
         recentHostIds: recentHostIds,
@@ -77,6 +99,7 @@ class SidebarState {
     return SidebarState(
       visible: visible,
       width: width,
+      terminalFontSize: terminalFontSize,
       sections: sections,
       folders: folders,
       recentHostIds: next,

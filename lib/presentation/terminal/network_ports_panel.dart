@@ -8,12 +8,12 @@ import '../../application/session/network_ports_controller.dart';
 import '../../domain/ssh/network_ports.dart';
 import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
-import '../components/app_text_form_field.dart';
 import '../localization/app_translations.dart';
 import '../navigation/app_navigation.dart';
 import '../theme/app_theme.dart';
 import 'network_port_termination_dialog.dart';
 import 'process_termination_dialog.dart';
+import 'terminal_search_field.dart';
 
 class NetworkPortsPanel extends StatefulWidget {
   const NetworkPortsPanel({
@@ -150,17 +150,12 @@ class _NetworkPortsPanelState extends State<NetworkPortsPanel> {
       children: [
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 10),
-          child: Semantics(
-            label: '搜索网络端口'.tr,
-            child: AppTextFormField(
-              key: const ValueKey('network-ports-search'),
-              controller: _search,
-              compact: true,
-              decoration: AppInputDecoration(
-                hintText: '搜索端口号或进程名'.tr,
-                suffixIcon: const AppIcon(AppIcons.search, size: 14),
-              ),
-            ),
+          child: TerminalSearchField(
+            fieldKey: const ValueKey('network-ports-search'),
+            clearKey: const ValueKey('network-ports-search-clear'),
+            controller: _search,
+            semanticLabel: '搜索网络端口'.tr,
+            hintText: '搜索端口号或进程名'.tr,
           ),
         ),
         Padding(

@@ -98,6 +98,8 @@ class _SftpPanelState extends State<SftpPanel> {
   final List<Worker> _transferWorkers = [];
   final Set<String> _preparingTargets = {};
   final _filePane = shadcn.AbsoluteResizablePaneController(0);
+  final _localPane = shadcn.FlexibleResizablePaneController(1);
+  final _remotePane = shadcn.FlexibleResizablePaneController(1);
   final _transferPane = shadcn.AbsoluteResizablePaneController(
     AppTheme.transferProgressDefaultHeight,
     collapsed: true,
@@ -169,6 +171,8 @@ class _SftpPanelState extends State<SftpPanel> {
   void dispose() {
     _releaseBrowser();
     _filePane.dispose();
+    _localPane.dispose();
+    _remotePane.dispose();
     _transferPane.dispose();
     super.dispose();
   }
@@ -792,10 +796,20 @@ class _SftpPanelState extends State<SftpPanel> {
                       AppTheme.transferProgressCollapsedHeight,
                 ),
               ),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
+              child: shadcn.ResizablePanel.horizontal(
+                key: const ValueKey('sftp-panes-resizable'),
+                dividerBuilder: (_) =>
+                    Container(width: 1, color: AppTheme.border(context)),
+                draggerBuilder: (_) => const shadcn.HorizontalResizableDragger(
+                  key: ValueKey('sftp-panes-resize-handle'),
+                ),
                 children: [
-                  Expanded(
+                  shadcn.ResizablePane.controlled(
+                    controller: _localPane,
+                    minSize: math.min(
+                      180.0,
+                      math.max(0.0, (constraints.maxWidth - 8) / 2),
+                    ),
                     child: Obx(
                       () => FileBrowserPane(
                         sessionId: widget.session.id,
@@ -817,6 +831,7 @@ class _SftpPanelState extends State<SftpPanel> {
                             ),
                         ],
                         onNavigate: _navigateLocalDirectory,
+                        onUp: _local.up,
                         onRefresh: () => _navigateLocalDirectory(
                           _local.cwd.value.isEmpty
                               ? _local.files.homeDirectory
@@ -845,8 +860,12 @@ class _SftpPanelState extends State<SftpPanel> {
                       ),
                     ),
                   ),
-                  Container(width: 1, color: AppTheme.border(context)),
-                  Expanded(
+                  shadcn.ResizablePane.controlled(
+                    controller: _remotePane,
+                    minSize: math.min(
+                      180.0,
+                      math.max(0.0, (constraints.maxWidth - 8) / 2),
+                    ),
                     child: Obx(
                       () => FileBrowserPane(
                         sessionId: widget.session.id,
@@ -866,6 +885,7 @@ class _SftpPanelState extends State<SftpPanel> {
                             ),
                         ],
                         onNavigate: _browser.navigate,
+                        onUp: _browser.up,
                         onRefresh: _browser.refreshDirectory,
                         onMkdir: _mkdir,
                         onUpload: _upload,
@@ -995,65 +1015,122 @@ class _TransferStrip extends StatelessWidget {
         ),
         child: Column(
           children: [
-            SizedBox(
-              height: AppTheme.transferProgressCollapsedHeight - 1,
-              child: Row(
-                children: [
-                  AppIconButton.text(
-                    semanticLabel: (expanded ? '折叠传输进度' : '展开传输进度').tr,
-                    tooltip: (expanded ? '折叠传输进度' : '展开传输进度').tr,
-                    icon: AppIcon(
-                      expanded ? AppIcons.chevronDown : AppIcons.chevronUp,
-                      size: 15,
-                    ),
-                    onPressed: onToggle,
-                  ),
-                  Expanded(
-                    child: Row(
-                      children: [
-                        Text(
-                          '传输进度 · @count 项 · @running 项进行中'.trParams({
-                            'count': '${tasks.length}',
-                            'running': '$running',
-                          }),
-                          style: TextStyle(
-                            fontSize: 11,
-                            color: colors.mutedForeground,
-                          ),
+            Stack(
+              children: [
+                SizedBox(
+                  height: AppTheme.transferProgressCollapsedHeight - 1,
+                  child: Row(
+                    children: [
+                      AppIconButton.text(
+                        semanticLabel: (expanded ? '折叠传输进度' : '展开传输进度').tr,
+                        tooltip: (expanded ? '折叠传输进度' : '展开传输进度').tr,
+                        icon: AppIcon(
+                          expanded ? AppIcons.chevronDown : AppIcons.chevronUp,
+                          size: 15,
                         ),
-                        const SizedBox(width: 12),
-                        // 速率每次采样都会变化，单独订阅，避免重建
-                        // 整个传输条与任务列表。
-                        Flexible(
-                          child: Obx(
-                            () => Text(
-                              '总速率 @speed'.trParams({
-                                'speed': formatTransferRate(
-                                  controller.totalBytesPerSecond(sessionId),
-                                ),
-                              }),
-                              key: const ValueKey('sftp-total-transfer-rate'),
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                fontSize: 11,
-                                color: colors.mutedForeground,
+                        onPressed: onToggle,
+                      ),
+                      Expanded(
+                        child: MouseRegion(
+                          cursor: SystemMouseCursors.click,
+                          child: GestureDetector(
+                            key: const ValueKey('sftp-transfer-header-toggle'),
+                            behavior: HitTestBehavior.opaque,
+                            onTap: onToggle,
+                            child: SizedBox(
+                              height: double.infinity,
+                              child: Row(
+                                children: [
+                                  Text(
+                                    '传输进度 · @count 项 · @running 项进行中'.trParams({
+                                      'count': '${tasks.length}',
+                                      'running': '$running',
+                                    }),
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color: colors.mutedForeground,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  // 速率每次采样都会变化，单独订阅，避免重建
+                                  // 整个传输条与任务列表。
+                                  Flexible(
+                                    child: Obx(
+                                      () => Text(
+                                        '总速率 @speed'.trParams({
+                                          'speed': formatTransferRate(
+                                            controller.totalBytesPerSecond(
+                                              sessionId,
+                                            ),
+                                          ),
+                                        }),
+                                        key: const ValueKey(
+                                          'sftp-total-transfer-rate',
+                                        ),
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          color: colors.mutedForeground,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
                           ),
                         ),
-                      ],
+                      ),
+                      AppIconButton.text(
+                        semanticLabel: '清除已完成'.tr,
+                        tooltip: '清除已完成'.tr,
+                        icon: const AppIcon(AppIcons.listX, size: 15),
+                        onPressed: () =>
+                            controller.clearFinished(sessionId: sessionId),
+                      ),
+                      const SizedBox(width: 12),
+                    ],
+                  ),
+                ),
+                if (running > 0)
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    height: 2,
+                    child: IgnorePointer(
+                      child: Obx(() {
+                        var total = 0;
+                        var transferred = 0;
+                        for (final task in tasks) {
+                          if (!task.status.value.active) continue;
+                          final taskTotal = task.total.value;
+                          if (taskTotal <= 0) continue;
+                          total += taskTotal;
+                          transferred += task.transferred.value.clamp(
+                            0,
+                            taskTotal,
+                          );
+                        }
+                        if (total <= 0) return const SizedBox.shrink();
+                        final fraction = (transferred / total).clamp(0.0, 1.0);
+                        return ColoredBox(
+                          color: colors.border.withValues(alpha: 0.4),
+                          child: Align(
+                            alignment: Alignment.centerLeft,
+                            child: FractionallySizedBox(
+                              widthFactor: fraction,
+                              child: ColoredBox(
+                                color: colors.primary,
+                                child: const SizedBox.expand(),
+                              ),
+                            ),
+                          ),
+                        );
+                      }),
                     ),
                   ),
-                  AppIconButton.text(
-                    semanticLabel: '清除已完成'.tr,
-                    tooltip: '清除已完成'.tr,
-                    icon: const AppIcon(AppIcons.listX, size: 15),
-                    onPressed: () =>
-                        controller.clearFinished(sessionId: sessionId),
-                  ),
-                  const SizedBox(width: 12),
-                ],
-              ),
+              ],
             ),
             if (expanded)
               Expanded(

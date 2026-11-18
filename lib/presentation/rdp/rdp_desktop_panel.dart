@@ -18,6 +18,7 @@ import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
 import '../components/app_menu.dart';
 import '../navigation/app_notice.dart';
+import '../theme/app_theme.dart';
 import '../vnc/vnc_keyboard.dart';
 import 'rdp_input_queue.dart';
 import 'rdp_surface.dart';
@@ -582,8 +583,19 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
           children: [
             Offstage(
               offstage: widget.fullscreen,
-              child: Padding(
-                padding: const EdgeInsets.all(8),
+              child: Container(
+                key: const ValueKey('rdp-toolbar'),
+                width: double.infinity,
+                decoration: BoxDecoration(
+                  color: AppTheme.surface(context),
+                  border: Border(
+                    bottom: BorderSide(color: AppTheme.border(context)),
+                  ),
+                ),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 6,
+                ),
                 child: Wrap(
                   spacing: 8,
                   runSpacing: 8,
@@ -628,19 +640,13 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
                                     child: shadcn.CircularProgressIndicator(),
                                   )
                                 else
-                                  const AppIcon(
-                                    AppIcons.monitor,
-                                    size: 16,
-                                  ),
+                                  const AppIcon(AppIcons.monitor, size: 16),
                                 const SizedBox(width: 6),
                                 Text(
                                   _resolution == null ? '自适应窗口'.tr : '分辨率'.tr,
                                 ),
                                 const SizedBox(width: 4),
-                                const AppIcon(
-                                  AppIcons.chevronDown,
-                                  size: 14,
-                                ),
+                                const AppIcon(AppIcons.chevronDown, size: 14),
                               ],
                             ),
                           ),
@@ -686,8 +692,21 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
                       color: const Color(0xff000000),
                       child: SizedBox.expand(
                         child: !image.hasImage
-                            ? const Center(
-                                child: shadcn.CircularProgressIndicator(),
+                            ? Center(
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const shadcn.CircularProgressIndicator(),
+                                    const SizedBox(height: 12),
+                                    Text(
+                                      '正在等待远程桌面画面…'.tr,
+                                      style: const TextStyle(
+                                        fontSize: 12,
+                                        color: Color(0xFFB8C0CC),
+                                      ),
+                                    ),
+                                  ],
+                                ),
                               )
                             : FittedBox(
                                 fit: BoxFit.contain,

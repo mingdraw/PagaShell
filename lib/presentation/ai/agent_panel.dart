@@ -9,6 +9,7 @@ import '../../application/ai/agent_controller.dart';
 import '../../application/ai/ai_settings_controller.dart';
 import '../../domain/ai/agent_skill.dart';
 import '../../domain/ai/ai_model.dart';
+import '../components/app_copy_button.dart';
 import '../components/app_dialog.dart';
 import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
@@ -693,6 +694,14 @@ class _AgentPanelState extends State<AgentPanel> {
                   fontWeight: FontWeight.w600,
                 ),
               ),
+              if (!user && entry.text.trim().isNotEmpty) ...[
+                const Spacer(),
+                AppCopyButton(
+                  text: entry.text,
+                  size: 12,
+                  semanticLabel: '复制回复'.tr,
+                ),
+              ],
               if (user) ...[
                 const SizedBox(width: 8),
                 Expanded(

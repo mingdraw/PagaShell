@@ -62,9 +62,13 @@ class DriftSettingsRepository implements SettingsRepository {
       final folders = decoded['folders'];
       final recentHosts = decoded['recentHosts'];
       final width = decoded['width'];
+      final terminalFontSize = decoded['terminalFontSize'];
       return SidebarState(
         visible: decoded['visible'] is bool ? decoded['visible'] as bool : true,
         width: width is num ? width.toDouble() : SidebarState.defaultWidth,
+        terminalFontSize: terminalFontSize is num
+            ? terminalFontSize.toDouble()
+            : SidebarState.defaultTerminalFontSize,
         sections: {
           for (final section in SidebarSection.values)
             if (sections is Map<String, dynamic> &&
@@ -97,6 +101,7 @@ class DriftSettingsRepository implements SettingsRepository {
           value: jsonEncode({
             'visible': state.visible,
             'width': state.width,
+            'terminalFontSize': state.terminalFontSize,
             'sections': {
               for (final entry in state.sections.entries)
                 entry.key.name: entry.value,

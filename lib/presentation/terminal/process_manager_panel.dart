@@ -8,12 +8,12 @@ import '../../application/session/process_manager_controller.dart';
 import '../../domain/ssh/process_manager.dart';
 import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
-import '../components/app_text_form_field.dart';
 import '../localization/app_translations.dart';
 import '../navigation/app_navigation.dart';
 import '../theme/app_theme.dart';
 import 'process_details_dialog.dart';
 import 'process_termination_dialog.dart';
+import 'terminal_search_field.dart';
 
 class ProcessManagerPanel extends StatefulWidget {
   const ProcessManagerPanel({
@@ -169,17 +169,12 @@ class _ProcessManagerPanelState extends State<ProcessManagerPanel> {
       children: [
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 10),
-          child: Semantics(
-            label: '搜索进程'.tr,
-            child: AppTextFormField(
-              key: const ValueKey('process-manager-search'),
-              controller: _search,
-              compact: true,
-              decoration: AppInputDecoration(
-                hintText: '搜索名称、PID 或用户'.tr,
-                suffixIcon: const AppIcon(AppIcons.search, size: 14),
-              ),
-            ),
+          child: TerminalSearchField(
+            fieldKey: const ValueKey('process-manager-search'),
+            clearKey: const ValueKey('process-manager-search-clear'),
+            controller: _search,
+            semanticLabel: '搜索进程'.tr,
+            hintText: '搜索名称、PID 或用户'.tr,
           ),
         ),
         Padding(

@@ -17,6 +17,7 @@ class SettingsController extends GetxController {
   /// 只关心显隐，单独订阅它，展开/折叠文件夹时不再跟着重建。
   final sidebarVisible = true.obs;
   final sidebarWidth = SidebarState.defaultWidth.obs;
+  final terminalFontSize = SidebarState.defaultTerminalFontSize.obs;
   final isLoaded = false.obs;
   final automaticUpdates = true.obs;
   final savingAutomaticUpdates = false.obs;
@@ -51,6 +52,7 @@ class SettingsController extends GetxController {
             sidebarState.value = saved;
             sidebarVisible.value = saved.visible;
             sidebarWidth.value = saved.width;
+            terminalFontSize.value = saved.terminalFontSize;
           }
         },
         // 显示偏好不可读时保留默认布局，不影响主题和启动。
@@ -104,6 +106,14 @@ class SettingsController extends GetxController {
     return _saveSidebarState(next);
   }
 
+  Future<void> setTerminalFontSize(double fontSize) {
+    final next = sidebarState.value.withTerminalFontSize(fontSize);
+    if (sidebarState.value.terminalFontSize == next.terminalFontSize) {
+      return _pendingSidebarSave;
+    }
+    return _saveSidebarState(next);
+  }
+
   Future<void> setSidebarSectionExpanded(
     SidebarSection section,
     bool expanded,
@@ -123,9 +133,17 @@ class SettingsController extends GetxController {
   }
 
   Future<void> _saveSidebarState(SidebarState state) {
+    final previous = sidebarState.value;
     sidebarState.value = state;
-    sidebarVisible.value = state.visible;
-    sidebarWidth.value = state.width;
+    if (previous.visible != state.visible) {
+      sidebarVisible.value = state.visible;
+    }
+    if (previous.width != state.width) {
+      sidebarWidth.value = state.width;
+    }
+    if (previous.terminalFontSize != state.terminalFontSize) {
+      terminalFontSize.value = state.terminalFontSize;
+    }
     // 点击立即更新界面，快照按顺序写入，避免快速操作后旧状态覆盖新状态。
     final save = _pendingSidebarSave.then((_) async {
       await ready;
