@@ -2,6 +2,8 @@
 
 PagaShell 从 [GitHub Releases](https://github.com/mingdraw/PagaShell/releases/latest) 检查正式版，下载与当前系统和程序架构对应的安装包。
 
+[返回使用指南](user-guide.md#备份与更新)
+
 ## 检查和安装
 
 - **设置 → 关于 → 自动更新**：默认开启，打开软件时检查一次。发现新版后显示更新内容，由你决定是否下载和安装。

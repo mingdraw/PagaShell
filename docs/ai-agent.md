@@ -1,9 +1,47 @@
-# AI Agent
+# Agent 使用指南
+
+Agent 位于主窗口的右侧，可辅助阅读终端输出、分析问题和拟定 SSH 命令。开始使用前，需要配置自己的模型 API。
+
+[返回使用指南](user-guide.md#agent)
+
+## 配置模型
+
+1. 点击主窗口顶部的 **Agent** 展开右栏，再点击右栏的「AI 设置」。也可从主窗口的「设置 → AI 设置」打开。
+2. 选择「API 协议」：OpenAI Chat Completions、OpenAI Responses 或 Anthropic Messages。填写「API 地址」和 API Key；远程地址使用 HTTPS，本机接口可使用 HTTP。
+3. 填写「默认模型 ID」，或点击模型字段旁的刷新按钮获取列表、再选择模型。获取列表失败时仍可手动填写。
+4. 点击「测试连接」，成功后保存。测试只用当前填写的配置，不保存配置或聊天记录。以后修改其他字段时，可将 API Key 留空以继续使用已保存的 Key。
+
+## 引用会话和发送消息
+
+- 在输入框输入 `@`，或点击「+」，从「会话」列表选择已打开的连接。一次可引用多个会话，引用成功后名称会高亮。
+- 若只想分享一段终端文字，可在终端选中内容后右键选择「引用选区到 Agent」。选区会添加到草稿，你可以编辑后再发送。
+- 直接按 `Enter` 发送，按 `Shift+Enter` 换行。前一条消息还在执行时，后续消息会排队。
+- 引用 SSH 会话后，Agent 会将该会话的相关信息和近期终端输出发送给你配置的 API。若只想咨询一般问题，可以不加会话引用。引用 RDP 只提供会话上下文和建议。
+
+## 命令权限
+
+| 模式 | 行为 |
+|---|---|
+| 请求批准（默认） | 先显示目标、用途和命令。你可以编辑、拒绝或确认发送；高风险或多行命令可能还需确认一次。 |
+| 完全访问 | Agent 可以直接向本轮引用的 SSH 会话发送命令。启用前会提示确认。 |
+
+多选会话后，Agent 仍须为每条命令指定一个目标。停止按钮会取消当前和排队中的请求；已经发到终端的命令需在该终端处理。
+
+需要手动执行时，可用「填入终端」将命令放进输入行，由你检查后回车。回复代码块会填入当前 SSH 终端，审批卡片会填入卡片上标明的目标终端。
+
+## 阅读回复和管理历史
+
+- 回复在收到时逐步显示；「思考与工具调用」可展开查看服务商提供的思考内容和工具执行记录。
+- 滚到底部才跟随新输出。向上翻阅时保留阅读位置；点击「回到底部」恢复跟随。
+- 标题栏可新建对话、搜索并打开历史，或删除不需要的记录。历史在本机加密保存；重新打开历史后，需要重新选择会话引用。
+
+<details>
+<summary>接口、数据范围和开发验证</summary>
 
 ## 结构与边界
 
 - `ShellPage` 的外层 `AgentWorkspace` 将左侧服务栏、完整会话工作区与 Agent 分成独立区域，Agent 不再嵌入中间 `TabPane` 的内容或圆角外框。右栏有独立顶部拖窗区、开关和拖宽分隔条，使用与左侧服务栏相同的宽度过渡、时长与曲线；动画只裁剪固定宽度的聊天，避免反复换行。窄窗口不足以容纳三栏时临时收起左栏，保持中间工作区与右栏并排，不覆盖主区域，也不改写左栏显隐偏好；关闭 Agent 或加宽窗口后恢复。此时点击左栏展开入口会收起 Agent 并恢复服务栏。收起后右栏不占宽度，通过顶部 Agent 按钮重新展开。聊天和会话子树均保持挂载，RDP 全屏立即隐藏右栏。Windows/Linux 窗口按钮固定在窗口右上角，不跟随右栏动画移动。
-- `SettingsDialog` 使用 shadcn Tabs 提供通用和 AI 两类设置；AI Tab 直接填写一组 API 协议、地址、Key 和默认模型 ID，底部提供测试连接与保存。长表单滚动，底部按钮和结果反馈固定可见，不再通过模型卡片进入第二层编辑弹窗。
+- 设置分为「通用」「代理」「AI 设置」「关于」。AI 设置表单包含 API 协议、地址、Key 和默认模型 ID，底部提供测试连接与保存。
 - `AiSettingsController` 串行提交配置快照。`DriftAiSettingsRepository` 复用 `app_settings.ai_settings`，不修改 Drift schema。API Key 经现有 SecretStore 加密；替换前先记录待清理引用，再写新密文和提交引用，保存失败保留旧引用。新旧密文删除失败的引用持久化，后续编辑或重载重试。
 - `AgentController` 构造注入 GetConnect、配置控制器、SecretStore、SessionController 和对话仓库，保留运行编排与生命周期。同一 Dart library 的 `agent_history.dart`、`agent_api.dart`、`agent_tools.dart`、`agent_queue.dart` 分别管理历史持久化、模型 API、工具执行与消息队列，API 部分直接使用注入的 GetConnect；`AgentApiCodec` 仅做 JSON 映射。AI 使用的 GetConnect 超时 90 秒，不跟随重定向，不调用 SDK 云服务、不引入遥测。
 - 内置技能位于 `domain/ai/agent_skill.dart`，仅三项，模型通过 `read_skill` 按需加载。没有外部技能市场或通用插件框架。
@@ -13,9 +51,9 @@
 
 | 设置格式 | 请求 | 鉴权 | 工具结果 |
 |---|---|---|---|
-| OpenAI | `POST /v1/chat/completions`；`messages` 含 system | `Authorization: Bearer` | assistant `tool_calls` 与 tool `tool_call_id` |
+| OpenAI Chat Completions | `POST /v1/chat/completions`；`messages` 含 system | `Authorization: Bearer` | assistant `tool_calls` 与 tool `tool_call_id` |
 | OpenAI Responses | `POST /v1/responses`；`instructions`、`input`、`store: false` | `Authorization: Bearer` | `function_call` 与 `function_call_output` 通过 `call_id` 关联；保留并回放 reasoning 和原始 output 项目 |
-| Anthropic | `POST /v1/messages`；顶层 `system`、自动读取的 `max_tokens` | `x-api-key`、`anthropic-version: 2023-06-01` | assistant `tool_use` 与 user `tool_result` |
+| Anthropic Messages | `POST /v1/messages`；顶层 `system`、自动读取的 `max_tokens` | `x-api-key`、`anthropic-version: 2023-06-01` | assistant `tool_use` 与 user `tool_result` |
 
 地址可为根路径、版本路径或完整接口，切换协议或获取模型时归一化已知接口后缀，保留自定义路径前缀。新建地址为空，示例只作 placeholder，切换协议不改写输入值。API Key 位于模型 ID 上方。模型 ID 可手动填写，也可点击刷新，通过当前地址、协议和 Key 获取 `GET /v1/models` 目录后下拉选择；支持游标分页、去重和输入过滤。编辑时 Key 留空从保险库复用，目录仅存在表单内存，修改地址、协议或 Key 会清除旧候选并忽略迟到结果。目录失败不阻止手动保存。
 
@@ -73,3 +111,5 @@ flutter test --no-pub test/application/ai_settings_controller_test.dart test/app
 ```
 
 本机 HTTP 契约测试真实经过 GetConnect，覆盖三种协议的模型目录、设置默认模型、思考参数、技能往返及后续聊天。队列控制器与组件测试覆盖三协议连续发送、完整轮次顺序、上下文隔离、每条配置和会话快照、审批等待期间排队、单条失败后继续、取消整队、同步状态通知取消、同 ID 重连、迟到响应隔离及历史恢复不重发。控制器和组件测试还覆盖 `@` 分组 Popover 的独立宽度、会话命名、同名会话引用与目标 ID 映射、输入框内多引用高亮、删改解除关联、整段删除、输入法组词和重连失效、中英文长列表键盘定位、反复开关、模式持久化及保存失败重试、Enter/Shift+Enter 和输入法组词、审核模式切换、目标固定、批准/拒绝/停止、完全访问与输出返回模型、输出限额、重连失效，以及直接设置表单、复用 Key、迟到目录结果、思考签名回传、聊天、折叠保留输入、拖宽、800×600 macOS/Windows/Linux 主题布局及语言切换。历史测试覆盖新建保留、恢复续聊、删除当前和旧对话、保存失败重试、迟到响应隔离、只读命令恢复、数据库关闭重开及密文/密钥异常。它们不代表真实第三方服务商、Windows/Linux 原生运行或真实远程命令执行验收。实际服务商需在设置中提供用户自己的 URL、模型 ID 和 API Key 后测试连接。
+
+</details>

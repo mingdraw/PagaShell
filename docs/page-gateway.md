@@ -1,8 +1,12 @@
 # Page 网关
 
-Page 是 PagaShell 的自定义 TCP 中转类型，配套 Go 项目为 [PagaGateway](https://github.com/mingdraw/PagaGateway)，两个独立 GitHub 仓库通过 **Page v1** 协议关联。它参考反向代理的控制连接/工作连接设计，不兼容 frps/frpc 的线协议。
+当本机不能直接访问内网目标时，可用 [PagaGateway](https://github.com/mingdraw/PagaGateway) 部署中转，再在 PagaShell 中添加 Page 网关。已有可达的 SSH 跳板机时，也可直接在 PagaShell 中添加 SSH 网关。
+
+[返回使用指南](user-guide.md#网关与代理)
 
 ## 网络路径
+
+PagaShell 与 PagaGateway 使用 Page v1 协议。Server 和 Client 需运行 PagaGateway，不能用 frps/frpc 直接替换。
 
 ```mermaid
 flowchart LR
@@ -15,7 +19,9 @@ flowchart LR
 
 ## 配置对应
 
-先按 [PagaGateway 部署说明](https://github.com/mingdraw/PagaGateway#快速部署) 启动 Server 与 Client，再创建 Page 网关：
+1. 按 [PagaGateway 部署说明](https://github.com/mingdraw/PagaGateway#快速部署) 启动 Server 与 Client。
+2. 在 PagaShell 左侧「网关」组菜单中新建网关，将「网关类型」设为 Page，按下表填写连接信息。
+3. 新建或编辑目标服务，在「高级选项 → 网关」中选择此网关。保存服务后连接。
 
 | PagaShell 字段 | PagaGateway 对应 |
 |---|---|
@@ -42,15 +48,16 @@ Page 表单不使用 SSH 用户名或凭证选择器；令牌仅存于原有 Sec
 
 ### 网关端口转发
 
-右键 Page 网关选择「端口转发」，填写「本地端口 → 目标 IP 或域名:目标端口」并启动。无需创建或登录目标 SSH 服务，目标由内网 Client 连接；`127.0.0.1` 指 Client 本机。映射自动保存在网关下，升级时清除旧服务上的映射。
+在 Page 网关行点击「端口转发」，也可从右键菜单打开。填写本地端口、目标 IP 或域名及目标端口，然后启动。目标由内网 Client 连接，无需创建或登录目标 SSH 服务；目标填 `127.0.0.1` 时指 Client 本机。映射保存在网关下。
 
 本地监听所有 IPv4 网卡，全部端口绑定成功后显示「正在监听」。每条本地连接通过 Page 独立鉴权并访问目标；目标须符合 Client 的 `allowed_targets`。令牌、Client 状态或目标连接有误时，本次连接报错并关闭，监听仍保留供后续重试；不回退本机直连。停止、关闭页签或删除网关时释放监听、活动连接和正在建立的中转流。
 
 ### 网关动态代理
 
-右键 Page 网关选择「动态代理」，可启用 HTTP(S)、SOCKS5 并设置本机监听端口；HTTP(S) 同时支持 HTTP 请求和 HTTPS CONNECT。全局或规则命中的请求通过 Page 自有 TCP 通道，由内网 Client 访问原始域名及端口，保留 HTTPS 网站的 TLS/SNI；无需 Client 运行 SSH。目标继续受 `allowed_targets` 限制。直连模式与未命中的规则请求由 PagaShell 本机连接。详细行为见 [动态代理](dynamic-proxy.md)。
+在 Page 网关行点击「动态代理」，也可从右键菜单打开。全局模式的请求和规则模式中命中的请求由内网 Client 访问，目标仍受 `allowed_targets` 限制。规则模式下未命中的请求由 PagaShell 本机直连。监听协议、端口和规则测试见[动态代理](dynamic-proxy.md)。
 
-## 验证
+<details>
+<summary>开发验证</summary>
 
 Go 测试覆盖 TLS / 无证书 TCP 的鉴权、目标允许列表、二进制与半关闭，以及并发、断线和重连。跨仓库测试分别使用两种模式启动真实 Go Server/Client，并验证 Rust SSH 指纹门禁、认证、SFTP 规范化目录、取消/清理，以及 RDP TLS/NLA 在发送凭据前停于证书审核：
 
@@ -69,3 +76,5 @@ PAGAGATEWAY_BIN=/tmp/pagagateway cargo test --lib page_go_relay -- --ignored
 - Rust `fmt`、全部目标 `clippy -D warnings` 通过；常规测试 55 通过、3 个显式环境测试跳过；其中 2 项 Page 跨仓库测试已单独运行并通过。
 - Flutter 静态分析通过；网关、数据库和会话相关测试 173 通过、4 跳过；macOS Debug 构建通过。英文 800×600 Page 表单已检查。
 - 完整 Flutter 套件为 506 通过、4 跳过、5 失败。失败集中在 `ui_layout_test.dart` 的菜单键盘高亮断言和密码框高度断言（30/33）；未将全套测试标记为通过。
+
+</details>
