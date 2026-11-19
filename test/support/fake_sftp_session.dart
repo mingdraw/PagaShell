@@ -34,6 +34,10 @@ class FakeSftpSession
   Object? dockerShellFailure;
   Object? listFailure;
 
+  void emitShellOutput(String text) => _shell.add(text);
+
+  Future<void> endShell() => _shell.close();
+
   @override
   Stream<TerminalFrame> startDockerTerminalShell({
     required DockerTerminalTarget target,
@@ -147,6 +151,6 @@ class FakeSftpSession
   @override
   Future<void> close() async {
     closes++;
-    unawaited(_shell.close());
+    if (!_shell.isClosed) unawaited(_shell.close());
   }
 }

@@ -29,9 +29,34 @@ void main() {
   });
 
   test('下载文件名不能改变目标目录', () {
-    for (final name in ['', '.', '..', '../escape', 'child/file']) {
+    for (final name in ['', '.', '..', '../escape', 'child/file', 'a\x00b']) {
       expect(() => files.pathOf(directory.path, name), throwsArgumentError);
     }
+  });
+
+  test('交互新建文件夹拒绝同名文件、目录和符号链接', () async {
+    final folder = files.pathOf(directory.path, '新文件夹');
+    await files.createDirectory(folder, rejectExisting: true);
+    expect(await files.listDirectory(folder), isEmpty);
+
+    final keep = File(files.pathOf(folder, 'keep.txt'))
+      ..writeAsStringSync('keep');
+    final file = File(files.pathOf(directory.path, 'existing.txt'))
+      ..writeAsStringSync('existing');
+    final targets = [file.path, folder];
+    if (!Platform.isWindows) {
+      final link = Link(files.pathOf(directory.path, 'link'))
+        ..createSync(folder);
+      targets.add(link.path);
+    }
+    for (final target in targets) {
+      await expectLater(
+        files.createDirectory(target, rejectExisting: true),
+        throwsA(isA<LocalFileTargetExists>()),
+      );
+    }
+    expect(await file.readAsString(), 'existing');
+    expect(await keep.readAsString(), 'keep');
   });
 
   test('读取拖入文件元数据可区分目录，保留特殊名称并拒绝不存在的源', () async {

@@ -25,6 +25,7 @@ class ProcessManagerController extends GetxController {
   final RxSet<String> terminating = <String>{}.obs;
   ProcessSnapshot? _previous;
   Timer? _timer;
+  final autoRefreshPaused = false.obs;
   bool _enabled = false;
   bool _disposed = false;
   bool _inFlight = false;
@@ -57,10 +58,18 @@ class ProcessManagerController extends GetxController {
     _previous = null;
     _timer?.cancel();
     loading.value = false;
-    if (enabled) unawaited(refreshProcesses());
+    if (enabled) unawaited(refreshProcesses(automatic: true));
   }
 
-  Future<void> refreshProcesses() async {
+  void setAutoRefreshPaused(bool paused) {
+    if (_disposed || autoRefreshPaused.value == paused) return;
+    autoRefreshPaused.value = paused;
+    _timer?.cancel();
+    if (!paused) unawaited(refreshProcesses(automatic: true));
+  }
+
+  Future<void> refreshProcesses({bool automatic = false}) async {
+    if (automatic && autoRefreshPaused.value) return;
     if (_disposed || !_enabled) return;
     if (_inFlight) {
       _refreshAgain = true;
@@ -73,25 +82,36 @@ class ProcessManagerController extends GetxController {
     loading.value = true;
     try {
       final snapshot = await source.readProcesses();
-      if (_disposed || !_enabled || generation != _generation) return;
+      if (_disposed ||
+          !_enabled ||
+          generation != _generation ||
+          (automatic && autoRefreshPaused.value)) {
+        return;
+      }
       processes.value = ProcessUsage.fromSamples(snapshot, _previous);
       _previous = snapshot;
       updatedAt.value = DateTime.now();
       error.value = null;
     } on Object catch (e) {
-      if (_disposed || !_enabled || generation != _generation) return;
+      if (_disposed ||
+          !_enabled ||
+          generation != _generation ||
+          (automatic && autoRefreshPaused.value)) {
+        return;
+      }
       error.value = e is SshEngineException ? e.message : '无法读取进程列表，请重试';
       _previous = null;
     } finally {
       _inFlight = false;
       if (!_disposed && _enabled) {
         loading.value = false;
-        if (error.value != '进程管理仅支持 Linux 和 macOS') {
+        if (!autoRefreshPaused.value &&
+            error.value != '进程管理仅支持 Linux 和 macOS') {
           _timer = Timer(
             _refreshAgain || generation != _generation
                 ? Duration.zero
                 : interval,
-            () => unawaited(refreshProcesses()),
+            () => unawaited(refreshProcesses(automatic: true)),
           );
         }
       }

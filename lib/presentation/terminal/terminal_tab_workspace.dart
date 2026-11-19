@@ -5,16 +5,22 @@ import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
+import '../../application/hosts/host_controller.dart';
 import '../../application/session/session.dart';
 import '../../application/session/session_controller.dart';
 import '../../application/session/session_layout.dart';
+import '../../domain/entities/host.dart';
+import '../../domain/entities/host_tree_item.dart';
 import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
+import '../shell/connect_flow.dart';
+import '../shell/widgets/host_tree_drag.dart';
 import '../theme/app_theme.dart';
 import 'docker_manager_panel.dart';
 import 'network_ports_panel.dart';
 import 'process_manager_panel.dart';
 import 'server_status_panel.dart';
+import 'terminal_pane_zoom_intent.dart';
 import 'terminal_side_panel.dart';
 
 /// 一个 SSH 标签内的工具栏、窗格树与页签独立的监控面板。
@@ -38,10 +44,16 @@ class TerminalTabWorkspace extends StatefulWidget {
 
 class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
   final _splitKeys = <String, GlobalKey>{};
+  String? _zoomed;
 
   @override
   void didUpdateWidget(TerminalTabWorkspace oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (_zoomed != null &&
+        (widget.sessions.length < 2 ||
+            widget.tab.selectedSessionId != _zoomed)) {
+      _zoomed = null;
+    }
     final live = <String>{};
     void visit(SessionLayout layout) {
       if (layout is SessionSplit) {
@@ -55,74 +67,230 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
     _splitKeys.removeWhere((id, _) => !live.contains(id));
   }
 
-  Widget _layout(SessionLayout layout, Map<String, Session> sessions) {
+  bool _toggleZoom(String id) {
+    if (!widget.active || widget.sessions.length < 2) return false;
+    Get.find<SessionController>().activate(id);
+    setState(() => _zoomed = _zoomed == id ? null : id);
+    return true;
+  }
+
+  Widget _panes(Map<String, Session> sessions, bool synced) => Stack(
+    fit: StackFit.expand,
+    children: [
+      Offstage(
+        offstage: _zoomed != null,
+        child: ExcludeFocus(
+          excluding: _zoomed != null,
+          child: _layout(widget.tab.layout, sessions, synced),
+        ),
+      ),
+      if (_zoomed case final id?)
+        _pane(sessions[id]!, split: true, synced: synced),
+    ],
+  );
+
+  Widget _layout(
+    SessionLayout layout,
+    Map<String, Session> sessions,
+    bool synced,
+  ) {
     if (layout is SessionSplit) {
       return _ResizableTerminalSplit(
         key: _splitKeys.putIfAbsent(layout.id, GlobalKey.new),
         axis: layout.axis,
-        first: _layout(layout.first, sessions),
-        second: _layout(layout.second, sessions),
+        first: _layout(layout.first, sessions, synced),
+        second: _layout(layout.second, sessions, synced),
       );
     }
     final id = (layout as SessionPane).sessionId;
-    final session = sessions[id]!;
+    // Keep the resize controllers and hidden siblings mounted while the
+    // selected terminal moves to the full-size layer using its existing key.
+    if (id == _zoomed) return const SizedBox.expand();
+    return _pane(sessions[id]!, split: sessions.length > 1, synced: synced);
+  }
+
+  Widget _pane(Session session, {required bool split, required bool synced}) {
+    final id = session.id;
     final selected = widget.tab.selectedSessionId == id;
     final child = widget.paneBuilder(session, selected);
-    if (sessions.length == 1) return child;
+    if (!split) return _dropZones(session, child);
     return Listener(
       onPointerDown: (_) => Get.find<SessionController>().activate(id),
-      child: Container(
-        key: ValueKey('terminal-pane-$id'),
-        decoration: BoxDecoration(
-          border: Border.all(
-            color: selected && widget.active
-                ? AppTheme.terminalSelectedBorder
-                : AppTheme.terminalBorder,
+      child: _dropZones(
+        session,
+        Container(
+          key: ValueKey('terminal-pane-$id'),
+          decoration: BoxDecoration(
+            border: Border.all(
+              color: synced
+                  ? StatusColors.connecting
+                  : selected && widget.active
+                  ? AppTheme.terminalSelectedBorder
+                  : AppTheme.terminalBorder,
+            ),
           ),
-        ),
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            child,
-            Positioned(
-              top: 4,
-              right: 4,
-              child: Container(
-                decoration: BoxDecoration(
-                  color: AppTheme.terminalBackground.withValues(alpha: .9),
-                  borderRadius: BorderRadius.circular(5),
-                ),
-                child: SizedBox.square(
-                  dimension: AppTheme.terminalPaneCloseSize,
-                  child: AppIconButton(
-                    key: ValueKey('terminal-pane-close-$id'),
-                    semanticLabel: '关闭窗格'.tr,
-                    tooltip: '关闭窗格'.tr,
-                    density: shadcn.ButtonDensity.compact,
-                    onPressed: () =>
-                        unawaited(Get.find<SessionController>().close(id)),
-                    icon: const AppIcon(AppIcons.x, size: 14),
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              child,
+              Positioned(
+                top: 4,
+                right: 4,
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: AppTheme.terminalBackground.withValues(alpha: .9),
+                    borderRadius: BorderRadius.circular(5),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      SizedBox.square(
+                        dimension: AppTheme.terminalPaneCloseSize,
+                        child: AppIconButton(
+                          key: ValueKey('terminal-pane-zoom-$id'),
+                          semanticLabel: (_zoomed == id ? '还原分屏' : '最大化窗格').tr,
+                          tooltip: (_zoomed == id ? '还原分屏' : '最大化窗格').tr,
+                          density: shadcn.ButtonDensity.compact,
+                          onPressed: () => _toggleZoom(id),
+                          icon: AppIcon(
+                            _zoomed == id
+                                ? AppIcons.minimize
+                                : AppIcons.maximize,
+                            size: 13,
+                          ),
+                        ),
+                      ),
+                      SizedBox.square(
+                        dimension: AppTheme.terminalPaneCloseSize,
+                        child: AppIconButton(
+                          key: ValueKey('terminal-pane-close-$id'),
+                          semanticLabel: '关闭窗格'.tr,
+                          tooltip: '关闭窗格'.tr,
+                          density: shadcn.ButtonDensity.compact,
+                          onPressed: () => unawaited(
+                            Get.find<SessionController>().close(id),
+                          ),
+                          icon: const AppIcon(AppIcons.x, size: 14),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
   }
 
+  Widget _dropZones(Session session, Widget child) {
+    final controller = Get.find<SessionController>();
+    if (!widget.active ||
+        session.kind != SessionKind.terminal ||
+        !controller.canSplitTerminal(session.id)) {
+      return child;
+    }
+    Host? sourceOf(HostTreeItem item) {
+      if (item is! ServiceTerminalDrag || !Get.isRegistered<HostController>()) {
+        return null;
+      }
+      return Get.find<HostController>().hosts.firstWhereOrNull(
+        (host) => host.id == item.id,
+      );
+    }
+
+    Widget zone(SessionSplitEdge edge) => DragTarget<HostTreeItem>(
+      key: ValueKey('terminal-drop-${session.id}-${edge.name}'),
+      onWillAcceptWithDetails: (details) {
+        final host = sourceOf(details.data);
+        return host != null && controller.canSplitToHost(session.id, host);
+      },
+      onAcceptWithDetails: (details) {
+        final host = sourceOf(details.data);
+        if (host == null) return;
+        unawaited(
+          connectToHost(
+            context,
+            host,
+            splitTarget: (sessionId: session.id, edge: edge),
+          ),
+        );
+      },
+      builder: (context, candidate, _) => IgnorePointer(
+        child: candidate.isEmpty
+            ? const SizedBox.expand()
+            : DecoratedBox(
+                decoration: BoxDecoration(
+                  color: AppTheme.terminalSelectedBorder.withValues(alpha: .25),
+                  border: Border.all(color: AppTheme.terminalSelectedBorder),
+                ),
+                child: const SizedBox.expand(),
+              ),
+      ),
+    );
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width = constraints.maxWidth * .24;
+        final height = constraints.maxHeight * .23;
+        return Stack(
+          fit: StackFit.expand,
+          children: [
+            child,
+            Positioned(
+              left: 0,
+              top: height,
+              bottom: height,
+              width: width,
+              child: zone(SessionSplitEdge.left),
+            ),
+            Positioned(
+              right: 0,
+              top: height,
+              bottom: height,
+              width: width,
+              child: zone(SessionSplitEdge.right),
+            ),
+            Positioned(
+              left: 0,
+              right: 0,
+              top: 0,
+              height: height,
+              child: zone(SessionSplitEdge.top),
+            ),
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              height: height,
+              child: zone(SessionSplitEdge.bottom),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   @override
-  Widget build(BuildContext context) => shadcn.Theme(
-    data: AppTheme.terminalTheme(context),
-    child: DefaultTextStyle.merge(
-      style: const TextStyle(color: AppTheme.terminalForeground),
-      child: IconTheme.merge(
-        data: const IconThemeData(color: AppTheme.terminalForeground),
-        child: ColoredBox(
-          key: const ValueKey('terminal-surface'),
-          color: AppTheme.terminalBackground,
-          child: Builder(builder: _buildWorkspace),
+  Widget build(BuildContext context) => Actions(
+    actions: {
+      TerminalPaneZoomIntent: CallbackAction<TerminalPaneZoomIntent>(
+        onInvoke: (_) => _toggleZoom(widget.tab.selectedSessionId),
+      ),
+    },
+    child: shadcn.Theme(
+      data: AppTheme.terminalTheme(context),
+      child: DefaultTextStyle.merge(
+        style: const TextStyle(color: AppTheme.terminalForeground),
+        child: IconTheme.merge(
+          data: const IconThemeData(color: AppTheme.terminalForeground),
+          child: ColoredBox(
+            key: const ValueKey('terminal-surface'),
+            color: AppTheme.terminalBackground,
+            child: Builder(
+              builder: (context) => Obx(() => _buildWorkspace(context)),
+            ),
+          ),
         ),
       ),
     ),
@@ -134,11 +302,12 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
     };
     final selected = sessions[widget.tab.selectedSessionId]!;
     final controller = Get.find<SessionController>();
+    final synced = controller.isInputSyncEnabled(widget.tab.id);
     if (selected.kind == SessionKind.containerTerminal) {
       return Column(
         children: [
-          _toolbar(selected, _splitButtons(controller, selected)),
-          Expanded(child: _layout(widget.tab.layout, sessions)),
+          _toolbar(selected, _splitButtons(controller, selected, synced)),
+          Expanded(child: _panes(sessions, synced)),
         ],
       );
     }
@@ -192,6 +361,7 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
             ),
             NetworkPortsPanel(
               source: portsSource,
+              hostname: selected.host.hostname,
               active:
                   widget.active &&
                   visible &&
@@ -202,7 +372,7 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
         toolbarBuilder: (context, panel, canExpand, toggle) => _toolbar(
           selected,
           [
-            ..._splitButtons(controller, selected),
+            ..._splitButtons(controller, selected, synced),
             _toolbarDivider(),
             _toolbarButton(
               name: 'open-sftp',
@@ -284,7 +454,7 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
             ),
           ],
         ),
-        terminal: _layout(widget.tab.layout, sessions),
+        terminal: _panes(sessions, synced),
       ),
     );
   }
@@ -308,7 +478,7 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
       ),
       child: LayoutBuilder(
         builder: (context, constraints) {
-          if (constraints.maxWidth < 260) {
+          if (constraints.maxWidth < (widget.sessions.length > 1 ? 292 : 260)) {
             return Align(
               alignment: Alignment.centerRight,
               child: SingleChildScrollView(
@@ -421,7 +591,11 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
     color: AppTheme.terminalBorder,
   );
 
-  List<Widget> _splitButtons(SessionController controller, Session selected) {
+  List<Widget> _splitButtons(
+    SessionController controller,
+    Session selected,
+    bool synced,
+  ) {
     final canSplit = controller.canSplitTerminal(selected.id);
     return [
       _toolbarButton(
@@ -451,6 +625,19 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
             : null,
         icon: AppIcons.rows2,
       ),
+      if (widget.sessions.length > 1) ...[
+        const SizedBox(width: 4),
+        _toolbarButton(
+          name: 'input-sync',
+          label: (synced ? '同步输入中（点击关闭）' : '同步输入到此页签的所有窗格').tr,
+          onPressed: synced || controller.canSyncInput(widget.tab.id)
+              ? () => controller.toggleInputSync(widget.tab.id)
+              : null,
+          icon: AppIcons.arrowLeftRight,
+          selected: synced,
+          accent: synced ? StatusColors.connecting : null,
+        ),
+      ],
     ];
   }
 
@@ -461,13 +648,16 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
     required VoidCallback? onPressed,
     String? tooltip,
     bool selected = false,
+    Color? accent,
   }) => Container(
     width: AppTheme.terminalToolbarButtonSize,
     height: AppTheme.terminalToolbarButtonSize,
     decoration: selected
         ? BoxDecoration(
             color: AppTheme.terminalControlBackground,
-            border: Border.all(color: AppTheme.terminalSelectedBorder),
+            border: Border.all(
+              color: accent ?? AppTheme.terminalSelectedBorder,
+            ),
             borderRadius: BorderRadius.circular(6),
           )
         : null,
@@ -479,7 +669,7 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
       icon: AppIcon(
         icon,
         size: 16,
-        color: selected ? AppTheme.terminalForeground : null,
+        color: accent ?? (selected ? AppTheme.terminalForeground : null),
       ),
     ),
   );

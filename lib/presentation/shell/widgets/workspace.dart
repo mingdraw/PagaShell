@@ -11,7 +11,9 @@ import '../../../application/session/session_layout.dart';
 import '../../../application/settings/settings_controller.dart';
 import '../../../domain/entities/host.dart';
 import '../../../domain/repositories/local_file_repository.dart';
+import '../../components/app_copy_button.dart';
 import '../../components/app_icon.dart';
+import '../../components/app_icon_button.dart';
 import '../../components/app_list_row.dart';
 import '../../forward/forward_session_panel.dart';
 import '../../hosts/host_edit_dialog.dart';
@@ -25,6 +27,7 @@ import '../../ssh/host_key_confirmation.dart';
 import '../../terminal/app_terminal_view.dart';
 import '../../terminal/terminal_tab_workspace.dart';
 import '../../theme/app_theme.dart';
+import '../agent_sidebar_scope.dart';
 import '../command_palette.dart';
 import '../connect_flow.dart';
 import '../session_close_confirmation.dart';
@@ -205,7 +208,7 @@ class _WelcomeView extends StatelessWidget {
     final theme = shadcn.Theme.of(context);
     final colors = theme.colorScheme;
     final hintStyle = TextStyle(fontSize: 13, color: colors.mutedForeground);
-    final modifier = theme.platform == TargetPlatform.macOS ? '⌘' : 'Ctrl + ';
+    final isMac = theme.platform == TargetPlatform.macOS;
 
     return Center(
       child: SingleChildScrollView(
@@ -326,19 +329,19 @@ class _WelcomeView extends StatelessWidget {
                 child: Column(
                   children: [
                     _ShortcutHint(
-                      keys: '${modifier}K',
+                      keys: isMac ? '⌘K' : 'Ctrl + Shift + K',
                       label: '快速连接'.tr,
                       style: hintStyle,
                     ),
                     const SizedBox(height: 14),
                     _ShortcutHint(
-                      keys: '${modifier}N',
+                      keys: isMac ? '⌘N' : 'Ctrl + Shift + N',
                       label: '新建服务'.tr,
                       style: hintStyle,
                     ),
                     const SizedBox(height: 14),
                     _ShortcutHint(
-                      keys: '$modifier,',
+                      keys: isMac ? '⌘,' : 'Ctrl + ,',
                       label: '打开设置'.tr,
                       style: hintStyle,
                     ),
@@ -478,7 +481,7 @@ class _SessionView extends StatelessWidget {
       return ForwardSessionPanel(session: session);
     }
     if (session.kind == SessionKind.dynamicProxy) {
-      return DynamicProxyPanel(session: session);
+      return DynamicProxyPanel(session: session, active: active);
     }
     if (session.kind == SessionKind.fileTransfer &&
         session.engineSession != null) {
@@ -632,10 +635,161 @@ class _TerminalHostState extends State<_TerminalHost> {
   }
 
   @override
-  Widget build(BuildContext context) => AppTerminalView(
-    widget.session.terminal!,
-    focusNode: _focusNode,
-    active: widget.active,
+  Widget build(BuildContext context) {
+    final controller = Get.find<SessionController>();
+    final session = widget.session;
+    final canSplit = controller.canSplitTerminal(session.id);
+    final canTransfer = controller.canOpenFileTransfer(session.id);
+    final canReconnect = controller.canReconnect(session.id);
+    final terminalView = AppTerminalView(
+      session.terminal!,
+      focusNode: _focusNode,
+      active: widget.active,
+      canInput: session.phase == SessionPhase.ready,
+      onUserInput: (send) => controller.syncUserInput(session.id, send),
+      onSplitHorizontal: canSplit
+          ? () => unawaited(
+              controller.splitTerminal(session.id, SessionSplitAxis.horizontal),
+            )
+          : null,
+      onSplitVertical: canSplit
+          ? () => unawaited(
+              controller.splitTerminal(session.id, SessionSplitAxis.vertical),
+            )
+          : null,
+      onOpenFileTransfer: canTransfer
+          ? () => unawaited(controller.openFileTransfer(session.id))
+          : null,
+      onReconnect: canReconnect
+          ? () => unawaited(controller.reconnect(session.id))
+          : null,
+      onQuoteSelection: AgentSidebarScope.maybeOf(context)
+          ?.onQuoteTerminalSelection,
+    );
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        terminalView,
+        if (session.phase == SessionPhase.closed)
+          Positioned(
+            left: 12,
+            right: 12,
+            bottom: 12,
+            child: Align(
+              alignment: Alignment.bottomCenter,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 540),
+                child: Container(
+                  key: const ValueKey('terminal-disconnected-banner'),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 8,
+                  ),
+                  decoration: BoxDecoration(
+                    color: AppTheme.terminalControlBackground.withValues(
+                      alpha: 0.96,
+                    ),
+                    border: Border.all(color: AppTheme.terminalSelectedBorder),
+                    borderRadius: BorderRadius.circular(8),
+                    boxShadow: const [
+                      BoxShadow(color: Color(0x50000000), blurRadius: 12),
+                    ],
+                  ),
+                  child: _DisconnectedTerminalActions(
+                    onClose: () => unawaited(controller.close(session.id)),
+                    onReconnect: canReconnect
+                        ? () => unawaited(controller.retry(session.id))
+                        : null,
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class _DisconnectedTerminalActions extends StatelessWidget {
+  const _DisconnectedTerminalActions({required this.onClose, this.onReconnect});
+
+  final VoidCallback onClose;
+  final VoidCallback? onReconnect;
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      final compact =
+          constraints.maxWidth < AppTheme.terminalDisconnectCompactWidth;
+      const closeKey = ValueKey('terminal-disconnected-close');
+      const reconnectKey = ValueKey('terminal-disconnected-reconnect');
+      return Row(
+        children: [
+          if (!compact) ...[
+            const AppIcon(
+              AppIcons.unplug,
+              size: 15,
+              color: StatusColors.closed,
+            ),
+            const SizedBox(width: 8),
+          ],
+          Expanded(
+            child: Text(
+              (compact ? '连接已断开' : '连接已断开，已保留历史输出').tr,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                fontSize: 12,
+                color: AppTheme.terminalForeground,
+              ),
+            ),
+          ),
+          if (compact) ...[
+            AppIconButton(
+              key: closeKey,
+              semanticLabel: '关闭'.tr,
+              tooltip: '关闭'.tr,
+              onPressed: onClose,
+              icon: const AppIcon(
+                AppIcons.x,
+                size: 13,
+                color: AppTheme.terminalForeground,
+              ),
+            ),
+            if (onReconnect != null)
+              AppIconButton(
+                key: reconnectKey,
+                semanticLabel: '重新连接'.tr,
+                tooltip: '重新连接'.tr,
+                onPressed: onReconnect,
+                icon: const AppIcon(
+                  AppIcons.rotateCw,
+                  size: 13,
+                  color: AppTheme.terminalForeground,
+                ),
+              ),
+          ] else ...[
+            const SizedBox(width: 8),
+            shadcn.OutlineButton(
+              key: closeKey,
+              size: shadcn.ButtonSize.small,
+              onPressed: onClose,
+              child: Text('关闭'.tr),
+            ),
+            if (onReconnect != null) ...[
+              const SizedBox(width: 8),
+              shadcn.PrimaryButton(
+                key: reconnectKey,
+                size: shadcn.ButtonSize.small,
+                onPressed: onReconnect,
+                leading: const AppIcon(AppIcons.rotateCw, size: 13),
+                child: Text('重新连接'.tr),
+              ),
+            ],
+          ],
+        ],
+      );
+    },
   );
 }
 
@@ -648,6 +802,10 @@ class _FailedView extends StatelessWidget {
   Widget build(BuildContext context) {
     final controller = Get.find<SessionController>();
     final colors = shadcn.Theme.of(context).colorScheme;
+    final errorMessage = AppTranslations.error(session.error ?? '未知错误');
+    final canEditHost =
+        session.kind != SessionKind.containerTerminal &&
+        Get.isRegistered<HostController>();
 
     return Center(
       child: SingleChildScrollView(
@@ -668,10 +826,27 @@ class _FailedView extends StatelessWidget {
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 8),
-            Text(
-              AppTranslations.error(session.error ?? '未知错误'),
-              textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 12, color: colors.mutedForeground),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Flexible(
+                  child: Text(
+                    errorMessage,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: colors.mutedForeground,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 4),
+                AppCopyButton(
+                  key: const ValueKey('failed-copy-error'),
+                  text: errorMessage,
+                  size: 13,
+                  semanticLabel: '复制错误信息'.tr,
+                ),
+              ],
             ),
             const SizedBox(height: 20),
             Wrap(
@@ -685,6 +860,21 @@ class _FailedView extends StatelessWidget {
                       : requestSessionTabClose(controller, [session.id]),
                   child: Text('关闭'.tr),
                 ),
+                if (canEditHost)
+                  shadcn.OutlineButton(
+                    key: const ValueKey('failed-edit-host'),
+                    onPressed: () {
+                      final hosts = Get.find<HostController>();
+                      final liveHost =
+                          hosts.hosts.firstWhereOrNull(
+                            (host) => host.id == session.host.id,
+                          ) ??
+                          session.host;
+                      unawaited(showHostEditDialog(context, host: liveHost));
+                    },
+                    leading: const AppIcon(AppIcons.pencil, size: 15),
+                    child: Text('编辑服务'.tr),
+                  ),
                 if (session.hostKeyFailure?.hasChanged == true)
                   shadcn.OutlineButton(
                     key: const ValueKey('clear-host-key-and-retry'),

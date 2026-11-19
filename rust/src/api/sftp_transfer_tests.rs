@@ -199,6 +199,7 @@ impl russh_sftp::server::Handler for FileServer {
             id,
             attrs: FileAttributes {
                 size: Some(self.state.bytes.lock().unwrap().len() as u64),
+                permissions: Some(0o100600),
                 mtime: Some(u32::from(
                     self.state
                         .change_on_stat
@@ -207,6 +208,26 @@ impl russh_sftp::server::Handler for FileServer {
                 ..FileAttributes::default()
             },
         })
+    }
+
+    async fn lstat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
+        self.stat(id, path).await
+    }
+
+    async fn fstat(&mut self, id: u32, handle: String) -> Result<Attrs, Self::Error> {
+        self.stat(id, handle).await
+    }
+
+    async fn fsetstat(
+        &mut self,
+        id: u32,
+        _: String,
+        attrs: FileAttributes,
+    ) -> Result<Status, Self::Error> {
+        if let Some(size) = attrs.size {
+            self.state.bytes.lock().unwrap().resize(size as usize, 0);
+        }
+        Ok(ok_status(id))
     }
 
     async fn remove(&mut self, id: u32, _: String) -> Result<Status, Self::Error> {
@@ -278,6 +299,45 @@ async fn upload(session: &SftpSession, bytes: &[u8], chunk: usize) {
     }
     transfer_io(&cancel, remote.flush()).await.unwrap();
     transfer_io(&cancel, remote.shutdown()).await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn small_text_edit_preserves_utf8_and_removes_the_old_tail() {
+    let text = "\u{feff}名称=反向代理\r\n端口=8080\r\n";
+    let edited = "\u{feff}端口=9000\r\n";
+    let (session, state) = fixture(
+        sftp_client_config(),
+        Options::default(),
+        text.as_bytes().to_vec(),
+    )
+    .await;
+    let original = read_small_text(&session, "file").await.unwrap();
+    assert_eq!(original.text, text);
+    assert_eq!(original.modified_unix, Some(0));
+    save_small_text(&session, "file", &original, edited)
+        .await
+        .unwrap();
+    assert_eq!(*state.bytes.lock().unwrap(), edited.as_bytes());
+    session.close().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn small_text_edit_refuses_new_content_with_identical_size_and_mtime() {
+    let (session, state) = fixture(
+        sftp_client_config(),
+        Options::default(),
+        b"port=8080\n".to_vec(),
+    )
+    .await;
+    let original = read_small_text(&session, "file").await.unwrap();
+    *state.bytes.lock().unwrap() = b"port=8081\n".to_vec();
+    let error = save_small_text(&session, "file", &original, "port=9000\n")
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), "文件已被修改，请重新打开");
+    assert_eq!(*state.bytes.lock().unwrap(), b"port=8081\n");
+    assert_eq!(state.writes.load(Ordering::Relaxed), 0);
+    session.close().await.unwrap();
 }
 
 #[tokio::test(start_paused = true)]

@@ -401,6 +401,12 @@ class _SettingsDialogState extends State<SettingsDialog> {
           ],
         ),
         actions: [
+          shadcn.OutlineButton(
+            onPressed: _saving || savingProxy
+                ? null
+                : AppNavigation.closeDialog<void>,
+            child: Text('关闭'.tr),
+          ),
           if (_tab == _proxyTab && proxyReady)
             shadcn.PrimaryButton(
               key: const ValueKey('proxy-save'),
@@ -419,12 +425,6 @@ class _SettingsDialogState extends State<SettingsDialog> {
               onPressed: busy ? null : _save,
               child: Text((_saving ? '保存中' : '保存').tr),
             ),
-          shadcn.OutlineButton(
-            onPressed: _saving || savingProxy
-                ? null
-                : AppNavigation.closeDialog<void>,
-            child: Text('关闭'.tr),
-          ),
         ],
       ),
     );

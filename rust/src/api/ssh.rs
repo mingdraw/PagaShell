@@ -16,7 +16,7 @@ use russh::keys::{decode_secret_key, HashAlg, PrivateKey, PrivateKeyWithHashAlg,
 use russh::{ChannelMsg, Disconnect};
 use russh_sftp::client::{Config as SftpConfig, SftpSession};
 use russh_sftp::protocol::{FileAttributes, OpenFlags, StatusCode};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch, Mutex, Notify, RwLock};
 use tokio::task::{JoinHandle, JoinSet};
@@ -31,6 +31,137 @@ pub struct SftpEntry {
     pub is_dir: bool,
     pub size: u64,
     pub modified_unix: u64,
+}
+
+pub struct SftpTextFile {
+    pub text: String,
+    pub modified_unix: Option<u32>,
+}
+
+const SFTP_TEXT_LIMIT: usize = 2 * 1024 * 1024;
+
+fn check_text_bytes(bytes: &[u8]) -> Result<&str> {
+    anyhow::ensure!(bytes.len() <= SFTP_TEXT_LIMIT, "文本文件不能超过 2 MiB");
+    anyhow::ensure!(
+        !bytes
+            .iter()
+            .any(|byte| matches!(byte, 0..=8 | 11..=12 | 14..=31 | 127)),
+        "仅支持 UTF-8 文本文件"
+    );
+    std::str::from_utf8(bytes).context("仅支持 UTF-8 文本文件")
+}
+
+async fn checked_text_metadata(sftp: &SftpSession, path: &str) -> Result<FileAttributes> {
+    let metadata = sftp
+        .symlink_metadata(path)
+        .await
+        .context("无法读取文件信息")?;
+    anyhow::ensure!(metadata.file_type().is_file(), "只可编辑普通文件");
+    anyhow::ensure!(
+        metadata
+            .size
+            .is_some_and(|size| size <= SFTP_TEXT_LIMIT as u64),
+        "文本文件不能超过 2 MiB"
+    );
+    Ok(metadata)
+}
+
+async fn read_small_text_bytes(file: &mut russh_sftp::client::fs::File) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    file.take((SFTP_TEXT_LIMIT + 1) as u64)
+        .read_to_end(&mut bytes)
+        .await
+        .context("读取文本失败")?;
+    check_text_bytes(&bytes)?;
+    Ok(bytes)
+}
+
+pub async fn sftp_read_text(session_id: u32, path: String) -> Result<SftpTextFile> {
+    let sftp = open_sftp(session_id).await?;
+    let result = read_small_text(&sftp, &path).await;
+    let _ = sftp.close().await;
+    result
+}
+
+async fn read_small_text(sftp: &SftpSession, path: &str) -> Result<SftpTextFile> {
+    let before = checked_text_metadata(sftp, path).await?;
+    let mut file = sftp.open(path).await.context("读取文本失败")?;
+    let bytes = read_small_text_bytes(&mut file).await?;
+    let after = checked_text_metadata(sftp, path).await?;
+    anyhow::ensure!(
+        !remote_changed(&before, &after) && after.size == Some(bytes.len() as u64),
+        "文件已被修改，请重新打开"
+    );
+    file.shutdown().await.context("读取文本失败")?;
+    Ok(SftpTextFile {
+        text: String::from_utf8(bytes).context("仅支持 UTF-8 文本文件")?,
+        modified_unix: after.mtime,
+    })
+}
+
+/// Validates size, mtime and the original bytes using a non-truncating handle.
+/// SFTP v3 has no atomic compare-and-write. An external writer must still be
+/// coordinated with by the user.
+pub async fn sftp_save_text(
+    session_id: u32,
+    path: String,
+    original: SftpTextFile,
+    text: String,
+) -> Result<()> {
+    check_text_bytes(text.as_bytes())?;
+    check_text_bytes(original.text.as_bytes())?;
+    anyhow::ensure!(
+        original.modified_unix.is_some(),
+        "无法确认文件修改时间，不能保存"
+    );
+    let sftp = open_sftp(session_id).await?;
+    let result = save_small_text(&sftp, &path, &original, &text).await;
+    let _ = sftp.close().await;
+    result
+}
+
+async fn save_small_text(
+    sftp: &SftpSession,
+    path: &str,
+    original: &SftpTextFile,
+    text: &str,
+) -> Result<()> {
+    let before = checked_text_metadata(sftp, path).await?;
+    let expected_size = Some(original.text.len() as u64);
+    anyhow::ensure!(
+        before.mtime == original.modified_unix && before.size == expected_size,
+        "文件已被修改，请重新打开"
+    );
+    let mut file = sftp
+        .open_with_flags(path, OpenFlags::READ | OpenFlags::WRITE)
+        .await
+        .context("打开文件写入失败")?;
+    let bytes = read_small_text_bytes(&mut file).await?;
+    let handle = file.metadata().await.context("无法读取文件信息")?;
+    let latest = checked_text_metadata(sftp, path).await?;
+    anyhow::ensure!(
+        handle.file_type().is_file()
+            && !remote_changed(&before, &handle)
+            && !remote_changed(&before, &latest)
+            && bytes == original.text.as_bytes(),
+        "文件已被修改，请重新打开"
+    );
+    file.seek(std::io::SeekFrom::Start(0))
+        .await
+        .context("写入文本失败")?;
+    file.write_all(text.as_bytes())
+        .await
+        .context("写入文本失败")?;
+    file.flush().await.context("写入文本失败")?;
+    if text.len() < bytes.len() {
+        file.set_metadata(FileAttributes {
+            size: Some(text.len() as u64),
+            ..FileAttributes::empty()
+        })
+        .await
+        .context("写入文本失败")?;
+    }
+    file.shutdown().await.context("写入文本失败")
 }
 
 /// 传输进度事件（跨 FFI）。total 为 0 表示大小未知。
@@ -1143,6 +1274,7 @@ pub async fn ssh_disconnect(session_id: u32) -> Result<()> {
     }
     let entry = SESSIONS.lock().await.remove(&session_id);
     if let Some(entry) = entry {
+        super::docker::close_logs_for_session(session_id).await;
         if let Some((cancel, mut task)) = entry.forwards {
             let _ = cancel.send(true);
             if tokio::time::timeout(Duration::from_secs(2), &mut task)
@@ -3678,6 +3810,122 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
                 task.abort();
             }
         }
+    }
+
+    struct DockerLogServer {
+        streaming: Option<russh::ChannelId>,
+        closed: mpsc::UnboundedSender<()>,
+    }
+
+    impl server::Handler for DockerLogServer {
+        type Error = russh::Error;
+
+        async fn auth_password(&mut self, _: &str, _: &str) -> Result<server::Auth, Self::Error> {
+            Ok(server::Auth::Accept)
+        }
+
+        async fn channel_open_session(
+            &mut self,
+            _: russh::Channel<server::Msg>,
+            reply: server::ChannelOpenHandle,
+            _: &mut server::Session,
+        ) -> Result<(), Self::Error> {
+            reply.accept().await;
+            Ok(())
+        }
+
+        async fn exec_request(
+            &mut self,
+            channel: russh::ChannelId,
+            command: &[u8],
+            session: &mut server::Session,
+        ) -> Result<(), Self::Error> {
+            session.channel_success(channel)?;
+            if command == server_status_command(include_str!("docker_access.sh")).as_bytes() {
+                session.data(channel, b"PAGA_DOCKER_ACCESS_V1\n/usr/bin/docker\nunix:///var/run/docker.sock\n0\n/fixture\n1.45\n".to_vec())?;
+                session.exit_status_request(channel, 0)?;
+                session.close(channel)?;
+            } else {
+                assert_eq!(
+                    command,
+                    server_status_command("exec '/usr/bin/docker' logs --follow --tail 200 --timestamps -- 0123456789ab </dev/null").as_bytes()
+                );
+                self.streaming = Some(channel);
+                session.data(channel, b"first line\n".to_vec())?;
+                session.extended_data(channel, 1, b"stderr line\n".to_vec())?;
+            }
+            Ok(())
+        }
+
+        async fn channel_close(
+            &mut self,
+            channel: russh::ChannelId,
+            _: &mut server::Session,
+        ) -> Result<(), Self::Error> {
+            if self.streaming == Some(channel) {
+                self.streaming = None;
+                let _ = self.closed.send(());
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn docker_log_channel_streams_separately_and_releases_pending_reads() {
+        use crate::api::docker::{
+            ssh_close_docker_logs, ssh_next_docker_logs, ssh_open_docker_logs,
+        };
+
+        let (closed, mut closures) = mpsc::unbounded_channel();
+        let (id, task) = process_test_connection(DockerLogServer {
+            streaming: None,
+            closed,
+        })
+        .await;
+        assert!(ssh_open_docker_logs(id, "0123456789ab;invalid".into())
+            .await
+            .is_err());
+
+        for disconnect in [false, true] {
+            let logs = ssh_open_docker_logs(id, "0123456789ab".into())
+                .await
+                .unwrap();
+            for line in [b"first line\n".as_slice(), b"stderr line\n".as_slice()] {
+                assert_eq!(
+                    tokio::time::timeout(Duration::from_secs(1), ssh_next_docker_logs(logs))
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .as_deref(),
+                    Some(line)
+                );
+            }
+            let mut pending = tokio::spawn(ssh_next_docker_logs(logs));
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), &mut pending)
+                    .await
+                    .is_err()
+            );
+            if disconnect {
+                ssh_disconnect(id).await.unwrap();
+            } else {
+                ssh_close_docker_logs(logs).await;
+                assert!(
+                    tokio::time::timeout(Duration::from_secs(1), closures.recv())
+                        .await
+                        .unwrap()
+                        .is_some()
+                );
+            }
+            assert!(tokio::time::timeout(Duration::from_secs(1), pending)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .is_none());
+            assert!(ssh_next_docker_logs(logs).await.unwrap().is_none());
+        }
+        task.abort();
     }
 
     #[tokio::test]

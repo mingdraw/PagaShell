@@ -67,6 +67,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PageGateway dco_decode_box_autoadd_page_gateway(dynamic raw);
 
   @protected
+  ProxyTraffic dco_decode_box_autoadd_proxy_traffic(dynamic raw);
+
+  @protected
+  SftpTextFile dco_decode_box_autoadd_sftp_text_file(dynamic raw);
+
+  @protected
   int dco_decode_box_autoadd_u_16(dynamic raw);
 
   @protected
@@ -150,10 +156,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PageGateway? dco_decode_opt_box_autoadd_page_gateway(dynamic raw);
 
   @protected
+  ProxyTraffic? dco_decode_opt_box_autoadd_proxy_traffic(dynamic raw);
+
+  @protected
   int? dco_decode_opt_box_autoadd_u_16(dynamic raw);
 
   @protected
   int? dco_decode_opt_box_autoadd_u_32(dynamic raw);
+
+  @protected
+  Uint8List? dco_decode_opt_list_prim_u_8_strict(dynamic raw);
 
   @protected
   PageGateway dco_decode_page_gateway(dynamic raw);
@@ -162,7 +174,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PortForwardEvent dco_decode_port_forward_event(dynamic raw);
 
   @protected
+  ProxyTraffic dco_decode_proxy_traffic(dynamic raw);
+
+  @protected
   SftpEntry dco_decode_sftp_entry(dynamic raw);
+
+  @protected
+  SftpTextFile dco_decode_sftp_text_file(dynamic raw);
 
   @protected
   SshHandshake dco_decode_ssh_handshake(dynamic raw);
@@ -235,6 +253,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PageGateway sse_decode_box_autoadd_page_gateway(SseDeserializer deserializer);
+
+  @protected
+  ProxyTraffic sse_decode_box_autoadd_proxy_traffic(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  SftpTextFile sse_decode_box_autoadd_sftp_text_file(
+    SseDeserializer deserializer,
+  );
 
   @protected
   int sse_decode_box_autoadd_u_16(SseDeserializer deserializer);
@@ -342,10 +370,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  ProxyTraffic? sse_decode_opt_box_autoadd_proxy_traffic(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   int? sse_decode_opt_box_autoadd_u_16(SseDeserializer deserializer);
 
   @protected
   int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer);
+
+  @protected
+  Uint8List? sse_decode_opt_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
   PageGateway sse_decode_page_gateway(SseDeserializer deserializer);
@@ -354,7 +390,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PortForwardEvent sse_decode_port_forward_event(SseDeserializer deserializer);
 
   @protected
+  ProxyTraffic sse_decode_proxy_traffic(SseDeserializer deserializer);
+
+  @protected
   SftpEntry sse_decode_sftp_entry(SseDeserializer deserializer);
+
+  @protected
+  SftpTextFile sse_decode_sftp_text_file(SseDeserializer deserializer);
 
   @protected
   SshHandshake sse_decode_ssh_handshake(SseDeserializer deserializer);
@@ -437,6 +479,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_page_gateway(
     PageGateway self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_proxy_traffic(
+    ProxyTraffic self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_sftp_text_file(
+    SftpTextFile self,
     SseSerializer serializer,
   );
 
@@ -576,10 +630,22 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_proxy_traffic(
+    ProxyTraffic? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_u_16(int? self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_list_prim_u_8_strict(
+    Uint8List? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_page_gateway(PageGateway self, SseSerializer serializer);
@@ -591,7 +657,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_proxy_traffic(ProxyTraffic self, SseSerializer serializer);
+
+  @protected
   void sse_encode_sftp_entry(SftpEntry self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_sftp_text_file(SftpTextFile self, SseSerializer serializer);
 
   @protected
   void sse_encode_ssh_handshake(SshHandshake self, SseSerializer serializer);

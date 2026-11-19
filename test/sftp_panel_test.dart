@@ -117,6 +117,8 @@ void main() {
   }
 
   Finder pane(String side) => find.byKey(ValueKey('sftp-$side-pane'));
+  Finder mkdirButton(String side) =>
+      find.byKey(ValueKey('sftp-$side-new-folder'));
 
   Finder pathSegment(String side, String path) => find.descendant(
     of: pane(side),
@@ -274,7 +276,7 @@ void main() {
       '/external/a.txt',
     ]);
     expect(engine.uploads, isEmpty);
-    await tester.tap(findAppIconButton('新建目录'));
+    await tester.tap(mkdirButton('remote'));
     await tester.pumpAndSettle();
     await nativeFileDrop(tester, tester.getCenter(pane('remote')), [
       '/external/a.txt',
@@ -402,7 +404,7 @@ void main() {
     final sizeLabel = find.byKey(ValueKey('sftp-transfer-label-${task.id}'));
     final failureLabel = find.byKey(ValueKey('sftp-transfer-error-${task.id}'));
     final path = find.byKey(ValueKey('sftp-transfer-path-${task.id}'));
-    expect(tester.widget<Text>(sizeLabel).data, '25 B');
+    expect(tester.widget<Text>(sizeLabel).data, '100 B');
     expect(
       tester.getRect(sizeLabel).left,
       greaterThan(tester.getRect(bar).right),
@@ -454,7 +456,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(tester.getSize(failureLabel).width, lessThanOrEqualTo(220));
     expect(tester.widget<Text>(failureLabel).overflow, TextOverflow.ellipsis);
-    expect(tester.widget<Text>(sizeLabel).data, '25 B');
+    expect(tester.widget<Text>(sizeLabel).data, '100 B');
     expect(tester.getSize(bar).width, greaterThan(0));
     expect(tester.takeException(), isNull);
     final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
@@ -634,7 +636,7 @@ void main() {
     await tester.pumpAndSettle();
   });
 
-  testWidgets('任务仅显示进度和已传输大小，标题总速率响应更新且只统计本标签', (tester) async {
+  testWidgets('任务右侧显示总大小，标题总速率响应更新且只统计本标签', (tester) async {
     await pumpPanel(tester);
     final controller = Get.find<TransferController>();
     TransferTask task(String id, String session, double speed) {
@@ -662,8 +664,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('1.0 KB/s'), findsNothing);
     expect(find.text('2.0 KB/s'), findsNothing);
-    expect(find.text('1.0 KB'), findsOneWidget);
-    expect(find.text('2.0 KB'), findsOneWidget);
+    expect(find.text('8.0 KB'), findsNWidgets(2));
     expect(
       tester
           .widget<shadcn.LinearProgressIndicator>(
@@ -698,6 +699,49 @@ void main() {
       );
       expect(find.text('重命名'), findsOneWidget);
       expect(find.text('删除'), findsOneWidget);
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+    }
+  });
+
+  testWidgets('选中文件按住右键只打开文件菜单，空白处只打开目录菜单', (tester) async {
+    await pumpPanel(tester);
+
+    Future<void> rightClick(Offset position) async {
+      final gesture = await tester.startGesture(
+        position,
+        kind: PointerDeviceKind.mouse,
+        buttons: kSecondaryMouseButton,
+      );
+      await tester.pump(const Duration(milliseconds: 180));
+      await gesture.up();
+      await tester.pumpAndSettle();
+    }
+
+    Finder menuItem(String label) =>
+        find.widgetWithText(shadcn.MenuButton, label);
+    for (final (side, name, transfer) in [
+      ('local', 'upload.txt', '上传'),
+      ('remote', 'readme.txt', '下载'),
+    ]) {
+      await selectFile(tester, side, name);
+      final selected = selectedPaths(side);
+      await rightClick(tester.getCenter(fileIn(side, name)));
+      expect(find.byType(shadcn.MenuPopup), findsOneWidget);
+      expect(menuItem(transfer), findsOneWidget);
+      expect(menuItem('重命名'), findsOneWidget);
+      expect(menuItem('复制当前路径'), findsNothing);
+      expect(selectedPaths(side), selected);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+      final list = find.byKey(ValueKey('sftp-$side-file-list'));
+      await rightClick(tester.getRect(list).bottomCenter - const Offset(0, 24));
+      expect(find.byType(shadcn.MenuPopup), findsOneWidget);
+      expect(menuItem('复制当前路径'), findsOneWidget);
+      expect(menuItem('新建目录'), findsOneWidget);
+      expect(menuItem(transfer), findsNothing);
+
       await tester.sendKeyEvent(LogicalKeyboardKey.escape);
       await tester.pumpAndSettle();
     }
@@ -912,7 +956,7 @@ void main() {
     const name = 'scm-service-main.jar';
     final files = InMemoryLocalFileRepository()..putFile('/local/$name', 10);
     final engine = await pumpPanel(tester, files: files);
-    await tester.tap(findAppIconButton('新建目录'));
+    await tester.tap(mkdirButton('remote'));
     await tester.pumpAndSettle();
     final standardButtonHeight = tester
         .getSize(find.widgetWithText(shadcn.OutlineButton, '取消'))
@@ -2338,7 +2382,7 @@ void main() {
   testWidgets('通过工具栏新建目录并出现在列表', (tester) async {
     final engine = await pumpPanel(tester);
 
-    await tester.tap(findAppIconButton('新建目录'));
+    await tester.tap(mkdirButton('remote'));
     await tester.pumpAndSettle();
     final dialog = tester.widget<AppDialog>(find.byType(AppDialog));
     expect(dialog.maxWidth, AppTheme.folderDialogMaxWidth);
@@ -2360,6 +2404,65 @@ void main() {
 
     expect(engine.fs.containsKey('/home/test/deploy'), isTrue);
     expect(find.text('deploy'), findsOneWidget);
+  });
+
+  testWidgets('两侧新建目录图标位于同一工具栏行，本地可创建或改名重试', (tester) async {
+    final files = InMemoryLocalFileRepository()
+      ..putFile('/local/downloads/existing.txt', 20);
+    final engine = await pumpPanel(tester, files: files);
+    await openLocalDownloads(tester);
+    const directory = '/local/downloads';
+    expect(localController(tester).cwd.value, directory);
+
+    expect(findAppIconButton('新建目录'), findsNWidgets(2));
+    for (final (side, title) in [('local', '本地文件'), ('remote', '远程文件')]) {
+      expect(
+        tester.getCenter(mkdirButton(side)).dy,
+        closeTo(tester.getCenter(find.text(title)).dy, 0.5),
+      );
+    }
+    await tester.tap(mkdirButton('local'));
+    await tester.pumpAndSettle();
+    expect(find.text('新建目录'), findsOneWidget);
+    final name = find.widgetWithText(AppTextFormField, '名称');
+    final confirm = find.widgetWithText(shadcn.PrimaryButton, '确定');
+    await tester.enterText(name, '../outside');
+    await tester.tap(confirm);
+    await tester.pumpAndSettle();
+    expect(find.text('请输入有效的目录名称'), findsOneWidget);
+    expect(fileIn('local', 'existing.txt'), findsOneWidget);
+
+    await tester.enterText(name, 'existing.txt');
+    await tester.tap(confirm);
+    await tester.pumpAndSettle();
+    expect(find.text('目标位置已存在同名文件或目录'), findsOneWidget);
+    expect((await files.entryAt('$directory/existing.txt')).size, 20);
+
+    await tester.enterText(name, 'notes');
+    await tester.tap(confirm);
+    await tester.pumpAndSettle();
+    expect(find.byType(AppDialog), findsNothing);
+    expect(fileIn('local', 'notes'), findsOneWidget);
+    expect((await files.entryAt('$directory/notes')).isDir, isTrue);
+    expect(await files.listDirectory('$directory/notes'), isEmpty);
+    expect(engine.uploads, isEmpty);
+
+    final list = find.byKey(const ValueKey('sftp-local-file-list'));
+    await tester.tapAt(
+      tester.getRect(list).bottomCenter - const Offset(0, 24),
+      buttons: kSecondaryMouseButton,
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(find.widgetWithText(shadcn.MenuButton, '新建目录'));
+    await tester.pumpAndSettle();
+    await tester.enterText(name, 'cancelled');
+    await tester.tap(find.widgetWithText(shadcn.OutlineButton, '取消'));
+    await tester.pumpAndSettle();
+    expect(
+      (await files.listDirectory(directory)).map((entry) => entry.name),
+      unorderedEquals(['existing.txt', 'notes']),
+    );
   });
 
   testWidgets('删除文件需确认并刷新列表', (tester) async {
@@ -2459,6 +2562,27 @@ void main() {
     await tester.pumpAndSettle();
     expect(tester.getSize(pane('local')).width, greaterThan(localWidthBefore));
     expect(tester.getSize(pane('remote')).width, lessThan(remoteWidthBefore));
+
+    await tester.dragFrom(
+      tester.getCenter(find.byKey(const ValueKey('sftp-panes-resize-handle'))),
+      const Offset(450, 0),
+    );
+    await tester.pumpAndSettle();
+    final moreActions = find.byKey(
+      const ValueKey('sftp-remote-toolbar-overflow'),
+    );
+    expect(
+      tester.getCenter(moreActions).dy,
+      closeTo(tester.getCenter(find.text('远程文件')).dy, 0.5),
+    );
+    await tester.tap(moreActions);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(find.widgetWithText(shadcn.MenuButton, '新建目录'));
+    await tester.pumpAndSettle();
+    expect(find.byType(AppDialog), findsOneWidget);
+    await tester.tap(find.widgetWithText(shadcn.OutlineButton, '取消'));
+    await tester.pumpAndSettle();
 
     expect(find.byKey(const ValueKey('sftp-transfer-list')), findsNothing);
     final controller = Get.find<TransferController>();

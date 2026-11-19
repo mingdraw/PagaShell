@@ -44,6 +44,8 @@ class TerminalView extends StatefulWidget {
     this.deleteDetection = false,
     this.shortcuts,
     this.onKeyEvent,
+    this.onPaste,
+    this.onUserInput,
     this.readOnly = false,
     this.hardwareKeyboardOnly = false,
     this.simulateScroll = true,
@@ -125,6 +127,13 @@ class TerminalView extends StatefulWidget {
   /// Keyboard event handler of the terminal. This has higher priority than
   /// [shortcuts] and input handler of the terminal.
   final FocusOnKeyEventCallback? onKeyEvent;
+
+  /// Optional custom paste handler. Return `true` when text was pasted.
+  final Future<bool> Function(String text)? onPaste;
+
+  /// An already accepted user edit, encoded again for another terminal.
+  /// Mouse reports and protocol-generated replies never use this callback.
+  final ValueChanged<void Function(Terminal)>? onUserInput;
 
   /// True if no input should send to the terminal.
   final bool readOnly;
@@ -258,7 +267,7 @@ class TerminalViewState extends State<TerminalView> {
         onInsert: _onInsert,
         onDelete: () {
           _scrollToBottom();
-          widget.terminal.keyInput(TerminalKey.backspace);
+          _inputKey(TerminalKey.backspace);
         },
         onComposing: _onComposing,
         onAction: (action) {
@@ -266,7 +275,7 @@ class TerminalViewState extends State<TerminalView> {
           // Android sends TextInputAction.newline when the user presses the virtual keyboard's enter key.
           if (action == TextInputAction.done ||
               action == TextInputAction.newline) {
-            widget.terminal.keyInput(TerminalKey.enter);
+            _inputKey(TerminalKey.enter);
           }
         },
         onKeyEvent: _handleKeyEvent,
@@ -288,6 +297,7 @@ class TerminalViewState extends State<TerminalView> {
     child = TerminalActions(
       terminal: widget.terminal,
       controller: _controller,
+      onPaste: widget.onPaste,
       child: child,
     );
 
@@ -375,10 +385,11 @@ class TerminalViewState extends State<TerminalView> {
     // On mobile platforms there is no guarantee that virtual keyboard will
     // generate hardware key events. So we need first try to send the key
     // as a hardware key event. If it fails, then we send it as a text input.
-    final consumed = key == null ? false : widget.terminal.keyInput(key);
+    final consumed = key != null && _inputKey(key);
 
     if (!consumed) {
       widget.terminal.textInput(text);
+      widget.onUserInput?.call((target) => target.textInput(text));
     }
 
     _scrollToBottom();
@@ -386,6 +397,26 @@ class TerminalViewState extends State<TerminalView> {
 
   void _onComposing(String? text) {
     setState(() => _composingText = text);
+  }
+
+  bool _inputKey(
+    TerminalKey key, {
+    bool ctrl = false,
+    bool alt = false,
+    bool shift = false,
+  }) {
+    final handled = widget.terminal.keyInput(
+      key,
+      ctrl: ctrl,
+      alt: alt,
+      shift: shift,
+    );
+    if (handled) {
+      widget.onUserInput?.call((target) {
+        target.keyInput(key, ctrl: ctrl, alt: alt, shift: shift);
+      });
+    }
+    return handled;
   }
 
   KeyEventResult _handleKeyEvent(FocusNode focusNode, KeyEvent event) {
@@ -414,7 +445,7 @@ class TerminalViewState extends State<TerminalView> {
       return KeyEventResult.ignored;
     }
 
-    final handled = widget.terminal.keyInput(
+    final handled = _inputKey(
       key,
       ctrl: HardwareKeyboard.instance.isControlPressed,
       alt: HardwareKeyboard.instance.isAltPressed,

@@ -5,19 +5,38 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
+import 'package:path/path.dart' as p;
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
+import '../../domain/entities/small_text_file.dart';
 import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
 import '../components/app_list_row.dart';
 import '../components/app_menu.dart';
 import '../localization/app_translations.dart';
+import '../navigation/app_notice.dart';
 import '../theme/app_theme.dart';
 import 'file_path_breadcrumb.dart';
 
 enum FileBrowserSide { local, remote }
 
 enum _FileSortField { name, size, modified }
+
+class _FileToolbarAction {
+  const _FileToolbarAction(
+    this.id,
+    this.label,
+    this.icon,
+    this.onPressed, {
+    this.active = false,
+  });
+
+  final String id;
+  final String label;
+  final AppIcons icon;
+  final VoidCallback? onPressed;
+  final bool active;
+}
 
 class FileBrowserEntry {
   const FileBrowserEntry({
@@ -79,6 +98,8 @@ class FileBrowserPane extends StatefulWidget {
     this.onMkdir,
     this.onRename,
     this.onDelete,
+    this.onEditText,
+    this.onMove,
     this.showHidden = false,
     this.onShowHiddenChanged,
     this.active = true,
@@ -105,6 +126,8 @@ class FileBrowserPane extends StatefulWidget {
   final VoidCallback? onMkdir;
   final ValueChanged<FileBrowserEntry>? onRename;
   final ValueChanged<List<FileBrowserEntry>>? onDelete;
+  final ValueChanged<FileBrowserEntry>? onEditText;
+  final void Function(FileTransferDrag data, String directory)? onMove;
   final bool showHidden;
   final ValueChanged<bool>? onShowHiddenChanged;
   final bool active;
@@ -123,10 +146,14 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
   final _scroll = ScrollController();
   final _pathController = TextEditingController();
   final _pathFocus = FocusNode();
+  final _filterController = TextEditingController();
+  final _filterFocus = FocusNode();
   late List<FileBrowserEntry> _sortedEntries;
-  _FileSortField? _sortField;
+  _FileSortField? _sortField = _FileSortField.name;
   bool _sortAscending = true;
   bool _editingPath = false;
+  bool _filtering = false;
+  String _filterQuery = '';
   String? _anchor;
   int _focusedIndex = 0;
   int? _collapseSelectionPointer;
@@ -162,6 +189,8 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
   ValueChanged<FileBrowserEntry>? get onRename => widget.onRename;
   ValueChanged<List<FileBrowserEntry>>? get onDelete => widget.onDelete;
 
+  bool get _canMkdir => onMkdir != null && !loading && error == null;
+
   List<FileBrowserEntry> get _selectedEntries => [
     for (final entry in entries)
       if (_selected.contains(entry.path)) entry,
@@ -175,9 +204,16 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
   }
 
   void _rebuildSortedEntries() {
+    final query = _filterQuery.trim().toLowerCase();
+    final filtered = query.isEmpty
+        ? List.of(widget.entries)
+        : [
+            for (final entry in widget.entries)
+              if (entry.name.toLowerCase().contains(query)) entry,
+          ];
     final field = _sortField;
     if (field == null) {
-      _sortedEntries = List.of(widget.entries);
+      _sortedEntries = filtered;
       return;
     }
     int compareByName(FileBrowserEntry a, FileBrowserEntry b) {
@@ -185,7 +221,7 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
       return lower != 0 ? lower : a.name.compareTo(b.name);
     }
 
-    _sortedEntries = List.of(widget.entries)
+    _sortedEntries = filtered
       ..sort((a, b) {
         if (a.isDir != b.isDir) return a.isDir ? -1 : 1;
         final result = switch (field) {
@@ -200,6 +236,45 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
         };
         return _sortAscending ? result : -result;
       });
+  }
+
+  void _openFilter() {
+    if (loading) return;
+    setState(() => _filtering = true);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _filtering) _filterFocus.requestFocus();
+    });
+  }
+
+  void _closeFilter() {
+    if (!_filtering && _filterQuery.isEmpty) return;
+    setState(() {
+      _filtering = false;
+      _filterQuery = '';
+      _filterController.clear();
+      _rebuildSortedEntries();
+      final paths = _sortedEntries.map((entry) => entry.path).toSet();
+      _selected.removeWhere((path) => !paths.contains(path));
+      if (!paths.contains(_anchor)) _anchor = null;
+    });
+    _focus.requestFocus();
+  }
+
+  void _updateFilter(String value) {
+    setState(() {
+      _filterQuery = value;
+      _rebuildSortedEntries();
+      final paths = _sortedEntries.map((entry) => entry.path).toSet();
+      _selected.removeWhere((path) => !paths.contains(path));
+      if (!paths.contains(_anchor)) _anchor = null;
+      _focusedIndex = 0;
+    });
+  }
+
+  void _copyText(String text) {
+    if (text.isEmpty) return;
+    unawaited(Clipboard.setData(ClipboardData(text: text)));
+    AppNotice.success('已复制'.tr);
   }
 
   void _toggleSort(_FileSortField field) {
@@ -473,6 +548,10 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
     }
     if (oldWidget.cwd != cwd || oldWidget.sessionId != sessionId) {
       _editingPath = false;
+      _filtering = false;
+      _filterQuery = '';
+      _filterController.clear();
+      _rebuildSortedEntries();
       _selected.clear();
       _anchor = null;
       _focusedIndex = 0;
@@ -495,6 +574,8 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
     _resetSelectionDrag();
     _pathController.dispose();
     _pathFocus.dispose();
+    _filterController.dispose();
+    _filterFocus.dispose();
     _focus.dispose();
     _scroll.dispose();
     super.dispose();
@@ -547,20 +628,68 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
       _selected.contains(entry.path) ? _selectedEntries : [entry];
 
   KeyEventResult _onKeyEvent(FocusNode node, KeyEvent event) {
-    if (_editingPath || _pathFocus.hasFocus) return KeyEventResult.ignored;
+    if (_editingPath || _pathFocus.hasFocus || _filterFocus.hasFocus) {
+      return KeyEventResult.ignored;
+    }
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
       return KeyEventResult.ignored;
     }
-    if (loading) return KeyEventResult.ignored;
+    if (!widget.active || loading) return KeyEventResult.ignored;
     final key = event.logicalKey;
-    if (key == LogicalKeyboardKey.backspace && widget.onUp != null) {
+    final keyboard = HardwareKeyboard.instance;
+    final primary = keyboard.isMetaPressed || keyboard.isControlPressed;
+    if (key == LogicalKeyboardKey.f5 ||
+        (primary && key == LogicalKeyboardKey.keyR)) {
+      onRefresh();
+      return KeyEventResult.handled;
+    }
+    if (primary && key == LogicalKeyboardKey.keyL) {
+      _startPathEdit();
+      return KeyEventResult.handled;
+    }
+    if (primary && key == LogicalKeyboardKey.keyF) {
+      _openFilter();
+      return KeyEventResult.handled;
+    }
+    final isMac = shadcn.Theme.of(context).platform == TargetPlatform.macOS;
+    final toggleHidden = isMac
+        ? keyboard.isMetaPressed &&
+              keyboard.isShiftPressed &&
+              key == LogicalKeyboardKey.period
+        : keyboard.isControlPressed &&
+              !keyboard.isShiftPressed &&
+              key == LogicalKeyboardKey.keyH;
+    final showHiddenChanged = widget.onShowHiddenChanged;
+    if (toggleHidden && showHiddenChanged != null) {
+      if (event is KeyDownEvent) showHiddenChanged(!widget.showHidden);
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.delete ||
+        (keyboard.isMetaPressed && key == LogicalKeyboardKey.backspace)) {
+      if (_selectedEntries.isNotEmpty && onDelete != null) {
+        onDelete!(_selectedEntries);
+        return KeyEventResult.handled;
+      }
+      return KeyEventResult.ignored;
+    }
+    if (key == LogicalKeyboardKey.backspace &&
+        !primary &&
+        widget.onUp != null) {
       widget.onUp!();
       return KeyEventResult.handled;
     }
+    if (key == LogicalKeyboardKey.f2 &&
+        _selectedEntries.length == 1 &&
+        onRename != null) {
+      onRename!(_selectedEntries.single);
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.escape && _filtering) {
+      _closeFilter();
+      return KeyEventResult.handled;
+    }
     if (entries.isEmpty) return KeyEventResult.ignored;
-    final keyboard = HardwareKeyboard.instance;
-    if ((keyboard.isMetaPressed || keyboard.isControlPressed) &&
-        key == LogicalKeyboardKey.keyA) {
+    if (primary && key == LogicalKeyboardKey.keyA) {
       setState(() {
         _selected.addAll(entries.map((entry) => entry.path));
         _anchor ??= entries.first.path;
@@ -582,14 +711,24 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
       }
     } else if (key == LogicalKeyboardKey.arrowDown ||
         key == LogicalKeyboardKey.arrowUp ||
+        key == LogicalKeyboardKey.pageDown ||
+        key == LogicalKeyboardKey.pageUp ||
         key == LogicalKeyboardKey.home ||
         key == LogicalKeyboardKey.end) {
+      final current = _selected.isEmpty ? 0 : _focusedIndex;
+      final pageRows = _scroll.hasClients
+          ? (_scroll.position.viewportDimension / _rowHeight).floor().clamp(
+              1,
+              entries.length,
+            )
+          : 1;
       final next = switch (key) {
         LogicalKeyboardKey.home => 0,
         LogicalKeyboardKey.end => entries.length - 1,
-        LogicalKeyboardKey.arrowDown =>
-          _selected.isEmpty ? 0 : _focusedIndex + 1,
-        _ => _selected.isEmpty ? 0 : _focusedIndex - 1,
+        LogicalKeyboardKey.arrowDown => _selected.isEmpty ? 0 : current + 1,
+        LogicalKeyboardKey.pageDown => current + pageRows,
+        LogicalKeyboardKey.pageUp => current - pageRows,
+        _ => current - 1,
       };
       _select(entries[next.clamp(0, entries.length - 1)], additive: false);
     } else {
@@ -604,6 +743,24 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
       cwd.isNotEmpty &&
       data.sessionId == sessionId &&
       data.source != side;
+
+  bool _acceptsDirectory(FileTransferDrag data, FileBrowserEntry directory) {
+    if (_accepts(data)) return true;
+    if (widget.onMove == null ||
+        loading ||
+        error != null ||
+        data.sessionId != sessionId ||
+        data.source != side) {
+      return false;
+    }
+    final paths = side == FileBrowserSide.remote ? p.posix : p.context;
+    return data.files.every(
+      (entry) =>
+          !paths.equals(entry.path, directory.path) &&
+          !paths.equals(paths.dirname(entry.path), directory.path) &&
+          (!entry.isDir || !paths.isWithin(entry.path, directory.path)),
+    );
+  }
 
   String _externalDirectory(Offset position) {
     final viewport = _fileListDropKey.currentContext?.findRenderObject();
@@ -629,6 +786,274 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
     setState(() => _externalHoverPath = path);
   }
 
+  List<_FileToolbarAction> _toolbarActions() {
+    final local = side == FileBrowserSide.local;
+    final canTransfer = !loading && error == null;
+    return [
+      if (widget.onUploadDirectory != null)
+        _FileToolbarAction(
+          'upload-directory',
+          '上传文件夹'.tr,
+          AppIcons.folderUp,
+          canTransfer ? widget.onUploadDirectory : null,
+        ),
+      if (onUpload != null)
+        _FileToolbarAction(
+          'upload-file',
+          '上传文件'.tr,
+          AppIcons.fileUp,
+          canTransfer ? onUpload : null,
+        ),
+      if (onBrowse != null)
+        _FileToolbarAction(
+          'browse',
+          '选择本地目录'.tr,
+          AppIcons.folderOpen,
+          onBrowse,
+        ),
+      if (onMkdir != null)
+        _FileToolbarAction(
+          'new-folder',
+          '新建目录'.tr,
+          AppIcons.folderPlus,
+          _canMkdir ? onMkdir : null,
+        ),
+      _FileToolbarAction('refresh', '刷新'.tr, AppIcons.refreshCw, onRefresh),
+      _FileToolbarAction(
+        'transfer-selected',
+        (local ? '上传所选文件' : '下载所选文件').tr,
+        local ? AppIcons.upload : AppIcons.download,
+        canTransfer && _selectedEntries.isNotEmpty
+            ? () => onTransfer(_selectedEntries)
+            : null,
+      ),
+      _FileToolbarAction(
+        'filter-toggle',
+        '筛选当前目录'.tr,
+        AppIcons.search,
+        loading ? null : (_filtering ? _closeFilter : _openFilter),
+        active: _filtering,
+      ),
+      _FileToolbarAction(
+        'edit-path',
+        '输入路径'.tr,
+        AppIcons.pencil,
+        loading || cwd.isEmpty || _editingPath ? null : _startPathEdit,
+      ),
+    ];
+  }
+
+  double _toolbarTextWidth(BuildContext context, String text, TextStyle style) {
+    final painter = TextPainter(
+      text: TextSpan(
+        text: text,
+        style: DefaultTextStyle.of(context).style.merge(style),
+      ),
+      textDirection: Directionality.of(context),
+      textScaler: MediaQuery.textScalerOf(context),
+      maxLines: 1,
+    )..layout();
+    final width = painter.width.ceilToDouble();
+    painter.dispose();
+    return width;
+  }
+
+  Widget _toolbarRow(BuildContext context) {
+    final theme = shadcn.Theme.of(context);
+    final colors = theme.colorScheme;
+    final local = side == FileBrowserSide.local;
+    final title = (local ? '本地文件' : '远程文件').tr;
+    const titleStyle = TextStyle(fontSize: 13, fontWeight: FontWeight.w600);
+    final hiddenLabel = '隐藏文件'.tr;
+    final hiddenStyle = TextStyle(fontSize: 11, color: colors.mutedForeground);
+    final showHiddenChanged = widget.onShowHiddenChanged;
+    final actions = _toolbarActions();
+    return SizedBox(
+      height: AppTheme.fileBrowserToolbarRowHeight,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final width = constraints.maxWidth;
+            final compact = width < AppTheme.fileToolbarCompactWidth;
+            final density = compact
+                ? shadcn.ButtonDensity.iconDense
+                : shadcn.ButtonDensity.icon;
+            final buttonSize = compact
+                ? AppTheme.fileToolbarCompactButtonSize
+                : AppTheme.fileToolbarButtonSize;
+            final switchWidth = 36 * theme.scaling;
+            final badgeWidth = AppTheme.fileToolbarBadgeWidth * theme.scaling;
+            final showTitleIcon = width >= 120;
+            final gap = showTitleIcon ? 8.0 : 4.0;
+            const titleIconSize = 15.0;
+            final reservedWidth =
+                _toolbarTextWidth(context, title, titleStyle) +
+                gap +
+                (showTitleIcon ? titleIconSize + gap : 0) +
+                (showHiddenChanged != null ? switchWidth + gap : 0);
+            final actionWidth = width - reservedWidth;
+            final slots = (actionWidth / buttonSize).floor().clamp(
+              1,
+              actions.length,
+            );
+            final directCount = slots == actions.length ? slots : slots - 1;
+            final overflow = actions.skip(directCount).toList();
+            final detailWidth = actionWidth - actions.length * buttonSize;
+            final hiddenLabelWidth =
+                _toolbarTextWidth(context, hiddenLabel, hiddenStyle) + gap;
+            final showHiddenLabel =
+                showHiddenChanged != null && detailWidth >= hiddenLabelWidth;
+            final showBadge =
+                !local &&
+                detailWidth - (showHiddenLabel ? hiddenLabelWidth : 0) >=
+                    badgeWidth + gap;
+            return Row(
+              children: [
+                if (showTitleIcon) ...[
+                  AppIcon(
+                    local ? AppIcons.monitor : AppIcons.server,
+                    size: titleIconSize,
+                    color: colors.mutedForeground,
+                  ),
+                  SizedBox(width: gap),
+                ],
+                Expanded(
+                  child: Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: titleStyle,
+                  ),
+                ),
+                SizedBox(width: gap),
+                for (final action in actions.take(directCount))
+                  SizedBox.square(
+                    dimension: buttonSize,
+                    child: AppIconButton(
+                      key: ValueKey('sftp-${side.name}-${action.id}'),
+                      semanticLabel: action.label,
+                      tooltip: action.label,
+                      density: density,
+                      icon: AppIcon(
+                        action.icon,
+                        size: 16,
+                        color: action.active ? colors.primary : null,
+                      ),
+                      onPressed: action.onPressed,
+                    ),
+                  ),
+                if (overflow.isNotEmpty)
+                  SizedBox.square(
+                    dimension: buttonSize,
+                    child: AppMenuButton<_FileToolbarAction>(
+                      key: ValueKey('sftp-${side.name}-toolbar-overflow'),
+                      semanticLabel: '更多文件操作'.tr,
+                      tooltip: '更多文件操作'.tr,
+                      density: density,
+                      items: [
+                        for (final action in overflow) (action, action.label),
+                      ],
+                      icons: {
+                        for (final action in overflow) action: action.icon,
+                      },
+                      disabledValues: {
+                        for (final action in overflow)
+                          if (action.onPressed == null) action,
+                      },
+                      onSelected: (action) => action.onPressed?.call(),
+                    ),
+                  ),
+                if (showBadge) ...[
+                  SizedBox(width: gap),
+                  SizedBox(
+                    width: badgeWidth,
+                    child: const FittedBox(
+                      fit: BoxFit.scaleDown,
+                      child: shadcn.OutlineBadge(child: Text('SFTP')),
+                    ),
+                  ),
+                ],
+                if (showHiddenChanged != null) ...[
+                  SizedBox(width: gap),
+                  if (showHiddenLabel) ...[
+                    Text(hiddenLabel, style: hiddenStyle),
+                    SizedBox(width: gap),
+                  ],
+                  Semantics(
+                    label: '显示隐藏文件'.tr,
+                    child: shadcn.Switch(
+                      value: widget.showHidden,
+                      onChanged: showHiddenChanged,
+                    ),
+                  ),
+                ],
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _pathRow() => SizedBox(
+    height: AppTheme.fileBrowserToolbarRowHeight,
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      child: _editingPath
+          ? TapRegion(
+              onTapOutside: (_) => _cancelPathEdit(),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: CallbackShortcuts(
+                      bindings: {
+                        const SingleActivator(LogicalKeyboardKey.escape):
+                            _cancelPathEdit,
+                      },
+                      child: shadcn.TextField(
+                        key: ValueKey('sftp-${side.name}-path-input'),
+                        controller: _pathController,
+                        focusNode: _pathFocus,
+                        filled: true,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 5,
+                        ),
+                        style: const TextStyle(fontSize: 12),
+                        onSubmitted: (_) => _submitPathEdit(),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  AppIconButton(
+                    key: ValueKey('sftp-${side.name}-path-submit'),
+                    semanticLabel: '前往路径'.tr,
+                    tooltip: '前往路径'.tr,
+                    density: shadcn.ButtonDensity.compact,
+                    icon: const AppIcon(AppIcons.check, size: 15),
+                    onPressed: _submitPathEdit,
+                  ),
+                  AppIconButton(
+                    key: ValueKey('sftp-${side.name}-path-cancel'),
+                    semanticLabel: '取消编辑路径'.tr,
+                    tooltip: '取消编辑路径'.tr,
+                    density: shadcn.ButtonDensity.compact,
+                    icon: const AppIcon(AppIcons.x, size: 15),
+                    onPressed: _cancelPathEdit,
+                  ),
+                ],
+              ),
+            )
+          : FilePathBreadcrumb(
+              path: cwd,
+              remote: side == FileBrowserSide.remote,
+              onNavigate: loading ? null : widget.onNavigate,
+              onTapEmpty: loading || cwd.isEmpty ? null : _startPathEdit,
+            ),
+    ),
+  );
+
   Widget _fileList(BuildContext context) => LayoutBuilder(
     key: _fileListDropKey,
     builder: (context, constraints) {
@@ -637,59 +1062,96 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
           ?.shift(Offset(0, -offset))
           .intersect(Offset.zero & constraints.biggest);
       final colors = shadcn.Theme.of(context).colorScheme;
-      return Listener(
-        behavior: HitTestBehavior.opaque,
-        onPointerDown: _beginSelection,
-        onPointerMove: _moveSelection,
-        onPointerUp: _endSelection,
-        onPointerCancel: _cancelSelection,
-        child: Stack(
-          fit: StackFit.expand,
-          clipBehavior: Clip.hardEdge,
-          children: [
-            if (loading)
-              const Center(
-                child: SizedBox(
-                  width: 20,
-                  height: 20,
-                  child: shadcn.CircularProgressIndicator(strokeWidth: 2),
+      final showSize =
+          constraints.maxWidth >= AppTheme.fileSizeColumnMinPaneWidth;
+      final showModified =
+          constraints.maxWidth >= AppTheme.fileModifiedColumnMinPaneWidth;
+      final emptyAreaActions = <(String, String)>[
+        ('refresh', '刷新'.tr),
+        if (_canMkdir) ('mkdir', '新建目录'.tr),
+        if (cwd.isNotEmpty) ('copy-cwd', '复制当前路径'.tr),
+      ];
+      return _FileContextMenu(
+        enabled: !loading && emptyAreaActions.isNotEmpty,
+        items: appMenuItems<String>(
+          emptyAreaActions,
+          (value) {
+            switch (value) {
+              case 'refresh':
+                onRefresh();
+              case 'mkdir':
+                onMkdir?.call();
+              case 'copy-cwd':
+                _copyText(cwd);
+            }
+          },
+          icons: const {
+            'refresh': AppIcons.refreshCw,
+            'mkdir': AppIcons.folderPlus,
+            'copy-cwd': AppIcons.folderMarker,
+          },
+        ),
+        child: Listener(
+          behavior: HitTestBehavior.opaque,
+          onPointerDown: _beginSelection,
+          onPointerMove: _moveSelection,
+          onPointerUp: _endSelection,
+          onPointerCancel: _cancelSelection,
+          child: Stack(
+            fit: StackFit.expand,
+            clipBehavior: Clip.hardEdge,
+            children: [
+              if (loading)
+                const Center(
+                  child: SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: shadcn.CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                )
+              else if (entries.isEmpty)
+                Center(
+                  child: Text(
+                    (_filterQuery.trim().isNotEmpty ? '无匹配文件' : '空目录').tr,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: colors.mutedForeground,
+                    ),
+                  ),
+                )
+              else
+                ListView.builder(
+                  key: ValueKey('sftp-${side.name}-file-list'),
+                  controller: _scroll,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: AppTheme.fileSelectionGutter,
+                  ),
+                  itemExtent: _rowHeight,
+                  itemCount: entries.length,
+                  itemBuilder: (context, index) => _entry(
+                    context,
+                    entries[index],
+                    showSize: showSize,
+                    showModified: showModified,
+                  ),
                 ),
-              )
-            else if (entries.isEmpty)
-              Center(
-                child: Text(
-                  '空目录'.tr,
-                  style: TextStyle(fontSize: 12, color: colors.mutedForeground),
-                ),
-              )
-            else
-              ListView.builder(
-                key: ValueKey('sftp-${side.name}-file-list'),
-                controller: _scroll,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: AppTheme.fileSelectionGutter,
-                ),
-                itemExtent: _rowHeight,
-                itemCount: entries.length,
-                itemBuilder: (context, index) =>
-                    _entry(context, entries[index]),
-              ),
-            if (rect != null && !rect.isEmpty)
-              Positioned.fromRect(
-                rect: rect,
-                child: IgnorePointer(
-                  child: DecoratedBox(
-                    key: ValueKey('sftp-${side.name}-selection-box'),
-                    decoration: BoxDecoration(
-                      color: colors.primary.withValues(alpha: 0.12),
-                      border: Border.all(
-                        color: colors.primary.withValues(alpha: 0.8),
+              if (rect != null && !rect.isEmpty)
+                Positioned.fromRect(
+                  rect: rect,
+                  child: IgnorePointer(
+                    child: DecoratedBox(
+                      key: ValueKey('sftp-${side.name}-selection-box'),
+                      decoration: BoxDecoration(
+                        color: colors.primary.withValues(alpha: 0.12),
+                        border: Border.all(
+                          color: colors.primary.withValues(alpha: 0.8),
+                        ),
                       ),
                     ),
                   ),
                 ),
-              ),
-          ],
+            ],
+          ),
         ),
       );
     },
@@ -724,242 +1186,115 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              SizedBox(
-                height: 40,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
+              _toolbarRow(context),
+              _pathRow(),
+              const shadcn.Divider(),
+              if (_filtering)
+                Container(
+                  padding: const EdgeInsets.fromLTRB(12, 6, 8, 6),
+                  decoration: BoxDecoration(
+                    border: Border(
+                      bottom: BorderSide(color: AppTheme.border(context)),
+                    ),
+                  ),
                   child: Row(
                     children: [
-                      AppIcon(
-                        side == FileBrowserSide.local
-                            ? AppIcons.monitor
-                            : AppIcons.server,
-                        size: 15,
-                        color: colors.mutedForeground,
-                      ),
-                      const SizedBox(width: 8),
                       Expanded(
-                        child: Text(
-                          (side == FileBrowserSide.local ? '本地文件' : '远程文件').tr,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w600,
+                        child: CallbackShortcuts(
+                          bindings: {
+                            const SingleActivator(LogicalKeyboardKey.escape):
+                                _closeFilter,
+                          },
+                          child: shadcn.TextField(
+                            key: ValueKey('sftp-${side.name}-filter'),
+                            controller: _filterController,
+                            focusNode: _filterFocus,
+                            filled: true,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 4,
+                            ),
+                            style: const TextStyle(fontSize: 12),
+                            placeholder: Text(
+                              '筛选当前目录文件…'.tr,
+                              style: const TextStyle(fontSize: 12),
+                            ),
+                            features: const [
+                              shadcn.InputFeature.leading(
+                                AppIcon(AppIcons.search, size: 13),
+                              ),
+                            ],
+                            onChanged: _updateFilter,
                           ),
                         ),
                       ),
+                      const SizedBox(width: 4),
                       AppIconButton(
-                        key: ValueKey('sftp-${side.name}-edit-path'),
-                        semanticLabel: '输入路径'.tr,
-                        tooltip: '输入路径'.tr,
+                        key: ValueKey('sftp-${side.name}-filter-clear'),
+                        semanticLabel: '关闭筛选'.tr,
+                        tooltip: '关闭筛选'.tr,
                         density: shadcn.ButtonDensity.compact,
-                        icon: const AppIcon(AppIcons.pencil, size: 13),
-                        onPressed: loading || cwd.isEmpty
-                            ? null
-                            : _editingPath
-                            ? _cancelPathEdit
-                            : _startPathEdit,
+                        icon: const AppIcon(AppIcons.x, size: 14),
+                        onPressed: _closeFilter,
                       ),
-                      const SizedBox(width: 6),
-                      if (side == FileBrowserSide.remote)
-                        const shadcn.OutlineBadge(child: Text('SFTP')),
-                      if (widget.onShowHiddenChanged != null) ...[
-                        Text(
-                          '隐藏文件'.tr,
-                          style: TextStyle(
-                            fontSize: 11,
-                            color: colors.mutedForeground,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Semantics(
-                          label: '显示隐藏文件'.tr,
-                          child: shadcn.Switch(
-                            value: widget.showHidden,
-                            onChanged: widget.onShowHiddenChanged,
-                          ),
-                        ),
-                      ],
                     ],
                   ),
                 ),
-              ),
               SizedBox(
-                height: 40,
-                child: _editingPath
-                    ? Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                height: 26,
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    final showSize =
+                        constraints.maxWidth >=
+                        AppTheme.fileSizeColumnMinPaneWidth;
+                    final showModified =
+                        constraints.maxWidth >=
+                        AppTheme.fileModifiedColumnMinPaneWidth;
+                    return Padding(
+                      padding: const EdgeInsets.only(left: 35, right: 12),
+                      child: DefaultTextStyle.merge(
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: colors.mutedForeground,
+                        ),
                         child: Row(
                           children: [
                             Expanded(
-                              child: CallbackShortcuts(
-                                bindings: {
-                                  const SingleActivator(
-                                    LogicalKeyboardKey.escape,
-                                  ): _cancelPathEdit,
-                                },
-                                child: shadcn.TextField(
-                                  key: ValueKey('sftp-${side.name}-path-input'),
-                                  controller: _pathController,
-                                  focusNode: _pathFocus,
-                                  filled: true,
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 8,
-                                    vertical: 5,
-                                  ),
-                                  style: const TextStyle(fontSize: 12),
-                                  onSubmitted: (_) => _submitPathEdit(),
+                              child: _sortHeader(
+                                context,
+                                _FileSortField.name,
+                                '名称'.tr,
+                                tooltip: '按名称排序'.tr,
+                              ),
+                            ),
+                            if (showSize)
+                              SizedBox(
+                                width: AppTheme.fileSizeColumnWidth,
+                                child: _sortHeader(
+                                  context,
+                                  _FileSortField.size,
+                                  '大小'.tr,
+                                  tooltip: '按大小排序'.tr,
+                                  alignRight: true,
                                 ),
                               ),
-                            ),
-                            const SizedBox(width: 4),
-                            AppIconButton(
-                              key: ValueKey('sftp-${side.name}-path-submit'),
-                              semanticLabel: '前往路径'.tr,
-                              tooltip: '前往路径'.tr,
-                              density: shadcn.ButtonDensity.compact,
-                              icon: const AppIcon(AppIcons.check, size: 15),
-                              onPressed: _submitPathEdit,
-                            ),
-                            AppIconButton(
-                              key: ValueKey('sftp-${side.name}-path-cancel'),
-                              semanticLabel: '取消编辑路径'.tr,
-                              tooltip: '取消编辑路径'.tr,
-                              density: shadcn.ButtonDensity.compact,
-                              icon: const AppIcon(AppIcons.x, size: 15),
-                              onPressed: _cancelPathEdit,
-                            ),
+                            if (showModified) ...[
+                              const SizedBox(width: 12),
+                              SizedBox(
+                                width: AppTheme.fileModifiedColumnWidth,
+                                child: _sortHeader(
+                                  context,
+                                  _FileSortField.modified,
+                                  '更新时间'.tr,
+                                  tooltip: '按更新时间排序'.tr,
+                                ),
+                              ),
+                            ],
                           ],
                         ),
-                      )
-                    : Row(
-                        children: [
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: FilePathBreadcrumb(
-                              path: cwd,
-                              remote: side == FileBrowserSide.remote,
-                              onNavigate: loading ? null : widget.onNavigate,
-                            ),
-                          ),
-                          AppIconButton(
-                            semanticLabel:
-                                (side == FileBrowserSide.local
-                                        ? '上传所选文件'
-                                        : '下载所选文件')
-                                    .tr,
-                            tooltip:
-                                (side == FileBrowserSide.local
-                                        ? '上传所选文件'
-                                        : '下载所选文件')
-                                    .tr,
-                            icon: AppIcon(
-                              side == FileBrowserSide.local
-                                  ? AppIcons.upload
-                                  : AppIcons.download,
-                              size: 16,
-                            ),
-                            onPressed:
-                                loading ||
-                                    error != null ||
-                                    _selectedEntries.isEmpty
-                                ? null
-                                : () => onTransfer(_selectedEntries),
-                          ),
-                          AppIconButton(
-                            semanticLabel: '刷新'.tr,
-                            tooltip: '刷新'.tr,
-                            icon: const AppIcon(AppIcons.refreshCw, size: 16),
-                            onPressed: onRefresh,
-                          ),
-                          if (onBrowse != null)
-                            AppIconButton(
-                              semanticLabel: '选择本地目录'.tr,
-                              tooltip: '选择本地目录'.tr,
-                              icon: const AppIcon(
-                                AppIcons.folderOpen,
-                                size: 16,
-                              ),
-                              onPressed: onBrowse,
-                            ),
-                          if (onMkdir != null)
-                            AppIconButton(
-                              semanticLabel: '新建目录'.tr,
-                              tooltip: '新建目录'.tr,
-                              icon: const AppIcon(
-                                AppIcons.folderPlus,
-                                size: 16,
-                              ),
-                              onPressed: loading || error != null
-                                  ? null
-                                  : onMkdir,
-                            ),
-                          if (onUpload != null)
-                            AppIconButton(
-                              semanticLabel: '上传文件'.tr,
-                              tooltip: '上传文件'.tr,
-                              icon: const AppIcon(AppIcons.fileUp, size: 16),
-                              onPressed: loading || error != null
-                                  ? null
-                                  : onUpload,
-                            ),
-                          if (widget.onUploadDirectory != null)
-                            AppIconButton(
-                              semanticLabel: '上传文件夹'.tr,
-                              tooltip: '上传文件夹'.tr,
-                              icon: const AppIcon(AppIcons.folderUp, size: 16),
-                              onPressed: loading || error != null
-                                  ? null
-                                  : widget.onUploadDirectory,
-                            ),
-                          const SizedBox(width: 4),
-                        ],
                       ),
-              ),
-              const shadcn.Divider(),
-              SizedBox(
-                height: 26,
-                child: Padding(
-                  padding: const EdgeInsets.only(left: 35, right: 12),
-                  child: DefaultTextStyle.merge(
-                    style: TextStyle(
-                      fontSize: 11,
-                      color: colors.mutedForeground,
-                    ),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: _sortHeader(
-                            context,
-                            _FileSortField.name,
-                            '名称'.tr,
-                            tooltip: '按名称排序'.tr,
-                          ),
-                        ),
-                        SizedBox(
-                          width: AppTheme.fileSizeColumnWidth,
-                          child: _sortHeader(
-                            context,
-                            _FileSortField.size,
-                            '大小'.tr,
-                            tooltip: '按大小排序'.tr,
-                            alignRight: true,
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        SizedBox(
-                          width: AppTheme.fileModifiedColumnWidth,
-                          child: _sortHeader(
-                            context,
-                            _FileSortField.modified,
-                            '更新时间'.tr,
-                            tooltip: '按更新时间排序'.tr,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
+                    );
+                  },
                 ),
               ),
               if (error != null)
@@ -1101,6 +1436,19 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
               style: TextStyle(fontSize: 11, color: colors.mutedForeground),
             ),
           ),
+          AppIconButton(
+            key: ValueKey('sftp-${side.name}-selection-transfer'),
+            semanticLabel: (side == FileBrowserSide.local ? '上传' : '下载').tr,
+            tooltip: (side == FileBrowserSide.local ? '上传所选文件' : '下载所选文件').tr,
+            density: shadcn.ButtonDensity.compact,
+            icon: AppIcon(
+              side == FileBrowserSide.local
+                  ? AppIcons.upload
+                  : AppIcons.download,
+              size: 14,
+            ),
+            onPressed: () => onTransfer(selected),
+          ),
           if (onDelete != null)
             AppIconButton(
               key: ValueKey('sftp-${side.name}-selection-delete'),
@@ -1130,28 +1478,48 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
     );
   }
 
-  Widget _entry(BuildContext context, FileBrowserEntry entry) {
+  Widget _entry(
+    BuildContext context,
+    FileBrowserEntry entry, {
+    required bool showSize,
+    required bool showModified,
+  }) {
     final colors = shadcn.Theme.of(context).colorScheme;
     final selected = _selected.contains(entry.path);
     final selectedForeground = AppTheme.fileSelectionForeground(context);
+    final targets = _filesFor(entry);
+    final multi = targets.length > 1;
     final actions = [
-      if (entry.isDir) ('open', '打开'.tr),
+      if (entry.isDir && !multi) ('open', '打开'.tr),
+      if (!multi &&
+          !entry.isDir &&
+          entry.size <= smallTextFileByteLimit &&
+          widget.onEditText != null)
+        ('edit-text', '查看／编辑文本'.tr),
       (
         side == FileBrowserSide.local ? 'upload' : 'download',
         (side == FileBrowserSide.local ? '上传' : '下载').tr,
       ),
-      if (onRename != null) ('rename', '重命名'.tr),
+      if (!multi && onRename != null) ('rename', '重命名'.tr),
+      ('copy-path', '复制路径'.tr),
+      if (!multi) ('copy-name', '复制名称'.tr),
       if (onDelete != null) ('delete', '删除'.tr),
     ];
     void action(String value) {
       switch (value) {
         case 'open':
           onOpen(entry);
+        case 'edit-text':
+          widget.onEditText?.call(entry);
         case 'upload':
         case 'download':
           onTransfer(_filesFor(entry));
         case 'rename':
           onRename?.call(entry);
+        case 'copy-path':
+          _copyText(_filesFor(entry).map((item) => item.path).join('\n'));
+        case 'copy-name':
+          _copyText(entry.name);
         case 'delete':
           onDelete?.call(_filesFor(entry));
       }
@@ -1188,8 +1556,16 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
           _collapseSelectionPointer = null;
         }
       },
-      child: shadcn.ContextMenu(
-        items: appMenuItems(actions, action),
+      child: _FileContextMenu(
+        items: appMenuItems(
+          actions,
+          action,
+          icons: const {
+            'edit-text': AppIcons.fileText,
+            'copy-path': AppIcons.link,
+            'copy-name': AppIcons.letterCase,
+          },
+        ),
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
           // 消费单击，避免列表空白区的手势在双击判定后清空选择。
@@ -1238,34 +1614,37 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
                       ),
                     ),
                   ),
-                  SizedBox(
-                    width: AppTheme.fileSizeColumnWidth,
-                    child: Text(
-                      entry.isDir ? '—' : formatFileSize(entry.size),
-                      textAlign: TextAlign.right,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: selected
-                            ? selectedForeground
-                            : colors.mutedForeground,
+                  if (showSize)
+                    SizedBox(
+                      width: AppTheme.fileSizeColumnWidth,
+                      child: Text(
+                        entry.isDir ? '—' : formatFileSize(entry.size),
+                        textAlign: TextAlign.right,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: selected
+                              ? selectedForeground
+                              : colors.mutedForeground,
+                        ),
                       ),
                     ),
-                  ),
-                  const SizedBox(width: 12),
-                  SizedBox(
-                    width: AppTheme.fileModifiedColumnWidth,
-                    child: Text(
-                      formatFileModified(entry.modified),
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: selected
-                            ? selectedForeground
-                            : colors.mutedForeground,
+                  if (showModified) ...[
+                    const SizedBox(width: 12),
+                    SizedBox(
+                      width: AppTheme.fileModifiedColumnWidth,
+                      child: Text(
+                        formatFileModified(entry.modified),
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: selected
+                              ? selectedForeground
+                              : colors.mutedForeground,
+                        ),
                       ),
                     ),
-                  ),
+                  ],
                   const SizedBox(width: 12 - AppTheme.fileSelectionGutter),
                 ],
               ),
@@ -1276,8 +1655,15 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
     );
     final draggableRow = entry.isDir
         ? DragTarget<FileTransferDrag>(
-            onWillAcceptWithDetails: (details) => _accepts(details.data),
-            onAcceptWithDetails: (details) => onDrop(details.data, entry.path),
+            onWillAcceptWithDetails: (details) =>
+                _acceptsDirectory(details.data, entry),
+            onAcceptWithDetails: (details) {
+              if (details.data.source == side) {
+                widget.onMove?.call(details.data, entry.path);
+              } else {
+                onDrop(details.data, entry.path);
+              }
+            },
             builder: (context, candidates, rejected) => ColoredBox(
               key: _directoryDropKeys.putIfAbsent(entry.path, GlobalKey.new),
               color: candidates.isEmpty && _externalHoverPath != entry.path
@@ -1315,6 +1701,53 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
       ),
       childWhenDragging: Opacity(opacity: 0.4, child: draggableRow),
       child: draggableRow,
+    );
+  }
+}
+
+/// Wait for the gesture to resolve so a row and its surrounding list cannot
+/// both open a menu when the secondary button is held down.
+class _FileContextMenu extends StatelessWidget {
+  const _FileContextMenu({
+    required this.items,
+    required this.child,
+    this.enabled = true,
+  });
+
+  final List<shadcn.MenuItem> items;
+  final Widget child;
+  final bool enabled;
+
+  void _show(BuildContext context, Offset position) {
+    shadcn.showDropdown<void>(
+      context: context,
+      position: position + const Offset(8, 0),
+      alignment: Alignment.topLeft,
+      anchorAlignment: Alignment.topRight,
+      offset: Offset.zero,
+      follow: false,
+      dismissBackdropFocus: false,
+      builder: (_) => shadcn.DropdownMenu(children: items),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final longPressEnabled = switch (shadcn.Theme.of(context).platform) {
+      TargetPlatform.iOS ||
+      TargetPlatform.android ||
+      TargetPlatform.fuchsia => enabled,
+      _ => false,
+    };
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onSecondaryTapUp: enabled
+          ? (details) => _show(context, details.globalPosition)
+          : null,
+      onLongPressStart: longPressEnabled
+          ? (details) => _show(context, details.globalPosition)
+          : null,
+      child: child,
     );
   }
 }

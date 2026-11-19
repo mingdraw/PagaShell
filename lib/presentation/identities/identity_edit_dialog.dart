@@ -52,7 +52,7 @@ Future<void> confirmDeleteIdentity(
           onPressed: () => AppNavigation.closeDialog(result: false),
           child: Text('取消'.tr),
         ),
-        shadcn.PrimaryButton(
+        shadcn.DestructiveButton(
           onPressed: () => AppNavigation.closeDialog(result: true),
           child: Text('删除'.tr),
         ),

@@ -10,10 +10,33 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'page.dart';
 import 'terminal.dart';
 
-// These functions are ignored because they are not marked as `pub`: `ack`, `attempted`, `authenticate_inner`, `authenticate`, `begin_frame`, `bind_forward_ports`, `desktop_tunnel`, `disconnect_handle`, `docker_api_channel`, `download_inner`, `due`, `expire_sync`, `feed`, `finish`, `flush`, `forward_listener`, `handshake`, `is_closed`, `is_missing_remote_file`, `load_private_key`, `local_changed`, `new`, `open_sftp_inner`, `open_sftp`, `pending`, `process_exec`, `process_target_command`, `read_only_exec`, `register_transfer`, `remote_changed`, `remove_dir_recursive`, `resize`, `resume_mismatch`, `server_status_command`, `sftp_client_config`, `shell_tx`, `spawn_port_forwards`, `start_docker_terminal_output`, `start_page_port_forwards`, `start_port_forwards`, `start_shell_output_with_command`, `start_shell_output`, `terminate_process_command`, `transfer_cleanup`, `transfer_file`, `transfer_io`, `unregister_transfer`, `upload_inner`, `verify_resume_prefix`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Credentials`, `ForwardTransport`, `FrameAcks`, `FramePacer`, `PageForwardEntry`, `PendingSession`, `PinningHandler`, `ReadOnlyExecPolicy`, `SessionEntry`, `ShellCmd`, `ShellOutput`, `TransferTimeout`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `check_server_key`, `clone`, `clone`, `fmt`, `fmt`
+// These functions are ignored because they are not marked as `pub`: `ack`, `attempted`, `authenticate_inner`, `authenticate`, `begin_frame`, `bind_forward_ports`, `check_text_bytes`, `checked_text_metadata`, `desktop_tunnel`, `disconnect_handle`, `docker_api_channel`, `download_inner`, `due`, `expire_sync`, `feed`, `finish`, `flush`, `forward_listener`, `handshake`, `is_closed`, `is_missing_remote_file`, `load_private_key`, `local_changed`, `new`, `open_sftp_inner`, `open_sftp`, `pending`, `process_exec`, `process_target_command`, `read_only_exec`, `read_small_text_bytes`, `read_small_text`, `register_transfer`, `remote_changed`, `remove_dir_recursive`, `resize`, `resume_mismatch`, `save_small_text`, `server_status_command`, `sftp_client_config`, `shell_tx`, `spawn_port_forwards`, `start_docker_terminal_output`, `start_page_port_forwards`, `start_port_forwards`, `start_shell_output_with_command`, `start_shell_output`, `terminate_process_command`, `transfer_cleanup`, `transfer_file`, `transfer_io`, `unregister_transfer`, `upload_inner`, `verify_resume_prefix`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Credentials`, `ForwardTransport`, `FrameAcks`, `FramePacer`, `PageForwardEntry`, `PendingSession`, `PinningHandler`, `ReadOnlyExecPolicy`, `SessionEntry`, `ShellCmd`, `ShellOutput`, `TransferMode`, `TransferTimeout`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `check_server_key`, `clone`, `clone`, `clone`, `fmt`, `fmt`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
+
+Future<SftpTextFile> sftpReadText({
+  required int sessionId,
+  required String path,
+}) => RustLib.instance.api.crateApiSshSftpReadText(
+  sessionId: sessionId,
+  path: path,
+);
+
+/// Validates size, mtime and the original bytes using a non-truncating handle.
+/// SFTP v3 has no atomic compare-and-write. An external writer must still be
+/// coordinated with by the user.
+Future<void> sftpSaveText({
+  required int sessionId,
+  required String path,
+  required SftpTextFile original,
+  required String text,
+}) => RustLib.instance.api.crateApiSshSftpSaveText(
+  sessionId: sessionId,
+  path: path,
+  original: original,
+  text: text,
+);
 
 /// 只进行 SSH 握手并返回服务器指纹。此阶段不接收或发送密码。
 Future<SshHandshake> sshHandshake({required String host, required int port}) =>
@@ -341,6 +364,24 @@ class SftpEntry {
           name == other.name &&
           isDir == other.isDir &&
           size == other.size &&
+          modifiedUnix == other.modifiedUnix;
+}
+
+class SftpTextFile {
+  final String text;
+  final int? modifiedUnix;
+
+  const SftpTextFile({required this.text, this.modifiedUnix});
+
+  @override
+  int get hashCode => text.hashCode ^ modifiedUnix.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SftpTextFile &&
+          runtimeType == other.runtimeType &&
+          text == other.text &&
           modifiedUnix == other.modifiedUnix;
 }
 

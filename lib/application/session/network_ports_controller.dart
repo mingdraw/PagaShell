@@ -32,6 +32,7 @@ class NetworkPortsController extends GetxController {
   final limited = false.obs;
   final updatedAt = Rxn<DateTime>();
   Timer? _timer;
+  final autoRefreshPaused = false.obs;
   bool _enabled = false;
   bool _disposed = false;
   bool _inFlight = false;
@@ -39,6 +40,58 @@ class NetworkPortsController extends GetxController {
   int _generation = 0;
 
   bool get canTerminate => source is ProcessManagerSource;
+
+  Future<RemoteProcess> locateProcess(
+    ListeningNetworkPort port,
+    NetworkPortProcess owner,
+  ) async {
+    final reader = source;
+    if (_disposed ||
+        !_enabled ||
+        reader is! ProcessManagerSource ||
+        owner.pid < 1) {
+      throw const SshEngineException('此连接不支持查看进程');
+    }
+    final generation = _generation;
+    final processSource = reader as ProcessManagerSource;
+    return (() async {
+      final processes = await processSource.readProcesses();
+      final process = processes.processes.firstWhereOrNull(
+        (p) => p.pid == owner.pid,
+      );
+      final current = await source.readNetworkPorts();
+      if (_disposed ||
+          !_enabled ||
+          generation != _generation ||
+          process == null ||
+          process.startedAt.isEmpty ||
+          !_samePort(current.ports, port).any(
+            (item) => item.processes.any(
+              (p) => p.pid == owner.pid && p.name == owner.name,
+            ),
+          )) {
+        throw const SshEngineException('端口对应的进程已变化，请刷新后重试');
+      }
+      return process;
+    })().timeout(timeout);
+  }
+
+  Future<ProcessDetails> readProcessDetails(RemoteProcess process) async {
+    if (_disposed || !_enabled || source is! ProcessManagerSource) {
+      throw const SshEngineException('进程管理连接已关闭');
+    }
+    final generation = _generation;
+    final details = await (source as ProcessManagerSource)
+        .readProcessDetails(process)
+        .timeout(timeout);
+    if (_disposed ||
+        !_enabled ||
+        generation != _generation ||
+        details.process.identity != process.identity) {
+      throw const SshEngineException('进程已变化，请刷新后重试');
+    }
+    return details;
+  }
 
   bool canTerminateProcess(NetworkPortProcess process) =>
       canTerminate && process.pid > 1 && process.name.isNotEmpty;
@@ -103,10 +156,18 @@ class NetworkPortsController extends GetxController {
     _generation++;
     _timer?.cancel();
     loading.value = false;
-    if (enabled) unawaited(refreshPorts());
+    if (enabled) unawaited(refreshPorts(automatic: true));
   }
 
-  Future<void> refreshPorts() async {
+  void setAutoRefreshPaused(bool paused) {
+    if (_disposed || autoRefreshPaused.value == paused) return;
+    autoRefreshPaused.value = paused;
+    _timer?.cancel();
+    if (!paused) unawaited(refreshPorts(automatic: true));
+  }
+
+  Future<void> refreshPorts({bool automatic = false}) async {
+    if (automatic && autoRefreshPaused.value) return;
     if (_disposed || !_enabled) return;
     if (_inFlight) {
       _refreshAgain = true;
@@ -119,13 +180,23 @@ class NetworkPortsController extends GetxController {
     loading.value = true;
     try {
       final sample = await source.readNetworkPorts().timeout(timeout);
-      if (_disposed || !_enabled || generation != _generation) return;
+      if (_disposed ||
+          !_enabled ||
+          generation != _generation ||
+          (automatic && autoRefreshPaused.value)) {
+        return;
+      }
       ports.value = sample.ports;
       limited.value = sample.limited;
       updatedAt.value = DateTime.now();
       error.value = null;
     } on Object catch (e) {
-      if (_disposed || !_enabled || generation != _generation) return;
+      if (_disposed ||
+          !_enabled ||
+          generation != _generation ||
+          (automatic && autoRefreshPaused.value)) {
+        return;
+      }
       error.value = e is TimeoutException
           ? '网络端口查询超时，请重试'
           : e is SshEngineException
@@ -135,13 +206,14 @@ class NetworkPortsController extends GetxController {
       _inFlight = false;
       if (!_disposed && _enabled) {
         loading.value = false;
-        if (error.value != '网络端口仅支持 Linux 和 macOS' &&
+        if (!autoRefreshPaused.value &&
+            error.value != '网络端口仅支持 Linux 和 macOS' &&
             error.value != '未找到端口采集工具，请安装 ss 或 lsof') {
           _timer = Timer(
             _refreshAgain || generation != _generation
                 ? Duration.zero
                 : interval,
-            () => unawaited(refreshPorts()),
+            () => unawaited(refreshPorts(automatic: true)),
           );
         }
       }

@@ -55,8 +55,27 @@ class AgentWorkspace extends StatefulWidget {
 
 class _AgentWorkspaceState extends State<AgentWorkspace> {
   final _panelKey = GlobalKey();
+  final _agentPanel = GlobalKey<AgentPanelState>();
   final _workspaceKey = GlobalKey();
   double? _dragWidth;
+
+  void _quoteTerminalSelection(String text) {
+    unawaited(_openAgentWithQuote(text));
+  }
+
+  Future<void> _openAgentWithQuote(String text) async {
+    final settings = Get.find<AiSettingsController>();
+    try {
+      if (!settings.state.value.panelVisible) {
+        await settings.setPanel(visible: true);
+      }
+    } on Object {
+      AppNotice.error('AI 设置保存失败，请重试');
+      return;
+    }
+    await WidgetsBinding.instance.endOfFrame;
+    if (mounted) _agentPanel.currentState?.quoteTerminalSelection(text);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -179,7 +198,7 @@ class _AgentWorkspaceState extends State<AgentWorkspace> {
                               ],
                             ),
                           ),
-                          const Expanded(child: AgentPanel()),
+                          Expanded(child: AgentPanel(key: _agentPanel)),
                         ],
                       ),
                     ),
@@ -194,6 +213,7 @@ class _AgentWorkspaceState extends State<AgentWorkspace> {
               await settings.setPanel(visible: false);
               await generalSettings.setSidebarVisible(true);
             },
+            onQuoteTerminalSelection: _quoteTerminalSelection,
             child: _buildLayout(
               context,
               constraints.maxWidth,

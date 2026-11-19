@@ -5,11 +5,20 @@ import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import '../theme/app_theme.dart';
 import 'app_copy_button.dart';
+import 'app_icon.dart';
+import 'app_icon_button.dart';
 
 /// 将 Markdown 语法树映射为原生组件；链接与图片保留可复制的文本。
 class AppMarkdown extends StatefulWidget {
-  const AppMarkdown(this.text, {super.key});
+  const AppMarkdown(
+    this.text, {
+    this.onInsertToTerminal,
+    this.defaultCodeLabel = '代码',
+    super.key,
+  });
   final String text;
+  final ValueChanged<String>? onInsertToTerminal;
+  final String defaultCodeLabel;
 
   @override
   State<AppMarkdown> createState() => _AppMarkdownState();
@@ -38,13 +47,22 @@ class _AppMarkdownState extends State<AppMarkdown> {
   }
 
   @override
-  Widget build(BuildContext context) =>
-      _MarkdownRenderer(context).blocks(_nodes);
+  Widget build(BuildContext context) => _MarkdownRenderer(
+    context,
+    onInsertToTerminal: widget.onInsertToTerminal,
+    defaultCodeLabel: widget.defaultCodeLabel,
+  ).blocks(_nodes);
 }
 
 class _MarkdownRenderer {
-  _MarkdownRenderer(this.context);
+  _MarkdownRenderer(
+    this.context, {
+    this.onInsertToTerminal,
+    this.defaultCodeLabel = '代码',
+  });
   final BuildContext context;
+  final ValueChanged<String>? onInsertToTerminal;
+  final String defaultCodeLabel;
   static const _bodyStyle = TextStyle(fontSize: 13, height: 1.65);
   static const _blockTags = {
     'p',
@@ -103,6 +121,8 @@ class _MarkdownRenderer {
         return AppMarkdownCodeBlock(
           code: text.endsWith('\n') ? text.substring(0, text.length - 1) : text,
           language: language,
+          defaultLabel: defaultCodeLabel,
+          onInsertToTerminal: onInsertToTerminal,
         );
       case 'ul':
       case 'ol':
@@ -324,10 +344,14 @@ class AppMarkdownCodeBlock extends StatelessWidget {
   const AppMarkdownCodeBlock({
     required this.code,
     this.language = '',
+    this.defaultLabel = '代码',
+    this.onInsertToTerminal,
     super.key,
   });
   final String code;
   final String language;
+  final String defaultLabel;
+  final ValueChanged<String>? onInsertToTerminal;
 
   @override
   Widget build(BuildContext context) => Container(
@@ -346,12 +370,20 @@ class AppMarkdownCodeBlock extends StatelessWidget {
             children: [
               Expanded(
                 child: Text(
-                  language.isEmpty ? '命令'.tr : language,
+                  language.isEmpty ? defaultLabel.tr : language,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(fontSize: 11),
                 ),
               ),
+              if (onInsertToTerminal != null && code.trim().isNotEmpty)
+                AppIconButton(
+                  key: const ValueKey('code-insert-terminal'),
+                  semanticLabel: '填入终端'.tr,
+                  tooltip: '填入终端'.tr,
+                  icon: const AppIcon(AppIcons.terminal, size: 13),
+                  onPressed: () => onInsertToTerminal!(code),
+                ),
               AppCopyButton(text: code),
             ],
           ),

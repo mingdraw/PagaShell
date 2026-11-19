@@ -12,11 +12,11 @@ import '../../application/session/session.dart';
 import '../../application/session/session_controller.dart';
 import '../../application/settings/settings_controller.dart';
 import '../../application/updates/app_update_controller.dart';
+import '../../domain/entities/sidebar_state.dart';
 import '../../domain/proxy/system_proxy.dart';
 import '../../domain/window/app_window.dart';
 import '../ai/agent_workspace.dart';
 import '../components/app_dialog.dart';
-import '../components/app_icon.dart';
 import '../hosts/host_edit_dialog.dart';
 import '../navigation/app_navigation.dart';
 import '../navigation/app_notice.dart';
@@ -34,9 +34,12 @@ import 'widgets/workspace.dart';
 /// 应用主框架：左侧服务栏、中间会话工作区和独立 Agent 右栏。
 ///
 /// 全局快捷键：
-/// - ⌘/Ctrl+K 命令面板（快速连接）
-/// - ⌘/Ctrl+N 新建服务
-/// - ⌘/Ctrl+, 打开设置
+/// - ⌘K / Ctrl+Shift+K 命令面板（快速连接）
+/// - ⌘N / Ctrl+Shift+N 新建服务
+/// - ⌘, / Ctrl+, 打开设置
+///
+/// Windows/Linux 下 K/N 需配合 Shift，避免劫持 bash/vim 常用的 Ctrl+K / Ctrl+N；
+/// 远程桌面（RDP/VNC）全屏时放行所有全局快捷键给远端桌面。
 class ShellPage extends StatefulWidget {
   const ShellPage({super.key});
 
@@ -326,6 +329,18 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
     if (_canRunWorkspaceCommand) unawaited(showSettingsDialog());
   }
 
+  void _adjustTerminalFontSize(double? delta) {
+    if (!Get.isRegistered<SettingsController>()) return;
+    final settings = Get.find<SettingsController>();
+    final next = delta == null
+        ? SidebarState.defaultTerminalFontSize
+        : (settings.terminalFontSize.value + delta).clamp(
+            SidebarState.minTerminalFontSize,
+            SidebarState.maxTerminalFontSize,
+          );
+    unawaited(settings.setTerminalFontSize(next).catchError((Object _) {}));
+  }
+
   KeyEventResult _handleShortcut(KeyEvent event) {
     // Consume the complete shortcut key sequence, including repeats and key-up,
     // so terminal/RDP input cannot intercept or forward it to the remote host.
@@ -333,28 +348,66 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
       if (event is KeyUpEvent) _shortcutKeys.remove(event.physicalKey);
       return KeyEventResult.handled;
     }
-    if (!_canRunWorkspaceCommand || event is! KeyDownEvent) {
+    if (!_canRunWorkspaceCommand ||
+        _fullscreenId != null ||
+        event is! KeyDownEvent) {
       return KeyEventResult.ignored;
     }
     final isMac = shadcn.Theme.of(context).platform == TargetPlatform.macOS;
-    final bindings = <LogicalKeyboardKey, VoidCallback>{
-      LogicalKeyboardKey.keyK: _openQuickConnect,
-      LogicalKeyboardKey.keyN: _newService,
-      LogicalKeyboardKey.comma: _openSettings,
+    final bindings = <LogicalKeyboardKey, ({VoidCallback run, bool shift})>{
+      LogicalKeyboardKey.keyK: (run: _openQuickConnect, shift: !isMac),
+      LogicalKeyboardKey.keyN: (run: _newService, shift: !isMac),
+      LogicalKeyboardKey.comma: (run: _openSettings, shift: false),
     };
     final command = bindings[event.logicalKey];
-    if (command == null ||
-        !SingleActivator(
+    if (command != null &&
+        SingleActivator(
           event.logicalKey,
           meta: isMac,
           control: !isMac,
+          shift: command.shift,
           includeRepeats: false,
         ).accepts(event, HardwareKeyboard.instance)) {
-      return KeyEventResult.ignored;
+      _shortcutKeys.add(event.physicalKey);
+      command.run();
+      return KeyEventResult.handled;
     }
-    _shortcutKeys.add(event.physicalKey);
-    command();
-    return KeyEventResult.handled;
+    if (_sessions.activeSession?.kind.isInteractiveTerminal == true &&
+        Get.isRegistered<SettingsController>()) {
+      final keyboard = HardwareKeyboard.instance;
+      final primary = isMac
+          ? keyboard.isMetaPressed &&
+                !keyboard.isControlPressed &&
+                !keyboard.isAltPressed
+          : keyboard.isControlPressed &&
+                !keyboard.isMetaPressed &&
+                !keyboard.isAltPressed;
+      if (primary) {
+        final key = event.logicalKey;
+        if (key == LogicalKeyboardKey.equal ||
+            key == LogicalKeyboardKey.add ||
+            key == LogicalKeyboardKey.numpadAdd) {
+          _shortcutKeys.add(event.physicalKey);
+          _adjustTerminalFontSize(1);
+          return KeyEventResult.handled;
+        }
+        if ((key == LogicalKeyboardKey.minus ||
+                key == LogicalKeyboardKey.numpadSubtract) &&
+            !keyboard.isShiftPressed) {
+          _shortcutKeys.add(event.physicalKey);
+          _adjustTerminalFontSize(-1);
+          return KeyEventResult.handled;
+        }
+        if ((key == LogicalKeyboardKey.digit0 ||
+                key == LogicalKeyboardKey.numpad0) &&
+            !keyboard.isShiftPressed) {
+          _shortcutKeys.add(event.physicalKey);
+          _adjustTerminalFontSize(null);
+          return KeyEventResult.handled;
+        }
+      }
+    }
+    return KeyEventResult.ignored;
   }
 
   @override
@@ -376,75 +429,11 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
           enter: _enterFullscreen,
           exit: _exitFullscreen,
           child: shadcn.Scaffold(
-            child: Stack(
-              children: [
-                const AgentWorkspace(
-                  sidebar: _AnimatedSidebar(),
-                  child: Workspace(),
-                ),
-                if (_fullscreenId != null)
-                  Positioned(
-                    top: 8,
-                    left: 12,
-                    right: 12,
-                    child: Align(
-                      alignment: Alignment.topCenter,
-                      child: _fullscreenToolbar(context),
-                    ),
-                  ),
-              ],
+            child: const AgentWorkspace(
+              sidebar: _AnimatedSidebar(),
+              child: Workspace(),
             ),
           ),
-        ),
-      ),
-    );
-  }
-
-  Widget _fullscreenToolbar(BuildContext context) {
-    final session = _sessions.sessions.firstWhereOrNull(
-      (s) => s.id == _fullscreenId,
-    );
-    return ConstrainedBox(
-      constraints: const BoxConstraints(maxWidth: 440),
-      child: Container(
-        key: const ValueKey('rdp-fullscreen-toolbar'),
-        padding: const EdgeInsets.all(6),
-        decoration: BoxDecoration(
-          color: AppTheme.surface(context).withValues(alpha: 0.96),
-          border: Border.all(color: AppTheme.border(context)),
-          borderRadius: BorderRadius.circular(10),
-          boxShadow: const [
-            BoxShadow(color: Color(0x40000000), blurRadius: 12),
-          ],
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const SizedBox(width: 6),
-            AppIcon(
-              session == null
-                  ? AppIcons.rdp
-                  : AppIcons.forServiceType(session.host.serviceType),
-              size: 16,
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                session?.title ?? '远程桌面'.tr,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-            const SizedBox(width: 12),
-            shadcn.OutlineButton(
-              key: const ValueKey('rdp-exit-fullscreen'),
-              onPressed: _fullscreenBusy
-                  ? null
-                  : () => unawaited(_exitFullscreen()),
-              leading: const AppIcon(AppIcons.minimize, size: 16),
-              child: Text('退出全屏'.tr),
-            ),
-          ],
         ),
       ),
     );
@@ -473,12 +462,15 @@ class _AnimatedSidebar extends StatelessWidget {
           ignoring: !visible,
           child: ExcludeSemantics(
             excluding: !visible,
-            child: ClipRect(
-              key: const ValueKey('sidebar-viewport'),
-              child: Align(
-                alignment: Alignment.centerLeft,
-                widthFactor: value,
-                child: child,
+            child: ExcludeFocus(
+              excluding: !visible,
+              child: ClipRect(
+                key: const ValueKey('sidebar-viewport'),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  widthFactor: value,
+                  child: child,
+                ),
               ),
             ),
           ),

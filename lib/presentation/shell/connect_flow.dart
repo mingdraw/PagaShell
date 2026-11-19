@@ -9,6 +9,7 @@ import '../../application/hosts/host_controller.dart';
 import '../../application/identities/identity_controller.dart';
 import '../../application/session/session.dart';
 import '../../application/session/session_controller.dart';
+import '../../application/session/session_layout.dart';
 import '../../application/settings/settings_controller.dart';
 import '../../domain/entities/host.dart';
 import '../../domain/entities/identity.dart';
@@ -35,16 +36,20 @@ Future<void> connectToHost(
   BuildContext context,
   Host host, {
   bool forceNew = false,
+  bool temporary = false,
   SessionKind kind = SessionKind.terminal,
   String? forwardSessionId,
+  ({String sessionId, SessionSplitEdge edge})? splitTarget,
 }) async {
   try {
     await _connectToHost(
       context,
       host,
       forceNew: forceNew,
+      temporary: temporary,
       kind: kind,
       forwardSessionId: forwardSessionId,
+      splitTarget: splitTarget,
     );
   } on SecretStoreException catch (e) {
     if (context.mounted) {
@@ -65,8 +70,10 @@ Future<void> _connectToHost(
   BuildContext context,
   Host host, {
   required bool forceNew,
+  required bool temporary,
   required SessionKind kind,
   String? forwardSessionId,
+  ({String sessionId, SessionSplitEdge edge})? splitTarget,
 }) async {
   if (host.isDesktop) {
     if (kind == SessionKind.fileTransfer || kind == SessionKind.portForward) {
@@ -75,6 +82,11 @@ Future<void> _connectToHost(
     kind = SessionKind.remoteDesktop;
   }
   final sessionController = Get.find<SessionController>();
+  if (splitTarget != null &&
+      (kind != SessionKind.terminal ||
+          !sessionController.canSplitToHost(splitTarget.sessionId, host))) {
+    return;
+  }
 
   if (kind == SessionKind.portForward || kind == SessionKind.dynamicProxy) {
     final session = sessionController.sessions.firstWhereOrNull(
@@ -98,11 +110,16 @@ Future<void> _connectToHost(
       }
     }
     return;
-  } else if (!forceNew &&
+  } else if (splitTarget == null &&
+      !forceNew &&
       sessionController.focusExisting(host.id, kind: kind)) {
     return;
   }
-  final login = await _prepareLogin(context, host, Get.find<HostController>());
+  final login = await _prepareLogin(
+    context,
+    host,
+    temporary ? null : Get.find<HostController>(),
+  );
   if (login == null || !context.mounted) return;
   SshGateway? gateway;
   final gatewayId = login.$1.gatewayId;
@@ -119,21 +136,37 @@ Future<void> _connectToHost(
     if (gateway == null || !context.mounted) return;
   }
   // 准备凭据及网关期间可能已有同类标签打开，创建前再检查一次。
-  if (!forceNew && sessionController.focusExisting(host.id, kind: kind)) {
+  if (splitTarget != null) {
+    if (!sessionController.canSplitToHost(splitTarget.sessionId, login.$1)) {
+      return;
+    }
+  } else if (!forceNew &&
+      sessionController.focusExisting(host.id, kind: kind)) {
     return;
   }
-  if (Get.isRegistered<SettingsController>()) {
+  if (!temporary && Get.isRegistered<SettingsController>()) {
     unawaited(
       Get.find<SettingsController>()
           .recordRecentHost(host.id)
           .catchError((Object _) {}),
     );
   }
+  if (splitTarget != null) {
+    await sessionController.splitToHost(
+      splitTarget.sessionId,
+      login.$1,
+      login.$2,
+      edge: splitTarget.edge,
+      gateway: gateway,
+    );
+    return;
+  }
   await sessionController.open(
     login.$1,
     login.$2,
     kind: kind,
     gateway: gateway,
+    temporary: temporary,
   );
 }
 
@@ -157,7 +190,7 @@ Future<SshGateway?> _prepareGateway(
 Future<(Host, SshCredentials)?> _prepareLogin(
   BuildContext context,
   Host host,
-  HostController hostController,
+  HostController? hostController,
 ) async {
   final identityController = Get.find<IdentityController>();
 
@@ -174,14 +207,14 @@ Future<(Host, SshCredentials)?> _prepareLogin(
   }
 
   // 服务自有密码（「账号密码」登录方式）→ 直连。
-  final hostPassword = await hostController.passwordOf(host.id);
+  final hostPassword = await hostController?.passwordOf(host.id);
   if (hostPassword != null) {
     return (host, SshCredentials.password(hostPassword));
   }
 
   if (!context.mounted) return null;
   final choice = await AppNavigation.dialog<_ConnectChoice>(
-    _ConnectDialog(host: host),
+    _ConnectDialog(host: host, canRemember: hostController != null),
   );
   if (choice == null) return null;
 
@@ -193,13 +226,13 @@ Future<(Host, SshCredentials)?> _prepareLogin(
     }
     // 记住绑定，下次直连。
     final connectHost = host.copyWith(identityId: identity.id);
-    await hostController.save(connectHost);
+    await hostController?.save(connectHost);
     return (connectHost, credentials);
   }
 
   var connectHost = host;
   final credentials = choice.credentials!;
-  if (choice.saveAsIdentity) {
+  if (choice.saveAsIdentity && hostController != null) {
     final identity = credentials.authType == AuthType.privateKey
         ? await identityController.saveWithPrivateKey(
             name: choice.identityName,
@@ -239,9 +272,10 @@ class _ConnectChoice {
 }
 
 class _ConnectDialog extends StatefulWidget {
-  const _ConnectDialog({required this.host});
+  const _ConnectDialog({required this.host, required this.canRemember});
 
   final Host host;
+  final bool canRemember;
 
   @override
   State<_ConnectDialog> createState() => _ConnectDialogState();
@@ -304,7 +338,11 @@ class _ConnectDialogState extends State<_ConnectDialog> {
   Widget build(BuildContext context) {
     final colors = shadcn.Theme.of(context).colorScheme;
     final identities = Get.find<IdentityController>().sorted
-        .where((identity) => identity.supports(widget.host.serviceType))
+        .where(
+          (identity) =>
+              identity.supports(widget.host.serviceType) &&
+              (widget.canRemember || identity.username == widget.host.username),
+        )
         .toList();
 
     return AppDialog(
@@ -407,22 +445,24 @@ class _ConnectDialogState extends State<_ConnectDialog> {
                       ),
                     ),
                   ),
-                const SizedBox(height: 4),
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 12),
-                  child: shadcn.Checkbox(
-                    state: _save
-                        ? shadcn.CheckboxState.checked
-                        : shadcn.CheckboxState.unchecked,
-                    onChanged: (state) => setState(
-                      () => _save = state == shadcn.CheckboxState.checked,
-                    ),
-                    trailing: Text(
-                      '保存为凭证，供其他服务复用'.tr,
-                      style: TextStyle(fontSize: 13),
+                if (widget.canRemember) ...[
+                  const SizedBox(height: 4),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    child: shadcn.Checkbox(
+                      state: _save
+                          ? shadcn.CheckboxState.checked
+                          : shadcn.CheckboxState.unchecked,
+                      onChanged: (state) => setState(
+                        () => _save = state == shadcn.CheckboxState.checked,
+                      ),
+                      trailing: Text(
+                        '保存为凭证，供其他服务复用'.tr,
+                        style: TextStyle(fontSize: 13),
+                      ),
                     ),
                   ),
-                ),
+                ],
                 if (_save) ...[
                   AppTextFormField(
                     controller: _identityName,
@@ -439,7 +479,9 @@ class _ConnectDialogState extends State<_ConnectDialog> {
                 ],
               ] else
                 Text(
-                  widget.host.isVnc
+                  !widget.canRemember
+                      ? '将使用所选凭证连接'.tr
+                      : widget.host.isVnc
                       ? '将使用所选凭证连接，并记住此绑定'.tr
                       : '将以 @username 连接，并记住此绑定'.trParams({
                           'username': _selectedIdentity!.username,

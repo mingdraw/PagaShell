@@ -10,6 +10,20 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 // These functions are ignored because they are not marked as `pub`: `docker_command`, `docker_terminal_command`, `docker_terminal_error`, `docker_terminal_exec_error`, `docker_terminal_launch_command`, `docker_terminal_preflight_error`, `query`, `shell_argument`, `validate_docker_id`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`
 
+Future<int> sshOpenDockerLogs({
+  required int sessionId,
+  required String containerId,
+}) => RustLib.instance.api.crateApiDockerSshOpenDockerLogs(
+  sessionId: sessionId,
+  containerId: containerId,
+);
+
+Future<Uint8List?> sshNextDockerLogs({required int logId}) =>
+    RustLib.instance.api.crateApiDockerSshNextDockerLogs(logId: logId);
+
+Future<void> sshCloseDockerLogs({required int logId}) =>
+    RustLib.instance.api.crateApiDockerSshCloseDockerLogs(logId: logId);
+
 /// 仅接受 Compose 项目名及固定操作；重建从远端原配置读取，不传回配置内容。
 Future<String?> sshRunDockerComposeAction({
   required int sessionId,

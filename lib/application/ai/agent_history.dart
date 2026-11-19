@@ -66,7 +66,7 @@ extension _AgentHistoryOperations on AgentController {
     return done.future;
   }
 
-  void _addEntry(AgentEntry entry) {
+  void _addEntry(AgentEntry entry, {bool persist = true}) {
     final active = _queue.active;
     final activeIndex = active == null ? -1 : entries.indexOf(active.entry);
     final nextUser = entry.kind == AgentEntryKind.user || activeIndex < 0
@@ -81,7 +81,7 @@ extension _AgentHistoryOperations on AgentController {
     } else {
       entries.insert(nextUser, entry);
     }
-    _saveConversation();
+    if (persist) _saveConversation();
   }
 
   void _saveConversation() {
@@ -199,6 +199,7 @@ extension _AgentHistoryOperations on AgentController {
           archivedCommand: message.command,
           requestState: message.requestState,
           requestError: message.requestError,
+          toolSummary: message.toolSummary,
         ),
     ]);
     _history = turns;

@@ -18,7 +18,9 @@ import 'docker_compose_dialog.dart';
 import 'docker_container_dialog.dart';
 import 'docker_details_dialog.dart';
 import 'docker_image_dialog.dart';
+import 'docker_logs_dialog.dart';
 import 'docker_resource_labels.dart';
+import 'panel_refresh_pause_button.dart';
 import 'terminal_search_field.dart';
 
 class DockerManagerPanel extends StatefulWidget {
@@ -113,7 +115,12 @@ class _DockerManagerPanelState extends State<DockerManagerPanel> {
                 ),
                 const SizedBox(width: 8),
                 Expanded(child: _heading()),
-                if (_controller case final controller?)
+                if (_controller case final controller?) ...[
+                  PanelRefreshPauseButton(
+                    key: const ValueKey('docker-manager-pause'),
+                    paused: controller.autoRefreshPaused,
+                    onChanged: controller.setAutoRefreshPaused,
+                  ),
                   Obx(
                     () => AppIconButton(
                       key: const ValueKey('docker-manager-refresh'),
@@ -128,6 +135,7 @@ class _DockerManagerPanelState extends State<DockerManagerPanel> {
                           : () => unawaited(controller.refreshResources()),
                     ),
                   ),
+                ],
               ],
             ),
           ),
@@ -505,9 +513,12 @@ class _DockerManagerPanelState extends State<DockerManagerPanel> {
                           available && !_opening.contains(resource.identity),
                       items: [
                         ('container-terminal', '终端'.tr),
+                        if (widget.source is DockerLogsSource)
+                          ('container-logs', '查看实时日志'.tr),
                         ('container-upgrade', '升级'.tr),
                         ('delete', '删除'.tr),
                       ],
+                      icons: const {'container-logs': AppIcons.fileText},
                       disabledValues: {
                         if (!running || widget.onOpenTerminal == null)
                           'container-terminal',
@@ -519,6 +530,18 @@ class _DockerManagerPanelState extends State<DockerManagerPanel> {
                       onSelected: (action) {
                         if (action == 'container-terminal') {
                           unawaited(_requestTerminal(resource));
+                        } else if (action == 'container-logs') {
+                          if (widget.source case final DockerLogsSource source
+                              when widget.active) {
+                            unawaited(
+                              AppNavigation.dialog<void>(
+                                DockerLogsDialog(
+                                  container: resource,
+                                  source: source,
+                                ),
+                              ),
+                            );
+                          }
                         } else {
                           unawaited(
                             _requestAction(
@@ -549,6 +572,10 @@ class _DockerManagerPanelState extends State<DockerManagerPanel> {
                         (DockerComposeAction.rebuild, '重建'.tr),
                         (DockerComposeAction.delete, '删除'.tr),
                       ],
+                      destructiveValues: const {DockerComposeAction.delete},
+                      icons: const {
+                        DockerComposeAction.rebuild: AppIcons.rotateCw,
+                      },
                       onSelected: (action) => unawaited(
                         _requestComposeAction(controller, resource, action),
                       ),

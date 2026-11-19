@@ -11,6 +11,7 @@ import '../components/app_icon_button.dart';
 import '../localization/app_translations.dart';
 import '../navigation/app_navigation.dart';
 import '../theme/app_theme.dart';
+import 'panel_refresh_pause_button.dart';
 import 'process_details_dialog.dart';
 import 'process_termination_dialog.dart';
 import 'terminal_search_field.dart';
@@ -93,7 +94,12 @@ class _ProcessManagerPanelState extends State<ProcessManagerPanel> {
                 ),
                 const SizedBox(width: 8),
                 Expanded(child: _heading()),
-                if (_controller case final controller?)
+                if (_controller case final controller?) ...[
+                  PanelRefreshPauseButton(
+                    key: const ValueKey('process-manager-pause'),
+                    paused: controller.autoRefreshPaused,
+                    onChanged: controller.setAutoRefreshPaused,
+                  ),
                   Obx(
                     () => AppIconButton(
                       key: const ValueKey('process-manager-refresh'),
@@ -105,6 +111,7 @@ class _ProcessManagerPanelState extends State<ProcessManagerPanel> {
                           : () => unawaited(controller.refreshProcesses()),
                     ),
                   ),
+                ],
               ],
             ),
           ),

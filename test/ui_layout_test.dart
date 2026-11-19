@@ -392,7 +392,7 @@ void main() {
         );
         await tester.pumpAndSettle();
         expect(tester.takeException(), isNull);
-        expect(find.text('搜索服务'.tr), findsOneWidget);
+        expect(find.text('搜索服务、凭证或网关'.tr), findsOneWidget);
         expect(
           find.widgetWithText(shadcn.PrimaryButton, '快速连接'.tr).hitTestable(),
           findsOneWidget,

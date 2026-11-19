@@ -6,6 +6,7 @@ import 'package:file_selector/file_selector.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
+import 'package:path/path.dart' as p;
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import '../../application/session/session.dart';
@@ -14,6 +15,7 @@ import '../../application/sftp/sftp_controller.dart';
 import '../../application/transfer/directory_transfer.dart';
 import '../../application/transfer/transfer_controller.dart';
 import '../../domain/entities/local_file_entry.dart';
+import '../../domain/entities/small_text_file.dart';
 import '../../domain/repositories/local_file_repository.dart';
 import '../../domain/ssh/ssh_engine.dart';
 import '../components/app_dialog.dart';
@@ -25,6 +27,7 @@ import '../navigation/app_navigation.dart';
 import '../navigation/app_notice.dart';
 import '../theme/app_theme.dart';
 import 'file_browser_pane.dart';
+import 'small_text_file_dialog.dart';
 
 typedef LocalDirectoryPicker = Future<String?> Function({
   String? initialDirectory,
@@ -100,6 +103,7 @@ class _SftpPanelState extends State<SftpPanel> {
   final _filePane = shadcn.AbsoluteResizablePaneController(0);
   final _localPane = shadcn.FlexibleResizablePaneController(1);
   final _remotePane = shadcn.FlexibleResizablePaneController(1);
+  final _showRemoteHidden = true.obs;
   final _transferPane = shadcn.AbsoluteResizablePaneController(
     AppTheme.transferProgressDefaultHeight,
     collapsed: true,
@@ -109,6 +113,7 @@ class _SftpPanelState extends State<SftpPanel> {
   bool _choosingLocalDirectory = false;
   bool _deletingLocal = false;
   bool _deletingRemote = false;
+  final _fileMoves = <FileBrowserSide>{};
 
   @override
   void initState() {
@@ -144,6 +149,7 @@ class _SftpPanelState extends State<SftpPanel> {
   void didUpdateWidget(SftpPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.session.id != widget.session.id) {
+      _showRemoteHidden.value = true;
       _transferExpanded = false;
       _expandedTransferHeight = AppTheme.transferProgressDefaultHeight;
       _transferPane.collapse();
@@ -407,6 +413,154 @@ class _SftpPanelState extends State<SftpPanel> {
     await _transferFiles(data.files, data.source, directory);
   }
 
+  bool _hasActiveTransfer(bool local, String path, {bool isDir = false}) {
+    final paths = local ? p.context : p.posix;
+    return Get.find<TransferController>().tasks.any((task) {
+      if (!(task.status.value.active || task.retrying.value) ||
+          (!local && task.sessionId != widget.session.id)) {
+        return false;
+      }
+      final active = local ? task.localPath : task.remotePath;
+      return paths.equals(active, path) ||
+          (task.isDirectory && paths.isWithin(active, path)) ||
+          (isDir && paths.isWithin(path, active));
+    });
+  }
+
+  Future<void> _moveFiles(FileTransferDrag data, String directory) async {
+    if (data.sessionId != widget.session.id || !_fileMoves.add(data.source)) {
+      return;
+    }
+    final local = data.source == FileBrowserSide.local;
+    final paths = local ? p.context : p.posix;
+    final localBrowser = _local;
+    final browser = _browser;
+    final engine = browser.engine;
+    final mover = localBrowser.files;
+    final failures = <String>[];
+    bool current() =>
+        mounted &&
+        browser == _browser &&
+        localBrowser == _local &&
+        (local ||
+            (identical(engine, browser.engine) &&
+                !browser.needsReconnect.value &&
+                !browser.reconnecting.value));
+    var moved = 0;
+    try {
+      final targetDirectory = local
+          ? directory
+          : await engine.canonicalize(directory);
+      final occupied = local
+          ? <String>{}
+          : (await engine.listDir(targetDirectory))
+                .map((entry) => entry.name)
+                .toSet();
+      for (final entry in data.files) {
+        if (!current()) return;
+        final target = local
+            ? localBrowser.files.pathOf(targetDirectory, entry.name)
+            : SftpController.join(targetDirectory, entry.name);
+        try {
+          // 服务端返回的名称同样必须是单个文件名。
+          if (entry.name.isEmpty ||
+              entry.name == '.' ||
+              entry.name == '..' ||
+              entry.name.contains('/') ||
+              paths.equals(entry.path, target) ||
+              (entry.isDir && paths.isWithin(entry.path, targetDirectory)) ||
+              occupied.contains(entry.name) ||
+              _hasActiveTransfer(local, entry.path, isDir: entry.isDir) ||
+              _hasActiveTransfer(local, target, isDir: entry.isDir)) {
+            failures.add(entry.name);
+            continue;
+          }
+          if (local) {
+            if (mover is! LocalFileMover) return;
+            await (mover as LocalFileMover).moveTo(
+              entry.path,
+              target,
+              isDir: entry.isDir,
+            );
+          } else {
+            if (entry.isDir) {
+              final source = await engine.canonicalize(entry.path);
+              if (!current()) return;
+              if (paths.equals(source, targetDirectory) ||
+                  paths.isWithin(source, targetDirectory)) {
+                failures.add(entry.name);
+                continue;
+              }
+            }
+            // 使用标准 SFTP RENAME；不使用覆盖目标的 POSIX 扩展。
+            await engine.rename(entry.path, target);
+          }
+          occupied.add(entry.name);
+          moved++;
+        } on Object catch (error) {
+          failures.add(entry.name);
+          if (error is SshEngineException && error.isConnectionClosed) break;
+        }
+      }
+      if (!current()) return;
+      if (moved > 0) {
+        if (local) {
+          await localBrowser.refreshDirectory();
+        } else {
+          await browser.refreshDirectory(reconnectIfNeeded: false);
+        }
+      }
+      if (!current()) return;
+      if (failures.isNotEmpty) {
+        AppNotice.error('部分文件未能移动，请检查重名、目录权限或进行中的传输');
+      } else if (moved > 0) {
+        AppNotice.success('已移动 @count 项'.trParams({'count': '$moved'}));
+      }
+    } on Object {
+      if (current()) AppNotice.error('无法移动文件，请检查目标目录');
+    } finally {
+      _fileMoves.remove(data.source);
+    }
+  }
+
+  Future<void> _editText(FileBrowserEntry entry, {required bool local}) async {
+    final browser = _browser;
+    final localBrowser = _local;
+    final engine = browser.engine;
+    final Object access = local ? localBrowser.files : engine;
+    if (access is! SmallTextFileAccess) return;
+    bool current() =>
+        mounted &&
+        browser == _browser &&
+        localBrowser == _local &&
+        (local ||
+            (identical(engine, browser.engine) &&
+                !browser.needsReconnect.value &&
+                !browser.reconnecting.value));
+    final saved = await AppNavigation.dialog<bool>(
+      SmallTextFileDialog(
+        name: entry.name,
+        path: entry.path,
+        read: () => access.readSmallText(entry.path),
+        save: (original, text) async {
+          if (!current()) {
+            throw const SmallTextFileException('文件连接已变更，请重新打开');
+          }
+          if (_hasActiveTransfer(local, entry.path)) {
+            throw const SmallTextFileException('文件正在传输，请稍后再保存');
+          }
+          await access.saveSmallText(entry.path, original, text);
+        },
+      ),
+    );
+    if (saved != true || !current()) return;
+    if (local) {
+      await localBrowser.refreshDirectory();
+    } else {
+      await browser.refreshDirectory(reconnectIfNeeded: false);
+    }
+  }
+
   /// false 表示取消或连接已变更，调用方应停止本批次；跳过仍继续。
   Future<bool> _transferFile(
     FileTransferDrag data,
@@ -620,6 +774,37 @@ class _SftpPanelState extends State<SftpPanel> {
       refresh();
     });
     _transferWorkers.add(worker);
+  }
+
+  Future<void> _mkdirLocal() async {
+    final local = _local;
+    final directory = local.cwd.value;
+    if (directory.isEmpty || local.loading.value || local.error.value != null) {
+      return;
+    }
+    await _promptName(
+      context,
+      title: '新建目录',
+      onCommit: (name) async {
+        if (!mounted ||
+            !identical(local, _local) ||
+            local.cwd.value != directory) {
+          return '本地目录已变更，请重试';
+        }
+        try {
+          await local.createDirectory(name);
+          return null;
+        } on LocalFileTargetExists {
+          return '目标位置已存在同名文件或目录';
+        } on ArgumentError {
+          return '请输入有效的目录名称';
+        } on UnsupportedError {
+          return '请输入有效的目录名称';
+        } on Object {
+          return '无法新建目录，请检查名称和目录权限';
+        }
+      },
+    );
   }
 
   Future<void> _mkdir() async {
@@ -838,6 +1023,7 @@ class _SftpPanelState extends State<SftpPanel> {
                               : _local.cwd.value,
                         ),
                         onBrowse: _chooseLocalDirectory,
+                        onMkdir: _mkdirLocal,
                         onAuthorize: _local.permissionDeniedPath.value == null
                             ? null
                             : () => _authorizeLocalDirectory(
@@ -853,6 +1039,13 @@ class _SftpPanelState extends State<SftpPanel> {
                         ),
                         onDrop: _dropFiles,
                         onRename: (entry) => _rename(entry, local: true),
+                        onMove: _local.files is LocalFileMover
+                            ? _moveFiles
+                            : null,
+                        onEditText: _local.files is SmallTextFileAccess
+                            ? (entry) =>
+                                  unawaited(_editText(entry, local: true))
+                            : null,
                         onDelete: (entry) => _delete(entry, local: true),
                         showHidden: _local.showHidden.value,
                         onShowHiddenChanged: (value) =>
@@ -876,13 +1069,15 @@ class _SftpPanelState extends State<SftpPanel> {
                         error: _browser.error.value,
                         entries: [
                           for (final entry in _browser.entries)
-                            FileBrowserEntry(
-                              name: entry.name,
-                              path: _browser.pathOf(entry.name),
-                              isDir: entry.isDir,
-                              size: entry.size,
-                              modified: entry.modified,
-                            ),
+                            if (_showRemoteHidden.value ||
+                                !entry.name.startsWith('.'))
+                              FileBrowserEntry(
+                                name: entry.name,
+                                path: _browser.pathOf(entry.name),
+                                isDir: entry.isDir,
+                                size: entry.size,
+                                modified: entry.modified,
+                              ),
                         ],
                         onNavigate: _browser.navigate,
                         onUp: _browser.up,
@@ -899,7 +1094,15 @@ class _SftpPanelState extends State<SftpPanel> {
                         onDrop: _dropFiles,
                         onExternalDrop: _uploadExternal,
                         onRename: _rename,
+                        onMove: _moveFiles,
+                        onEditText: _browser.engine is SmallTextFileAccess
+                            ? (entry) =>
+                                  unawaited(_editText(entry, local: false))
+                            : null,
                         onDelete: _delete,
+                        showHidden: _showRemoteHidden.value,
+                        onShowHiddenChanged: (value) =>
+                            _showRemoteHidden.value = value,
                       ),
                     ),
                   ),
@@ -1008,6 +1211,21 @@ class _TransferStrip extends StatelessWidget {
       final running = tasks
           .where((task) => task.status.value == TransferStatus.running)
           .length;
+      final queued = tasks
+          .where((task) => task.status.value == TransferStatus.queued)
+          .length;
+      final failed = tasks
+          .where((task) => task.status.value == TransferStatus.failed)
+          .length;
+      final retryableFailed = tasks
+          .where(
+            (task) =>
+                task.status.value == TransferStatus.failed &&
+                !task.retrying.value &&
+                controller.canRetry(task),
+          )
+          .toList();
+      final activeCount = running + queued;
       return Container(
         key: const ValueKey('sftp-transfer-progress'),
         decoration: BoxDecoration(
@@ -1041,16 +1259,81 @@ class _TransferStrip extends StatelessWidget {
                               height: double.infinity,
                               child: Row(
                                 children: [
-                                  Text(
-                                    '传输进度 · @count 项 · @running 项进行中'.trParams({
-                                      'count': '${tasks.length}',
-                                      'running': '$running',
-                                    }),
-                                    style: TextStyle(
-                                      fontSize: 11,
-                                      color: colors.mutedForeground,
+                                  Flexible(
+                                    flex: 2,
+                                    child: Text(
+                                      '传输进度 · @count 项 · @running 项进行中'
+                                          .trParams({
+                                            'count': '${tasks.length}',
+                                            'running': '$running',
+                                          }),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        color: colors.mutedForeground,
+                                      ),
                                     ),
                                   ),
+                                  if (queued > 0) ...[
+                                    const SizedBox(width: 8),
+                                    Text(
+                                      '排队 @count'.trParams({
+                                        'count': '$queued',
+                                      }),
+                                      key: const ValueKey(
+                                        'sftp-transfer-queued-badge',
+                                      ),
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        color: colors.mutedForeground,
+                                      ),
+                                    ),
+                                  ],
+                                  if (failed > 0) ...[
+                                    const SizedBox(width: 8),
+                                    Container(
+                                      key: const ValueKey(
+                                        'sftp-transfer-failed-badge',
+                                      ),
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 6,
+                                        vertical: 1,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: colors.destructive.withValues(
+                                          alpha: 0.12,
+                                        ),
+                                        border: Border.all(
+                                          color: colors.destructive.withValues(
+                                            alpha: 0.4,
+                                          ),
+                                        ),
+                                        borderRadius: BorderRadius.circular(10),
+                                      ),
+                                      child: Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          AppIcon(
+                                            AppIcons.circleAlert,
+                                            size: 11,
+                                            color: colors.destructive,
+                                          ),
+                                          const SizedBox(width: 4),
+                                          Text(
+                                            '失败 @count'.trParams({
+                                              'count': '$failed',
+                                            }),
+                                            style: TextStyle(
+                                              fontSize: 10,
+                                              fontWeight: FontWeight.w600,
+                                              color: colors.destructive,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
                                   const SizedBox(width: 12),
                                   // 速率每次采样都会变化，单独订阅，避免重建
                                   // 整个传输条与任务列表。
@@ -1081,6 +1364,32 @@ class _TransferStrip extends StatelessWidget {
                           ),
                         ),
                       ),
+                      if (retryableFailed.isNotEmpty)
+                        AppIconButton.text(
+                          key: const ValueKey('sftp-transfer-retry-all'),
+                          semanticLabel: '全部重试'.tr,
+                          tooltip: '全部重试'.tr,
+                          icon: const AppIcon(AppIcons.rotateCw, size: 14),
+                          onPressed: () {
+                            for (final task in retryableFailed) {
+                              unawaited(controller.retry(task.id));
+                            }
+                          },
+                        ),
+                      if (activeCount > 0)
+                        AppIconButton.text(
+                          key: const ValueKey('sftp-transfer-cancel-all'),
+                          semanticLabel: '全部取消'.tr,
+                          tooltip: '全部取消'.tr,
+                          icon: const AppIcon(AppIcons.x, size: 14),
+                          onPressed: () {
+                            for (final task in tasks) {
+                              if (task.status.value.active) {
+                                unawaited(controller.cancel(task.id));
+                              }
+                            }
+                          },
+                        ),
                       AppIconButton.text(
                         semanticLabel: '清除已完成'.tr,
                         tooltip: '清除已完成'.tr,
@@ -1128,6 +1437,19 @@ class _TransferStrip extends StatelessWidget {
                           ),
                         );
                       }),
+                    ),
+                  )
+                else if (failed > 0)
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    height: 2,
+                    child: IgnorePointer(
+                      child: ColoredBox(
+                        key: const ValueKey('sftp-transfer-failed-hairline'),
+                        color: colors.destructive.withValues(alpha: 0.7),
+                      ),
                     ),
                   ),
               ],
@@ -1199,11 +1521,30 @@ class _TransferRow extends StatelessWidget {
         final failureMessage = failureReason == null || failureReason.isEmpty
             ? '传输未完成，请检查连接后重试'.tr
             : failureReason;
+        final total = task.total.value;
+        String? runningDetail() {
+          if (status != TransferStatus.running) return null;
+          final transferred = task.transferred.value;
+          final speed = task.bytesPerSecond.value;
+          final fraction = task.fraction;
+          final percent = fraction == null ? null : (fraction * 100).round();
+          final eta = formatTransferEta(total - transferred, speed);
+          final parts = [
+            if (percent != null)
+              '${formatFileSize(transferred)} / ${formatFileSize(total)} ($percent%)',
+            if (speed.isFinite && speed > 0) formatTransferRate(speed),
+            if (eta != null) '剩余 @eta'.trParams({'eta': eta}),
+          ];
+          return parts.isEmpty ? null : parts.join(' · ');
+        }
+
         final label = Text(
           switch (status) {
-            TransferStatus.cancelled => '已取消'.tr,
             TransferStatus.queued => '等待传输'.tr,
-            _ => formatFileSize(task.transferred.value),
+            TransferStatus.running ||
+            TransferStatus.failed ||
+            TransferStatus.cancelled when total <= 0 => '—',
+            _ => formatFileSize(total),
           },
           key: ValueKey('sftp-transfer-label-${task.id}'),
           maxLines: 1,
@@ -1219,6 +1560,7 @@ class _TransferRow extends StatelessWidget {
               icon: icon,
               color: color,
               hoverIcon: status.active ? AppIcons.x : AppIcons.rotateCw,
+              loading: task.retrying.value,
               semanticLabel: switch (status) {
                 TransferStatus.queued || TransferStatus.running => '停止传输'.tr,
                 TransferStatus.failed => '重试传输'.tr,
@@ -1278,6 +1620,9 @@ class _TransferRow extends StatelessWidget {
           ],
         );
         final path = task.currentPath.value;
+        final detail = status == TransferStatus.cancelled
+            ? '已取消'.tr
+            : runningDetail();
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -1290,7 +1635,7 @@ class _TransferRow extends StatelessWidget {
                 child: LayoutBuilder(
                   builder: (context, constraints) {
                     final gap = math.min(8.0, constraints.maxWidth);
-                    final errorWidth = math.min(
+                    final trailingWidth = math.min(
                       220.0,
                       math.max(0.0, (constraints.maxWidth - gap) / 2),
                     );
@@ -1315,7 +1660,9 @@ class _TransferRow extends StatelessWidget {
                         if (status == TransferStatus.failed) ...[
                           SizedBox(width: gap),
                           ConstrainedBox(
-                            constraints: BoxConstraints(maxWidth: errorWidth),
+                            constraints: BoxConstraints(
+                              maxWidth: trailingWidth,
+                            ),
                             child: shadcn.Tooltip(
                               tooltip: (_) => shadcn.TooltipContainer(
                                 child: Text(failureMessage),
@@ -1329,6 +1676,30 @@ class _TransferRow extends StatelessWidget {
                                 style: TextStyle(
                                   fontSize: 10,
                                   color: colors.destructive,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ] else if (detail != null) ...[
+                          SizedBox(width: gap),
+                          ConstrainedBox(
+                            constraints: BoxConstraints(
+                              maxWidth: (constraints.maxWidth - gap) * 0.7,
+                            ),
+                            child: shadcn.Tooltip(
+                              tooltip: (_) =>
+                                  shadcn.TooltipContainer(child: Text(detail)),
+                              child: Text(
+                                detail,
+                                key: ValueKey(
+                                  'sftp-transfer-detail-${task.id}',
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                textAlign: TextAlign.right,
+                                style: TextStyle(
+                                  fontSize: 10,
+                                  color: colors.mutedForeground,
                                 ),
                               ),
                             ),
@@ -1354,6 +1725,7 @@ class _TransferStatusAction extends StatefulWidget {
     required this.color,
     required this.semanticLabel,
     required this.onPressed,
+    this.loading = false,
     super.key,
   });
 
@@ -1362,6 +1734,7 @@ class _TransferStatusAction extends StatefulWidget {
   final Color color;
   final String semanticLabel;
   final VoidCallback? onPressed;
+  final bool loading;
 
   @override
   State<_TransferStatusAction> createState() => _TransferStatusActionState();
@@ -1377,7 +1750,15 @@ class _TransferStatusActionState extends State<_TransferStatusAction> {
     child: SizedBox(
       width: 26,
       height: 26,
-      child: widget.onPressed == null
+      child: widget.loading
+          ? const Center(
+              child: SizedBox(
+                width: 13,
+                height: 13,
+                child: shadcn.CircularProgressIndicator(strokeWidth: 1.8),
+              ),
+            )
+          : widget.onPressed == null
           ? Center(child: AppIcon(widget.icon, size: 13, color: widget.color))
           : AppIconButton.text(
               semanticLabel: widget.semanticLabel,
@@ -1396,21 +1777,45 @@ class _TransferStatusActionState extends State<_TransferStatusAction> {
 String formatTransferRate(double bytesPerSecond) =>
     '${formatFileSize(bytesPerSecond.isFinite ? bytesPerSecond.clamp(0, double.infinity).round() : 0)}/s';
 
+String? formatTransferEta(int remainingBytes, double bytesPerSecond) {
+  if (remainingBytes <= 0 || !bytesPerSecond.isFinite || bytesPerSecond < 1) {
+    return null;
+  }
+  final seconds = (remainingBytes / bytesPerSecond).ceil();
+  if (seconds < 60) return '${seconds}s';
+  if (seconds < 3600) {
+    final minutes = seconds ~/ 60;
+    final rem = seconds % 60;
+    return rem == 0 ? '${minutes}m' : '${minutes}m ${rem}s';
+  }
+  final hours = seconds ~/ 3600;
+  final minutes = (seconds % 3600) ~/ 60;
+  return minutes == 0 ? '${hours}h' : '${hours}h ${minutes}m';
+}
+
 Future<String?> _promptName(
   BuildContext context, {
   required String title,
   String initial = '',
+  Future<String?> Function(String name)? onCommit,
 }) {
   return AppNavigation.dialog<String>(
-    _NameDialog(title: title, initial: initial),
+    _NameDialog(title: title, initial: initial, onCommit: onCommit),
   );
 }
 
 class _NameDialog extends StatefulWidget {
-  const _NameDialog({required this.title, required this.initial});
+  const _NameDialog({
+    required this.title,
+    required this.initial,
+    this.onCommit,
+  });
 
   final String title;
   final String initial;
+
+  /// Returns a translation key on failure so the name can be corrected.
+  final Future<String?> Function(String name)? onCommit;
 
   @override
   State<_NameDialog> createState() => _NameDialogState();
@@ -1421,6 +1826,8 @@ class _NameDialogState extends State<_NameDialog> {
   late final TextEditingController _controller = TextEditingController(
     text: widget.initial,
   );
+  bool _saving = false;
+  String? _error;
 
   @override
   void dispose() {
@@ -1428,9 +1835,25 @@ class _NameDialogState extends State<_NameDialog> {
     super.dispose();
   }
 
-  void _submit() {
-    if (!_formKey.currentState!.validate()) return;
-    AppNavigation.closeDialog(result: _controller.text.trim());
+  Future<void> _submit() async {
+    if (_saving || !_formKey.currentState!.validate()) return;
+    final name = _controller.text.trim();
+    if (widget.onCommit case final commit?) {
+      setState(() {
+        _saving = true;
+        _error = null;
+      });
+      final error = await commit(name);
+      if (!mounted || ModalRoute.of(context)?.isCurrent != true) return;
+      if (error != null) {
+        setState(() {
+          _saving = false;
+          _error = error;
+        });
+        return;
+      }
+    }
+    AppNavigation.closeDialog(result: name);
   }
 
   @override
@@ -1447,6 +1870,8 @@ class _NameDialogState extends State<_NameDialog> {
             AppTextFormField(
               controller: _controller,
               autofocus: true,
+              enabled: !_saving,
+              smartPunctuation: false,
               autovalidateMode: AutovalidateMode.onUserInteraction,
               decoration: AppInputDecoration(labelText: '名称'.tr),
               validator: (value) =>
@@ -1456,12 +1881,23 @@ class _NameDialogState extends State<_NameDialog> {
           ],
         ),
       ),
+      feedback: _error == null
+          ? null
+          : Text(
+              _error!.tr,
+              style: TextStyle(
+                color: shadcn.Theme.of(context).colorScheme.destructive,
+              ),
+            ),
       actions: [
         shadcn.OutlineButton(
-          onPressed: () => AppNavigation.closeDialog<void>(),
+          onPressed: _saving ? null : () => AppNavigation.closeDialog<void>(),
           child: Text('取消'.tr),
         ),
-        shadcn.PrimaryButton(onPressed: _submit, child: Text('确定'.tr)),
+        shadcn.PrimaryButton(
+          onPressed: _saving ? null : _submit,
+          child: Text('确定'.tr),
+        ),
       ],
     );
   }

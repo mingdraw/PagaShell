@@ -1,4 +1,12 @@
-enum AgentEntryKind { user, assistant, tool, command }
+enum AgentEntryKind {
+  user,
+  assistant,
+  tool,
+  command,
+  reasoning;
+
+  bool get isActivity => this == reasoning || this == tool;
+}
 
 enum AgentCommandState { pending, sent, rejected, unavailable }
 
@@ -38,6 +46,27 @@ class AgentArchivedCommand {
       );
 }
 
+class AgentToolSummary {
+  const AgentToolSummary(this.target, {this.elapsedMs, this.outputLength});
+
+  final String? target;
+  final int? elapsedMs;
+  final int? outputLength;
+
+  Map<String, dynamic> toJson() => {
+    'target': target,
+    'elapsedMs': elapsedMs,
+    'outputLength': outputLength,
+  };
+
+  factory AgentToolSummary.fromJson(Map<String, dynamic> json) =>
+      AgentToolSummary(
+        json['target'] as String?,
+        elapsedMs: json['elapsedMs'] as int?,
+        outputLength: json['outputLength'] as int?,
+      );
+}
+
 class AgentMessage {
   const AgentMessage(
     this.kind,
@@ -45,6 +74,7 @@ class AgentMessage {
     this.command,
     this.requestState,
     this.requestError,
+    this.toolSummary,
   });
 
   final AgentEntryKind kind;
@@ -52,6 +82,7 @@ class AgentMessage {
   final AgentArchivedCommand? command;
   final AgentRequestState? requestState;
   final String? requestError;
+  final AgentToolSummary? toolSummary;
 
   Map<String, dynamic> toJson() => {
     'kind': kind.name,
@@ -59,6 +90,7 @@ class AgentMessage {
     if (command != null) 'command': command!.toJson(),
     if (requestState != null) 'requestState': requestState!.name,
     if (requestError != null) 'requestError': requestError,
+    if (toolSummary != null) 'toolSummary': toolSummary!.toJson(),
   };
 
   factory AgentMessage.fromJson(Map<String, dynamic> json) => AgentMessage(
@@ -77,6 +109,11 @@ class AgentMessage {
       _ => null,
     },
     requestError: json['requestError'] as String?,
+    toolSummary: json['toolSummary'] == null
+        ? null
+        : AgentToolSummary.fromJson(
+            json['toolSummary'] as Map<String, dynamic>,
+          ),
   );
 }
 

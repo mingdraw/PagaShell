@@ -49,6 +49,19 @@ pub async fn proxy_wait(proxy_id: u32) -> Result<Option<String>> {
     }
 }
 
+pub struct ProxyTraffic {
+    pub sent: u64,
+    pub received: u64,
+}
+
+/// Cumulative bytes carried by this listener instance.
+pub async fn proxy_traffic(proxy_id: u32) -> Option<ProxyTraffic> {
+    PROXIES.lock().await.get(&proxy_id).map(|running| {
+        let (sent, received) = running.traffic();
+        ProxyTraffic { sent, received }
+    })
+}
+
 /// Cancels negotiations, tunnels and HTTP drivers, then releases every listener.
 pub async fn proxy_stop(proxy_id: u32) -> Result<()> {
     let running = PROXIES.lock().await.remove(&proxy_id);

@@ -205,7 +205,7 @@ class _RdpCertificateDialogState extends State<RdpCertificateDialog> {
           Text(
             (warning
                     ? '确认前不会发送 Windows 登录凭据。继续仅允许本次证书例外，不会覆盖已保存的证书。'
-                    : '请通过可信渠道与服务器管理员核对下方 SHA-256 指纹。确认后保存可信记录，后续连接自动校验。')
+                    : '请通过可信渠道与服务器管理员核对 SHA-256 指纹。确认后保存可信记录，后续连接自动校验。')
                 .tr,
           ),
           if (_details) ...[
@@ -248,10 +248,16 @@ class _RdpCertificateDialogState extends State<RdpCertificateDialog> {
           onPressed: () => widget.onDecision(false),
           child: Text('取消'.tr),
         ),
-        shadcn.PrimaryButton(
-          onPressed: () => widget.onDecision(true),
-          child: Text('继续连接'.tr),
-        ),
+        if (review.hasChanged)
+          shadcn.DestructiveButton(
+            onPressed: () => widget.onDecision(true),
+            child: Text('继续连接'.tr),
+          )
+        else
+          shadcn.PrimaryButton(
+            onPressed: () => widget.onDecision(true),
+            child: Text('继续连接'.tr),
+          ),
       ],
     );
   }

@@ -6,6 +6,9 @@ abstract final class AppTheme {
   static const Color terminalBackground = Color(0xFF09090B);
   static const Color terminalForeground = Color(0xFFCDD2DA);
   static const Color terminalMutedForeground = Color(0xFF8B939F);
+  static const Color terminalSearchMatch = Color(0x4460A5FA);
+  static const Color terminalSearchSelected = Color(0x88B45309);
+  static const Color terminalSearchOption = Color(0xFF93C5FD);
   static const Color terminalBorder = Color(0xFF24282F);
   static const Color terminalSelectedBorder = Color(0xFF536A80);
   static const Color terminalControlBackground = Color(0xFF181C22);
@@ -103,6 +106,7 @@ abstract final class AppTheme {
   static const double terminalToolbarButtonSize = 28;
   static const double terminalPaneCloseSize = 24;
   static const double terminalPaneMinWidth = 160;
+  static const double terminalDisconnectCompactWidth = 250;
   static const double terminalPaneMinHeight = 100;
   static const double terminalSelectionEdgeExtent = 24;
   static const Duration terminalSelectionScrollInterval = Duration(
@@ -115,6 +119,13 @@ abstract final class AppTheme {
   static const double serverStatusMaxWidth = 520;
   static const double fileSizeColumnWidth = 64;
   static const double fileModifiedColumnWidth = 140;
+  static const double fileSizeColumnMinPaneWidth = 260;
+  static const double fileModifiedColumnMinPaneWidth = 360;
+  static const double fileBrowserToolbarRowHeight = 34;
+  static const double fileToolbarCompactWidth = 420;
+  static const double fileToolbarButtonSize = 28;
+  static const double fileToolbarCompactButtonSize = 22;
+  static const double fileToolbarBadgeWidth = 40;
   static const double fileBrowserMinHeight = 180;
   static const double fileSelectionGutter = 8;
   static const double fileSelectionDragThreshold = 4;
@@ -127,6 +138,14 @@ abstract final class AppTheme {
   static const double transferProgressMinHeight = 96;
   static const double transferProgressRowHeight = 50;
   static const double sidebarWidth = 264;
+  static const double sidebarSearchResultHeight = 40;
+  static const hostColorPresets = <int, String>{
+    0xFFDC2626: '生产 · 红色',
+    0xFFEA580C: '测试 · 橙色',
+    0xFF2563EB: '开发 · 蓝色',
+    0xFF059669: '绿色',
+    0xFF7C3AED: '紫色',
+  };
   static const double sidebarMinWidth = 200;
   static const double sidebarMaxWidth = 420;
   static const double sidebarResizeWidth = 5;
@@ -164,15 +183,6 @@ abstract final class AppTheme {
         dialogFocusInset,
       );
 
-  static const double batchCommandDialogMaxWidth = 760;
-  static const double batchCommandSessionListHeight = 270;
-  static const double batchCommandSessionItemHeight = 32;
-  static const double batchCommandSessionItemGap = 2;
-  static const double batchCommandSessionColumnGap = 8;
-  static const EdgeInsets batchCommandSessionItemPadding = EdgeInsets.symmetric(
-    horizontal: 8,
-    vertical: 5,
-  );
   static const double fileConflictDialogMaxWidth = 400;
   static const double folderDialogMaxWidth = 320;
   static const double processDetailsDialogMaxWidth = 560;

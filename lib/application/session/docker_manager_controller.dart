@@ -59,6 +59,7 @@ class DockerManagerController extends GetxController {
   bool _refreshAgain = false;
   bool _manualRefreshQueued = false;
   bool _automaticRefreshPaused = false;
+  final autoRefreshPaused = false.obs;
   int _failureRevision = 0;
   int _generation = 0;
   bool _refreshAfterAction = false;
@@ -90,11 +91,18 @@ class DockerManagerController extends GetxController {
   /// 工具栏手动刷新；只有手动请求成功后才能解除错误造成的暂停。
   Future<void> refreshResources() => _refreshResources(automatic: false);
 
+  void setAutoRefreshPaused(bool paused) {
+    if (_disposed || autoRefreshPaused.value == paused) return;
+    autoRefreshPaused.value = paused;
+    _timer?.cancel();
+    if (!paused) unawaited(_refreshResources(automatic: true));
+  }
+
   Future<void> _refreshResources({required bool automatic}) async {
     if (_disposed ||
         !_enabled ||
         busy ||
-        (automatic && _automaticRefreshPaused)) {
+        (automatic && (_automaticRefreshPaused || autoRefreshPaused.value))) {
       return;
     }
     if (_inFlight) {
@@ -114,11 +122,14 @@ class DockerManagerController extends GetxController {
     state.loading.value = true;
     try {
       final resources = await _withinTimeout(source.readDockerResources(kind));
-      if (!_isCurrent(generation)) return;
+      if (!_isCurrent(generation) || (automatic && autoRefreshPaused.value)) {
+        return;
+      }
       _applyResources(state, resources, revision);
       if (!automatic) _resumeAutomaticRefresh(failureRevision);
     } on Object catch (e) {
       if (!_isCurrent(generation) ||
+          (automatic && autoRefreshPaused.value) ||
           revision <= state._revision ||
           failureRevision != _failureRevision) {
         return;
@@ -387,7 +398,7 @@ class DockerManagerController extends GetxController {
     if (_disposed ||
         !_enabled ||
         busy ||
-        (automatic && _automaticRefreshPaused)) {
+        (automatic && (_automaticRefreshPaused || autoRefreshPaused.value))) {
       return;
     }
     _timer?.cancel();

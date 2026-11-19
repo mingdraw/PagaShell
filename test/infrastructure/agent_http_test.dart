@@ -198,7 +198,8 @@ void main() {
       expect(headers.first.contentType!.mimeType, 'application/json');
       expect(bodies.first['model'], 'contract-model');
       expect(settings.state.value.apiConfig!.model, 'contract-model');
-      expect(bodies.first['stream'], isFalse);
+      // Compatible providers may respond with JSON even when asked for SSE.
+      expect(bodies.map((body) => body['stream']), everyElement(isTrue));
       final tools = (bodies.first['tools'] as List<dynamic>)
           .map(
             (dynamic value) =>

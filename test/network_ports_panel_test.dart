@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:get/get.dart';
@@ -25,6 +26,7 @@ class _Source implements NetworkPortsSource, ProcessManagerSource {
     ],
   );
   final terminated = <RemoteProcess>[];
+  final detailsRead = <RemoteProcess>[];
   int processReads = 0;
   Object? failure;
   final failures = <int, Object>{};
@@ -39,8 +41,11 @@ class _Source implements NetworkPortsSource, ProcessManagerSource {
   }
 
   @override
-  Future<ProcessDetails> readProcessDetails(RemoteProcess process) async =>
-      processDetails(process: process);
+  Future<ProcessDetails> readProcessDetails(RemoteProcess process) async {
+    detailsRead.add(process);
+    return processDetails(process: process);
+  }
+
   @override
   Future<void> terminateProcess(RemoteProcess process) async {
     terminated.add(process);
@@ -68,6 +73,7 @@ Future<void> _mount(
   WidgetTester tester,
   _Source source, {
   Locale locale = const Locale('zh', 'CN'),
+  String? hostname,
 }) async {
   await tester.pumpWidget(
     ShadcnTestApp(
@@ -76,7 +82,11 @@ Future<void> _mount(
         child: SizedBox(
           width: 260,
           height: 550,
-          child: NetworkPortsPanel(source: source, active: true),
+          child: NetworkPortsPanel(
+            source: source,
+            active: true,
+            hostname: hostname,
+          ),
         ),
       ),
     ),
@@ -93,8 +103,122 @@ TextEditingController _input(WidgetTester tester) => tester
     )
     .controller;
 
+void _mockClipboard(WidgetTester tester, ValueChanged<String> onWrite) {
+  final messenger = tester.binding.defaultBinaryMessenger;
+  messenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+    if (call.method == 'Clipboard.setData') {
+      onWrite((call.arguments as Map<Object?, Object?>)['text']! as String);
+    }
+    return null;
+  });
+  addTearDown(
+    () => messenger.setMockMethodCallHandler(SystemChannels.platform, null),
+  );
+}
+
 void main() {
   tearDown(Get.reset);
+
+  testWidgets('端口卡片可复制 PID 和主机端口，监听地址没有复制按钮', (tester) async {
+    final source = _Source();
+    final port = source.ports.ports.last;
+    final copied = <String>[];
+    var rejected = true;
+    _mockClipboard(tester, (text) {
+      if (rejected) throw PlatformException(code: 'clipboard-unavailable');
+      copied.add(text);
+    });
+    await _mount(tester, source, hostname: '2001:db8::10');
+    final pid = find.byKey(ValueKey('network-port-copy-pid-${port.identity}'));
+    await tester.ensureVisible(pid);
+    await tester.tap(pid);
+    await tester.pumpAndSettle();
+    expect(copied, isEmpty);
+    expect(find.text('复制失败，请重试'), findsOneWidget);
+    expect(
+      find.descendant(of: pid, matching: findAppIcon(AppIcons.check)),
+      findsNothing,
+    );
+
+    rejected = false;
+    await tester.tap(pid);
+    await tester.pump();
+    expect(copied, ['42']);
+    expect(
+      find.descendant(of: pid, matching: findAppIcon(AppIcons.check)),
+      findsOneWidget,
+    );
+    expect(source.processReads, 0);
+
+    await tester.tap(
+      find.byKey(ValueKey('network-port-copy-host-${port.identity}')),
+    );
+    await tester.pumpAndSettle();
+    expect(copied, ['42', '[2001:db8::10]:8080']);
+    expect(find.text('[::1]:8080'), findsOneWidget);
+    expect(findAppIconButton('复制监听地址'), findsNothing);
+    await tester.pump(const Duration(seconds: 6));
+    await tester.pumpAndSettle();
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('共享端口一键复制多个 PID，以英文逗号分隔', (tester) async {
+    final source = _Source();
+    const port = ListeningNetworkPort(
+      protocol: NetworkPortProtocol.tcp,
+      port: 8080,
+      addresses: [NetworkPortAddress(address: '127.0.0.1', ipv6: false)],
+      processes: [
+        NetworkPortProcess(pid: 42, name: 'Web API'),
+        NetworkPortProcess(pid: 43, name: 'Other API'),
+      ],
+    );
+    source.ports = const NetworkPortsSnapshot(ports: [port]);
+    final copied = <String>[];
+    _mockClipboard(tester, copied.add);
+    await _mount(tester, source);
+    await tester.tap(
+      find.byKey(ValueKey('network-port-copy-pid-${port.identity}')),
+    );
+    await tester.pump();
+    expect(copied, ['42,43']);
+    expect(source.processReads, 0);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('监听端口的 PID 打开所属进程详情，端口转交后拒绝旧入口', (tester) async {
+    final source = _Source();
+    final port = source.ports.ports.last;
+    await _mount(tester, source);
+    final link = find.byKey(ValueKey('network-port-process-${port.identity}'));
+    await tester.ensureVisible(link);
+    await tester.tap(link);
+    await tester.pumpAndSettle();
+    expect(find.text('进程详情'), findsOneWidget);
+    expect(source.detailsRead.single.pid, 42);
+    expect(source.terminated, isEmpty);
+    await tester.tap(find.text('关闭'));
+    await tester.pumpAndSettle();
+
+    source.ports = NetworkPortsSnapshot(
+      ports: [
+        ListeningNetworkPort(
+          protocol: port.protocol,
+          port: port.port,
+          addresses: port.addresses,
+          processes: const [NetworkPortProcess(pid: 43, name: 'Other API')],
+        ),
+      ],
+    );
+    await tester.tap(link);
+    await tester.pumpAndSettle();
+    expect(find.text('进程详情'), findsNothing);
+    expect(find.text('端口对应的进程已变化，请刷新后重试'), findsOneWidget);
+    expect(source.detailsRead, hasLength(1));
+    await tester.pump(const Duration(seconds: 6));
+    await tester.pumpAndSettle();
+    await tester.pumpWidget(const SizedBox());
+  });
 
   for (final locale in [const Locale('zh', 'CN'), const Locale('en', 'US')]) {
     testWidgets('端口停止需输入完全一致进程名，取消不结束，成功传递身份并刷新 $locale', (tester) async {

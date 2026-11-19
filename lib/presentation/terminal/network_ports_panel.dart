@@ -6,12 +6,18 @@ import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import '../../application/session/network_ports_controller.dart';
 import '../../domain/ssh/network_ports.dart';
+import '../../domain/ssh/ssh_engine.dart';
+import '../components/app_copy_button.dart';
 import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
+import '../components/app_menu.dart';
 import '../localization/app_translations.dart';
 import '../navigation/app_navigation.dart';
+import '../navigation/app_notice.dart';
 import '../theme/app_theme.dart';
 import 'network_port_termination_dialog.dart';
+import 'panel_refresh_pause_button.dart';
+import 'process_details_dialog.dart';
 import 'process_termination_dialog.dart';
 import 'terminal_search_field.dart';
 
@@ -19,10 +25,12 @@ class NetworkPortsPanel extends StatefulWidget {
   const NetworkPortsPanel({
     required this.source,
     required this.active,
+    this.hostname,
     super.key,
   });
   final NetworkPortsSource? source;
   final bool active;
+  final String? hostname;
   @override
   State<NetworkPortsPanel> createState() => _NetworkPortsPanelState();
 }
@@ -32,6 +40,7 @@ class _NetworkPortsPanelState extends State<NetworkPortsPanel> {
   final _search = TextEditingController();
   final _scroll = ScrollController();
   bool _showingTermination = false;
+  bool _lookingUpProcess = false;
 
   @override
   void initState() {
@@ -88,7 +97,12 @@ class _NetworkPortsPanelState extends State<NetworkPortsPanel> {
                 ),
                 const SizedBox(width: 8),
                 Expanded(child: _heading()),
-                if (_controller case final controller?)
+                if (_controller case final controller?) ...[
+                  PanelRefreshPauseButton(
+                    key: const ValueKey('network-ports-pause'),
+                    paused: controller.autoRefreshPaused,
+                    onChanged: controller.setAutoRefreshPaused,
+                  ),
                   Obx(
                     () => AppIconButton(
                       key: const ValueKey('network-ports-refresh'),
@@ -100,6 +114,7 @@ class _NetworkPortsPanelState extends State<NetworkPortsPanel> {
                           : () => unawaited(controller.refreshPorts()),
                     ),
                   ),
+                ],
               ],
             ),
           ),
@@ -301,9 +316,7 @@ class _NetworkPortsPanelState extends State<NetworkPortsPanel> {
   }
 
   Widget _card(NetworkPortsController controller, ListeningNetworkPort port) {
-    final processes = port.processes
-        .map((p) => '${p.name.isEmpty ? '进程'.tr : p.name} (${p.pid})')
-        .join(' · ');
+    final owners = port.processes.where((item) => item.pid > 0).toList();
     return Padding(
       key: ValueKey('network-port-${port.identity}'),
       padding: const EdgeInsets.only(bottom: 6),
@@ -320,13 +333,7 @@ class _NetworkPortsPanelState extends State<NetworkPortsPanel> {
           children: [
             Row(
               children: [
-                Text(
-                  '${port.port}',
-                  style: const TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
+                _portNumber(port),
                 const SizedBox(width: 8),
                 Text(
                   port.protocol.name.toUpperCase(),
@@ -337,21 +344,14 @@ class _NetworkPortsPanelState extends State<NetworkPortsPanel> {
                   ),
                 ),
                 const SizedBox(width: 8),
-                Expanded(
-                  child: shadcn.Tooltip(
-                    tooltip: (_) => shadcn.TooltipContainer(
-                      child: Text(processes.isEmpty ? '进程信息不可见'.tr : processes),
-                    ),
-                    child: Text(
-                      processes.isEmpty ? '进程信息不可见'.tr : processes,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      textAlign: TextAlign.right,
-                      style: _secondary,
-                    ),
-                  ),
-                ),
+                Expanded(child: _processLink(controller, port, owners)),
                 const SizedBox(width: 4),
+                if (owners.isNotEmpty)
+                  AppCopyButton(
+                    key: ValueKey('network-port-copy-pid-${port.identity}'),
+                    text: owners.map((owner) => owner.pid).toSet().join(','),
+                    semanticLabel: '复制进程 ID'.tr,
+                  ),
                 _stopButton(controller, port),
               ],
             ),
@@ -378,6 +378,109 @@ class _NetworkPortsPanelState extends State<NetworkPortsPanel> {
         ),
       ),
     );
+  }
+
+  Widget _portNumber(ListeningNetworkPort port) {
+    final number = Text(
+      '${port.port}',
+      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+    );
+    final hostname = widget.hostname;
+    if (hostname == null || hostname.isEmpty) return number;
+    final address = hostname.contains(':') && !hostname.startsWith('[')
+        ? '[$hostname]'
+        : hostname;
+    return AppIconButton.text(
+      key: ValueKey('network-port-copy-host-${port.identity}'),
+      semanticLabel: '复制主机端口'.tr,
+      tooltip: '复制主机端口'.tr,
+      density: shadcn.ButtonDensity.compact,
+      icon: number,
+      onPressed: () async {
+        if (await copyAppText('$address:${port.port}') && mounted) {
+          AppNotice.success('已复制');
+        }
+      },
+    );
+  }
+
+  String _processLabel(NetworkPortProcess process) =>
+      '${process.name.isEmpty ? '进程'.tr : process.name} (${process.pid})';
+
+  Widget _processLink(
+    NetworkPortsController controller,
+    ListeningNetworkPort port,
+    List<NetworkPortProcess> owners,
+  ) {
+    final showDetails =
+        widget.active && controller.canTerminate && owners.isNotEmpty;
+    final text = Text(
+      owners.isEmpty ? '进程信息不可见'.tr : owners.map(_processLabel).join(' · '),
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: showDetails
+          ? _secondary.copyWith(decoration: TextDecoration.underline)
+          : _secondary,
+    );
+    return Align(
+      alignment: Alignment.centerRight,
+      child: showDetails
+          ? Builder(
+              builder: (anchor) => shadcn.TextButton(
+                key: ValueKey('network-port-process-${port.identity}'),
+                size: shadcn.ButtonSize.small,
+                density: shadcn.ButtonDensity.compact,
+                onPressed: () {
+                  if (owners.length == 1) {
+                    unawaited(_openProcess(controller, port, owners.single));
+                  } else {
+                    shadcn.showDropdown<void>(
+                      context: anchor,
+                      builder: (_) => shadcn.DropdownMenu(
+                        children: appMenuItems(
+                          [
+                            for (final owner in owners)
+                              (owner, _processLabel(owner)),
+                          ],
+                          (owner) =>
+                              unawaited(_openProcess(controller, port, owner)),
+                        ),
+                      ),
+                    );
+                  }
+                },
+                child: text,
+              ),
+            )
+          : text,
+    );
+  }
+
+  Future<void> _openProcess(
+    NetworkPortsController controller,
+    ListeningNetworkPort port,
+    NetworkPortProcess owner,
+  ) async {
+    if (_lookingUpProcess) return;
+    _lookingUpProcess = true;
+    try {
+      final process = await controller.locateProcess(port, owner);
+      if (!mounted || !widget.active || _controller != controller) return;
+      await AppNavigation.dialog<void>(
+        ProcessDetailsDialog(
+          process: process,
+          readDetails: controller.readProcessDetails,
+        ),
+      );
+    } on Object catch (error) {
+      if (mounted && widget.active && _controller == controller) {
+        AppNotice.error(
+          error is SshEngineException ? error.message : '无法读取进程详情，请重试',
+        );
+      }
+    } finally {
+      _lookingUpProcess = false;
+    }
   }
 
   Widget _stopButton(

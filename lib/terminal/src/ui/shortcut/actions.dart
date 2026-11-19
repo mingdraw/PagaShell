@@ -10,6 +10,7 @@ class TerminalActions extends StatelessWidget {
     required this.terminal,
     required this.controller,
     required this.child,
+    this.onPaste,
   });
 
   final Terminal terminal;
@@ -17,6 +18,8 @@ class TerminalActions extends StatelessWidget {
   final TerminalController controller;
 
   final Widget child;
+
+  final Future<bool> Function(String text)? onPaste;
 
   @override
   Widget build(BuildContext context) {
@@ -26,9 +29,16 @@ class TerminalActions extends StatelessWidget {
           onInvoke: (intent) async {
             final data = await Clipboard.getData(Clipboard.kTextPlain);
             final text = data?.text;
-            if (text != null) {
-              terminal.paste(text);
-              controller.clearSelection();
+            if (text != null && text.isNotEmpty) {
+              final pasted = onPaste != null
+                  ? await onPaste!(text)
+                  : () {
+                      terminal.paste(text);
+                      return true;
+                    }();
+              if (pasted) {
+                controller.clearSelection();
+              }
             }
             return null;
           },

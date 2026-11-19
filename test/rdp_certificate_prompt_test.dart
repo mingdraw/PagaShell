@@ -134,7 +134,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byType(AppDialog), findsOneWidget);
       expect(engine.authentications, 0);
-      expect(find.textContaining('windows.test:3389'), findsOneWidget);
+      expect(find.textContaining('windows.test:3389'), findsWidgets);
       expect(
         find.text(
           english
@@ -143,10 +143,16 @@ void main() {
         ),
         findsOneWidget,
       );
+      expect(find.text('SHA256:old'), findsNothing);
+      expect(find.text('SHA256:new'), findsNothing);
       await tester.tap(find.text(english ? 'Show certificate' : '显示证书'));
       await tester.pumpAndSettle();
       expect(find.text('SHA256:old'), findsOneWidget);
       expect(find.text('SHA256:new'), findsOneWidget);
+      await tester.tap(find.text(english ? 'Hide certificate' : '隐藏证书'));
+      await tester.pumpAndSettle();
+      expect(find.text('SHA256:old'), findsNothing);
+      expect(find.text('SHA256:new'), findsNothing);
       expect(tester.takeException(), isNull);
       await tester.tap(find.text(english ? 'Continue connecting' : '继续连接'));
       await tester.pumpAndSettle();
@@ -231,7 +237,7 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.byType(RdpPasswordDialog), findsOneWidget);
-      expect(find.textContaining('windows.test:3389'), findsOneWidget);
+      expect(find.textContaining('windows.test:3389'), findsWidgets);
       expect(find.textContaining('selected@example.test'), findsOneWidget);
       expect(
         find.text(

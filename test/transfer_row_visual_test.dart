@@ -152,7 +152,7 @@ void main() {
     for (final width in [1200.0, 600.0]) {
       tester.view.physicalSize = Size(width, 600);
       await tester.pumpAndSettle();
-      expect(tester.widget<Text>(size).data, '25 B');
+      expect(tester.widget<Text>(size).data, '100 B');
       expect(tester.widget<Text>(error).data, reason);
       expect(tester.widget<Text>(error).overflow, TextOverflow.ellipsis);
       expect(tester.getSize(error).width, lessThanOrEqualTo(220));
@@ -181,6 +181,6 @@ void main() {
     task.status.value = TransferStatus.done;
     await tester.pump();
     expect(error, findsNothing);
-    expect(tester.widget<Text>(size).data, '25 B');
+    expect(tester.widget<Text>(size).data, '100 B');
   });
 }

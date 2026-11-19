@@ -15,11 +15,14 @@ class ServerStatusController extends GetxController {
   final ServerStatusSource source;
   final Duration interval;
   final Rxn<ServerStatus> status = Rxn<ServerStatus>();
+  static const _historyLimit = 24;
+  final history = <ServerStatus>[].obs;
   final RxnString error = RxnString();
   final Rxn<DateTime> updatedAt = Rxn<DateTime>();
   final RxBool loading = false.obs;
   ServerStatusSample? _previous;
   Timer? _timer;
+  final autoRefreshPaused = false.obs;
   bool _enabled = false;
   bool _disposed = false;
   bool _inFlight = false;
@@ -32,10 +35,19 @@ class ServerStatusController extends GetxController {
     _timer?.cancel();
     _previous = null;
     loading.value = false;
-    if (enabled) unawaited(refreshStatus());
+    if (enabled) unawaited(refreshStatus(automatic: true));
   }
 
-  Future<void> refreshStatus() async {
+  void setAutoRefreshPaused(bool paused) {
+    if (_disposed || autoRefreshPaused.value == paused) return;
+    autoRefreshPaused.value = paused;
+    _previous = null;
+    _timer?.cancel();
+    if (!paused) unawaited(refreshStatus(automatic: true));
+  }
+
+  Future<void> refreshStatus({bool automatic = false}) async {
+    if (automatic && autoRefreshPaused.value) return;
     if (_disposed || !_enabled || _inFlight) return;
     _timer?.cancel();
     _inFlight = true;
@@ -44,13 +56,26 @@ class ServerStatusController extends GetxController {
     loading.value = true;
     try {
       final sample = await source.readServerStatus();
-      if (_disposed || !_enabled || generation != _generation) return;
-      status.value = ServerStatus.fromSamples(sample, _previous);
+      if (_disposed ||
+          !_enabled ||
+          generation != _generation ||
+          (automatic && autoRefreshPaused.value)) {
+        return;
+      }
+      final next = ServerStatus.fromSamples(sample, _previous);
+      if (history.length >= _historyLimit) history.removeAt(0);
+      history.add(next);
+      status.value = next;
       _previous = sample;
       updatedAt.value = DateTime.now();
       error.value = null;
     } on Object catch (e) {
-      if (_disposed || !_enabled || generation != _generation) return;
+      if (_disposed ||
+          !_enabled ||
+          generation != _generation ||
+          (automatic && autoRefreshPaused.value)) {
+        return;
+      }
       error.value = e is SshEngineException ? e.message : '无法获取服务状态，请重试';
       _previous = null;
     } finally {
@@ -65,10 +90,11 @@ class ServerStatusController extends GetxController {
                     (interval.inMilliseconds - elapsed.elapsedMilliseconds)
                         .clamp(0, interval.inMilliseconds),
               );
-        if (error.value != '服务状态仅支持 Linux 和 macOS') {
+        if (!autoRefreshPaused.value &&
+            error.value != '服务状态仅支持 Linux 和 macOS') {
           _timer = Timer(
             generation == _generation ? delay : Duration.zero,
-            () => unawaited(refreshStatus()),
+            () => unawaited(refreshStatus(automatic: true)),
           );
         }
       }

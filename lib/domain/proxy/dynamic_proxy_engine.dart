@@ -17,3 +17,9 @@ abstract interface class DynamicProxySession {
   Future<void> get done;
   Future<void> close();
 }
+
+typedef ProxyTraffic = ({int sent, int received});
+
+abstract interface class DynamicProxyTrafficSource {
+  Future<ProxyTraffic?> readTraffic();
+}

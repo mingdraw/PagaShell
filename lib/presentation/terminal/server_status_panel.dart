@@ -11,6 +11,8 @@ import '../components/app_icon_button.dart';
 import '../components/app_tree_expansion.dart';
 import '../localization/app_translations.dart';
 import '../theme/app_theme.dart';
+import 'panel_refresh_pause_button.dart';
+import 'server_status_trend.dart';
 import 'server_system_logo.dart';
 
 /// 服务状态内容；宿主侧面板保留它的状态，仅可见时采样。
@@ -95,6 +97,12 @@ class _ServerStatusPanelState extends State<ServerStatusPanel> {
                   ),
                   const SizedBox(width: 8),
                   Expanded(child: _heading()),
+                  if (_controller case final controller?)
+                    PanelRefreshPauseButton(
+                      key: const ValueKey('server-status-pause'),
+                      paused: controller.autoRefreshPaused,
+                      onChanged: controller.setAutoRefreshPaused,
+                    ),
                   AppIconButton(
                     semanticLabel: '刷新服务状态'.tr,
                     tooltip: '刷新服务状态'.tr,
@@ -167,6 +175,7 @@ class _ServerStatusPanelState extends State<ServerStatusPanel> {
     }
     return Obx(() {
       final status = controller.status.value;
+      final history = controller.history.toList(growable: false);
       final error = controller.error.value;
       final muted = shadcn.Theme.of(context).colorScheme.mutedForeground;
       return SingleChildScrollView(
@@ -232,6 +241,14 @@ class _ServerStatusPanelState extends State<ServerStatusPanel> {
                     valueLabel: status.cpuFraction == null ? '采样中'.tr : null,
                     detail: status.cpuFraction == null ? '等待下一次采样'.tr : null,
                   ),
+                  ServerStatusTrend(
+                    key: const ValueKey('server-status-cpu-trend'),
+                    series: [
+                      [for (final item in history) item.cpuFraction],
+                    ],
+                    colors: const [AppTheme.serverStatusCpuColor],
+                    upperBound: 1,
+                  ),
                   AppTreeExpansion(
                     expanded: _cpuExpanded,
                     children: [
@@ -260,6 +277,19 @@ class _ServerStatusPanelState extends State<ServerStatusPanel> {
                     color: AppTheme.serverStatusMemoryColor,
                     detail:
                         '${_bytes(status.sample.memoryUsed)} / ${_bytes(status.sample.memoryTotal)}',
+                  ),
+                  ServerStatusTrend(
+                    key: const ValueKey('server-status-memory-trend'),
+                    series: [
+                      [
+                        for (final item in history)
+                          item.sample.memoryTotal > 0
+                              ? item.sample.memoryFraction
+                              : null,
+                      ],
+                    ],
+                    colors: const [AppTheme.serverStatusMemoryColor],
+                    upperBound: 1,
                   ),
                   AppTreeExpansion(
                     expanded: _memoryExpanded,
@@ -304,6 +334,7 @@ class _ServerStatusPanelState extends State<ServerStatusPanel> {
                 '网络 I/O'.tr,
                 AppIcons.statusNetwork,
                 status.network,
+                history,
                 '接收'.tr,
                 '发送'.tr,
               ),
@@ -312,6 +343,7 @@ class _ServerStatusPanelState extends State<ServerStatusPanel> {
                 '磁盘 I/O'.tr,
                 AppIcons.statusDisk,
                 status.disks,
+                history,
                 '读取'.tr,
                 '写入'.tr,
               ),
@@ -634,6 +666,7 @@ class _ServerStatusPanelState extends State<ServerStatusPanel> {
     String title,
     AppIcons icon,
     Map<String, IoRate> rates,
+    List<ServerStatus> history,
     String readLabel,
     String writeLabel,
   ) {
@@ -654,7 +687,7 @@ class _ServerStatusPanelState extends State<ServerStatusPanel> {
         [
           if (device == null)
             _empty()
-          else
+          else ...[
             Row(
               children: [
                 Expanded(child: _ioValue('↓ $readLabel', rate?.readPerSecond)),
@@ -664,6 +697,26 @@ class _ServerStatusPanelState extends State<ServerStatusPanel> {
                 ),
               ],
             ),
+            ServerStatusTrend(
+              key: ValueKey('server-status-$id-trend'),
+              series: [
+                [
+                  for (final sample in history)
+                    (id == 'network' ? sample.network : sample.disks)[device]
+                        ?.readPerSecond,
+                ],
+                [
+                  for (final sample in history)
+                    (id == 'network' ? sample.network : sample.disks)[device]
+                        ?.writePerSecond,
+                ],
+              ],
+              colors: const [
+                AppTheme.serverStatusCpuColor,
+                AppTheme.serverStatusMemoryColor,
+              ],
+            ),
+          ],
         ],
         trailing: device == null
             ? null

@@ -3,6 +3,7 @@ import 'package:get/get.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import '../components/app_icon.dart';
+import '../components/app_icon_button.dart';
 import '../localization/app_translations.dart';
 import '../theme/app_theme.dart';
 
@@ -17,7 +18,7 @@ abstract final class AppNotice {
   }
 
   static void success(String message) {
-    _show(message, AppIcons.check, StatusColors.ready);
+    _show(message.tr, AppIcons.check, StatusColors.ready);
   }
 
   static void _show(String message, AppIcons icon, Color accent) {
@@ -25,15 +26,31 @@ abstract final class AppNotice {
     if (context == null) return;
     shadcn.showToast(
       context: context,
-      builder: (context, overlay) => shadcn.SurfaceCard(
-        borderColor: accent.withValues(alpha: 0.45),
-        child: shadcn.Row(
-          mainAxisSize: shadcn.MainAxisSize.min,
-          children: [
-            AppIcon(icon, size: 16, color: accent),
-            const shadcn.SizedBox(width: 10),
-            shadcn.Flexible(child: shadcn.Text(message)),
-          ],
+      location: shadcn.ToastLocation.bottomCenter,
+      builder: (context, overlay) => ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 400),
+        child: shadcn.SurfaceCard(
+          borderColor: accent.withValues(alpha: 0.45),
+          child: shadcn.Row(
+            mainAxisSize: shadcn.MainAxisSize.min,
+            children: [
+              AppIcon(icon, size: 16, color: accent),
+              const shadcn.SizedBox(width: 10),
+              shadcn.Flexible(child: shadcn.Text(message)),
+              const shadcn.SizedBox(width: 8),
+              SizedBox.square(
+                dimension: 20,
+                child: AppIconButton.text(
+                  key: const ValueKey('app-notice-close'),
+                  semanticLabel: '关闭提示'.tr,
+                  tooltip: '关闭'.tr,
+                  density: shadcn.ButtonDensity.compact,
+                  onPressed: overlay.close,
+                  icon: const AppIcon(AppIcons.x, size: 12),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

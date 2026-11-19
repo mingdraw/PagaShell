@@ -24,6 +24,13 @@ import 'session_layout.dart';
 part 'session_runtime.dart';
 part 'session_tabs.dart';
 
+enum TerminalInsertResult {
+  inserted,
+  unavailable,
+  requiresBracketedPaste,
+  invalidText,
+}
+
 /// 全局会话控制器：负责终端、文件传输与端口转发标签的创建、激活与关闭。
 ///
 /// [SshEngine] 通过构造函数显式注入（装配见 AppBinding），
@@ -50,6 +57,7 @@ class SessionController extends GetxController {
   final RxnString activeSessionId = RxnString();
   final RxList<String> recentHostIds = <String>[].obs;
   final _tabState = _SessionTabs();
+  final _inputSync = Rxn<({String tabId, Map<String, Terminal> targets})>();
 
   void _recordRecentHost(String hostId) {
     recentHostIds.remove(hostId);
@@ -76,7 +84,7 @@ class SessionController extends GetxController {
 
   bool canSplitTerminal(String id) => _canReuseTerminalConnection(id);
 
-  /// 同一页签所有窗格共用一条独立采集连接，选中窗格变化不替换数据源。
+  /// 同页签的同主机窗格共用采集连接。混排时随当前主机切换数据源。
   ServerStatusSource? serverStatusSource(String tabId) =>
       _monitoringConnection(tabId, (session) => session is ServerStatusSource);
 
@@ -98,21 +106,24 @@ class SessionController extends GetxController {
   ) {
     if (_disposed) return null;
     final tab = tabById(tabId);
-    if (tab == null ||
-        _find(tab.sessionIds.first)?.kind != SessionKind.terminal) {
+    if (tab == null) return null;
+    final selected = _find(tab.selectedSessionId);
+    if (selected == null || selected.kind != SessionKind.terminal) {
       return null;
     }
-    final existing = _serverStatusConnections[tabId];
+    final key = (tabId, selected.host.id);
+    final existing = _serverStatusConnections[key];
     if (existing != null) return existing;
     for (final id in tab.sessionIds) {
       if (!_canReuseTerminalConnection(id)) continue;
       final session = _find(id)!;
+      if (session.host.id != selected.host.id) continue;
       if (!supports(session.engineSession)) continue;
       final runtime = _runtimes[id]!;
       final host = session.host;
       final credentials = runtime.credentials!;
       final gateway = runtime.gateway;
-      return _serverStatusConnections[tabId] = ServerStatusConnection(
+      return _serverStatusConnections[key] = ServerStatusConnection(
         connect: (cancelled) => _engine.connect(
           host,
           credentials,
@@ -158,6 +169,33 @@ class SessionController extends GetxController {
       splitFrom: id,
       splitAxis: axis,
       dockerTarget: session.dockerTarget,
+      temporary: runtime.temporary,
+    );
+  }
+
+  bool canSplitToHost(String id, Host host) {
+    final current = _find(id);
+    return current?.kind == SessionKind.terminal &&
+        current!.host.id != host.id &&
+        !host.isDesktop &&
+        canSplitTerminal(id);
+  }
+
+  Future<String?> splitToHost(
+    String id,
+    Host host,
+    SshCredentials credentials, {
+    required SessionSplitEdge edge,
+    SshGateway? gateway,
+  }) async {
+    if (!canSplitToHost(id, host)) return null;
+    return _openSession(
+      host,
+      credentials,
+      gateway: gateway,
+      splitFrom: id,
+      splitAxis: edge.axis,
+      splitBefore: edge.before,
     );
   }
 
@@ -219,11 +257,13 @@ class SessionController extends GetxController {
       runtime.credentials!,
       kind: SessionKind.fileTransfer,
       gateway: runtime.gateway,
+      temporary: runtime.temporary,
     );
   }
 
   final Map<String, _SessionRuntime> _runtimes = {};
-  final Map<String, ServerStatusConnection> _serverStatusConnections = {};
+  final Map<(String, String), ServerStatusConnection> _serverStatusConnections =
+      {};
   // 跨标签共享的网关清理队列；重新启动必须等旧监听端口释放。
   final Map<String, Future<void>> _forwardHostCleanup = {};
   final Map<String, Future<void>> _proxyHostCleanup = {};
@@ -240,47 +280,118 @@ class SessionController extends GetxController {
     return id == null ? null : _find(id);
   }
 
-  /// 可接收批量命令的交互终端；SFTP 和转发连接不具有 shell。
-  List<Session> get commandSessions => sessions.where(_canSendCommand).toList();
-
   static bool _canSendCommand(Session session) =>
       session.kind.isInteractiveTerminal &&
       session.phase == SessionPhase.ready &&
       session.engineSession != null &&
       session.terminal?.onOutput != null;
 
-  /// 只负责把输入排入各终端通道，不代表远端命令已执行成功。
-  BatchCommandResult sendCommandToSessions(
-    Iterable<String> sessionIds,
-    String command,
-  ) {
-    if (_disposed || command.trim().isEmpty) {
-      return const BatchCommandResult();
+  Terminal? _commandTerminal(String id) {
+    if (_disposed) return null;
+    final session = _find(id);
+    return session != null && _canSendCommand(session)
+        ? session.terminal
+        : null;
+  }
+
+  bool canSendCommandToSession(String id) => _commandTerminal(id) != null;
+
+  bool isInputSyncEnabled(String tabId) => _inputSync.value?.tabId == tabId;
+
+  Map<String, Terminal>? _inputTargets(String tabId) {
+    if (_disposed || activeTabId != tabId) return null;
+    final tab = tabById(tabId);
+    if (tab == null || tab.layout is! SessionSplit) return null;
+    final targets = <String, Terminal>{};
+    for (final id in tab.sessionIds) {
+      final pane = _find(id);
+      if (pane == null || !_canSendCommand(pane)) return null;
+      targets[id] = pane.terminal!;
     }
-    final text = command.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
-    var sent = 0;
-    var skipped = 0;
-    var failed = 0;
-    for (final id in sessionIds.toSet()) {
-      final session = _find(id);
-      if (session == null || !_canSendCommand(session)) {
-        skipped++;
-        continue;
-      }
-      final terminal = session.terminal!;
-      // 一次写入包含粘贴和最终回车，避免异步通道拆包导致回车先到达。
-      final input = terminal.bracketedPasteMode
-          ? '\x1b[200~$text\x1b[201~\r'
-          : '${text.replaceAll('\n', '\r')}${text.endsWith('\n') ? '' : '\r'}';
+    return targets;
+  }
+
+  bool canSyncInput(String tabId) => _inputTargets(tabId) != null;
+
+  void toggleInputSync(String tabId) {
+    if (isInputSyncEnabled(tabId)) {
+      _inputSync.value = null;
+      return;
+    }
+    final targets = _inputTargets(tabId);
+    if (targets != null) _inputSync.value = (tabId: tabId, targets: targets);
+  }
+
+  /// Only keyboard, IME and accepted paste from the selected view use this path.
+  /// Re-encode keys and bracketed paste for each terminal's own input modes.
+  void syncUserInput(String sourceId, void Function(Terminal) send) {
+    final sync = _inputSync.value;
+    if (sync == null || activeSessionId.value != sourceId) return;
+    final live = _inputTargets(sync.tabId);
+    if (live == null ||
+        live.length != sync.targets.length ||
+        live.entries.any(
+          (entry) => !identical(entry.value, sync.targets[entry.key]),
+        )) {
+      _inputSync.value = null;
+      return;
+    }
+    for (final entry in live.entries) {
+      if (entry.key == sourceId) continue;
       try {
-        terminal.textInput(input);
-        sent++;
+        send(entry.value);
       } on Object {
-        // 一个连接写入失败不能阻断其他目标，也不暴露输入及底层错误。
-        failed++;
+        _inputSync.value = null;
+        return;
       }
     }
-    return BatchCommandResult(sent: sent, skipped: skipped, failed: failed);
+  }
+
+  void _selectSession(String? id) {
+    final sync = _inputSync.value;
+    if (sync != null && !sync.targets.containsKey(id)) _inputSync.value = null;
+    activeSessionId.value = id;
+  }
+
+  /// 只将输入排入指定终端，不代表远端命令已执行成功。
+  bool sendCommandToSession(String id, String command) {
+    final terminal = _commandTerminal(id);
+    if (terminal == null || command.trim().isEmpty) return false;
+    final text = command.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+    // 一次写入包含粘贴和最终回车，避免异步通道拆包导致回车先到达。
+    final input = terminal.bracketedPasteMode
+        ? '\x1b[200~$text\x1b[201~\r'
+        : '${text.replaceAll('\n', '\r')}${text.endsWith('\n') ? '' : '\r'}';
+    try {
+      terminal.textInput(input);
+      return true;
+    } on Object {
+      return false;
+    }
+  }
+
+  /// 去除末尾换行；仅在远端启用括号粘贴时填入带内部换行的文本。
+  TerminalInsertResult insertTextToSession(String sessionId, String text) {
+    final terminal = _commandTerminal(sessionId);
+    if (terminal == null) return TerminalInsertResult.unavailable;
+    final cleaned = text
+        .replaceAll('\r\n', '\n')
+        .replaceAll('\r', '\n')
+        .replaceFirst(RegExp(r'\n+$'), '');
+    // 拒绝擦除、提交或提前退出括号粘贴的控制字符。
+    if (cleaned.trim().isEmpty ||
+        RegExp(r'[\x00-\x08\x0b-\x1f\x7f-\x9f]').hasMatch(cleaned)) {
+      return TerminalInsertResult.invalidText;
+    }
+    if (cleaned.contains('\n') && !terminal.bracketedPasteMode) {
+      return TerminalInsertResult.requiresBracketedPaste;
+    }
+    try {
+      terminal.paste(cleaned);
+      return TerminalInsertResult.inserted;
+    } on Object {
+      return TerminalInsertResult.unavailable;
+    }
   }
 
   /// 为 [host] 打开一个新会话标签并发起连接。返回会话 id。
@@ -289,7 +400,37 @@ class SessionController extends GetxController {
     SshCredentials credentials, {
     SessionKind kind = SessionKind.terminal,
     SshGateway? gateway,
-  }) => _openSession(host, credentials, kind: kind, gateway: gateway);
+    bool temporary = false,
+  }) => _openSession(
+    host,
+    credentials,
+    kind: kind,
+    gateway: gateway,
+    temporary: temporary,
+  );
+
+  /// 复制仍有会话凭据的连接，在独立标签中建立新的连接。
+  Future<String?> duplicateSession(String id) async {
+    final session = _find(id);
+    final runtime = _runtimes[id];
+    final credentials = runtime?.credentials;
+    if (_disposed ||
+        session == null ||
+        (session.kind != SessionKind.terminal &&
+            session.kind != SessionKind.remoteDesktop) ||
+        (session.phase != SessionPhase.ready &&
+            session.phase != SessionPhase.closed) ||
+        credentials == null) {
+      return null;
+    }
+    return open(
+      session.host,
+      credentials,
+      kind: session.kind,
+      gateway: runtime?.gateway,
+      temporary: runtime?.temporary ?? false,
+    );
+  }
 
   Future<String> _openSession(
     Host host,
@@ -298,7 +439,9 @@ class SessionController extends GetxController {
     SshGateway? gateway,
     String? splitFrom,
     SessionSplitAxis splitAxis = SessionSplitAxis.horizontal,
+    bool splitBefore = false,
     DockerTerminalTarget? dockerTarget,
+    bool temporary = false,
   }) async {
     if (kind == SessionKind.portForward || kind == SessionKind.dynamicProxy) {
       throw ArgumentError('请通过端口转发页签手动启动');
@@ -313,7 +456,7 @@ class SessionController extends GetxController {
       kind = SessionKind.remoteDesktop;
     }
     final id = 'ssn-${_nextId++}';
-    _runtimes[id] = _SessionRuntime();
+    _runtimes[id] = _SessionRuntime(temporary: temporary);
     final session = Session(
       id: id,
       host: host,
@@ -323,16 +466,22 @@ class SessionController extends GetxController {
     );
     final targetTab = tabForSession(splitFrom);
     if (targetTab != null) {
-      _tabState.split(targetTab, splitFrom!, id, splitAxis);
+      _tabState.split(
+        targetTab,
+        splitFrom!,
+        id,
+        splitAxis,
+        before: splitBefore,
+      );
       final index = sessions.indexWhere((item) => item.id == splitFrom);
-      sessions.insert(index + 1, session);
+      sessions.insert(splitBefore ? index : index + 1, session);
     } else {
       sessions.add(session);
     }
-    if (kind != SessionKind.containerTerminal) {
+    if (!temporary && kind != SessionKind.containerTerminal) {
       _recordRecentHost(host.id);
     }
-    activeSessionId.value = id;
+    _selectSession(id);
     _runtimes[id]?.credentials = credentials;
     if (gateway != null) _runtimes[id]?.gateway = gateway;
 
@@ -360,7 +509,7 @@ class SessionController extends GetxController {
         phase: SessionPhase.closed,
       ),
     );
-    activeSessionId.value = id;
+    _selectSession(id);
     return id;
   }
 
@@ -426,7 +575,7 @@ class SessionController extends GetxController {
         phase: SessionPhase.closed,
       ),
     );
-    activeSessionId.value = id;
+    _selectSession(id);
     return id;
   }
 
@@ -664,8 +813,42 @@ class SessionController extends GetxController {
     }
   }
 
-  /// 认证失败后先重新输入密码；其他失败沿用当前会话凭据。
-  Future<void> retry(String id) async {
+  bool canRetry(String id) {
+    final session = _find(id);
+    if (_disposed ||
+        session == null ||
+        session.kind == SessionKind.portForward ||
+        session.kind == SessionKind.dynamicProxy ||
+        _runtimes[id]?.credentials == null) {
+      return false;
+    }
+    if (session.kind == SessionKind.fileTransfer &&
+        session.engineSession != null) {
+      return !session.phase.isBusy;
+    }
+    return session.phase == SessionPhase.failed ||
+        session.phase == SessionPhase.closed;
+  }
+
+  bool canReconnect(String id) {
+    if (canRetry(id)) return true;
+    final session = _find(id);
+    return !_disposed &&
+        session != null &&
+        session.phase == SessionPhase.ready &&
+        (session.kind.isInteractiveTerminal ||
+            session.kind == SessionKind.remoteDesktop) &&
+        _runtimes[id]?.credentials != null;
+  }
+
+  /// 认证失败后先重新输入密码；其他失败或已断开会话沿用当前会话凭据。
+  Future<void> retry(String id) => _reconnect(id, allowReady: false);
+
+  /// 在原标签和窗格中重新连接，允许用户主动替换仍存活的连接。
+  Future<void> reconnect(String id) => _reconnect(id, allowReady: true);
+
+  Future<void> _reconnect(String id, {required bool allowReady}) async {
+    if (!(allowReady ? canReconnect(id) : canRetry(id))) return;
     final session = _find(id);
     if (session?.kind == SessionKind.fileTransfer &&
         session?.engineSession != null) {
@@ -677,13 +860,7 @@ class SessionController extends GetxController {
       return;
     }
     final credentials = _runtimes[id]?.credentials;
-    if (session == null ||
-        session.kind == SessionKind.portForward ||
-        session.kind == SessionKind.dynamicProxy ||
-        session.phase != SessionPhase.failed ||
-        credentials == null) {
-      return;
-    }
+    if (session == null || credentials == null) return;
     _update(
       id,
       (s) => Session(
@@ -694,7 +871,12 @@ class SessionController extends GetxController {
         dockerTarget: s.dockerTarget,
       ),
     );
-    await _runtimes[id]?.shellCleanup;
+    if (session.phase == SessionPhase.closed ||
+        session.phase == SessionPhase.ready) {
+      await _releaseResources(session);
+    } else {
+      await _runtimes[id]?.shellCleanup;
+    }
     if (_disposed || _find(id) == null) return;
     await _connect(
       id,
@@ -1199,11 +1381,29 @@ class SessionController extends GetxController {
     decision.complete(trust && (review.presented.isRdp || !review.hasChanged));
   }
 
-  /// 远端 shell 结束（exit / 断网）时自动关闭该标签。
+  /// SSH 输出结束时断开传输通道，保留终端内容供查看和重连。
   void _onShellEnded(String id) {
     final session = _find(id);
     if (session == null || session.phase != SessionPhase.ready) return;
-    unawaited(close(id));
+    if (session.kind == SessionKind.containerTerminal) {
+      unawaited(close(id));
+      return;
+    }
+    final terminal = session.terminal;
+    terminal?.onOutput = null;
+    terminal?.onResize = null;
+    _releaseEndedShell(session, keepTerminal: true);
+    _update(
+      id,
+      (s) => Session(
+        id: s.id,
+        host: s.host,
+        kind: s.kind,
+        loginUsername: s.loginUsername,
+        terminal: terminal,
+        phase: SessionPhase.closed,
+      ),
+    );
   }
 
   void _onDockerShellFailed(String id, Terminal terminal, Object error) {
@@ -1221,7 +1421,15 @@ class SessionController extends GetxController {
         error: _displayFailure(error, '无法打开容器终端，请重试'),
       ),
     );
-    final cleanup = _releaseResources(session).catchError((Object _) {});
+    _releaseEndedShell(session);
+  }
+
+  void _releaseEndedShell(Session session, {bool keepTerminal = false}) {
+    final id = session.id;
+    final cleanup = _releaseResources(
+      session,
+      keepTerminal: keepTerminal,
+    ).catchError((Object _) {});
     _runtimes[id]?.shellCleanup = cleanup;
     unawaited(
       cleanup.whenComplete(() {
@@ -1256,7 +1464,7 @@ class SessionController extends GetxController {
   void activate(String id) {
     if (_find(id) == null) return;
     _tabState.activate(id);
-    activeSessionId.value = id;
+    _selectSession(id);
   }
 
   void activateTab(String id) {
@@ -1482,25 +1690,33 @@ class SessionController extends GetxController {
     final tab = tabForSession(id)!;
     final tabIndex = tabs.indexWhere((item) => item.id == tab.id);
 
-    // 先同步移除标签：UI 即时响应，且天然去重——点击 ✕ 与断线自动关闭
-    // 并发触发时，后到者查不到会话直接返回。绝不能在 await 之后再用
+    // 先同步移除标签：并发关闭时，后到者查不到会话直接返回。
+    // 绝不能在 await 之后再用
     // 事先算好的 index 访问列表：挂起期间列表可能已被其他关闭操作改动。
+    if (_inputSync.value?.targets.containsKey(id) == true) {
+      _inputSync.value = null;
+    }
     _tabState.remove(id);
     sessions.removeAt(index);
     if (activeSessionId.value == id) {
       final remaining = tabs;
       final sameTab = tabById(tab.id);
-      activeSessionId.value =
-          sameTab?.selectedSessionId ??
-          (remaining.isEmpty
-              ? null
-              : remaining[tabIndex.clamp(0, remaining.length - 1)]
-                    .selectedSessionId);
+      _selectSession(
+        sameTab?.selectedSessionId ??
+            (remaining.isEmpty
+                ? null
+                : remaining[tabIndex.clamp(0, remaining.length - 1)]
+                      .selectedSessionId),
+      );
     }
     _runtimes[id]?.cancelPending();
-    final statusClose = tabById(tab.id) == null
-        ? _serverStatusConnections.remove(tab.id)?.close()
-        : null;
+    final stillMonitored =
+        tabById(tab.id)?.sessionIds
+            .any((id) => _find(id)?.host.id == session.host.id) ??
+        false;
+    final statusClose = stillMonitored
+        ? null
+        : _serverStatusConnections.remove((tab.id, session.host.id))?.close();
 
     try {
       if (session.kind == SessionKind.portForward) {
@@ -1527,7 +1743,12 @@ class SessionController extends GetxController {
     }
   }
 
-  Future<void> _releaseResources(Session session) async {
+  Future<void> _releaseResources(
+    Session session, {
+    bool keepTerminal = false,
+  }) async {
+    final terminal = session.terminal;
+    if (!keepTerminal) terminal?.dispose();
     final shellCleanup = _runtimes[session.id]?.shellCleanup;
     if (shellCleanup != null) {
       await shellCleanup;
@@ -1542,8 +1763,6 @@ class SessionController extends GetxController {
     // 同时断开连接，再一起等待，避免取消与断开互相等待。
     final outputCancellation = _runtimes[session.id]
         ?.cancelOutputSubscription();
-    final terminal = session.terminal;
-    terminal?.dispose();
     final forwardCancellation = _runtimes[session.id]
         ?.cancelForwardSubscription();
     await Future.wait([
@@ -1653,6 +1872,11 @@ class SessionController extends GetxController {
     // 内容不变时不写回：RxList 的下标赋值总会通知全部监听者，
     // 端口转发错误等高频事件会让所有标签与工作区跟着重建。
     if (_sameSnapshot(current, next)) return;
+    final syncedTerminal = _inputSync.value?.targets[id];
+    if (syncedTerminal != null &&
+        (!_canSendCommand(next) || !identical(syncedTerminal, next.terminal))) {
+      _inputSync.value = null;
+    }
     sessions[index] = next;
   }
 
@@ -1665,12 +1889,4 @@ class SessionController extends GetxController {
           identical(a.proxySession, b.proxySession) &&
           identical(a.desktopSession, b.desktopSession) &&
           identical(a.terminal, b.terminal));
-}
-
-class BatchCommandResult {
-  const BatchCommandResult({this.sent = 0, this.skipped = 0, this.failed = 0});
-
-  final int sent;
-  final int skipped;
-  final int failed;
 }

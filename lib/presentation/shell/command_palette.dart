@@ -1,16 +1,20 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
+import '../../application/ai/ai_settings_controller.dart';
 import '../../application/hosts/host_controller.dart';
 import '../../application/session/session.dart';
 import '../../application/session/session_controller.dart';
 import '../../application/session/session_layout.dart';
 import '../../application/settings/settings_controller.dart';
 import '../../domain/entities/host.dart';
+import '../../domain/ssh/ssh_endpoint.dart';
+import '../ai/agent_workspace.dart';
 import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
 import '../components/app_list_row.dart';
@@ -20,7 +24,7 @@ import '../settings/settings_dialog.dart';
 import '../theme/app_theme.dart';
 import 'connect_flow.dart';
 
-/// 命令面板（⌘K / Ctrl+K）：模糊搜服务、切换已打开标签、快捷执行多动作。
+/// 命令面板（⌘K / Ctrl+Shift+K）：多词模糊搜服务、切换已打开标签、快捷执行工作区操作。
 Future<void> showCommandPalette(BuildContext context) {
   return AppNavigation.dialog<void>(
     const _CommandPalette(),
@@ -28,8 +32,12 @@ Future<void> showCommandPalette(BuildContext context) {
   );
 }
 
+enum _PaletteSection { hosts, tabs, actions }
+
 sealed class _PaletteEntry {
   const _PaletteEntry();
+
+  _PaletteSection get section;
 }
 
 final class _HostPaletteEntry extends _PaletteEntry {
@@ -42,6 +50,9 @@ final class _HostPaletteEntry extends _PaletteEntry {
   final Host host;
   final bool isRecent;
   final bool isConnected;
+
+  @override
+  _PaletteSection get section => _PaletteSection.hosts;
 }
 
 final class _TabPaletteEntry extends _PaletteEntry {
@@ -49,6 +60,9 @@ final class _TabPaletteEntry extends _PaletteEntry {
 
   final SessionTab tab;
   final Session session;
+
+  @override
+  _PaletteSection get section => _PaletteSection.tabs;
 
   String get kindLabel => switch (session.kind) {
     SessionKind.terminal => '终端'.tr,
@@ -65,13 +79,18 @@ final class _ActionPaletteEntry extends _PaletteEntry {
     required this.id,
     required this.icon,
     required this.title,
+    required this.keywords,
     required this.onRun,
   });
 
   final String id;
   final AppIcons icon;
   final String title;
+  final String keywords;
   final void Function(BuildContext workspaceContext) onRun;
+
+  @override
+  _PaletteSection get section => _PaletteSection.actions;
 }
 
 class _CommandPalette extends StatefulWidget {
@@ -82,8 +101,17 @@ class _CommandPalette extends StatefulWidget {
 }
 
 class _CommandPaletteState extends State<_CommandPalette> {
+  final _scroll = ScrollController();
   String _query = '';
   int _selected = 0;
+  bool _keyboardScrolling = false;
+  bool _movingUp = false;
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
 
   List<Host> _orderedHosts(
     List<Host> sorted,
@@ -119,13 +147,25 @@ class _CommandPaletteState extends State<_CommandPalette> {
     List<SessionTab> tabs,
     Map<String, Session> sessionsById,
     Set<String> connectedHostIds,
+    SessionController? sessionController,
+    SettingsController? settingsController,
   ) {
-    final q = _query.trim().toLowerCase();
+    final tokens = _query
+        .trim()
+        .toLowerCase()
+        .split(RegExp(r'\s+'))
+        .where((token) => token.isNotEmpty)
+        .toList();
+    bool matches(String haystack) =>
+        tokens.isEmpty || tokens.every(haystack.contains);
+
     final ordered = _orderedHosts(allHosts, recentIds, connectedHostIds);
     final entries = <_PaletteEntry>[];
 
     for (final host in ordered) {
-      if (q.isEmpty || host.searchText.contains(q)) {
+      final target = '${host.searchText} ${host.port} ${host.note}'
+          .toLowerCase();
+      if (matches(target)) {
         entries.add(
           _HostPaletteEntry(
             host: host,
@@ -143,33 +183,89 @@ class _CommandPaletteState extends State<_CommandPalette> {
       final searchTarget =
           '${session.title} ${session.address} ${tabEntry.kindLabel}'
               .toLowerCase();
-      if (q.isEmpty || searchTarget.contains(q)) {
+      if (matches(searchTarget)) {
         entries.add(tabEntry);
       }
     }
 
-    if (q.isNotEmpty) {
-      final actions = [
+    final includeActions =
+        tokens.isNotEmpty || allHosts.isNotEmpty || tabs.isNotEmpty;
+    if (includeActions) {
+      final actions = <_ActionPaletteEntry>[
+        if (settingsController != null)
+          _ActionPaletteEntry(
+            id: 'toggle-sidebar',
+            icon: AppIcons.panelLeftOpen,
+            title: '切换侧边栏'.tr,
+            keywords: 'sidebar panel left 侧边栏 收起 展开',
+            onRun: (_) => unawaited(
+              settingsController
+                  .setSidebarVisible(!settingsController.sidebarVisible.value)
+                  .catchError((Object _) {}),
+            ),
+          ),
+        if (Get.isRegistered<AiSettingsController>())
+          _ActionPaletteEntry(
+            id: 'toggle-agent',
+            icon: AppIcons.bot,
+            title: '切换 AI Agent'.tr,
+            keywords: 'ai agent assistant 助手 面板',
+            onRun: (_) => toggleAgentPanel(),
+          ),
         _ActionPaletteEntry(
           id: 'new-service',
           icon: AppIcons.plus,
           title: '新建服务'.tr,
+          keywords: 'new service host server 新建 添加 服务 主机',
           onRun: (ctx) => unawaited(showHostEditDialog(ctx)),
         ),
         _ActionPaletteEntry(
           id: 'open-settings',
           icon: AppIcons.settings,
           title: '打开设置'.tr,
+          keywords: 'settings preferences config 设置 偏好',
           onRun: (_) => unawaited(showSettingsDialog()),
         ),
       ];
       for (final action in actions) {
-        if (action.title.toLowerCase().contains(q)) {
+        final target = '${action.title} ${action.keywords}'.toLowerCase();
+        if (matches(target)) {
           entries.add(action);
         }
       }
     }
 
+    final endpoint = parseSshEndpoint(_query);
+    if (sessionController != null && endpoint != null) {
+      final username = endpoint.username ?? ServiceType.ssh.defaultUsername;
+      final port = endpoint.port ?? ServiceType.ssh.defaultPort;
+      final hostname = endpoint.hostname;
+      final address = hostname.contains(':') ? '[$hostname]' : hostname;
+      entries.add(
+        _ActionPaletteEntry(
+          id: 'temporary-ssh',
+          icon: AppIcons.terminal,
+          title: '临时连接 @address'.trParams({
+            'address': '$username@$address:$port',
+          }),
+          keywords: '',
+          onRun: (context) => unawaited(
+            connectToHost(
+              context,
+              Host(
+                id: 'temporary-${DateTime.now().microsecondsSinceEpoch}',
+                name: hostname,
+                hostname: hostname,
+                username: username,
+                port: port,
+              ),
+              temporary: true,
+              forceNew: true,
+            ),
+          ),
+        ),
+      );
+    }
     return entries;
   }
 
@@ -221,15 +317,14 @@ class _CommandPaletteState extends State<_CommandPalette> {
     }
     switch (event.logicalKey) {
       case LogicalKeyboardKey.arrowDown:
-        setState(
-          () => _selected =
-              (_selected + 1) % (entries.isEmpty ? 1 : entries.length),
-        );
-        return KeyEventResult.handled;
       case LogicalKeyboardKey.arrowUp:
+        if (entries.isEmpty) return KeyEventResult.handled;
         setState(() {
-          final len = entries.isEmpty ? 1 : entries.length;
-          _selected = (_selected - 1 + len) % len;
+          final current = _selected.clamp(0, entries.length - 1);
+          final step = event.logicalKey == LogicalKeyboardKey.arrowUp ? -1 : 1;
+          _selected = (current + step) % entries.length;
+          _keyboardScrolling = true;
+          _movingUp = _selected < current;
         });
         return KeyEventResult.handled;
       case LogicalKeyboardKey.enter:
@@ -249,12 +344,22 @@ class _CommandPaletteState extends State<_CommandPalette> {
     }
   }
 
+  String _sectionTitle(_PaletteSection section) => switch (section) {
+    _PaletteSection.hosts => '最近与服务'.tr,
+    _PaletteSection.tabs => '已打开标签'.tr,
+    _PaletteSection.actions => '工作区操作'.tr,
+  };
+
   @override
   Widget build(BuildContext context) {
     final controller = Get.find<HostController>();
     final theme = shadcn.Theme.of(context);
     final colors = theme.colorScheme;
     final isMac = theme.platform == TargetPlatform.macOS;
+    final listMaxHeight = math.min(
+      360.0,
+      math.max(180.0, MediaQuery.sizeOf(context).height - 240),
+    );
 
     return Padding(
       padding: const EdgeInsets.all(24),
@@ -289,8 +394,68 @@ class _CommandPaletteState extends State<_CommandPalette> {
               tabs,
               sessionsById,
               connectedHostIds,
+              sessionController,
+              settingsController,
             );
             final hasHostEntries = entries.any((e) => e is _HostPaletteEntry);
+            final activeIndex = entries.isEmpty
+                ? 0
+                : _selected.clamp(0, entries.length - 1);
+
+            final listChildren = <Widget>[];
+            _PaletteSection? lastSection;
+            for (var index = 0; index < entries.length; index++) {
+              final entry = entries[index];
+              if (entry.section != lastSection) {
+                if (lastSection != null) {
+                  listChildren.add(const SizedBox(height: 8));
+                }
+                lastSection = entry.section;
+                listChildren.add(
+                  Padding(
+                    key: ValueKey('palette-section-${entry.section.name}'),
+                    padding: const EdgeInsets.fromLTRB(6, 2, 6, 4),
+                    child: Text(
+                      _sectionTitle(entry.section),
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: colors.mutedForeground,
+                      ),
+                    ),
+                  ),
+                );
+              } else {
+                listChildren.add(
+                  const SizedBox(height: AppTheme.commandPaletteItemGap),
+                );
+              }
+              final selected = index == activeIndex;
+              listChildren.add(
+                _PaletteRowHost(
+                  selected: selected,
+                  ensureVisible: _keyboardScrolling,
+                  movingUp: _movingUp,
+                  onHover: () {
+                    if (_selected != index) {
+                      setState(() {
+                        _keyboardScrolling = false;
+                        _selected = index;
+                      });
+                    }
+                  },
+                  child: _buildRow(
+                    context,
+                    entry,
+                    selected: selected,
+                    onTap: () {
+                      _selected = index;
+                      _confirm(entries, allHosts);
+                    },
+                  ),
+                ),
+              );
+            }
 
             return SizedBox(
               width: 520,
@@ -302,10 +467,15 @@ class _CommandPaletteState extends State<_CommandPalette> {
                         _onKey(node, event, entries, allHosts),
                     child: shadcn.TextField(
                       autofocus: true,
-                      onChanged: (v) => setState(() {
-                        _query = v;
-                        _selected = 0;
-                      }),
+                      onChanged: (v) {
+                        if (_scroll.hasClients) _scroll.jumpTo(0);
+                        setState(() {
+                          _query = v;
+                          _selected = 0;
+                          _keyboardScrolling = true;
+                          _movingUp = true;
+                        });
+                      },
                       hintText: '输入服务名称 / 地址，回车连接…'.tr,
                       placeholder: Text('输入服务名称 / 地址，回车连接…'.tr),
                       border: Border.all(color: shadcn.Colors.transparent),
@@ -332,29 +502,18 @@ class _CommandPaletteState extends State<_CommandPalette> {
                     )
                   else
                     ConstrainedBox(
-                      constraints: const BoxConstraints(maxHeight: 280),
-                      child: ListView.separated(
-                        shrinkWrap: true,
+                      constraints: BoxConstraints(maxHeight: listMaxHeight),
+                      child: SingleChildScrollView(
+                        key: const ValueKey('command-palette-list'),
+                        controller: _scroll,
                         padding: const EdgeInsets.symmetric(
                           vertical: AppTheme.commandPaletteSectionGap,
                         ),
-                        itemCount: entries.length,
-                        separatorBuilder: (context, index) => const SizedBox(
-                          height: AppTheme.commandPaletteItemGap,
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: listChildren,
                         ),
-                        itemBuilder: (context, index) {
-                          final entry = entries[index];
-                          final selected = index == _selected;
-                          return _buildRow(
-                            context,
-                            entry,
-                            selected: selected,
-                            onTap: () {
-                              _selected = index;
-                              _confirm(entries, allHosts);
-                            },
-                          );
-                        },
                       ),
                     ),
                   if (hasHostEntries) ...[
@@ -583,4 +742,57 @@ class _CommandPaletteState extends State<_CommandPalette> {
         );
     }
   }
+}
+
+class _PaletteRowHost extends StatefulWidget {
+  const _PaletteRowHost({
+    required this.selected,
+    required this.ensureVisible,
+    required this.movingUp,
+    required this.onHover,
+    required this.child,
+  });
+
+  final bool selected;
+  final bool ensureVisible;
+  final bool movingUp;
+  final VoidCallback onHover;
+  final Widget child;
+
+  @override
+  State<_PaletteRowHost> createState() => _PaletteRowHostState();
+}
+
+class _PaletteRowHostState extends State<_PaletteRowHost> {
+  @override
+  void initState() {
+    super.initState();
+    _revealIfSelected();
+  }
+
+  @override
+  void didUpdateWidget(covariant _PaletteRowHost oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!oldWidget.selected || !oldWidget.ensureVisible) _revealIfSelected();
+  }
+
+  void _revealIfSelected() {
+    if (!widget.selected || !widget.ensureVisible) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !widget.selected || !widget.ensureVisible) return;
+      unawaited(
+        Scrollable.ensureVisible(
+          context,
+          alignmentPolicy: widget.movingUp
+              ? ScrollPositionAlignmentPolicy.keepVisibleAtStart
+              : ScrollPositionAlignmentPolicy.keepVisibleAtEnd,
+        ),
+      );
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) =>
+      // 键盘滚动时，静止指针下的行会变；只有实际移动才切换到鼠标选中。
+      MouseRegion(onHover: (_) => widget.onHover(), child: widget.child);
 }

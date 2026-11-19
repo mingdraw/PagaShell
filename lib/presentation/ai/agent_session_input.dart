@@ -110,7 +110,8 @@ class AgentSessionInput extends StatefulWidget {
     required this.agent,
     required this.controller,
     required this.focusNode,
-    required this.footer,
+    required this.modeControls,
+    required this.sendButton,
     required this.onSend,
     super.key,
   });
@@ -118,7 +119,8 @@ class AgentSessionInput extends StatefulWidget {
   final AgentController agent;
   final AgentInputController controller;
   final FocusNode focusNode;
-  final Widget footer;
+  final Widget modeControls;
+  final Widget sendButton;
   final VoidCallback onSend;
 
   @override
@@ -476,7 +478,9 @@ class _AgentSessionInputState extends State<AgentSessionInput> {
         ];
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!mounted || revision != _revision) return;
-          _highlight.value = -1;
+          _highlight.value = groups.any((group) => group.options.isNotEmpty)
+              ? 0
+              : -1;
           _groups.value = groups;
           _syncPopover();
         });
@@ -517,19 +521,34 @@ class _AgentSessionInputState extends State<AgentSessionInput> {
             smartPunctuation: false,
             decoration: AppInputDecoration(
               hintText: '输入消息，@ 选择会话…'.tr,
-              footer: Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  AppIconButton.text(
-                    key: const ValueKey('agent-add-context'),
-                    density: shadcn.ButtonDensity.compact,
-                    semanticLabel: '添加上下文'.tr,
-                    icon: const AppIcon(AppIcons.plus, size: 16),
-                    onPressed: _composing(value) ? null : _openMentions,
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(child: widget.footer),
-                ],
+              footer: Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Row(
+                          children: [
+                            AppIconButton.text(
+                              key: const ValueKey('agent-add-context'),
+                              density: shadcn.ButtonDensity.compact,
+                              semanticLabel: '添加上下文'.tr,
+                              icon: const AppIcon(AppIcons.plus, size: 16),
+                              onPressed: _composing(value)
+                                  ? null
+                                  : _openMentions,
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(child: widget.modeControls),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    widget.sendButton,
+                  ],
+                ),
               ),
             ),
           ),

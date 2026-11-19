@@ -27,7 +27,9 @@ Agent 只使用设置中的默认模型 ID，在标题旁显示该 ID；面板�
 
 没有用户可配的输出上限，存量 `maxTokens` 字段读取时忽略，下次保存不再写入。OpenAI 两种格式均省略输出 Token 上限参数；Anthropic Messages 要求 `max_tokens`，自动使用模型目录返回的正整数最大值，未缓存时先从 `GET /v1/models/{model_id}` 读取，再尝试列表。该能力信息只在运行内存缓存；第三方兼容服务未提供能力时省略参数，允许采用服务端默认值。若该服务同时强制要求 `max_tokens`，会明确提示模型接口缺少能力信息，不使用固定 4096 截断。模型与服务商自身的长度限制仍然有效。
 
-当前采用完整 JSON 响应，尚未实现 SSE 流式输出；第三方 API 必须支持对应文本和工具调用格式。每轮最多 6 次模型请求，每次最多 8 个工具调用。后续请求保留最近 12 个用户轮次、约 60000 字符以内的历史，移除完整早期轮次时保留工具调用配对并在界面提示，当前可见聊天保留。Responses 原始 output 和加密 reasoning 计入历史大小；仅对同一接口、模型和密钥引用回放，切换模型或 Key 时使用通用聊天与工具表示。Anthropic 原始 content（包括 thinking、signature、redacted_thinking 与 tool_use 的顺序）在同一范围完整回传，不展示到聊天；接口、模型、Key、系统上下文、强度改变或历史裁剪后回退为通用文本和工具表示，避免误用思考签名。错误提示丢弃服务端原文，不回显请求头、API Key 或异常中的密文。
+三种协议的聊天请求都支持 SSE，收到文字即增量显示。兼容接口可直接返回完整 JSON，明确拒绝流式请求时会以普通 JSON 重试。工具调用在收到完整回复、校验参数后开始；流中断时保留已显示的文字。服务商返回的思考文本或摘要可在「思考与工具调用」中展开；工具记录显示目标、耗时及输出字数，签名、加密数据和原始工具输出不在此处展示。
+
+每轮最多 6 次模型请求，每次最多 8 个工具调用。后续请求保留最近 12 个用户轮次、约 60000 字符以内的历史，移除完整早期轮次时保留工具调用配对并在界面提示，当前可见聊天保留。Responses 原始 output 和加密 reasoning 计入历史大小；仅对同一接口、模型和密钥引用回放，切换模型或 Key 时使用通用聊天与工具表示。Anthropic 原始 content（包括 thinking、signature、redacted_thinking 与 tool_use 的顺序）在同一范围完整回传；接口、模型、Key、系统上下文、强度改变或历史裁剪后回退为通用文本和工具表示，避免误用思考签名。错误提示丢弃服务端原文，不回显请求头、API Key 或异常中的密文。
 
 参考 [OpenAI Chat Completions](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)、[OpenAI 思考参数](https://developers.openai.com/api/docs/guides/reasoning)、[Responses 迁移与无状态工具往返](https://developers.openai.com/api/docs/guides/migrate-to-responses)、[Anthropic effort](https://platform.claude.com/docs/en/build-with-claude/effort)、[思考与工具往返](https://platform.claude.com/docs/en/build-with-claude/thinking-tool-workflows) 与 [Anthropic 模型能力](https://platform.claude.com/docs/en/api/models/list)。
 
@@ -43,13 +45,15 @@ Enter 直接发送消息，Shift+Enter 在光标或选区插入换行；保留 C
 
 每条消息在提交时固定文本、引用标签、会话连接、模型配置与密钥引用、思考强度和审核模式。排队期间仍可编辑下一条草稿、选择会话及修改模式，已提交的请求不随之变化；改为完全访问也不会自动批准之前的命令。轮到执行时重新校验原连接并读取最新终端输出；排队会话已关闭或同 ID 重连时该条失败，需重新选择后发送。
 
+消息列表仅在滚到底部时跟随新输出。浏览历史时，发送、重试及持续输出都保留当前阅读位置；滚到底部或点击「回到底部」可恢复跟随。
+
 引用会话后发送白名单元数据（会话 ID、引用名称、hostname、port、协议、页签、连接状态、是否经网关），并分别从各 SSH 会话的 paga_terminal 当前屏幕镜像和近期回滚读取输出；每个会话默认最近 120 行，工具最多 200 行、16000 字符。`read_terminal_output` 可重新读取，或最多等候 5 秒获取新输出，不注入任何探测命令，也不重复订阅 SSH 输出流。切入 alternate screen 时读取当前屏幕。输出作为不可信数据处理，可能包含后台活动或用户自行显示的内容；仅引用的会话输出会发送到配置的 API。不读取凭据保险库中的密码、私钥、主机备注或 RDP 图像。SSH 状态通过现有只读状态通道采集；单次 Linux CPU 无百分比，不能解释成 0%。已发送的上下文仍在当前对话中，点击新对话后不再用于新的请求，旧记录保留在历史管理中。
 
 思考强度旁提供「请求批准 / 完全访问」。`propose_ssh_command` 在默认「请求批准」下暂停工具循环，用户审阅固定目标、命令和用途，确认后才发送命令及回车，拒绝结果也返回模型；「完全访问」直接发送到指定引用的 SSH 终端。读取与命令工具用 `session_id` 指定本轮引用集合中的一个会话，多引用时省略目标会拒绝操作，单引用时可省略；命令不广播到所有引用。两种模式发送前均重新验证原会话、终端及引擎身份，已关闭、重连、停止、已发送或已拒绝的请求不能发送。引用集合以外的目标 ID 不能操作。
 
 发送输入前开始观察终端变化，输出安静 600ms 或观察达到 8 秒后将近期输出返回模型继续分析；超时无新输出也明确记录，不自动重复发送。输出变化、安静或超时均不证明命令完成或成功，长任务可由读取工具继续观察。停止、清空或原会话失效会解除批准/输出等待并丢弃迟到回复，不撤销已排入终端的输入。RDP 仅提供上下文、建议和复制，不执行 PowerShell 或发送键鼠。
 
-停止、新建、切换或删除当前对话、退出以及正在运行的目标会话失效，都会取消当前消息及全部待执行消息，使运行代次失效；迟到响应不追加消息或调用工具。当前 GetConnect 不提供逐请求取消句柄，已发出的请求可能仍在服务商运行。
+停止、新建、切换或删除当前对话、退出以及正在运行的目标会话失效，都会取消当前消息及全部待执行消息，使运行代次失效；迟到响应不追加消息或调用工具。已打开的 SSE 响应会停止读取；已发出的请求可能仍在服务商运行。
 
 ## 历史对话
 
@@ -65,7 +69,7 @@ Enter 直接发送消息，Shift+Enter 在光标或选区插入换行；保留 C
 
 ```bash
 flutter analyze --no-pub
-flutter test --no-pub test/application/ai_settings_controller_test.dart test/application/agent_controller_test.dart test/application/agent_queue_test.dart test/infrastructure/agent_http_test.dart test/infrastructure/agent_conversation_repository_test.dart test/agent_input_controller_test.dart test/agent_message_body_test.dart test/agent_ui_test.dart test/theme_mode_test.dart
+flutter test --no-pub test/application/ai_settings_controller_test.dart test/application/agent_controller_test.dart test/application/agent_queue_test.dart test/infrastructure/agent_http_test.dart test/infrastructure/agent_stream_http_test.dart test/infrastructure/agent_conversation_repository_test.dart test/agent_input_controller_test.dart test/agent_message_body_test.dart test/agent_ui_test.dart test/theme_mode_test.dart
 ```
 
 本机 HTTP 契约测试真实经过 GetConnect，覆盖三种协议的模型目录、设置默认模型、思考参数、技能往返及后续聊天。队列控制器与组件测试覆盖三协议连续发送、完整轮次顺序、上下文隔离、每条配置和会话快照、审批等待期间排队、单条失败后继续、取消整队、同步状态通知取消、同 ID 重连、迟到响应隔离及历史恢复不重发。控制器和组件测试还覆盖 `@` 分组 Popover 的独立宽度、会话命名、同名会话引用与目标 ID 映射、输入框内多引用高亮、删改解除关联、整段删除、输入法组词和重连失效、中英文长列表键盘定位、反复开关、模式持久化及保存失败重试、Enter/Shift+Enter 和输入法组词、审核模式切换、目标固定、批准/拒绝/停止、完全访问与输出返回模型、输出限额、重连失效，以及直接设置表单、复用 Key、迟到目录结果、思考签名回传、聊天、折叠保留输入、拖宽、800×600 macOS/Windows/Linux 主题布局及语言切换。历史测试覆盖新建保留、恢复续聊、删除当前和旧对话、保存失败重试、迟到响应隔离、只读命令恢复、数据库关闭重开及密文/密钥异常。它们不代表真实第三方服务商、Windows/Linux 原生运行或真实远程命令执行验收。实际服务商需在设置中提供用户自己的 URL、模型 ID 和 API Key 后测试连接。

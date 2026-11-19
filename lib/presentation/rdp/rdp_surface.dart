@@ -276,9 +276,12 @@ class RdpSurface extends ChangeNotifier {
     compactions++;
   }
 
-  void paint(ui.Canvas canvas) {
+  void paint(
+    ui.Canvas canvas, {
+    FilterQuality filterQuality = FilterQuality.low,
+  }) {
     final paint = ui.Paint()
-      ..filterQuality = FilterQuality.low
+      ..filterQuality = filterQuality
       ..isAntiAlias = false;
     if (_atlases.length == 1) {
       final image = _atlases.single.image;
@@ -320,12 +323,16 @@ class RdpSurface extends ChangeNotifier {
 }
 
 class RdpSurfacePainter extends CustomPainter {
-  RdpSurfacePainter(this.surface) : super(repaint: surface);
+  RdpSurfacePainter(this.surface, {this.filterQuality = FilterQuality.low})
+    : super(repaint: surface);
   final RdpSurface surface;
+  final FilterQuality filterQuality;
 
   @override
-  void paint(Canvas canvas, Size size) => surface.paint(canvas);
+  void paint(Canvas canvas, Size size) =>
+      surface.paint(canvas, filterQuality: filterQuality);
   @override
   bool shouldRepaint(RdpSurfacePainter oldDelegate) =>
-      oldDelegate.surface != surface;
+      oldDelegate.surface != surface ||
+      oldDelegate.filterQuality != filterQuality;
 }

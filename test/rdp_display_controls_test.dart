@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -227,14 +228,13 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('默认自适应窗口合并连续变化，固定模式不跟随窗口且无发送文本入口', (tester) async {
+  testWidgets('默认自适应窗口合并连续变化，固定模式不跟随窗口', (tester) async {
     final session = await _panel(tester);
     expect(
       tester.widget<AppMenuButton<String>>(find.byKey(_menuKey)).selectedValue,
       'auto',
     );
     expect(find.text('自适应窗口'), findsOneWidget);
-    expect(find.text('发送文本'), findsNothing);
     expect(find.text('Ctrl+Alt+Del'), findsOneWidget);
     expect(find.byKey(_enterKey), findsOneWidget);
     expect(session.resizes, isEmpty);
@@ -273,6 +273,117 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('全屏工具栏自动收起，可用顶边唤出并固定', (tester) async {
+    final native = FakeAppWindow();
+    final sessions = await _shell(
+      tester,
+      TargetPlatform.macOS,
+      appWindow: native,
+    );
+    await _desktop(tester, sessions);
+    await tester.tap(find.byKey(_enterKey));
+    await tester.pumpAndSettle();
+    await tester.pump(const Duration(seconds: 2));
+    expect(find.byKey(_exitKey), findsNothing);
+
+    final reveal = find.byKey(const ValueKey('rdp-fullscreen-reveal'));
+    expect(tester.getSize(reveal).height, 4);
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer(location: const Offset(6, 120));
+    await mouse.moveTo(tester.getCenter(reveal));
+    await tester.pump();
+    expect(find.byKey(_exitKey).hitTestable(), findsOneWidget);
+
+    final pin = find.byKey(const ValueKey('rdp-fullscreen-pin'));
+    await mouse.moveTo(tester.getCenter(pin));
+    await tester.tap(pin, kind: PointerDeviceKind.mouse);
+    await mouse.moveTo(const Offset(6, 120));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 3));
+    expect(find.byKey(_exitKey).hitTestable(), findsOneWidget);
+    await tester.tap(find.byKey(_exitKey));
+    await tester.pumpAndSettle();
+    expect(native.fullscreenRequests, [true, false]);
+    await mouse.removePointer();
+    await sessions.closeAll();
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('原尺寸按设备像素显示，双轴滚动后点击仍指向远端像素', (tester) async {
+    final session = await _panel(tester);
+    tester.view.physicalSize = const Size(1000, 700);
+    tester.view.devicePixelRatio = 2;
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('rdp-scale-menu')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+    await tester.tap(find.text('1:1 原尺寸'));
+    await tester.pumpAndSettle();
+
+    final horizontal = tester
+        .widget<SingleChildScrollView>(
+          find.byKey(const ValueKey('rdp-horizontal-scroll')),
+        )
+        .controller!;
+    final vertical = tester
+        .widget<SingleChildScrollView>(
+          find.byKey(const ValueKey('rdp-vertical-scroll')),
+        )
+        .controller!;
+    expect(horizontal.position.maxScrollExtent, 140);
+    expect(vertical.position.maxScrollExtent, greaterThan(75));
+    horizontal.jumpTo(120);
+    vertical.jumpTo(75);
+    await tester.pump();
+    final viewport = tester.getTopLeft(
+      find.byKey(const ValueKey('rdp-horizontal-scroll')),
+    );
+    await tester.tapAt(
+      viewport + const Offset(30, 30),
+      kind: PointerDeviceKind.mouse,
+    );
+    await tester.pump(const Duration(seconds: 1));
+    expect(session.pointers, contains((300, 210, 0x9000, 0)));
+    expect(session.resizes, isEmpty);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await session.close();
+  });
+
+  testWidgets('剪贴板文本可键入，换行文本在明确确认后才发送', (tester) async {
+    final session = await _panel(tester);
+    await _choose(tester, '1280 × 800');
+    var clipboardText = '中文字串';
+    final messenger = tester.binding.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+      return call.method == 'Clipboard.getData'
+          ? {'text': clipboardText}
+          : null;
+    });
+    addTearDown(
+      () => messenger.setMockMethodCallHandler(SystemChannels.platform, null),
+    );
+    final button = find.byKey(const ValueKey('rdp-type-clipboard'));
+    await tester.tap(button);
+    await tester.pumpAndSettle();
+    expect(session.texts, ['中文字串']);
+
+    clipboardText = 'first\r\nsecond\tthird';
+    await tester.tap(button);
+    await tester.pumpAndSettle();
+    expect(session.texts, hasLength(1));
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect(session.texts, hasLength(1));
+
+    await tester.tap(button);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('继续键入'));
+    await tester.pumpAndSettle();
+    expect(session.texts, ['中文字串', 'first\nsecond\tthird']);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await session.close();
+  });
+
   testWidgets('全屏快捷键释放远端修饰键并截获 Enter，Esc 仍发送到远端', (tester) async {
     var toggles = 0;
     final session = await _panel(tester, onToggleFullscreen: () => toggles++);
@@ -304,23 +415,29 @@ void main() {
     testWidgets('$platform 远程桌面聚焦时应用快捷键生效，W 组合键交给远端', (tester) async {
       final sessions = await _shell(tester, platform);
       final desktop = await _desktop(tester, sessions);
-      final modifier = platform == TargetPlatform.macOS
+      final isMac = platform == TargetPlatform.macOS;
+      final modifier = isMac
           ? LogicalKeyboardKey.metaLeft
           : LogicalKeyboardKey.controlLeft;
 
-      Future<void> shortcut(LogicalKeyboardKey key) async {
+      Future<void> shortcut(
+        LogicalKeyboardKey key, {
+        bool shift = false,
+      }) async {
         await tester.tapAt(tester.getCenter(find.byKey(_imageKey)));
         await tester.sendKeyDownEvent(modifier);
+        if (shift) await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
         await tester.sendKeyEvent(key);
+        if (shift) await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
         await tester.sendKeyUpEvent(modifier);
         await tester.pumpAndSettle();
       }
 
-      await shortcut(LogicalKeyboardKey.keyK);
+      await shortcut(LogicalKeyboardKey.keyK, shift: !isMac);
       expect(find.text('输入服务名称 / 地址，回车连接…'), findsWidgets);
       AppNavigation.closeDialog<void>();
       await tester.pumpAndSettle();
-      await shortcut(LogicalKeyboardKey.keyN);
+      await shortcut(LogicalKeyboardKey.keyN, shift: !isMac);
       expect(find.byType(HostEditDialog), findsOneWidget);
       AppNavigation.closeDialog<void>();
       await tester.pumpAndSettle();

@@ -78,9 +78,10 @@ class AgentTurn {
 }
 
 class AgentReply {
-  const AgentReply(this.turn, {this.truncated = false});
+  const AgentReply(this.turn, {this.truncated = false, this.reasoning = ''});
   final AgentTurn turn;
   final bool truncated;
+  final String reasoning;
 }
 
 /// 公开协议的 JSON 映射；HTTP 由注入 GetConnect 的控制器直接发起。
@@ -159,13 +160,14 @@ abstract final class AgentApiCodec {
     AiReasoningEffort effort = AiReasoningEffort.auto,
     AiAvailableModel? capabilities,
     String? anthropicScope,
+    bool stream = false,
   }) {
     if (model.format == AiApiFormat.openaiResponses) {
       return {
         'model': model.model,
         'instructions': system,
         'store': false,
-        'stream': false,
+        'stream': stream,
         if (effort != AiReasoningEffort.auto)
           'reasoning': {'effort': effort.name},
         'include': ['reasoning.encrypted_content'],
@@ -200,7 +202,7 @@ abstract final class AgentApiCodec {
     if (model.format == AiApiFormat.openai) {
       return {
         'model': model.model,
-        'stream': false,
+        'stream': stream,
         if (effort != AiReasoningEffort.auto) 'reasoning_effort': effort.name,
         'messages': [
           {'role': 'system', 'content': system},
@@ -266,7 +268,7 @@ abstract final class AgentApiCodec {
       'system': system,
       'max_tokens': ?anthropicMaxTokens,
       ..._anthropicReasoning(effort, capabilities, anthropicMaxTokens),
-      'stream': false,
+      'stream': stream,
       'messages': messages,
       'tools': [
         for (final tool in tools)
@@ -329,6 +331,7 @@ abstract final class AgentApiCodec {
           (body is String ? jsonDecode(body) : body) as Map<String, dynamic>;
       final calls = <AgentToolCall>[];
       final text = StringBuffer();
+      final reasoning = StringBuffer();
       final output = <Map<String, dynamic>>[];
       final anthropicContent = <Map<String, dynamic>>[];
       var truncated = false;
@@ -365,6 +368,16 @@ abstract final class AgentApiCodec {
               output.add(item);
             case 'reasoning':
               output.add(item);
+              final summary = item['summary'];
+              if (summary is List) {
+                for (final part in summary.whereType<Map<String, dynamic>>()) {
+                  if (part['type'] == 'summary_text' &&
+                      part['text'] is String) {
+                    if (reasoning.isNotEmpty) reasoning.writeln();
+                    reasoning.write(part['text']);
+                  }
+                }
+              }
           }
         }
         truncated =
@@ -375,6 +388,8 @@ abstract final class AgentApiCodec {
         final choice =
             (data['choices'] as List<dynamic>).first as Map<String, dynamic>;
         final message = choice['message'] as Map<String, dynamic>;
+        final thought = message['reasoning_content'] ?? message['reasoning'];
+        if (thought is String) reasoning.write(thought);
         final content = message['content'];
         if (content is String) text.write(content);
         if (content is List) {
@@ -405,6 +420,10 @@ abstract final class AgentApiCodec {
           final block = raw as Map<String, dynamic>;
           anthropicContent.add(block);
           if (block['type'] == 'text') text.write(block['text'] as String);
+          if (block['type'] == 'thinking' && block['thinking'] is String) {
+            if (reasoning.isNotEmpty) reasoning.writeln();
+            reasoning.write(block['thinking']);
+          }
           if (block['type'] == 'tool_use') {
             calls.add(
               AgentToolCall(
@@ -434,6 +453,7 @@ abstract final class AgentApiCodec {
           anthropicScope: anthropicScope,
         ),
         truncated: truncated,
+        reasoning: reasoning.toString(),
       );
     } on Object {
       throw const AgentApiException('AI 响应格式无效，请检查接口协议与模型');

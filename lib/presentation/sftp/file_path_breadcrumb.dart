@@ -14,12 +14,14 @@ class FilePathBreadcrumb extends StatelessWidget {
     required this.path,
     required this.remote,
     required this.onNavigate,
+    this.onTapEmpty,
     super.key,
   });
 
   final String path;
   final bool remote;
   final ValueChanged<String>? onNavigate;
+  final VoidCallback? onTapEmpty;
 
   @override
   Widget build(BuildContext context) {
@@ -143,7 +145,7 @@ class FilePathBreadcrumb extends StatelessWidget {
             ),
           );
 
-          return shadcn.ButtonStyleOverride(
+          final breadcrumb = shadcn.ButtonStyleOverride(
             padding: (_, _, _) =>
                 const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
             child: shadcn.Breadcrumb(
@@ -159,6 +161,26 @@ class FilePathBreadcrumb extends StatelessWidget {
                 ],
               ],
             ),
+          );
+          if (onTapEmpty == null) return breadcrumb;
+          return Stack(
+            alignment: Alignment.centerLeft,
+            children: [
+              Positioned.fill(
+                child: MouseRegion(
+                  cursor: SystemMouseCursors.text,
+                  child: GestureDetector(
+                    key: ValueKey(
+                      'sftp-path-empty-${remote ? 'remote' : 'local'}',
+                    ),
+                    behavior: HitTestBehavior.opaque,
+                    onTap: onTapEmpty,
+                    child: const SizedBox.expand(),
+                  ),
+                ),
+              ),
+              breadcrumb,
+            ],
           );
         },
       ),

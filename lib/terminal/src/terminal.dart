@@ -108,9 +108,12 @@ class Terminal with Observable implements TerminalState {
       : MouseReportMode.normal;
 
   bool get isDisposed => _disposed;
+  int get outputRevision => _outputRevision;
+  int _outputRevision = 0;
 
   void applyFrame(TerminalFrame frame) {
     if (_disposed) return;
+    if (frame.lines.isNotEmpty || frame.trimFront > 0) _outputRevision++;
     _columns = frame.columns;
     _rows = frame.rows;
     _alternate = frame.alternate;

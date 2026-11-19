@@ -3,7 +3,10 @@ use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
 use anyhow::{bail, ensure, Context, Result};
@@ -15,7 +18,7 @@ use hyper::{Method, Request, Response, StatusCode, Uri};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use ipnet::IpNet;
 use serde::Deserialize;
-use tokio::io::{copy_bidirectional, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{copy_bidirectional, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{lookup_host, TcpListener, TcpStream};
 use tokio::sync::{watch, OwnedSemaphorePermit, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
@@ -143,6 +146,63 @@ trait ProxyIo: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> ProxyIo for T {}
 type Stream = Box<dyn ProxyIo>;
 
+#[derive(Default)]
+struct Traffic {
+    sent: AtomicU64,
+    received: AtomicU64,
+}
+
+// Meter the target stream after dialing or tunnelling through the gateway.
+// This includes HTTP framing, but excludes proxy negotiation and gateway overhead.
+struct MeteredStream {
+    io: Stream,
+    traffic: Arc<Traffic>,
+}
+
+impl AsyncRead for MeteredStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let result = Pin::new(&mut self.io).poll_read(cx, buf);
+        if matches!(result, Poll::Ready(Ok(()))) {
+            self.traffic
+                .received
+                .fetch_add((buf.filled().len() - before) as u64, Ordering::Relaxed);
+        }
+        result
+    }
+}
+
+impl AsyncWrite for MeteredStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let result = Pin::new(&mut self.io).poll_write(cx, buf);
+        if let Poll::Ready(Ok(written)) = result {
+            self.traffic
+                .sent
+                .fetch_add(written as u64, Ordering::Relaxed);
+        }
+        result
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.io).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.io).poll_shutdown(cx)
+    }
+}
+
 enum Gateway {
     Ssh(u32),
     Page(PageGateway),
@@ -152,6 +212,7 @@ struct Router {
     mode: Mode,
     rules: Vec<Rule>,
     gateway: Option<Gateway>,
+    traffic: Arc<Traffic>,
 }
 
 impl Router {
@@ -180,7 +241,7 @@ impl Router {
     }
 
     async fn connect(&self, host: &str, port: u16) -> Result<Stream> {
-        timeout(OPEN_TIMEOUT, async {
+        let io = timeout(OPEN_TIMEOUT, async {
             if self.use_gateway(host, port).await? {
                 // A selected gateway failure is never retried using direct access.
                 match self.gateway.as_ref().context("所选网关不可用")? {
@@ -192,11 +253,15 @@ impl Router {
                     ) as Stream),
                 }
             } else {
-                Ok(Box::new(TcpStream::connect((host, port)).await?) as Stream)
+                Ok::<_, anyhow::Error>(Box::new(TcpStream::connect((host, port)).await?) as Stream)
             }
         })
         .await
-        .context("代理目标连接超时")?
+        .context("代理目标连接超时")??;
+        Ok(Box::new(MeteredStream {
+            io,
+            traffic: self.traffic.clone(),
+        }))
     }
 }
 
@@ -204,9 +269,17 @@ pub(crate) struct RunningProxy {
     cancel: CancellationToken,
     pub(crate) status: watch::Receiver<Option<String>>,
     task: JoinHandle<()>,
+    traffic: Arc<Traffic>,
 }
 
 impl RunningProxy {
+    pub(crate) fn traffic(&self) -> (u64, u64) {
+        (
+            self.traffic.sent.load(Ordering::Relaxed),
+            self.traffic.received.load(Ordering::Relaxed),
+        )
+    }
+
     pub(crate) async fn stop(self) {
         self.cancel.cancel();
         let _ = self.task.await;
@@ -228,6 +301,7 @@ pub(crate) async fn start(
     ensure!(ssh_id.is_none() || page.is_none(), "网关配置无效");
     let gateway = ssh_id.map(Gateway::Ssh).or_else(|| page.map(Gateway::Page));
     ensure!(gateway.is_some(), "所选网关不可用");
+    let traffic = Arc::new(Traffic::default());
     let router = Arc::new(Router {
         mode: config.mode,
         rules: config
@@ -236,6 +310,7 @@ pub(crate) async fn start(
             .map(Rule::parse)
             .collect::<Result<_>>()?,
         gateway,
+        traffic: traffic.clone(),
     });
     let mut ports = BTreeMap::<u16, u8>::new();
     for (enabled, port, kind) in [
@@ -302,6 +377,7 @@ pub(crate) async fn start(
         cancel,
         status,
         task,
+        traffic,
     })
 }
 

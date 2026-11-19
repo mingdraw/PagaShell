@@ -10,6 +10,7 @@ import '../../application/session/session.dart';
 import '../../application/session/session_controller.dart';
 import '../../domain/entities/forward_port.dart';
 import '../../domain/entities/host.dart';
+import '../components/app_copy_button.dart';
 import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
 import '../components/app_text_form_field.dart';
@@ -287,7 +288,23 @@ class _ForwardSessionPanelState extends State<ForwardSessionPanel> {
                           ],
                         ),
                 ),
-                const SizedBox(width: 12),
+                const SizedBox(width: 8),
+                ValueListenableBuilder<TextEditingValue>(
+                  valueListenable: row.local,
+                  builder: (context, value, _) {
+                    final port = int.tryParse(value.text.trim());
+                    if (port == null || port < 1 || port > 65535) {
+                      return const SizedBox.shrink();
+                    }
+                    return AppCopyButton(
+                      key: ValueKey('forward-copy-$port'),
+                      text: '127.0.0.1:$port',
+                      size: 15,
+                      semanticLabel: '复制本地地址'.tr,
+                    );
+                  },
+                ),
+                const SizedBox(width: 4),
                 AppIconButton(
                   icon: const AppIcon(AppIcons.trash2, size: 16),
                   semanticLabel: '移除映射'.tr,
@@ -382,6 +399,14 @@ class _ForwardSessionPanelState extends State<ForwardSessionPanel> {
                 .tr,
             style: TextStyle(color: colors.mutedForeground, fontSize: 12),
           ),
+          if (running) ...[
+            const SizedBox(height: 4),
+            Text(
+              '运行中配置已锁定，停止转发后可修改'.tr,
+              key: const ValueKey('forward-locked-hint'),
+              style: TextStyle(color: colors.mutedForeground, fontSize: 12),
+            ),
+          ],
           const SizedBox(height: 16),
           Expanded(
             child: SingleChildScrollView(

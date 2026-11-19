@@ -124,8 +124,15 @@ class TerminalController with ChangeNotifier {
     required CellAnchor p1,
     required CellAnchor p2,
     required Color color,
+    bool underline = false,
   }) {
-    final highlight = TerminalHighlight(this, p1: p1, p2: p2, color: color);
+    final highlight = TerminalHighlight(
+      this,
+      p1: p1,
+      p2: p2,
+      color: color,
+      underline: underline,
+    );
 
     _highlights.add(highlight);
     notifyListeners();
@@ -161,12 +168,14 @@ class TerminalHighlight with Disposable {
   final CellAnchor p2;
 
   final Color color;
+  final bool underline;
 
   TerminalHighlight(
     this.owner, {
     required this.p1,
     required this.p2,
     required this.color,
+    this.underline = false,
   });
 
   /// Returns the range of the highlight. May be null if the anchors that

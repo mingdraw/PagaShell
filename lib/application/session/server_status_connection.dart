@@ -13,6 +13,7 @@ class ServerStatusConnection
         ProcessManagerSource,
         NetworkPortsSource,
         DockerManagerSource,
+        DockerLogsSource,
         DockerContainerActions,
         DockerImageActions,
         DockerComposeActions {
@@ -221,6 +222,20 @@ class ServerStatusConnection
   @override
   Future<DockerDetails> readDockerDetails(DockerResource resource) =>
       _dockerQuery((source) => source.readDockerDetails(resource));
+
+  @override
+  Future<DockerLogSession> openDockerLogs(DockerResource container) async {
+    final session = await _getSession();
+    if (session is! DockerLogsSource) {
+      throw const SshEngineException('此连接不支持查看容器日志');
+    }
+    final logs = await (session as DockerLogsSource).openDockerLogs(container);
+    if (_closed || !identical(_session, session)) {
+      await logs.close();
+      throw const SshEngineException('Docker 管理连接已关闭');
+    }
+    return logs;
+  }
 
   @override
   Future<DockerActionResult> runDockerContainerAction(

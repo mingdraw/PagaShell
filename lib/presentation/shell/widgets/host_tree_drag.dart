@@ -5,6 +5,12 @@ import '../../../domain/entities/host_tree_item.dart';
 import '../../components/app_tree_drag.dart';
 import '../../navigation/app_notice.dart';
 
+/// Still usable for sorting the service tree, but distinguish a dragged
+/// service from a gateway or folder in the terminal workspace.
+class ServiceTerminalDrag extends HostTreeItem {
+  const ServiceTerminalDrag(super.id) : super.host();
+}
+
 class HostTreeDraggable extends StatelessWidget {
   const HostTreeDraggable({
     required this.item,

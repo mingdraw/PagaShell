@@ -76,4 +76,51 @@ void main() {
     expect(controller.status.value!.sample.uptimeSeconds, 1006);
     expect(source.requests, hasLength(4));
   });
+
+  testWidgets('暂停忽略未结束的自动采样，保留手动刷新并可恢复趋势采样', (tester) async {
+    final source = _Source();
+    final controller = ServerStatusController(source: source);
+    controller.setEnabled(true);
+    source.requests[0].complete(statusSample());
+    await tester.pump(const Duration(seconds: 3));
+    expect(source.requests, hasLength(2));
+
+    controller.setAutoRefreshPaused(true);
+    source.requests[1].complete(statusSample(uptime: 1003, cpu: 1300));
+    await tester.pump(const Duration(seconds: 30));
+    expect(source.requests, hasLength(2));
+    expect(controller.history.map((sample) => sample.sample.uptimeSeconds), [
+      1000,
+    ]);
+
+    final manual = controller.refreshStatus();
+    expect(source.requests, hasLength(3));
+    source.requests[2].complete(
+      statusSample(uptime: 1033, cpu: 2000, idle: 1300),
+    );
+    await manual;
+    expect(controller.status.value?.sample.uptimeSeconds, 1033);
+    expect(controller.status.value?.cpuFraction, isNull);
+    await tester.pump(const Duration(seconds: 3));
+    expect(source.requests, hasLength(3));
+
+    controller.setAutoRefreshPaused(false);
+    expect(source.requests, hasLength(4));
+    source.requests[3].complete(
+      statusSample(uptime: 1036, cpu: 2300, idle: 1400),
+    );
+    await tester.pump(const Duration(seconds: 3));
+    source.requests[4].complete(
+      statusSample(uptime: 1039, cpu: 2600, idle: 1500),
+    );
+    await tester.pump();
+    expect(controller.history.map((sample) => sample.sample.uptimeSeconds), [
+      1000,
+      1033,
+      1036,
+      1039,
+    ]);
+    expect(controller.status.value?.cpuFraction, closeTo(2 / 3, 0.001));
+    controller.onClose();
+  });
 }

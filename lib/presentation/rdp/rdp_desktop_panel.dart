@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
@@ -14,12 +15,15 @@ import '../../domain/rdp/rdp_engine.dart';
 import '../../domain/rdp/rdp_resolution.dart';
 import '../../domain/ssh/ssh_engine.dart';
 import '../../domain/vnc/vnc_engine.dart';
+import '../components/app_dialog.dart';
 import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
 import '../components/app_menu.dart';
+import '../navigation/app_navigation.dart';
 import '../navigation/app_notice.dart';
 import '../theme/app_theme.dart';
 import '../vnc/vnc_keyboard.dart';
+import 'rdp_fullscreen_toolbar.dart';
 import 'rdp_input_queue.dart';
 import 'rdp_surface.dart';
 
@@ -65,6 +69,10 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
   late final RdpInputQueue _inputs;
   Timer? _moveTimer;
   Offset? _move;
+  Timer? _wheelTimer;
+  Offset _wheelPosition = Offset.zero;
+  double _wheelDeltaX = 0;
+  double _wheelDeltaY = 0;
   Offset _position = Offset.zero;
   bool _failed = false;
   AppLifecycleState _lifecycle =
@@ -78,6 +86,12 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
   int _resizeSerial = 0;
   Timer? _resizeDebounce;
   Timer? _resizeConfirmation;
+  final _horizontalScroll = ScrollController();
+  final _verticalScroll = ScrollController();
+  bool _originalSize = false;
+  bool _typingText = false;
+  int _openMenus = 0;
+  static const _maxTypedText = 2048;
 
   bool get _appResumed => _lifecycle == AppLifecycleState.resumed;
   bool get _clipboardAvailable =>
@@ -179,9 +193,13 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     );
   }
 
-  void _send(Future<void> Function() action, {bool movement = false}) {
+  void _send(
+    Future<void> Function() action, {
+    bool movement = false,
+    bool wheel = false,
+  }) {
     if (_failed) return;
-    _inputs.add(action, movement: movement);
+    _inputs.add(action, movement: movement, wheel: wheel);
   }
 
   void _syncFrames() {
@@ -237,6 +255,10 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     _moveTimer?.cancel();
     _moveTimer = null;
     _move = null;
+    _wheelTimer?.cancel();
+    _wheelTimer = null;
+    _wheelDeltaX = 0;
+    _wheelDeltaY = 0;
     _cursorPosition.value = null;
     _macMeta.clear();
     _clipboardShortcutKeys.clear();
@@ -374,6 +396,7 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     _send(
       () => widget.session.pointer(x, y, flags, wheel: wheel),
       movement: flags == 0x0800,
+      wheel: wheel != 0,
     );
   }
 
@@ -383,6 +406,23 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     final position = _move;
     _move = null;
     if (position != null) _pointer(position, 0x0800);
+  }
+
+  void _flushWheel() {
+    _wheelTimer?.cancel();
+    _wheelTimer = null;
+    final dy = _wheelDeltaY;
+    final dx = _wheelDeltaX;
+    _wheelDeltaY = 0;
+    _wheelDeltaX = 0;
+    if (dy != 0) {
+      final flags = 0x0200 | (dy > 0 ? 0x0100 : 0);
+      _pointer(_wheelPosition, flags, wheel: dy.abs().round().clamp(1, 255));
+    }
+    if (dx != 0) {
+      final flags = 0x0400 | (dx > 0 ? 0x0100 : 0);
+      _pointer(_wheelPosition, flags, wheel: dx.abs().round().clamp(1, 255));
+    }
   }
 
   void _moving(PointerEvent event) {
@@ -397,6 +437,7 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     if (!widget.active) return;
     _focus.requestFocus();
     _flushMove();
+    _flushWheel();
     _position = event.localPosition;
     _cursorPosition.value = _position;
     const buttons = {
@@ -421,23 +462,17 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     if (!widget.active || event is! PointerScrollEvent) return;
     GestureBinding.instance.pointerSignalResolver.register(event, (resolved) {
       _flushMove();
-      final delta = event.scrollDelta.dy != 0
-          ? event.scrollDelta.dy
-          : event.scrollDelta.dx;
-      final flags =
-          (event.scrollDelta.dy != 0 ? 0x0200 : 0x0400) |
-          (delta > 0 ? 0x0100 : 0);
-      _pointer(
-        event.localPosition,
-        flags,
-        wheel: delta.abs().round().clamp(1, 255),
-      );
+      _wheelPosition = event.localPosition;
+      _wheelDeltaY += event.scrollDelta.dy;
+      _wheelDeltaX += event.scrollDelta.dx;
+      _wheelTimer ??= Timer(const Duration(milliseconds: 16), _flushWheel);
     });
   }
 
   void _scheduleAutomaticResize() {
     _resizeDebounce?.cancel();
     if (!widget.dynamicResolution ||
+        _originalSize ||
         _resolution != null ||
         _viewport == null ||
         _resizeBusy ||
@@ -449,6 +484,7 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     _resizeDebounce = Timer(const Duration(milliseconds: 350), () {
       if (mounted &&
           widget.active &&
+          !_originalSize &&
           _resolution == null &&
           _viewport != null) {
         unawaited(_resize(_viewport!));
@@ -466,7 +502,7 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
           );
     _resizeDebounce?.cancel();
     setState(() => _resolution = resolution);
-    final target = resolution ?? _viewport;
+    final target = resolution ?? (_originalSize ? null : _viewport);
     if (target != null) unawaited(_resize(target));
     _focus.requestFocus();
   }
@@ -555,6 +591,253 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     _focus.requestFocus();
   }
 
+  Future<void> _typeClipboard() async {
+    if (_typingText || _failed || !widget.active) return;
+    final session = widget.session;
+    bool current() =>
+        mounted &&
+        widget.active &&
+        _appResumed &&
+        !_failed &&
+        identical(widget.session, session);
+    setState(() => _typingText = true);
+    var queued = false;
+    try {
+      final data = await Clipboard.getData(Clipboard.kTextPlain);
+      if (!current()) return;
+      final text = (data?.text ?? '')
+          .replaceAll('\r\n', '\n')
+          .replaceAll('\r', '\n');
+      if (text.isEmpty) {
+        AppNotice.error('剪贴板没有可键入的文本');
+        return;
+      }
+      if (text.length > _maxTypedText) {
+        AppNotice.error(
+          '剪贴板文本太长，最多可键入 @count 个字符'.trParams({'count': '$_maxTypedText'}),
+        );
+        return;
+      }
+      if (text.contains('\n') || text.contains('\t')) {
+        final accepted = await AppNavigation.dialog<bool>(
+          AppDialog(
+            title: Text('键入剪贴板文本'.tr),
+            content: Text('文本包含换行或制表符，可能触发远程窗口的提交或焦点切换。'.tr),
+            actions: [
+              shadcn.OutlineButton(
+                onPressed: () => AppNavigation.closeDialog(result: false),
+                child: Text('取消'.tr),
+              ),
+              shadcn.PrimaryButton(
+                onPressed: () => AppNavigation.closeDialog(result: true),
+                child: Text('继续键入'.tr),
+              ),
+            ],
+          ),
+        );
+        if (accepted != true || !current()) return;
+      }
+      _release();
+      queued = true;
+      _send(() async {
+        try {
+          if (current()) await session.text(text);
+        } on Object {
+          if (current()) AppNotice.error('无法键入剪贴板文本');
+        } finally {
+          if (mounted) setState(() => _typingText = false);
+        }
+      });
+    } on Object {
+      if (current()) AppNotice.error('无法读取剪贴板文本');
+    } finally {
+      if (mounted && !queued) setState(() => _typingText = false);
+      if (current()) _focus.requestFocus();
+    }
+  }
+
+  void _menuVisibilityChanged(bool open) {
+    if (!mounted) return;
+    setState(() => _openMenus = math.max(0, _openMenus + (open ? 1 : -1)));
+    if (!open && widget.active) _focus.requestFocus();
+  }
+
+  Widget _toolbar(BuildContext context) => Container(
+    key: const ValueKey('rdp-toolbar'),
+    width: double.infinity,
+    decoration: BoxDecoration(
+      color: AppTheme.surface(context),
+      border: Border(bottom: BorderSide(color: AppTheme.border(context))),
+    ),
+    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+    child: Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: _toolbarControls(),
+    ),
+  );
+
+  List<Widget> _toolbarControls() {
+    final image = _surface;
+    final actual = RdpResolution(image.width, image.height);
+    return [
+      Text(
+        !image.hasImage
+            ? '远程桌面'.tr
+            : '${widget.protocolLabel} · ${image.width} × ${image.height}',
+        overflow: TextOverflow.ellipsis,
+      ),
+      if (widget.dynamicResolution)
+        AppMenuButton<String>(
+          key: const ValueKey('rdp-resolution-menu'),
+          enabled: !_resizeBusy && image.hasImage,
+          semanticLabel: '分辨率'.tr,
+          tooltip: '分辨率'.tr,
+          selectedValue: _resolution == null
+              ? 'auto'
+              : '${_resolution!.width}x${_resolution!.height}',
+          items: [
+            ('auto', '自适应窗口'.tr),
+            for (final r in RdpResolution.presets)
+              ('${r.width}x${r.height}', r.label),
+            if (image.hasImage && !RdpResolution.presets.contains(actual))
+              ('${actual.width}x${actual.height}', actual.label),
+          ],
+          onSelected: _selectResolution,
+          onMenuVisibilityChanged: _menuVisibilityChanged,
+          icon: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (_resizeBusy)
+                const SizedBox.square(
+                  dimension: 14,
+                  child: shadcn.CircularProgressIndicator(),
+                )
+              else
+                const AppIcon(AppIcons.monitor, size: 16),
+              if (!widget.fullscreen) ...[
+                const SizedBox(width: 6),
+                Text(_resolution == null ? '自适应窗口'.tr : '分辨率'.tr),
+              ],
+              const SizedBox(width: 4),
+              const AppIcon(AppIcons.chevronDown, size: 14),
+            ],
+          ),
+        ),
+      AppMenuButton<bool>(
+        key: const ValueKey('rdp-scale-menu'),
+        enabled: image.hasImage,
+        semanticLabel: '画面缩放'.tr,
+        tooltip: (_originalSize ? '1:1 原尺寸' : '适应窗口').tr,
+        selectedValue: _originalSize,
+        items: [(false, '适应窗口'.tr), (true, '1:1 原尺寸'.tr)],
+        onSelected: (original) {
+          if (_originalSize != original) {
+            _release();
+            setState(() => _originalSize = original);
+            _scheduleAutomaticResize();
+          }
+          _focus.requestFocus();
+        },
+        onMenuVisibilityChanged: _menuVisibilityChanged,
+        icon: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (_originalSize)
+              const Text('1:1')
+            else
+              const AppIcon(AppIcons.maximize, size: 16),
+            const SizedBox(width: 4),
+            const AppIcon(AppIcons.chevronDown, size: 14),
+          ],
+        ),
+      ),
+      AppIconButton(
+        key: const ValueKey('rdp-type-clipboard'),
+        semanticLabel: '键入剪贴板文本'.tr,
+        tooltip: '键入剪贴板文本'.tr,
+        icon: const AppIcon(AppIcons.fileImport, size: 16),
+        onPressed: _typingText || !widget.active
+            ? null
+            : () => unawaited(_typeClipboard()),
+      ),
+      shadcn.OutlineButton(
+        onPressed: _secureAttention,
+        size: widget.fullscreen
+            ? shadcn.ButtonSize.small
+            : shadcn.ButtonSize.normal,
+        child: const Text('Ctrl+Alt+Del'),
+      ),
+      if (widget.fullscreen)
+        shadcn.OutlineButton(
+          key: const ValueKey('rdp-exit-fullscreen'),
+          onPressed: widget.fullscreenBusy ? null : widget.onToggleFullscreen,
+          size: shadcn.ButtonSize.small,
+          leading: const AppIcon(AppIcons.minimize, size: 15),
+          child: Text('退出全屏'.tr),
+        )
+      else
+        AppIconButton(
+          key: const ValueKey('rdp-enter-fullscreen'),
+          semanticLabel: '全屏（Ctrl+Alt+Enter）'.tr,
+          tooltip: '全屏（Ctrl+Alt+Enter）'.tr,
+          icon: const AppIcon(AppIcons.maximize, size: 16),
+          onPressed: widget.fullscreenBusy ? null : widget.onToggleFullscreen,
+        ),
+    ];
+  }
+
+  Widget _desktopViewport(
+    BuildContext context,
+    BoxConstraints size,
+    Widget desktop,
+  ) {
+    final fitted = FittedBox(fit: BoxFit.contain, child: desktop);
+    if (!_originalSize) return fitted;
+    final dpr = MediaQuery.devicePixelRatioOf(context);
+    final width = _surface.width / dpr;
+    final height = _surface.height / dpr;
+    final contentWidth = math.max(width, size.maxWidth);
+    final contentHeight = math.max(height, size.maxHeight);
+    return RawScrollbar(
+      controller: _verticalScroll,
+      thumbVisibility: true,
+      thickness: 6,
+      thumbColor: const Color(0xbdadb5c2),
+      notificationPredicate: (notice) => notice.metrics.axis == Axis.vertical,
+      child: RawScrollbar(
+        controller: _horizontalScroll,
+        thumbVisibility: true,
+        thickness: 6,
+        thumbColor: const Color(0xbdadb5c2),
+        notificationPredicate: (notice) =>
+            notice.metrics.axis == Axis.horizontal,
+        child: SingleChildScrollView(
+          key: const ValueKey('rdp-horizontal-scroll'),
+          controller: _horizontalScroll,
+          primary: false,
+          scrollDirection: Axis.horizontal,
+          child: SizedBox(
+            width: contentWidth,
+            height: size.maxHeight,
+            child: SingleChildScrollView(
+              key: const ValueKey('rdp-vertical-scroll'),
+              controller: _verticalScroll,
+              primary: false,
+              child: SizedBox(
+                height: contentHeight,
+                child: Center(
+                  child: SizedBox(width: width, height: height, child: fitted),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
@@ -568,107 +851,20 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     _surface.dispose();
     _cursorImage?.dispose();
     _cursorPosition.dispose();
+    _horizontalScroll.dispose();
+    _verticalScroll.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     final image = _surface;
-    final resolutionDisabled = _resizeBusy || !image.hasImage;
-    final actual = RdpResolution(image.width, image.height);
     return Stack(
       fit: StackFit.expand,
       children: [
         Column(
           children: [
-            Offstage(
-              offstage: widget.fullscreen,
-              child: Container(
-                key: const ValueKey('rdp-toolbar'),
-                width: double.infinity,
-                decoration: BoxDecoration(
-                  color: AppTheme.surface(context),
-                  border: Border(
-                    bottom: BorderSide(color: AppTheme.border(context)),
-                  ),
-                ),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 6,
-                ),
-                child: Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: [
-                    Text(
-                      !image.hasImage
-                          ? '远程桌面'.tr
-                          : '${widget.protocolLabel} · ${image.width} × ${image.height}',
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    if (widget.dynamicResolution)
-                      ExcludeFocus(
-                        excluding: resolutionDisabled,
-                        child: IgnorePointer(
-                          ignoring: resolutionDisabled,
-                          child: AppMenuButton<String>(
-                            key: const ValueKey('rdp-resolution-menu'),
-                            semanticLabel: '分辨率'.tr,
-                            selectedValue: _resolution == null
-                                ? 'auto'
-                                : '${_resolution!.width}x${_resolution!.height}',
-                            items: [
-                              ('auto', '自适应窗口'.tr),
-                              for (final r in RdpResolution.presets)
-                                ('${r.width}x${r.height}', r.label),
-                              if (image.hasImage &&
-                                  !RdpResolution.presets.contains(actual))
-                                (
-                                  '${actual.width}x${actual.height}',
-                                  actual.label,
-                                ),
-                            ],
-                            onSelected: _selectResolution,
-                            icon: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                if (_resizeBusy)
-                                  const SizedBox(
-                                    width: 14,
-                                    height: 14,
-                                    child: shadcn.CircularProgressIndicator(),
-                                  )
-                                else
-                                  const AppIcon(AppIcons.monitor, size: 16),
-                                const SizedBox(width: 6),
-                                Text(
-                                  _resolution == null ? '自适应窗口'.tr : '分辨率'.tr,
-                                ),
-                                const SizedBox(width: 4),
-                                const AppIcon(AppIcons.chevronDown, size: 14),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
-                    shadcn.OutlineButton(
-                      onPressed: _secureAttention,
-                      child: const Text('Ctrl+Alt+Del'),
-                    ),
-                    AppIconButton(
-                      key: const ValueKey('rdp-enter-fullscreen'),
-                      semanticLabel: '全屏（Ctrl+Alt+Enter）'.tr,
-                      tooltip: '全屏（Ctrl+Alt+Enter）'.tr,
-                      icon: const AppIcon(AppIcons.maximize, size: 16),
-                      onPressed: widget.fullscreenBusy
-                          ? null
-                          : widget.onToggleFullscreen,
-                    ),
-                  ],
-                ),
-              ),
-            ),
+            if (!widget.fullscreen) _toolbar(context),
             Expanded(
               child: LayoutBuilder(
                 builder: (context, constraints) {
@@ -685,6 +881,11 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
                       _scheduleAutomaticResize();
                     }
                   }
+                  final dpr = MediaQuery.devicePixelRatioOf(context);
+                  final downscaled =
+                      !_originalSize &&
+                      (image.width > constraints.maxWidth * dpr ||
+                          image.height > constraints.maxHeight * dpr);
                   return Focus(
                     focusNode: _focus,
                     onKeyEvent: _key,
@@ -708,9 +909,10 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
                                   ],
                                 ),
                               )
-                            : FittedBox(
-                                fit: BoxFit.contain,
-                                child: SizedBox(
+                            : _desktopViewport(
+                                context,
+                                constraints,
+                                SizedBox(
                                   width: image.width.toDouble(),
                                   height: image.height.toDouble(),
                                   child: Listener(
@@ -745,6 +947,9 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
                                                 ),
                                                 painter: RdpSurfacePainter(
                                                   _surface,
+                                                  filterQuality: downscaled
+                                                      ? ui.FilterQuality.medium
+                                                      : ui.FilterQuality.low,
                                                 ),
                                                 isComplex: true,
                                                 willChange: true,
@@ -788,6 +993,20 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
             ),
           ],
         ),
+        if (widget.fullscreen)
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: Align(
+              alignment: Alignment.topCenter,
+              child: RdpFullscreenToolbar(
+                controls: _toolbarControls(),
+                holdOpen: _openMenus > 0 || _typingText,
+                onRefocus: _focus.requestFocus,
+              ),
+            ),
+          ),
         if (_clipboard != null)
           Positioned(
             left: 16,

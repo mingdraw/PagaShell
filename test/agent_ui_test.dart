@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' as ui;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -156,6 +157,67 @@ void main() {
     await tester.tap(find.widgetWithText(shadcn.OutlineButton, '关闭'));
     await tester.pumpAndSettle();
   }
+
+  testWidgets('Agent 翻阅历史时发送或重试也不会跳到底部', (tester) async {
+    final connect = FakeAiConnect((_) => openAiReply('收到新回复'));
+    await pump(tester, connect: connect);
+    await Get.find<AiSettingsController>().saveApi(
+      format: AiApiFormat.openai,
+      baseUrl: 'https://api.test/v1',
+      defaultModel: 'test-model',
+      apiKey: 'test-key',
+    );
+    await tester.tap(find.byKey(const ValueKey('agent-toggle')));
+    await tester.pumpAndSettle();
+
+    final agent = Get.find<AgentController>();
+    agent.entries.assignAll([
+      for (var i = 0; i < 24; i++)
+        AgentEntry(
+          i.isEven ? AgentEntryKind.user : AgentEntryKind.assistant,
+          '历史消息 $i',
+        ),
+      AgentEntry(
+        AgentEntryKind.user,
+        '之前的提问',
+        requestState: AgentRequestState.failed,
+        requestError: '网络超时',
+      ),
+      AgentEntry(AgentEntryKind.assistant, '较晚的一条回复'),
+    ]);
+    await tester.pumpAndSettle();
+
+    final list = find.byKey(const ValueKey('agent-messages'));
+    final position = tester.widget<ListView>(list).controller!.position;
+    await tester.sendEventToBinding(
+      PointerScrollEvent(
+        kind: PointerDeviceKind.mouse,
+        position: tester.getCenter(list),
+        scrollDelta: const Offset(0, -32),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final readingOffset = position.pixels;
+    expect(readingOffset, lessThan(position.maxScrollExtent));
+
+    await tester.enterText(
+      find.byKey(const ValueKey('agent-input')),
+      '翻阅历史时的新提问',
+    );
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('agent-send')));
+    await tester.pumpAndSettle();
+    expect(connect.requests, hasLength(1));
+    expect(position.pixels, readingOffset);
+
+    final retry = find.byKey(const ValueKey('agent-entry-retry')).hitTestable();
+    expect(retry, findsOneWidget);
+    await tester.tap(retry);
+    await tester.pumpAndSettle();
+    expect(connect.requests, hasLength(2));
+    expect(position.pixels, readingOffset);
+    expect(find.byKey(const ValueKey('agent-scroll-bottom')), findsOneWidget);
+  });
 
   testWidgets('模型配置支持 Responses、空地址、Key 前置、刷新选择和手动输入', (tester) async {
     final connect = FakeAiConnect(
@@ -436,6 +498,7 @@ ss -lntp
         find.byKey(const ValueKey('agent-input')),
         '**保留我的原文**',
       );
+      await tester.pump();
       await tester.tap(find.byKey(const ValueKey('agent-send')));
       await tester.pumpAndSettle();
       expect(find.text('检查结果'), findsOneWidget);
@@ -498,6 +561,7 @@ ss -lntp
     );
     final input = find.byKey(const ValueKey('agent-input'));
     await tester.enterText(input, 'Explain SFTP');
+    await tester.pump();
     await tester.tap(find.byKey(const ValueKey('agent-send')));
     await tester.pumpAndSettle();
     expect(find.text('Explain SFTP'), findsOneWidget);
@@ -588,6 +652,7 @@ ss -lntp
       find.byKey(const ValueKey('agent-input')),
       'Think about SSH',
     );
+    await tester.pump();
     await tester.tap(find.byKey(const ValueKey('agent-send')));
     await tester.pumpAndSettle();
     expect(connect.requests.last.body['model'], 'test-model');
@@ -619,6 +684,7 @@ ss -lntp
         find.byKey(const ValueKey('agent-input')),
         'First saved chat',
       );
+      await tester.pump();
       await tester.tap(find.byKey(const ValueKey('agent-send')));
       await tester.pumpAndSettle();
       final first = agent.currentConversationId.value!;
@@ -629,6 +695,7 @@ ss -lntp
         find.byKey(const ValueKey('agent-input')),
         'Second saved chat',
       );
+      await tester.pump();
       await tester.tap(find.byKey(const ValueKey('agent-send')));
       await tester.pumpAndSettle();
       final second = agent.currentConversationId.value!;
@@ -646,6 +713,7 @@ ss -lntp
         find.byKey(const ValueKey('agent-input')),
         'Continue saved chat',
       );
+      await tester.pump();
       await tester.tap(find.byKey(const ValueKey('agent-send')));
       await tester.pumpAndSettle();
       expect(
@@ -696,6 +764,7 @@ ss -lntp
       find.byKey(const ValueKey('agent-input')),
       'Save before exit',
     );
+    await tester.pump();
     await tester.tap(find.byKey(const ValueKey('agent-send')));
     await tester.pump();
     final agent = Get.find<AgentController>();
@@ -1250,6 +1319,8 @@ ss -lntp
     await pumpModelOptions(tester);
     await tester.tap(find.text('完全访问').hitTestable());
     await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('agent-confirm-full-access')));
+    await tester.pumpAndSettle();
     expect(agent.accessMode.value, AgentAccessMode.fullAccess);
     await _capture(tester, capture, 'agent-session-access-small');
     await tester.enterText(input, '${controller.text}@beta');
@@ -1662,6 +1733,8 @@ ss -lntp
     await pumpModelOptions(tester);
     await tester.tap(find.text('完全访问').hitTestable());
     await pumpModelOptions(tester);
+    await tester.tap(find.byKey(const ValueKey('agent-confirm-full-access')));
+    await pumpModelOptions(tester);
     await tester.tap(find.byKey(const ValueKey('agent-reasoning-select')));
     await pumpModelOptions(tester);
     await tester.tap(find.text('高').hitTestable());
@@ -1789,6 +1862,22 @@ ss -lntp
     await pumpModelOptions(tester);
     await tester.tap(find.text('完全访问').hitTestable());
     await tester.pumpAndSettle();
+    expect(
+      Get.find<AgentController>().accessMode.value,
+      AgentAccessMode.requestApproval,
+    );
+    await tester.tap(find.text('取消').hitTestable());
+    await tester.pumpAndSettle();
+    expect(
+      Get.find<AgentController>().accessMode.value,
+      AgentAccessMode.requestApproval,
+    );
+    await tester.tap(find.byKey(const ValueKey('agent-access-select')));
+    await pumpModelOptions(tester);
+    await tester.tap(find.text('完全访问').hitTestable());
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('agent-confirm-full-access')));
+    await tester.pumpAndSettle();
     await tester.enterText(
       find.byKey(const ValueKey('agent-input')),
       '@Server Check port 80',
@@ -1806,80 +1895,124 @@ ss -lntp
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  testWidgets('Agent 命令经二次确认发送到固定 SSH 终端', (tester) async {
-    var count = 0;
-    final connect = FakeAiConnect(
-      (_) => ++count == 1
-          ? openAiReply(
-              '',
-              calls: [
-                {
-                  'id': 'proposal',
-                  'type': 'function',
-                  'function': {
-                    'name': 'propose_ssh_command',
-                    'arguments': '{"command":"df -h","purpose":"Check disk"}',
+  for (final (label, initial, edited, confirm) in [
+    ('普通单行修改后一键批准', 'df -h', 'df -i', false),
+    ('高风险命令需要二次确认', 'sudo -n rm -r -f /tmp/test', null, true),
+    ('改为多行需要二次确认', 'df -h', 'df -h\nls', true),
+  ]) {
+    testWidgets('Agent：$label，发送到固定 SSH 终端', (tester) async {
+      var count = 0;
+      final connect = FakeAiConnect(
+        (_) => ++count == 1
+            ? openAiReply(
+                '',
+                calls: [
+                  {
+                    'id': 'proposal',
+                    'type': 'function',
+                    'function': {
+                      'name': 'propose_ssh_command',
+                      'arguments': jsonEncode({
+                        'command': initial,
+                        'purpose': 'Check disk',
+                      }),
+                    },
                   },
-                },
-              ],
-            )
-          : openAiReply('Review the command below.'),
-    );
-    await pump(tester, connect: connect);
-    await configure(tester);
-    final written = <String>[];
-    final sessions = Get.find<SessionController>();
-    final terminal = Terminal();
-    terminal.onOutput = (input) {
-      written.add(input);
-      terminal.writeText('\r\ndisk-observed-output\r\n');
-    };
-    sessions.sessions.add(
-      Session(
-        id: 'ssh',
-        host: const Host(id: 'ssh', name: 'Server', hostname: 'server.test'),
-        phase: SessionPhase.ready,
-        engineSession: _SshSession(),
-        terminal: terminal,
-      ),
-    );
-    sessions.activeSessionId.value = 'ssh';
-    await tester.tap(find.byKey(const ValueKey('agent-toggle')).first);
-    await tester.pumpAndSettle();
-    await tester.enterText(find.byKey(const ValueKey('agent-input')), '@Serv');
-    await pumpModelOptions(tester);
-    await tester.tap(find.text('Server · 终端').hitTestable());
-    await tester.pumpAndSettle();
-    await tester.enterText(
-      find.byKey(const ValueKey('agent-input')),
-      '@Server Check disk',
-    );
-    await tester.tap(find.byKey(const ValueKey('agent-send')));
-    await tester.pumpAndSettle();
-    expect(written, isEmpty);
-    await tester.ensureVisible(find.text('发送到终端'));
-    await tester.tap(find.text('发送到终端'));
-    await tester.pumpAndSettle();
-    expect(written, isEmpty);
-    expect(find.textContaining('Server · root@server.test'), findsOneWidget);
-    await tester.tap(find.byKey(const ValueKey('agent-confirm-command')));
-    await tester.pumpAndSettle();
-    expect(written, ['df -h\r']);
-    expect(
-      jsonEncode(connect.requests.last.body),
-      contains('disk-observed-output'),
-    );
-    expect(
-      Get.find<AgentController>().entries
-          .firstWhere((e) => e.command != null)
-          .command!
-          .state
-          .value,
-      AgentCommandState.sent,
-    );
-    expect(tester.takeException(), isNull);
-    await tester.pump(const Duration(seconds: 6));
-    await tester.pumpAndSettle();
-    await tester.pumpWidget(const SizedBox.shrink());
-  });
+                ],
+              )
+            : openAiReply('Review the command below.'),
+      );
+      await pump(tester, connect: connect);
+      await configure(tester);
+      final written = <String>[];
+      final sessions = Get.find<SessionController>();
+      final terminal = Terminal();
+      terminal.onOutput = (input) {
+        written.add(input);
+        terminal.writeText('\r\ndisk-observed-output\r\n');
+      };
+      sessions.sessions.add(
+        Session(
+          id: 'ssh',
+          host: const Host(id: 'ssh', name: 'Server', hostname: 'server.test'),
+          phase: SessionPhase.ready,
+          engineSession: _SshSession(),
+          terminal: terminal,
+        ),
+      );
+      sessions.activeSessionId.value = 'ssh';
+      await tester.tap(find.byKey(const ValueKey('agent-toggle')).first);
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const ValueKey('agent-input')),
+        '@Serv',
+      );
+      await pumpModelOptions(tester);
+      await tester.tap(find.text('Server · 终端').hitTestable());
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const ValueKey('agent-input')),
+        '@Server Check disk',
+      );
+      await tester.tap(find.byKey(const ValueKey('agent-send')));
+      await tester.pumpAndSettle();
+      expect(written, isEmpty);
+      if (edited != null) {
+        final edit = find.byKey(const ValueKey('agent-command-edit'));
+        await tester.ensureVisible(edit);
+        await tester.tap(edit);
+        await tester.pumpAndSettle();
+        await tester.enterText(
+          find.byKey(const ValueKey('agent-command-input')),
+          edited,
+        );
+        await tester.pumpAndSettle();
+      }
+      final send = find.byKey(const ValueKey('agent-command-send'));
+      final confirmButton = find.byKey(const ValueKey('agent-confirm-command'));
+      await tester.ensureVisible(send);
+      await tester.tap(send);
+      await tester.pumpAndSettle();
+      if (confirm) {
+        expect(written, isEmpty);
+        expect(confirmButton, findsOneWidget);
+        expect(find.textContaining('Server · root@server.test'), findsWidgets);
+        await tester.tap(find.text('取消').hitTestable());
+        await tester.pumpAndSettle();
+        expect(written, isEmpty);
+        await tester.tap(send);
+        await tester.pumpAndSettle();
+        await tester.tap(confirmButton);
+        await tester.pumpAndSettle();
+      } else {
+        expect(confirmButton, findsNothing);
+      }
+      final actualCommand = edited ?? initial;
+      expect(written, ['${actualCommand.replaceAll('\n', '\r')}\r']);
+      expect(
+        jsonEncode(connect.requests.last.body),
+        contains('disk-observed-output'),
+      );
+      expect(
+        Get.find<AgentController>().entries
+            .firstWhere((e) => e.command != null)
+            .command!
+            .state
+            .value,
+        AgentCommandState.sent,
+      );
+      expect(
+        Get.find<AgentController>().entries
+            .firstWhere((e) => e.command != null)
+            .toMessage()
+            .command!
+            .command,
+        actualCommand,
+      );
+      expect(tester.takeException(), isNull);
+      await tester.pump(const Duration(seconds: 6));
+      await tester.pumpAndSettle();
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
 }

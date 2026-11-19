@@ -225,7 +225,7 @@ void main() {
     final sessions = Get.find<SessionController>();
     final id = sessions.sessions.single.id;
     expect(sessions.sessions.single.kind, SessionKind.remoteDesktop);
-    expect(sessions.commandSessions, isEmpty);
+    expect(sessions.canSendCommandToSession(id), isFalse);
     final desktop = engine.created.single;
     desktop.output.add(
       RdpFrame(

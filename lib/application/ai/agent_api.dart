@@ -5,6 +5,7 @@ class _AgentApiState {
   final modelLimits = <(String, String), int>{};
   final modelDetails = <(String, String), AiAvailableModel>{};
   String? scope;
+  AgentStreamReader? activeStream;
 }
 
 extension _AgentApiOperations on AgentController {
@@ -17,23 +18,106 @@ extension _AgentApiOperations on AgentController {
     AiReasoningEffort effort = AiReasoningEffort.auto,
     AiAvailableModel? capabilities,
     String? anthropicScope,
+    void Function(String text, bool reasoning)? onDelta,
   }) async {
-    final response = await _connect
+    Map<String, Object> body({bool stream = false}) => AgentApiCodec.request(
+      model,
+      system,
+      turns,
+      anthropicMaxTokens: anthropicMaxTokens,
+      effort: effort,
+      capabilities: capabilities,
+      anthropicScope: anthropicScope,
+      stream: stream,
+    );
+    final endpoint = model.endpoint.toString();
+    final headers = _headers(model.format, key);
+    Future<Response<dynamic>> buffered() => _connect
         .post<dynamic>(
-          model.endpoint.toString(),
-          AgentApiCodec.request(
-            model,
-            system,
-            turns,
-            anthropicMaxTokens: anthropicMaxTokens,
-            effort: effort,
-            capabilities: capabilities,
-            anthropicScope: anthropicScope,
-          ),
+          endpoint,
+          body(),
           contentType: 'application/json',
-          headers: _headers(model.format, key),
+          headers: headers,
         )
         .timeout(const Duration(seconds: 120));
+    final reader = onDelta != null && _connect is AppConnect
+        ? AgentStreamReader()
+        : null;
+    if (reader != null) _api.activeStream = reader;
+    try {
+      var response = reader == null
+          ? await buffered()
+          : await _connect.httpClient.post<dynamic>(
+              endpoint,
+              body: body(stream: true),
+              contentType: 'application/json',
+              headers: {
+                ...headers,
+                'Accept': 'text/event-stream, application/json',
+              },
+              responseInterceptor: (request, _, raw) async {
+                if (reader.cancelled) {
+                  await raw.listen((_) {}).cancel();
+                  return const Response<dynamic>(statusCode: 499);
+                }
+                final type = raw.headers
+                    .value('content-type')
+                    ?.split(';')
+                    .first
+                    .trim();
+                if (type?.toLowerCase() != 'text/event-stream') return null;
+                if (raw.statusCode < 200 || raw.statusCode >= 300) {
+                  await raw.listen((_) {}).cancel();
+                  return Response<dynamic>(statusCode: raw.statusCode);
+                }
+                return Response<dynamic>(
+                  request: request,
+                  statusCode: raw.statusCode,
+                  bodyBytes: raw,
+                  headers: const {'content-type': 'text/event-stream'},
+                );
+              },
+            );
+      if (reader != null &&
+          !reader.cancelled &&
+          (response.statusCode == 400 || response.statusCode == 422) &&
+          RegExp(
+            r'\bstream(?:ing)?\b',
+            caseSensitive: false,
+          ).hasMatch(jsonEncode(response.body))) {
+        // Older compatible providers may reject the stream flag entirely.
+        response = await buffered();
+      }
+      _checkReplyStatus(model, response, anthropicMaxTokens, effort);
+      final bytes = response.bodyBytes;
+      if (reader != null &&
+          bytes != null &&
+          response.headers?['content-type'] == 'text/event-stream') {
+        return await reader.read(
+          model.format,
+          bytes,
+          responsesScope: AgentApiCodec.responsesScope(model),
+          anthropicScope: anthropicScope,
+          onDelta: onDelta!,
+        );
+      }
+      return AgentApiCodec.parse(
+        model.format,
+        response.body,
+        responsesScope: AgentApiCodec.responsesScope(model),
+        anthropicScope: anthropicScope,
+      );
+    } finally {
+      if (identical(_api.activeStream, reader)) _api.activeStream = null;
+    }
+  }
+
+  void _checkReplyStatus(
+    AiModelConfig model,
+    Response<dynamic> response,
+    int? anthropicMaxTokens,
+    AiReasoningEffort effort,
+  ) {
     if (!response.isOk ||
         response.statusCode == null ||
         response.statusCode! < 200 ||
@@ -59,12 +143,6 @@ extension _AgentApiOperations on AgentController {
         _ => 'AI API 连接失败，请检查网络或服务状态',
       });
     }
-    return AgentApiCodec.parse(
-      model.format,
-      response.body,
-      responsesScope: AgentApiCodec.responsesScope(model),
-      anthropicScope: anthropicScope,
-    );
   }
 
   Map<String, String> _headers(AiApiFormat format, String key) =>

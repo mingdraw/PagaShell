@@ -9,6 +9,15 @@ abstract interface class DockerManagerSource {
   Future<DockerDetails> readDockerDetails(DockerResource resource);
 }
 
+abstract interface class DockerLogsSource {
+  Future<DockerLogSession> openDockerLogs(DockerResource container);
+}
+
+abstract interface class DockerLogSession {
+  Stream<String> get output;
+  Future<void> close();
+}
+
 enum DockerContainerAction { start, stop, upgrade, delete }
 
 enum DockerImageAction { delete, pruneUntagged, pruneUnused }

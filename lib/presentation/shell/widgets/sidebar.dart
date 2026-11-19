@@ -23,8 +23,6 @@ import '../../../domain/entities/identity_tree_item.dart';
 import '../../../domain/entities/sidebar_state.dart';
 import '../../../domain/services/host_tree.dart';
 import '../../../domain/services/identity_tree.dart';
-import '../../../domain/ssh/ssh_engine.dart';
-import '../../../domain/vault/secret_store.dart';
 import '../../components/app_icon.dart';
 import '../../components/app_icon_button.dart';
 import '../../components/app_list_row.dart';
@@ -40,6 +38,8 @@ import '../connect_flow.dart';
 import 'host_tree_drag.dart';
 import 'identity_tree_drag.dart';
 
+part 'sidebar_search.dart';
+
 class Sidebar extends StatefulWidget {
   const Sidebar({super.key});
 
@@ -54,6 +54,8 @@ class _SidebarState extends State<Sidebar> {
     text: _hostController.searchQuery.value,
   );
   final _searchFocus = FocusNode();
+  final _searchScroll = ScrollController();
+  final _searchIndex = 0.obs;
   bool get _hostsExpanded =>
       _settings.sidebarState.value.isSectionExpanded(SidebarSection.services);
   bool get _identitiesExpanded =>
@@ -68,13 +70,133 @@ class _SidebarState extends State<Sidebar> {
   void dispose() {
     _searchController.dispose();
     _searchFocus.dispose();
+    _searchScroll.dispose();
     super.dispose();
   }
 
   void _clearSearch() {
     _searchController.clear();
-    _hostController.searchQuery.value = '';
+    _updateSearch('');
     _searchFocus.requestFocus();
+  }
+
+  void _updateSearch(String value) {
+    _searchIndex.value = 0;
+    if (_searchScroll.hasClients) _searchScroll.jumpTo(0);
+    _hostController.searchQuery.value = value;
+  }
+
+  void _moveSearchSelection(int direction) {
+    final hits = _searchSidebar(_searchTerms(_searchController.text));
+    if (hits.isEmpty) return;
+    final index =
+        (_searchIndex.value.clamp(0, hits.length - 1) + direction) %
+        hits.length;
+    _searchIndex.value = index;
+    if (!_searchScroll.hasClients) return;
+    final position = _searchScroll.position;
+    final top = hits[index].slot * AppTheme.sidebarSearchResultHeight;
+    final bottom = top + AppTheme.sidebarSearchResultHeight;
+    final visibleBottom = position.pixels + position.viewportDimension;
+    final offset = top < position.pixels
+        ? top
+        : bottom > visibleBottom
+        ? bottom - position.viewportDimension
+        : position.pixels;
+    position.jumpTo(offset.clamp(0.0, position.maxScrollExtent));
+  }
+
+  void _openSearchSelection() {
+    final hits = _searchSidebar(_searchTerms(_searchController.text));
+    if (hits.isEmpty) return;
+    final hit = hits[_searchIndex.value.clamp(0, hits.length - 1)];
+    if (hit.identity case final identity?) {
+      unawaited(showIdentityEditDialog(context, identity: identity));
+    } else if (hit.host case final host?) {
+      if (hit.section == SidebarSection.gateways) {
+        unawaited(showHostEditDialog(context, host: host, gateway: true));
+      } else {
+        unawaited(connectToHost(context, host));
+      }
+    }
+  }
+
+  Widget _searchResults(List<String> terms) {
+    final hits = _searchSidebar(terms);
+    if (hits.isEmpty) return _EmptyHint(text: '没有匹配的结果'.tr);
+    final selected = _searchIndex.value.clamp(0, hits.length - 1);
+    final headingBySlot = <int, SidebarSection>{};
+    final rowBySlot = <int, int>{};
+    SidebarSection? section;
+    for (var i = 0; i < hits.length; i++) {
+      final hit = hits[i];
+      if (hit.section != section) {
+        section = hit.section;
+        headingBySlot[hit.slot - 1] = section;
+      }
+      rowBySlot[hit.slot] = i;
+    }
+    return ListView.builder(
+      key: const ValueKey('sidebar-search-results'),
+      controller: _searchScroll,
+      padding: EdgeInsets.zero,
+      itemCount: hits.last.slot + 1,
+      itemExtent: AppTheme.sidebarSearchResultHeight,
+      itemBuilder: (_, slot) {
+        final heading = headingBySlot[slot];
+        if (heading != null) {
+          final label = switch (heading) {
+            SidebarSection.services => '服务',
+            SidebarSection.identities => '凭证',
+            SidebarSection.gateways => '网关',
+          };
+          return Padding(
+            key: ValueKey('sidebar-search-${heading.name}'),
+            padding: const EdgeInsets.fromLTRB(14, 0, 4, 5),
+            child: Align(
+              alignment: Alignment.bottomLeft,
+              child: Text(
+                label.tr,
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  color: shadcn.Theme.of(context).colorScheme.mutedForeground,
+                ),
+              ),
+            ),
+          );
+        }
+        final index = rowBySlot[slot]!;
+        final hit = hits[index];
+        final display = (
+          terms: terms,
+          detail: hit.detail,
+          selected: index == selected,
+        );
+        if (hit.identity case final identity?) {
+          return _IdentityTile(
+            key: ValueKey(IdentityTreeItem.identity(identity.id)),
+            identity: identity,
+            depth: 0,
+            dragAnchor: _identityDragAnchor,
+            search: display,
+          );
+        }
+        final host = hit.host!;
+        final gateway = hit.section == SidebarSection.gateways;
+        return _HostTile(
+          key: gateway
+              ? ValueKey('search-gateway-${host.id}')
+              : ValueKey(HostTreeItem.host(host.id)),
+          host: host,
+          depth: 0,
+          dragAnchor: gateway ? _gatewayDragAnchor : _dragAnchor,
+          reorderable: false,
+          gateway: gateway,
+          search: display,
+        );
+      },
+    );
   }
 
   void _handleSearchEscape() {
@@ -134,25 +256,38 @@ class _SidebarState extends State<Sidebar> {
           children: [
             Padding(
               padding: const EdgeInsets.fromLTRB(10, 8, 10, 4),
-              child: CallbackShortcuts(
-                bindings: {
-                  const SingleActivator(LogicalKeyboardKey.escape):
-                      _handleSearchEscape,
-                },
-                child: ValueListenableBuilder<TextEditingValue>(
-                  valueListenable: _searchController,
-                  builder: (context, value, _) => shadcn.TextField(
+              child: ValueListenableBuilder<TextEditingValue>(
+                valueListenable: _searchController,
+                builder: (context, value, _) => CallbackShortcuts(
+                  bindings: {
+                    if (value.composing.isCollapsed)
+                      const SingleActivator(LogicalKeyboardKey.escape):
+                          _handleSearchEscape,
+                    if (value.composing.isCollapsed &&
+                        value.text.trim().isNotEmpty) ...{
+                      const SingleActivator(LogicalKeyboardKey.arrowDown): () =>
+                          _moveSearchSelection(1),
+                      const SingleActivator(LogicalKeyboardKey.arrowUp): () =>
+                          _moveSearchSelection(-1),
+                      const SingleActivator(LogicalKeyboardKey.enter):
+                          _openSearchSelection,
+                      const SingleActivator(LogicalKeyboardKey.numpadEnter):
+                          _openSearchSelection,
+                    },
+                  },
+                  child: shadcn.TextField(
+                    key: const ValueKey('sidebar-search'),
                     controller: _searchController,
                     focusNode: _searchFocus,
-                    onChanged: (v) => hostController.searchQuery.value = v,
+                    onChanged: _updateSearch,
                     borderRadius: AppTheme.sidebarSearchRadius,
                     filled: true,
                     padding: AppTheme.sidebarSearchPadding,
                     style: const TextStyle(
                       fontSize: AppTheme.sidebarSearchFontSize,
                     ),
-                    hintText: '搜索服务'.tr,
-                    placeholder: Text('搜索服务'.tr),
+                    hintText: '搜索服务、凭证或网关'.tr,
+                    placeholder: Text('搜索服务、凭证或网关'.tr),
                     features: [
                       const shadcn.InputFeature.leading(
                         AppIcon(
@@ -184,26 +319,8 @@ class _SidebarState extends State<Sidebar> {
               // 必须在这里以同步函数完成（而非下沉到子 Widget 的 build），
               // 否则新增服务/文件夹/凭证、展开折叠都不会触发重建。
               child: Obx(() {
-                final query = hostController.searchQuery.value.trim();
-                if (query.isNotEmpty) {
-                  final hosts = hostController.filtered;
-                  if (hosts.isEmpty) {
-                    return _EmptyHint(text: '没有匹配的服务'.tr);
-                  }
-                  return ListView(
-                    padding: const EdgeInsets.symmetric(vertical: 4),
-                    children: [
-                      for (final host in hosts)
-                        _HostTile(
-                          key: ValueKey(HostTreeItem.host(host.id)),
-                          host: host,
-                          depth: 0,
-                          dragAnchor: _dragAnchor,
-                          reorderable: false,
-                        ),
-                    ],
-                  );
-                }
+                final terms = _searchTerms(hostController.searchQuery.value);
+                if (terms.isNotEmpty) return _searchResults(terms);
                 // 服务、凭证、网关使用独立目录空间。
                 return ListView(
                   padding: const EdgeInsets.symmetric(vertical: 4),
@@ -850,25 +967,37 @@ class _SidebarQuickActionButton extends StatelessWidget {
   );
 }
 
-Widget _hoverTitleWithType(
+Widget _titleWithLabel(
   BuildContext context,
   Widget title, {
-  required bool showType,
-  required String typeLabel,
-  required Key typeKey,
+  required String? label,
+  required Key labelKey,
 }) {
-  if (!showType) return title;
+  if (label == null || label.isEmpty) return title;
   final colors = shadcn.Theme.of(context).colorScheme;
-  return Row(
-    children: [
-      Flexible(child: title),
-      const SizedBox(width: 6),
-      Text(
-        typeLabel,
-        key: typeKey,
-        style: TextStyle(fontSize: 11, color: colors.mutedForeground),
-      ),
-    ],
+  const gap = 6.0;
+  return LayoutBuilder(
+    builder: (_, constraints) {
+      if (constraints.maxWidth <= gap) return title;
+      return Row(
+        children: [
+          Flexible(child: title),
+          const SizedBox(width: gap),
+          ConstrainedBox(
+            constraints: BoxConstraints(
+              maxWidth: (constraints.maxWidth - gap) / 2,
+            ),
+            child: Text(
+              label,
+              key: labelKey,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 11, color: colors.mutedForeground),
+            ),
+          ),
+        ],
+      );
+    },
   );
 }
 
@@ -878,12 +1007,14 @@ class _IdentityTile extends StatefulWidget {
     required this.identity,
     required this.depth,
     required this.dragAnchor,
+    this.search,
     super.key,
   });
 
   final Identity identity;
   final int depth;
   final TreeDragAnchor dragAnchor;
+  final _SearchDisplay? search;
 
   @override
   State<_IdentityTile> createState() => _IdentityTileState();
@@ -949,14 +1080,16 @@ class _IdentityTileState extends State<_IdentityTile> {
     final identity = widget.identity;
     final actions = [('edit', '编辑'.tr), ('copy', '复制'.tr), ('delete', '删除'.tr)];
 
-    final titleText = Text(
+    final search = widget.search;
+    final titleText = _sidebarMatchText(
       identity.name,
-      maxLines: 1,
-      overflow: TextOverflow.ellipsis,
-      style: const TextStyle(fontSize: 13),
+      search?.terms ?? const [],
+      const TextStyle(fontSize: 13),
     );
 
     Widget buildRow({required bool showQuickActions}) => AppListRow(
+      selected: search?.selected ?? false,
+      subtitle: _searchSubtitle(context, search),
       minHeight: AppTheme.sidebarItemHeight,
       contentPadding: EdgeInsets.only(left: 14.0 + widget.depth * 14, right: 4),
       leading: AppIcon(
@@ -964,12 +1097,11 @@ class _IdentityTileState extends State<_IdentityTile> {
         size: AppTheme.sidebarIconSize,
         color: colors.primary,
       ),
-      title: _hoverTitleWithType(
+      title: _titleWithLabel(
         context,
         titleText,
-        showType: showQuickActions,
-        typeLabel: identity.serviceType.label,
-        typeKey: ValueKey('identity-type-${identity.id}'),
+        label: showQuickActions ? identity.serviceType.label : null,
+        labelKey: ValueKey('identity-type-${identity.id}'),
       ),
       trailing: showQuickActions
           ? _SidebarQuickActionButton(
@@ -987,29 +1119,31 @@ class _IdentityTileState extends State<_IdentityTile> {
     final previewRow = buildRow(showQuickActions: false);
     final row = buildRow(showQuickActions: _hovered);
     final item = IdentityTreeItem.identity(identity.id);
+    final draggable = IdentityTreeDraggable(
+      item: item,
+      dragAnchor: widget.dragAnchor,
+      preview: previewRow,
+      child: MouseRegion(
+        onEnter: (_) {
+          if (!_hovered) setState(() => _hovered = true);
+        },
+        onExit: (_) {
+          if (_hovered) setState(() => _hovered = false);
+        },
+        child: shadcn.ContextMenu(
+          items: appMenuItems(actions, _onAction),
+          child: row,
+        ),
+      ),
+    );
+    if (search != null) return draggable;
     return IdentityTreeDropTarget(
       item: item,
       parentId: identity.folderId,
       depth: widget.depth,
       tree: Get.find<IdentityTreeController>(),
       dragAnchor: widget.dragAnchor,
-      child: IdentityTreeDraggable(
-        item: item,
-        dragAnchor: widget.dragAnchor,
-        preview: previewRow,
-        child: MouseRegion(
-          onEnter: (_) {
-            if (!_hovered) setState(() => _hovered = true);
-          },
-          onExit: (_) {
-            if (_hovered) setState(() => _hovered = false);
-          },
-          child: shadcn.ContextMenu(
-            items: appMenuItems(actions, _onAction),
-            child: row,
-          ),
-        ),
-      ),
+      child: draggable,
     );
   }
 }
@@ -1025,6 +1159,7 @@ class _HostTile extends StatefulWidget {
     required this.dragAnchor,
     this.reorderable = true,
     this.gateway = false,
+    this.search,
     super.key,
   });
 
@@ -1033,6 +1168,7 @@ class _HostTile extends StatefulWidget {
   final TreeDragAnchor dragAnchor;
   final bool reorderable;
   final bool gateway;
+  final _SearchDisplay? search;
 
   @override
   State<_HostTile> createState() => _HostTileState();
@@ -1041,6 +1177,7 @@ class _HostTile extends StatefulWidget {
 class _HostTileState extends State<_HostTile> {
   final _doubleTap = _DoubleTapTracker();
   bool _hovered = false;
+  bool _focused = false;
 
   @override
   void dispose() {
@@ -1094,20 +1231,7 @@ class _HostTileState extends State<_HostTile> {
           gateway: widget.gateway,
         );
       case 'delete':
-        try {
-          final controller = widget.gateway
-              ? Get.find<GatewayController>()
-              : Get.find<HostController>();
-          await controller.remove(widget.host.id);
-        } on SecretStoreException catch (e) {
-          if (mounted) {
-            AppNotice.error(e.message);
-          }
-        } on SshEngineException catch (e) {
-          if (mounted) AppNotice.error(e.message.tr);
-        } on StateError catch (e) {
-          if (mounted) AppNotice.error(e.message.toString().tr);
-        }
+        await confirmDeleteHost(context, widget.host, gateway: widget.gateway);
     }
   }
 
@@ -1131,19 +1255,24 @@ class _HostTileState extends State<_HostTile> {
       size: AppTheme.sidebarIconSize,
       color: host.colorValue != null ? Color(host.colorValue!) : colors.primary,
     );
-    final titleText = Text(
+    final search = widget.search;
+    final tags = search == null && !widget.gateway ? host.tags.join(' · ') : '';
+    final titleText = _sidebarMatchText(
       host.name,
-      maxLines: 1,
-      overflow: TextOverflow.ellipsis,
-      style: const TextStyle(fontSize: 13),
+      search?.terms ?? const [],
+      const TextStyle(fontSize: 13),
     );
 
     Widget buildRow({
       required bool showQuickActions,
       required bool showStatus,
+      bool active = false,
       Color? statusColor,
       int sessionCount = 0,
     }) => AppListRow(
+      key: showStatus ? ValueKey('sidebar-host-row-${host.id}') : null,
+      selected: search?.selected ?? active,
+      subtitle: _searchSubtitle(context, search),
       minHeight: AppTheme.sidebarItemHeight,
       contentPadding: EdgeInsets.only(left: 14.0 + widget.depth * 14, right: 4),
       leading: showStatus && statusColor != null
@@ -1171,12 +1300,19 @@ class _HostTileState extends State<_HostTile> {
               ],
             )
           : baseIcon,
-      title: _hoverTitleWithType(
+      title: _titleWithLabel(
         context,
         titleText,
-        showType: widget.gateway && showQuickActions,
-        typeLabel: host.gatewayType.label,
-        typeKey: ValueKey('gateway-type-${host.id}'),
+        label: widget.gateway
+            ? (showQuickActions ? host.gatewayType.label : null)
+            : (showStatus && (showQuickActions || active || _focused)
+                  ? tags
+                  : null),
+        labelKey: ValueKey(
+          widget.gateway
+              ? 'gateway-type-${host.id}'
+              : 'sidebar-host-tags-${host.id}',
+        ),
       ),
       trailing: showQuickActions
           ? Row(
@@ -1240,10 +1376,18 @@ class _HostTileState extends State<_HostTile> {
     final previewRow = buildRow(showQuickActions: false, showStatus: false);
     final Widget row = Get.isRegistered<SessionController>()
         ? Obx(() {
-            final hostSessions = Get.find<SessionController>().sessions
+            final controller = Get.find<SessionController>();
+            final active = controller.activeSession;
+            bool belongsToTile(Session session) =>
+                session.host.id == host.id &&
+                widget.gateway ==
+                    (session.kind == SessionKind.portForward ||
+                        session.kind == SessionKind.dynamicProxy);
+            final current = active != null && belongsToTile(active);
+            final hostSessions = controller.sessions
                 .where(
                   (s) =>
-                      s.host.id == host.id &&
+                      belongsToTile(s) &&
                       s.kind != SessionKind.containerTerminal &&
                       s.phase != SessionPhase.closed,
                 )
@@ -1258,6 +1402,7 @@ class _HostTileState extends State<_HostTile> {
             return buildRow(
               showQuickActions: _hovered,
               showStatus: true,
+              active: current,
               statusColor: statusColor,
               sessionCount: hostSessions.length,
             );
@@ -1272,11 +1417,20 @@ class _HostTileState extends State<_HostTile> {
       },
       child: shadcn.ContextMenu(
         items: appMenuItems(actions, _onMenuAction),
-        child: row,
+        child: widget.gateway || search != null
+            ? row
+            : Focus(
+                canRequestFocus: false,
+                includeSemantics: false,
+                onFocusChange: (focused) => setState(() => _focused = focused),
+                child: row,
+              ),
       ),
     );
 
-    final item = HostTreeItem.host(host.id);
+    final item = widget.gateway
+        ? HostTreeItem.host(host.id)
+        : ServiceTerminalDrag(host.id);
     final draggable = HostTreeDraggable(
       item: item,
       dragAnchor: widget.dragAnchor,

@@ -144,6 +144,19 @@ impl Access {
     }
 }
 
+pub(crate) async fn log_command(session: u32, container_id: &str) -> Result<String> {
+    validate_docker_id(DockerResourceKind::Container, container_id)?;
+    let access = Access::prepare(session).await?;
+    let cli = if access.sudo {
+        access.cli()
+    } else {
+        format!("exec {}", access.cli())
+    };
+    Ok(server_status_command(&format!(
+        "{cli} logs --follow --tail 200 --timestamps -- {container_id} </dev/null"
+    )))
+}
+
 #[derive(Clone)]
 struct Client {
     session: u32,

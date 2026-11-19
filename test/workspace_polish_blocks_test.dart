@@ -20,13 +20,11 @@ import 'package:pagashell/presentation/ai/agent_history_dialog.dart';
 import 'package:pagashell/presentation/components/app_markdown.dart';
 import 'package:pagashell/presentation/components/app_text_form_field.dart';
 import 'package:pagashell/presentation/identities/identity_manager_dialog.dart';
-import 'package:pagashell/presentation/navigation/app_navigation.dart';
 import 'package:pagashell/presentation/navigation/app_notice.dart';
 import 'package:pagashell/presentation/rdp/rdp_certificate_prompt.dart';
 import 'package:pagashell/presentation/rdp/rdp_desktop_panel.dart';
 import 'package:pagashell/presentation/settings/settings_dialog.dart';
 import 'package:pagashell/presentation/ssh/host_key_confirmation.dart';
-import 'package:pagashell/presentation/terminal/batch_command_dialog.dart';
 import 'package:pagashell/presentation/terminal/docker_details_dialog.dart';
 import 'package:pagashell/presentation/terminal/process_details_dialog.dart';
 import 'package:pagashell/presentation/terminal/terminal_search_field.dart';
@@ -40,16 +38,7 @@ import 'support/in_memory_binding.dart';
 import 'support/in_memory_settings_repository.dart';
 import 'support/shadcn_test_app.dart';
 
-class _RecordingSession extends FakeSftpSession {
-  final written = <String>[];
-
-  @override
-  void write(String data) => written.add(data);
-}
-
 class _FakeEngine implements SshEngine {
-  final sessions = <_RecordingSession>[];
-
   @override
   Future<SshEngineSession> connect(
     Host host,
@@ -57,11 +46,7 @@ class _FakeEngine implements SshEngine {
     HostKeyVerifier? verifyHostKey,
     Future<void>? cancelled,
     SshGateway? gateway,
-  }) async {
-    final session = _RecordingSession();
-    sessions.add(session);
-    return session;
-  }
+  }) async => FakeSftpSession();
 }
 
 class _PendingEngine implements SshEngine {
@@ -482,91 +467,6 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('connecting-cancel')));
     await tester.pumpAndSettle();
     expect(sessions.sessions, isEmpty);
-  });
-
-  testWidgets('批量执行命令弹窗支持终端搜索过滤与快捷键直接执行', (tester) async {
-    tester.view.physicalSize = const Size(1280, 800);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
-
-    final engine = _FakeEngine();
-    await tester.pumpWidget(
-      PagaShellApp(
-        binding: InMemoryBinding(sshEngine: engine),
-        platform: TargetPlatform.macOS,
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    final sessions = Get.find<SessionController>();
-    await sessions.open(
-      const Host(id: 'w1', name: 'web-01', hostname: '10.0.1.1'),
-      SshCredentials.password('secret'),
-    );
-    await sessions.open(
-      const Host(id: 'd1', name: 'db-01', hostname: '10.0.1.2'),
-      SshCredentials.password('secret'),
-    );
-    await tester.pumpAndSettle();
-
-    unawaited(
-      AppNavigation.dialog<BatchCommandResult>(
-        BatchCommandDialog(controller: sessions),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(
-      find.byKey(const ValueKey('batch-command-shortcut-hint')),
-      findsOneWidget,
-    );
-    await tester.tap(find.byKey(const ValueKey('batch-command-search-toggle')));
-    await tester.pumpAndSettle();
-
-    await tester.enterText(
-      find.byKey(const ValueKey('batch-command-search')),
-      '10.0.1.2',
-    );
-    await tester.pumpAndSettle();
-    expect(
-      find.descendant(
-        of: find.byType(BatchCommandDialog),
-        matching: find.text('web-01'),
-      ),
-      findsNothing,
-    );
-    expect(
-      find.descendant(
-        of: find.byType(BatchCommandDialog),
-        matching: find.text('db-01'),
-      ),
-      findsOneWidget,
-    );
-
-    await tester.tap(
-      find.descendant(
-        of: find.byType(BatchCommandDialog),
-        matching: find.text('全选'),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.enterText(
-      find.byKey(const ValueKey('batch-command-input')),
-      'uptime',
-    );
-    await tester.pumpAndSettle();
-
-    await tester.sendKeyDownEvent(LogicalKeyboardKey.meta);
-    await tester.sendKeyDownEvent(LogicalKeyboardKey.enter);
-    await tester.sendKeyUpEvent(LogicalKeyboardKey.enter);
-    await tester.sendKeyUpEvent(LogicalKeyboardKey.meta);
-    await tester.pumpAndSettle();
-
-    expect(find.byType(BatchCommandDialog), findsNothing);
-    expect(engine.sessions[0].written, isEmpty);
-    expect(engine.sessions[1].written, ['uptime\r']);
   });
 
   testWidgets('Agent 历史对话弹窗支持搜索过滤与当前对话胶囊标识', (tester) async {

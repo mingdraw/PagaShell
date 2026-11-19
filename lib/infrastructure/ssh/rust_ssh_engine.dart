@@ -11,6 +11,7 @@ import '../../domain/entities/forward_port.dart';
 import '../../domain/entities/host.dart';
 import '../../domain/entities/identity.dart';
 import '../../domain/entities/proxy_config.dart';
+import '../../domain/entities/small_text_file.dart';
 import '../../domain/proxy/dynamic_proxy_engine.dart';
 import '../../domain/rdp/rdp_clipboard.dart';
 import '../../domain/rdp/rdp_engine.dart';
@@ -684,10 +685,12 @@ class _RustEngineSession
     implements
         SshEngineSession,
         ResumableSftpSession,
+        SmallTextFileAccess,
         ServerStatusSource,
         ProcessManagerSource,
         NetworkPortsSource,
         DockerManagerSource,
+        DockerLogsSource,
         DockerContainerActions,
         DockerImageActions,
         DockerComposeActions,
@@ -695,6 +698,37 @@ class _RustEngineSession
         PortForwardSession,
         TerminalScreenSource {
   _RustEngineSession(this._sessionId);
+
+  @override
+  Future<SmallTextFile> readSmallText(String path) => _guard(() async {
+    final file = await rust.sftpReadText(sessionId: _sessionId, path: path);
+    final timestamp = file.modifiedUnix;
+    return SmallTextFile(
+      file.text,
+      timestamp == null
+          ? null
+          : DateTime.fromMillisecondsSinceEpoch(timestamp * 1000),
+    );
+  });
+
+  @override
+  Future<void> saveSmallText(
+    String path,
+    SmallTextFile original,
+    String text,
+  ) => _guard(
+    () => rust.sftpSaveText(
+      sessionId: _sessionId,
+      path: path,
+      original: rust.SftpTextFile(
+        text: original.text,
+        modifiedUnix: original.modified == null
+            ? null
+            : original.modified!.millisecondsSinceEpoch ~/ 1000,
+      ),
+      text: text,
+    ),
+  );
 
   final int _sessionId;
   bool _closed = false;
@@ -761,6 +795,25 @@ class _RustEngineSession
           ),
           kind,
         );
+      });
+
+  @override
+  Future<DockerLogSession> openDockerLogs(DockerResource container) =>
+      _guard(() async {
+        if (_closed || container.kind != DockerResourceKind.container) {
+          throw const SshEngineException('无法打开容器日志，请检查连接');
+        }
+        final logs = _RustDockerLogSession(
+          await docker.sshOpenDockerLogs(
+            sessionId: _sessionId,
+            containerId: container.id,
+          ),
+        );
+        if (_closed) {
+          await logs.close();
+          throw const SshEngineException('Docker 管理连接已关闭');
+        }
+        return logs;
       });
 
   @override
@@ -1148,7 +1201,34 @@ class _RustEngineSession
   }
 }
 
-class _RustProxySession implements DynamicProxySession {
+class _RustDockerLogSession implements DockerLogSession {
+  _RustDockerLogSession(this.id);
+
+  final int id;
+  Future<void>? _closing;
+
+  Stream<List<int>> _chunks() async* {
+    try {
+      while (_closing == null) {
+        final bytes = await docker.sshNextDockerLogs(logId: id);
+        if (_closing != null || bytes == null) return;
+        yield bytes;
+      }
+    } on AnyhowException catch (e) {
+      throw SshEngineException(e.message.split('\n').first, e);
+    }
+  }
+
+  @override
+  Stream<String> get output =>
+      const Utf8Decoder(allowMalformed: true).bind(_chunks());
+
+  @override
+  Future<void> close() => _closing ??= docker.sshCloseDockerLogs(logId: id);
+}
+
+class _RustProxySession
+    implements DynamicProxySession, DynamicProxyTrafficSource {
   _RustProxySession(this.id, this.gateway) {
     done = proxy.proxyWait(proxyId: id).then((error) {
       if (error != null) throw SshEngineException(error);
@@ -1159,6 +1239,13 @@ class _RustProxySession implements DynamicProxySession {
   @override
   late final Future<void> done;
   Future<void>? _closing;
+
+  @override
+  Future<ProxyTraffic?> readTraffic() async {
+    final traffic = await proxy.proxyTraffic(proxyId: id);
+    if (traffic == null) return null;
+    return (sent: traffic.sent.toInt(), received: traffic.received.toInt());
+  }
 
   @override
   Future<void> close() => _closing ??= () async {

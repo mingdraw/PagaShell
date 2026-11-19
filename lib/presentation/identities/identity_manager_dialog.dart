@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
@@ -54,12 +56,16 @@ class _IdentityManagerDialogState extends State<_IdentityManagerDialog> {
   Widget build(BuildContext context) {
     final controller = Get.find<IdentityController>();
     final colors = shadcn.Theme.of(context).colorScheme;
+    final contentHeight = math.min(
+      340.0,
+      math.max(160.0, MediaQuery.sizeOf(context).height - 220),
+    );
 
     return AppDialog(
       title: Text('凭证管理'.tr),
       content: SizedBox(
         width: 420,
-        height: 340,
+        height: contentHeight,
         child: Obx(() {
           final identities = controller.sorted;
           if (identities.isEmpty) {
@@ -137,6 +143,12 @@ class _IdentityManagerDialogState extends State<_IdentityManagerDialog> {
                                 AuthType.privateKey => '私钥'.tr,
                                 _ => '暂不支持'.tr,
                               };
+                              final subtitleParts = [
+                                identity.serviceType.label,
+                                if (identity.username.isNotEmpty)
+                                  identity.username,
+                                authLabel,
+                              ];
                               return AppListRow(
                                 leading: const AppIcon(
                                   AppIcons.fileKey,
@@ -147,7 +159,7 @@ class _IdentityManagerDialogState extends State<_IdentityManagerDialog> {
                                   style: const TextStyle(fontSize: 13),
                                 ),
                                 subtitle: Text(
-                                  '${identity.serviceType.label} · ${identity.username} · $authLabel',
+                                  subtitleParts.join(' · '),
                                   style: TextStyle(
                                     fontSize: 11,
                                     color: colors.mutedForeground,

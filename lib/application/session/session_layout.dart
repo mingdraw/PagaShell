@@ -1,13 +1,31 @@
 /// 水平轴表示左右排列，垂直轴表示上下排列。
 enum SessionSplitAxis { horizontal, vertical }
 
+enum SessionSplitEdge {
+  left,
+  right,
+  top,
+  bottom;
+
+  SessionSplitAxis get axis => this == left || this == right
+      ? SessionSplitAxis.horizontal
+      : SessionSplitAxis.vertical;
+
+  bool get before => this == left || this == top;
+}
+
 /// 只记录布局和会话 ID，不持有连接或凭据。
 sealed class SessionLayout {
   const SessionLayout();
 
   Iterable<String> get sessionIds;
 
-  SessionLayout split(String target, String added, SessionSplitAxis axis);
+  SessionLayout split(
+    String target,
+    String added,
+    SessionSplitAxis axis, {
+    bool before = false,
+  });
   SessionLayout? remove(String sessionId);
 }
 
@@ -19,13 +37,17 @@ class SessionPane extends SessionLayout {
   Iterable<String> get sessionIds => [sessionId];
 
   @override
-  SessionLayout split(String target, String added, SessionSplitAxis axis) =>
-      sessionId == target
+  SessionLayout split(
+    String target,
+    String added,
+    SessionSplitAxis axis, {
+    bool before = false,
+  }) => sessionId == target
       ? SessionSplit(
           id: 'split-$added',
           axis: axis,
-          first: this,
-          second: SessionPane(added),
+          first: before ? SessionPane(added) : this,
+          second: before ? this : SessionPane(added),
         )
       : this;
 
@@ -60,9 +82,14 @@ class SessionSplit extends SessionLayout {
   }
 
   @override
-  SessionLayout split(String target, String added, SessionSplitAxis axis) {
-    final left = first.split(target, added, axis);
-    final right = second.split(target, added, axis);
+  SessionLayout split(
+    String target,
+    String added,
+    SessionSplitAxis axis, {
+    bool before = false,
+  }) {
+    final left = first.split(target, added, axis, before: before);
+    final right = second.split(target, added, axis, before: before);
     if (identical(left, first) && identical(right, second)) return this;
     return SessionSplit(id: id, axis: this.axis, first: left, second: right);
   }

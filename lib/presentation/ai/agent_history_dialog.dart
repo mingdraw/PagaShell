@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
@@ -82,13 +84,18 @@ class _AgentHistoryDialogState extends State<_AgentHistoryDialog> {
   @override
   Widget build(BuildContext context) {
     final agent = widget.agent;
-    final muted = shadcn.Theme.of(context).colorScheme.mutedForeground;
+    final colors = shadcn.Theme.of(context).colorScheme;
+    final muted = colors.mutedForeground;
+    final contentHeight = math.min(
+      400.0,
+      math.max(160.0, MediaQuery.sizeOf(context).height - 220),
+    );
     return AppDialog(
       title: Text('历史对话'.tr),
       maxWidth: 560,
       content: SizedBox(
         width: 560,
-        height: 400,
+        height: contentHeight,
         child: Obx(() {
           final conversations = agent.conversations.toList();
           return Column(
@@ -98,7 +105,7 @@ class _AgentHistoryDialogState extends State<_AgentHistoryDialog> {
                 Text(
                   agent.historyError.value!.tr,
                   key: const ValueKey('agent-history-error'),
-                  style: const TextStyle(fontSize: 12),
+                  style: TextStyle(fontSize: 12, color: colors.destructive),
                 ),
                 Align(
                   alignment: Alignment.centerRight,

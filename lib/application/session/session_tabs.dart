@@ -21,11 +21,12 @@ class _SessionTabs {
     SessionTab tab,
     String target,
     String added,
-    SessionSplitAxis axis,
-  ) {
+    SessionSplitAxis axis, {
+    bool before = false,
+  }) {
     _splitTabs[tab.id] = SessionTab(
       id: tab.id,
-      layout: tab.layout.split(target, added, axis),
+      layout: tab.layout.split(target, added, axis, before: before),
       selectedSessionId: added,
     );
   }

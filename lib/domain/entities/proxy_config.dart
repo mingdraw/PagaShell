@@ -14,12 +14,17 @@ class ProxyRule {
     if (type == ProxyRuleType.ip) {
       final parts = text.split('/');
       final ip = InternetAddress.tryParse(parts.first);
-      final bits = parts.length == 2 ? int.tryParse(parts[1]) : null;
+      final prefix = parts.length == 2 ? parts[1] : null;
+      final bits = prefix != null && RegExp(r'^[0-9]{1,3}$').hasMatch(prefix)
+          ? int.parse(prefix)
+          : null;
       if (text.contains('%') ||
           parts.length > 2 ||
           ip == null ||
-          (parts.length == 2 &&
-              (bits == null || bits < 0 || bits > ip.rawAddress.length * 8))) {
+          (prefix != null &&
+              (bits == null ||
+                  (ip.type == InternetAddressType.IPv4 && prefix.length > 2) ||
+                  bits > ip.rawAddress.length * 8))) {
         throw StateError('请填写有效的 IPv4、IPv6 或 CIDR');
       }
     } else if (text.isEmpty ||

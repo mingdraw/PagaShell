@@ -24,6 +24,28 @@ Future<int> proxyStart({
 Future<String?> proxyWait({required int proxyId}) =>
     RustLib.instance.api.crateApiProxyProxyWait(proxyId: proxyId);
 
+/// Cumulative bytes carried by this listener instance.
+Future<ProxyTraffic?> proxyTraffic({required int proxyId}) =>
+    RustLib.instance.api.crateApiProxyProxyTraffic(proxyId: proxyId);
+
 /// Cancels negotiations, tunnels and HTTP drivers, then releases every listener.
 Future<void> proxyStop({required int proxyId}) =>
     RustLib.instance.api.crateApiProxyProxyStop(proxyId: proxyId);
+
+class ProxyTraffic {
+  final BigInt sent;
+  final BigInt received;
+
+  const ProxyTraffic({required this.sent, required this.received});
+
+  @override
+  int get hashCode => sent.hashCode ^ received.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ProxyTraffic &&
+          runtimeType == other.runtimeType &&
+          sent == other.sent &&
+          received == other.received;
+}

@@ -150,7 +150,7 @@ void main() {
         tester.widget<shadcn.Checkbox>(checkbox).state,
         shadcn.CheckboxState.unchecked,
       );
-      await tester.tap(find.widgetWithText(shadcn.PrimaryButton, '删除'));
+      await tester.tap(find.widgetWithText(shadcn.DestructiveButton, '删除'));
       await tester.pumpAndSettle();
       await confirmation;
 
@@ -211,7 +211,7 @@ void main() {
       await tester.tap(checkbox);
       await tester.pumpAndSettle();
       expect(find.textContaining('此操作无法撤销'), findsOneWidget);
-      await tester.tap(find.widgetWithText(shadcn.PrimaryButton, '删除'));
+      await tester.tap(find.widgetWithText(shadcn.DestructiveButton, '删除'));
       await tester.pumpAndSettle();
       await confirmation;
 

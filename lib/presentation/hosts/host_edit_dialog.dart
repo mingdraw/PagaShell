@@ -1,13 +1,14 @@
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
-import '../../application/folders/folder_controller.dart';
 import '../../application/gateways/gateway_controller.dart';
 import '../../application/hosts/host_controller.dart';
-import '../../domain/entities/folder.dart';
 import '../../domain/entities/host.dart';
 import '../../domain/entities/proxy_config.dart';
+import '../../domain/ssh/ssh_endpoint.dart';
+import '../../domain/ssh/ssh_engine.dart';
 import '../../domain/vault/secret_store.dart';
 import '../components/app_dialog.dart';
 import '../components/app_icon.dart';
@@ -19,6 +20,8 @@ import '../components/copy_name.dart';
 import '../gateways/gateway_select_field.dart';
 import '../identities/identity_select_field.dart';
 import '../navigation/app_navigation.dart';
+import '../navigation/app_notice.dart';
+import '../shell/connect_flow.dart';
 import '../theme/app_theme.dart';
 
 /// 打开新建/编辑服务对话框。[host] 为 null 时表示新建，[initialFolderId]
@@ -31,8 +34,8 @@ Future<void> showHostEditDialog(
   Host? copyFrom,
   String? initialFolderId,
   bool gateway = false,
-}) {
-  return AppNavigation.dialog<void>(
+}) async {
+  final hostToConnect = await AppNavigation.dialog<Host>(
     HostEditDialog(
       host: host,
       copyFrom: copyFrom,
@@ -40,22 +43,61 @@ Future<void> showHostEditDialog(
       gateway: gateway,
     ),
   );
+  if (hostToConnect != null && context.mounted) {
+    await connectToHost(context, hostToConnect);
+  }
+}
+
+/// 确认删除服务或网关及其已保存的凭据/配置。
+Future<void> confirmDeleteHost(
+  BuildContext context,
+  Host host, {
+  bool gateway = false,
+}) async {
+  final ok = await AppNavigation.dialog<bool>(
+    AppDialog(
+      title: Text(
+        (gateway ? '删除网关「@name」？' : '删除服务「@name」？').trParams({
+          'name': host.name,
+        }),
+      ),
+      content: Text(
+        gateway
+            ? '将删除此网关及其端口转发、动态代理配置与保存的凭据，此操作无法撤销。'.tr
+            : '将删除此服务（@address）及其保存的密码，此操作无法撤销。'.trParams({
+                'address': host.address,
+              }),
+      ),
+      actions: [
+        shadcn.OutlineButton(
+          onPressed: () => AppNavigation.closeDialog(result: false),
+          child: Text('取消'.tr),
+        ),
+        shadcn.DestructiveButton(
+          key: const ValueKey('host-confirm-delete'),
+          onPressed: () => AppNavigation.closeDialog(result: true),
+          child: Text('删除'.tr),
+        ),
+      ],
+    ),
+  );
+  if (ok != true) return;
+  try {
+    final controller = gateway
+        ? Get.find<GatewayController>()
+        : Get.find<HostController>();
+    await controller.remove(host.id);
+  } on SecretStoreException catch (e) {
+    if (context.mounted) AppNotice.error(e.message);
+  } on SshEngineException catch (e) {
+    if (context.mounted) AppNotice.error(e.message.tr);
+  } on StateError catch (e) {
+    if (context.mounted) AppNotice.error(e.message.toString().tr);
+  }
 }
 
 /// 登录方式：直接维护本服务的用户名密码，或复用已有凭证。
 enum _AuthMode { password, identity }
-
-final class _FolderOption {
-  const _FolderOption(this.id);
-
-  final String? id;
-
-  @override
-  bool operator ==(Object other) => other is _FolderOption && other.id == id;
-
-  @override
-  int get hashCode => id.hashCode;
-}
 
 class HostEditDialog extends StatefulWidget {
   const HostEditDialog({
@@ -86,6 +128,8 @@ class _HostEditDialogState extends State<HostEditDialog> {
   late final TextEditingController _username;
   late final TextEditingController _password;
   late final TextEditingController _note;
+  late final TextEditingController _tags;
+  int? _colorValue;
   late final TextEditingController _rdpDomain;
   late final TextEditingController _pageClientId;
   late final TextEditingController _pageFingerprint;
@@ -100,7 +144,7 @@ class _HostEditDialogState extends State<HostEditDialog> {
       _hasSavedPassword && widget.host?.serviceType == _serviceType;
   late _AuthMode _mode;
   String? _identityId;
-  String? _folderId;
+  late final String? _folderId;
   String? _gatewayId;
   bool _advancedExpanded = false;
   HostController get _controller => widget.gateway
@@ -150,9 +194,12 @@ class _HostEditDialogState extends State<HostEditDialog> {
     );
     _password = TextEditingController();
     _note = TextEditingController(text: h?.note ?? '');
+    _tags = TextEditingController(text: h?.tags.join(', ') ?? '');
+    _colorValue = h?.colorValue;
     _identityId = h?.identityId;
     _folderId = h?.folderId ?? widget.initialFolderId;
     _gatewayId = h?.gatewayId;
+    _advancedExpanded = _gatewayId != null;
     _mode = h?.identityId != null ? _AuthMode.identity : _AuthMode.password;
     if (widget.copyFrom != null && h?.identityId == null) {
       _loadCopyPassword();
@@ -198,14 +245,17 @@ class _HostEditDialogState extends State<HostEditDialog> {
     _username.dispose();
     _password.dispose();
     _note.dispose();
+    _tags.dispose();
     _rdpDomain.dispose();
     _pageClientId.dispose();
     _pageFingerprint.dispose();
     super.dispose();
   }
 
-  Future<void> _save() async {
-    if (_saving || !_copyReady || !_formKey.currentState!.validate()) return;
+  Future<void> _save({bool connect = false}) async {
+    if (_saving || !_copyReady) return;
+    _applyTypedAddress();
+    if (!_formKey.currentState!.validate()) return;
     setState(() {
       _saving = true;
       _error = null;
@@ -229,7 +279,14 @@ class _HostEditDialogState extends State<HostEditDialog> {
           ? _serviceType.defaultUsername
           : username,
       note: _note.text.trim(),
-      tags: (widget.host ?? widget.copyFrom)?.tags ?? const [],
+      tags: widget.gateway
+          ? latest?.tags ?? const []
+          : _tags.text
+                .split(RegExp(r'[,，\n]'))
+                .map((tag) => tag.trim())
+                .where((tag) => tag.isNotEmpty)
+                .toSet()
+                .toList(growable: false),
       folderId: _folderId,
       identityId: !_isPage && _mode == _AuthMode.identity ? _identityId : null,
       gatewayId: widget.gateway ? null : _gatewayId,
@@ -238,7 +295,7 @@ class _HostEditDialogState extends State<HostEditDialog> {
       rdpDomain: _isRdp ? _rdpDomain.text.trim() : '',
       pageClientId: _isPage ? _pageClientId.text.trim() : '',
       pageServerFingerprint: _isPage ? _pageFingerprint.text.trim() : '',
-      colorValue: (widget.host ?? widget.copyFrom)?.colorValue,
+      colorValue: _colorValue,
       sortOrder: widget.host?.sortOrder ?? 0,
       forwardPorts: latest?.forwardPorts ?? const [],
       proxyConfig: latest?.proxyConfig ?? const ProxyConfig(),
@@ -261,7 +318,9 @@ class _HostEditDialogState extends State<HostEditDialog> {
         // 切换为凭证登录后清掉服务自有密码，不留无主密文。
         await controller.clearPassword(id);
       }
-      if (mounted) AppNavigation.closeDialog<void>();
+      if (mounted) {
+        AppNavigation.closeDialog<Host>(result: connect ? host : null);
+      }
     } on SecretStoreException catch (e) {
       if (mounted) {
         setState(() {
@@ -300,10 +359,56 @@ class _HostEditDialogState extends State<HostEditDialog> {
     return null;
   }
 
+  SshEndpoint? _splitAddress(String text) {
+    if (_isPage || _serviceType != ServiceType.ssh) return null;
+    final endpoint = parseSshEndpoint(text);
+    if (endpoint == null) return null;
+    if (endpoint.port case final port?) _port.text = '$port';
+    if (endpoint.username case final username?) _username.text = username;
+    return endpoint;
+  }
+
+  void _applyTypedAddress() {
+    if (_splitAddress(_hostname.text) case final endpoint?) {
+      _hostname.text = endpoint.hostname;
+    }
+  }
+
+  String? _validAddress(String? value) {
+    final requiredError = _required(value);
+    if (requiredError != null) return requiredError;
+    final address = value!.trim();
+    if (!_isPage &&
+        _serviceType == ServiceType.ssh &&
+        (RegExp(r'[\s@\[\]]').hasMatch(address) ||
+            ':'.allMatches(address).length == 1) &&
+        parseSshEndpoint(address) == null) {
+      return '请输入主机地址或有效的 SSH 连接地址'.tr;
+    }
+    return null;
+  }
+
+  TextEditingValue _formatAddressPaste(
+    TextEditingValue previous,
+    TextEditingValue next,
+  ) {
+    if (!next.composing.isCollapsed) return next;
+    final replaced = previous.selection.isValid
+        ? previous.selection.end - previous.selection.start
+        : 0;
+    if (next.text.length - previous.text.length + replaced <= 1) return next;
+    final endpoint = _splitAddress(next.text);
+    if (endpoint == null) return next;
+    return TextEditingValue(
+      text: endpoint.hostname,
+      selection: TextSelection.collapsed(offset: endpoint.hostname.length),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final colors = shadcn.Theme.of(context).colorScheme;
-    return PopScope<void>(
+    return PopScope<Host>(
       canPop: !_saving,
       child: AppDialog(
         scrollable: true,
@@ -412,7 +517,13 @@ class _HostEditDialogState extends State<HostEditDialog> {
                     Expanded(
                       flex: 3,
                       child: AppTextFormField(
+                        key: const ValueKey('host-address'),
                         controller: _hostname,
+                        smartPunctuation: false,
+                        inputFormatters: [
+                          TextInputFormatter.withFunction(_formatAddressPaste),
+                        ],
+                        onFieldSubmitted: (_) => _applyTypedAddress(),
                         decoration: AppInputDecoration(
                           labelText:
                               (_isPage
@@ -420,7 +531,7 @@ class _HostEditDialogState extends State<HostEditDialog> {
                                       : (widget.gateway ? '网关地址' : '服务地址'))
                                   .tr,
                         ),
-                        validator: _required,
+                        validator: _validAddress,
                       ),
                     ),
                     const SizedBox(width: 12),
@@ -568,11 +679,17 @@ class _HostEditDialogState extends State<HostEditDialog> {
                     child: Text('高级选项'.tr),
                   ),
                   if (_advancedExpanded) ...[
-                    if (Get.isRegistered<FolderController>() &&
-                        Get.find<FolderController>().folders.isNotEmpty) ...[
-                      _folderField(),
-                      const SizedBox(height: 12),
-                    ],
+                    AppTextFormField(
+                      key: const ValueKey('host-tags'),
+                      controller: _tags,
+                      decoration: AppInputDecoration(
+                        labelText: '标签'.tr,
+                        hintText: '用逗号分隔，例如 prod, db'.tr,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    _colorField(),
+                    const SizedBox(height: 12),
                     _gatewayField(),
                   ],
                 ],
@@ -623,56 +740,55 @@ class _HostEditDialogState extends State<HostEditDialog> {
               _loadingCopy ? '读取中…'.tr : (_saving ? '保存中…'.tr : '保存'.tr),
             ),
           ),
+          if (!_isEdit && !widget.gateway)
+            shadcn.OutlineButton(
+              key: const ValueKey('host-save-connect'),
+              onPressed: _saving || !_copyReady
+                  ? null
+                  : () => _save(connect: true),
+              child: Text('保存并连接'.tr),
+            ),
         ],
       ),
     );
   }
 
-  Widget _folderField() {
-    final folderController = Get.find<FolderController>();
-    return Obx(() {
-      final folders = folderController.folders.toList();
-      final byId = {for (final f in folders) f.id: f};
-      String pathOf(Folder folder) {
-        final parts = <String>[folder.name];
-        var parentId = folder.parentId;
-        final visited = <String>{folder.id};
-        while (parentId != null && visited.add(parentId)) {
-          final parent = byId[parentId];
-          if (parent == null) break;
-          parts.insert(0, parent.name);
-          parentId = parent.parentId;
-        }
-        return parts.join(' / ');
-      }
-
-      final currentId = _folderId != null && byId.containsKey(_folderId)
-          ? _folderId
-          : null;
-      return AppSelectField<_FolderOption>(
-        key: ValueKey('host-folder-select-$currentId'),
-        initialValue: _FolderOption(currentId),
-        label: '所属目录'.tr,
-        items: [
-          AppSelectOption(
-            value: const _FolderOption(null),
-            child: Text('根目录（未分组）'.tr),
+  Widget _colorField() {
+    final colors = shadcn.Theme.of(context).colorScheme;
+    Widget option(int value, String label) => Row(
+      children: [
+        DecoratedBox(
+          decoration: BoxDecoration(
+            color: value == 0 ? colors.mutedForeground : Color(value),
+            shape: BoxShape.circle,
           ),
-          for (final folder in folders)
-            AppSelectOption(
-              value: _FolderOption(folder.id),
-              child: Text(pathOf(folder), overflow: TextOverflow.ellipsis),
-            ),
-        ],
-        onChanged: _saving
-            ? null
-            : (selected) {
-                if (selected != null) {
-                  setState(() => _folderId = selected.id);
-                }
-              },
-      );
-    });
+          child: const SizedBox.square(dimension: 10),
+        ),
+        const SizedBox(width: 8),
+        Text(label.tr),
+      ],
+    );
+
+    final palette = AppTheme.hostColorPresets;
+    final current = _colorValue;
+    return AppSelectField<int>(
+      key: const ValueKey('host-color'),
+      label: '色标'.tr,
+      initialValue: current ?? 0,
+      items: [
+        AppSelectOption(value: 0, child: option(0, '无色标')),
+        for (final entry in palette.entries)
+          AppSelectOption(
+            value: entry.key,
+            child: option(entry.key, entry.value),
+          ),
+        if (current != null && current != 0 && !palette.containsKey(current))
+          AppSelectOption(value: current, child: option(current, '自定义色标')),
+      ],
+      onChanged: _saving
+          ? null
+          : (value) => setState(() => _colorValue = value == 0 ? null : value),
+    );
   }
 
   Widget _gatewayField() {

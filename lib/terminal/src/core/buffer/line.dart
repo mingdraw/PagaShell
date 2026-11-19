@@ -38,6 +38,7 @@ class BufferLine with IndexedItem {
     _data = update.cells;
     _clusters = update.clusters;
     isWrapped = update.wrapped;
+    _cachedText = null;
     _version++;
   }
 
@@ -49,9 +50,12 @@ class BufferLine with IndexedItem {
     cell.text = _clusters[index];
   }
 
+  String? _cachedText;
+
   String getText([int? from, int? to]) {
     final start = (from ?? 0).clamp(0, length);
     final end = (to ?? length).clamp(0, length);
+    if (start == 0 && end == length && _cachedText != null) return _cachedText!;
     final text = StringBuffer();
     for (var i = start; i < end; i++) {
       final codepoint = getCodePoint(i);
@@ -59,7 +63,26 @@ class BufferLine with IndexedItem {
         text.write(_clusters[i] ?? String.fromCharCode(codepoint));
       }
     }
-    return text.toString();
+    final result = text.toString();
+    if (start == 0 && end == length) _cachedText = result;
+    return result;
+  }
+
+  /// Maps a UTF-16 match boundary back to the terminal cell grid.
+  int columnForTextOffset(int offset, {bool exclusive = false}) {
+    var units = 0;
+    for (var index = 0; index < length; index++) {
+      final codepoint = getCodePoint(index);
+      final width = getWidth(index);
+      if (codepoint == 0 || index + width > length) continue;
+      final end =
+          units + (_clusters[index]?.length ?? (codepoint > 0xffff ? 2 : 1));
+      if (offset < end || (exclusive && offset == end)) {
+        return exclusive ? index + width.clamp(1, length - index) : index;
+      }
+      units = end;
+    }
+    return length;
   }
 
   CellAnchor createAnchor(int offset) {

@@ -182,7 +182,7 @@ void main() {
     expect(controller.sessions.single.kind, SessionKind.remoteDesktop);
     expect(controller.sessions.single.phase, SessionPhase.ready);
     expect(controller.sessions.single.terminal, isNull);
-    expect(controller.commandSessions, isEmpty);
+    expect(controller.canSendCommandToSession(id), isFalse);
     await controller.desktopFailed(id, '断开');
     expect(engine.created.first.closes, 1);
     expect(controller.sessions.single.phase, SessionPhase.failed);

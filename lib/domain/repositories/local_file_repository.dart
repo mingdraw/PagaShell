@@ -7,13 +7,19 @@ abstract interface class LocalFileRepository {
   String pathOf(String directory, String name);
   Future<LocalFileEntry> entryAt(String path);
   Future<List<LocalFileEntry>> listDirectory(String path);
-  Future<void> createDirectory(String path);
+
+  /// 默认允许复用已有目录；交互式新建使用 [rejectExisting] 提示重名。
+  Future<void> createDirectory(String path, {bool rejectExisting = false});
   Future<void> rename(String path, String newName, {required bool isDir});
   Future<void> remove(String path, {required bool isDir});
 }
 
 class LocalFileTargetExists implements Exception {
   const LocalFileTargetExists();
+}
+
+abstract interface class LocalFileMover {
+  Future<void> moveTo(String path, String targetPath, {required bool isDir});
 }
 
 /// macOS 目录访问被拒绝，可通过系统文件夹选择窗口请求授权。

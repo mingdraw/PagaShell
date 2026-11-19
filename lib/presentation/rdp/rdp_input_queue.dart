@@ -3,7 +3,7 @@ import 'dart:collection';
 
 import '../../domain/ssh/ssh_engine.dart';
 
-/// Keep key/button edges in order while replacing obsolete unsent mouse moves.
+/// Keep key/button edges in order while coalescing obsolete unsent moves and wheel bursts.
 class RdpInputQueue {
   RdpInputQueue({required this.onError});
   final void Function(Object) onError;
@@ -11,9 +11,17 @@ class RdpInputQueue {
   bool _sending = false;
   bool _failed = false;
 
-  void add(Future<void> Function() action, {bool movement = false}) {
+  void add(
+    Future<void> Function() action, {
+    bool movement = false,
+    bool wheel = false,
+  }) {
     if (_failed) return;
     if (movement && _pending.isNotEmpty && _pending.last.movement) {
+      _pending.last.action = action;
+      return;
+    }
+    if (wheel && _pending.isNotEmpty && _pending.last.wheel) {
       _pending.last.action = action;
       return;
     }
@@ -21,7 +29,7 @@ class RdpInputQueue {
       _fail(const SshEngineException('RDP 输入队列超时'));
       return;
     }
-    _pending.add(_Input(action, movement));
+    _pending.add(_Input(action, movement: movement, wheel: wheel));
     if (!_sending) unawaited(_drain());
   }
 
@@ -47,7 +55,8 @@ class RdpInputQueue {
 }
 
 class _Input {
-  _Input(this.action, this.movement);
+  _Input(this.action, {required this.movement, required this.wheel});
   Future<void> Function() action;
   final bool movement;
+  final bool wheel;
 }

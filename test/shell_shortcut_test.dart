@@ -33,13 +33,11 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        final modifierLabel = platform == TargetPlatform.macOS
-            ? '⌘'
-            : 'Ctrl + ';
-        for (final key in ['K', 'N']) {
-          expect(find.text('$modifierLabel$key'), findsOneWidget);
-        }
-        expect(find.text('${modifierLabel}W'), findsNothing);
+        final isMac = platform == TargetPlatform.macOS;
+        expect(find.text(isMac ? '⌘K' : 'Ctrl + Shift + K'), findsOneWidget);
+        expect(find.text(isMac ? '⌘N' : 'Ctrl + Shift + N'), findsOneWidget);
+        expect(find.text(isMac ? '⌘,' : 'Ctrl + ,'), findsOneWidget);
+        expect(find.text(isMac ? '⌘W' : 'Ctrl + W'), findsNothing);
 
         final sessions = Get.find<SessionController>();
         final output = <String>[];
@@ -64,23 +62,32 @@ void main() {
           await tester.pumpAndSettle();
         }
 
-        Future<void> shortcut(LogicalKeyboardKey key) async {
-          final modifier = platform == TargetPlatform.macOS
+        Future<void> shortcut(
+          LogicalKeyboardKey key, {
+          bool shift = false,
+        }) async {
+          final modifier = isMac
               ? LogicalKeyboardKey.metaLeft
               : LogicalKeyboardKey.controlLeft;
           await tester.sendKeyDownEvent(modifier);
+          if (shift) {
+            await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+          }
           await tester.sendKeyEvent(key);
+          if (shift) {
+            await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+          }
           await tester.sendKeyUpEvent(modifier);
           await tester.pumpAndSettle();
         }
 
         await restoreFocus();
-        await shortcut(LogicalKeyboardKey.keyK);
+        await shortcut(LogicalKeyboardKey.keyK, shift: !isMac);
         expect(find.text('输入服务名称 / 地址，回车连接…'), findsWidgets);
         expect(Get.isDialogOpen, isTrue);
 
         // 模态弹框内不叠加新弹框，也不关闭底层会话。
-        await shortcut(LogicalKeyboardKey.keyN);
+        await shortcut(LogicalKeyboardKey.keyN, shift: !isMac);
         await shortcut(LogicalKeyboardKey.keyW);
         expect(find.byType(HostEditDialog), findsNothing);
         expect(sessions.sessions.length, focus == '终端' ? 1 : 0);
@@ -94,7 +101,7 @@ void main() {
         await tester.pumpAndSettle();
 
         await restoreFocus();
-        await shortcut(LogicalKeyboardKey.keyN);
+        await shortcut(LogicalKeyboardKey.keyN, shift: !isMac);
         expect(find.byType(HostEditDialog), findsOneWidget);
         expect(Get.isDialogOpen, isTrue);
         AppNavigation.closeDialog<void>();

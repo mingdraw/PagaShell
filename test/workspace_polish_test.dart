@@ -15,6 +15,7 @@ import 'package:pagashell/domain/entities/host.dart';
 import 'package:pagashell/domain/entities/sidebar_state.dart';
 import 'package:pagashell/domain/ssh/host_key.dart';
 import 'package:pagashell/domain/ssh/ssh_engine.dart';
+import 'package:pagashell/presentation/components/app_list_row.dart';
 import 'package:pagashell/presentation/components/app_text_form_field.dart';
 import 'package:pagashell/presentation/hosts/host_edit_dialog.dart';
 import 'package:pagashell/presentation/settings/settings_dialog.dart';
@@ -39,7 +40,7 @@ class _FakeEngine implements SshEngine {
 void main() {
   tearDown(Get.reset);
 
-  testWidgets('侧边栏搜索框支持清除按钮与 Esc 清空，悬停服务行展示快捷编辑和文件传输', (tester) async {
+  testWidgets('侧栏搜索可清空，服务悬停或获得焦点时单行显示标签', (tester) async {
     tester.view.physicalSize = const Size(1280, 800);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -60,6 +61,7 @@ void main() {
         name: 'web-prod',
         hostname: '10.0.0.10',
         username: 'deploy',
+        tags: ['prod', 'payments-api-blue-green-canary'],
       ),
     );
     await hosts.save(
@@ -95,6 +97,8 @@ void main() {
 
     expect(find.byKey(const ValueKey('host-quick-edit-h1')), findsNothing);
     expect(find.byKey(const ValueKey('host-quick-sftp-h1')), findsNothing);
+    final tags = find.byKey(const ValueKey('sidebar-host-tags-h1'));
+    expect(tags, findsNothing);
 
     final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
     await mouse.addPointer(location: Offset.zero);
@@ -105,12 +109,33 @@ void main() {
     expect(find.byKey(const ValueKey('host-quick-edit-h1')), findsOneWidget);
     expect(find.byKey(const ValueKey('host-quick-sftp-h1')), findsOneWidget);
     expect(find.text('deploy@10.0.0.10'), findsNothing);
+    expect(
+      tester.widget<Text>(tags).data,
+      'prod · payments-api-blue-green-canary',
+    );
 
     await tester.tap(find.byKey(const ValueKey('host-quick-edit-h1')));
     await tester.pumpAndSettle();
     expect(find.byType(HostEditDialog), findsOneWidget);
     await tester.tap(find.text('取消'));
     await tester.pumpAndSettle();
+
+    await mouse.moveTo(tester.getCenter(find.text('db-prod')));
+    await tester.pumpAndSettle();
+    expect(tags, findsNothing);
+    expect(find.byKey(const ValueKey('sidebar-host-tags-h2')), findsNothing);
+
+    final detector = tester.widget<FocusableActionDetector>(
+      find
+          .descendant(
+            of: find.byKey(const ValueKey('sidebar-host-row-h1')),
+            matching: find.byType(FocusableActionDetector),
+          )
+          .first,
+    );
+    detector.focusNode!.requestFocus();
+    await tester.pumpAndSettle();
+    expect(tags, findsOneWidget);
   });
 
   testWidgets('欢迎页展示最近连接卡片，点击后直接打开会话', (tester) async {
@@ -230,6 +255,8 @@ void main() {
     expect(gwForward, findsOneWidget);
     expect(gwProxy, findsOneWidget);
     expect(gwEdit, findsOneWidget);
+    final gatewayRow = find.byKey(const ValueKey('sidebar-host-row-gw1'));
+    expect(tester.widget<AppListRow>(gatewayRow).subtitle, isNull);
 
     await tester.tap(gwForward);
     await tester.pumpAndSettle();
@@ -241,6 +268,9 @@ void main() {
       SessionKind.portForward,
       SessionKind.dynamicProxy,
     ]);
+    final activeGateway = tester.widget<AppListRow>(gatewayRow);
+    expect(activeGateway.selected, isTrue);
+    expect(activeGateway.subtitle, isNull);
 
     await tester.tap(gwEdit);
     await tester.pumpAndSettle();
@@ -363,9 +393,7 @@ void main() {
     await tester.pumpAndSettle();
   });
 
-  testWidgets('左侧边栏支持拖拽调宽并持久化，非激活标签关闭按钮悬停显现且支持中键关闭，服务高级选项可选择所属目录', (
-    tester,
-  ) async {
+  testWidgets('侧栏宽度可保存，目录内新建服务保留归属，页签可中键关闭', (tester) async {
     tester.view.physicalSize = const Size(1280, 800);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -403,10 +431,9 @@ void main() {
     final folder = await Get.find<FolderController>().create(name: '核心集群');
     await tester.pumpAndSettle();
 
-    await tester.sendKeyDownEvent(LogicalKeyboardKey.meta);
-    await tester.sendKeyDownEvent(LogicalKeyboardKey.keyN);
-    await tester.sendKeyUpEvent(LogicalKeyboardKey.keyN);
-    await tester.sendKeyUpEvent(LogicalKeyboardKey.meta);
+    await tester.tap(find.text('核心集群'), buttons: kSecondaryMouseButton);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('在此新建服务'));
     await tester.pumpAndSettle();
 
     await tester.enterText(
@@ -420,12 +447,13 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('host-advanced-toggle')));
     await tester.pumpAndSettle();
 
-    final folderSelect = find.byKey(const ValueKey('host-folder-select-null'));
-    expect(folderSelect, findsOneWidget);
-    await tester.tap(folderSelect);
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('核心集群').last);
-    await tester.pumpAndSettle();
+    expect(find.text('所属目录'), findsNothing);
+    final gateway = find.byKey(const ValueKey('gateway-select-null'));
+    final color = find.byKey(const ValueKey('host-color'));
+    expect(
+      tester.getTopLeft(gateway).dy,
+      greaterThan(tester.getBottomLeft(color).dy),
+    );
     await tester.tap(find.text('保存'));
     await tester.pumpAndSettle();
 

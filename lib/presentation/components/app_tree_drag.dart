@@ -44,6 +44,9 @@ class AppTreeDraggable<T extends Object> extends StatelessWidget {
         opacity: AppTheme.treeDragFeedbackOpacity,
         child: SizedBox(
           width: constraints.maxWidth,
+          height: constraints.hasTightHeight && constraints.hasBoundedHeight
+              ? constraints.maxHeight
+              : null,
           child: shadcn.SurfaceCard(
             theme: const shadcn.CardTheme(
               padding: EdgeInsets.zero,

@@ -11,9 +11,11 @@ import '../../domain/ai/ai_model.dart';
 import '../../domain/repositories/agent_conversation_repository.dart';
 import '../../domain/ssh/server_status.dart';
 import '../../domain/vault/secret_store.dart';
+import '../network/app_connect.dart';
 import '../session/session.dart';
 import '../session/session_controller.dart';
 import 'agent_api_codec.dart';
+import 'agent_sse.dart';
 import 'ai_settings_controller.dart';
 
 export '../../domain/ai/agent_conversation.dart'
@@ -24,19 +26,24 @@ part 'agent_history.dart';
 part 'agent_api.dart';
 part 'agent_tools.dart';
 part 'agent_queue.dart';
+part 'agent_preview.dart';
 
 class AgentEntry {
   AgentEntry(
     this.kind,
-    this.text, {
+    String text, {
     this.command,
     this.archivedCommand,
     AgentRequestState? requestState,
     String? requestError,
-  }) : requestState = Rxn<AgentRequestState>(requestState),
+    this.toolSummary,
+  }) : _text = text,
+       requestState = Rxn<AgentRequestState>(requestState),
        requestError = RxnString(requestError);
   final AgentEntryKind kind;
-  final String text;
+  String _text;
+  String get text => _text;
+  AgentToolSummary? toolSummary;
   final AgentCommandProposal? command;
   final AgentArchivedCommand? archivedCommand;
   final Rxn<AgentRequestState> requestState;
@@ -51,10 +58,11 @@ class AgentEntry {
       final state => state,
     },
     requestError: requestError.value,
+    toolSummary: toolSummary,
     command: command == null
         ? archivedCommand
         : AgentArchivedCommand(
-            command: command!.command,
+            command: command!.effectiveCommand,
             purpose: command!.purpose,
             target: command!.target.title,
             state: command!.state.value == AgentCommandState.pending
@@ -311,26 +319,30 @@ class AgentController extends GetxController {
       final anthropicScope =
           '${AgentApiCodec.responsesScope(model)}#$system#${effort.name}#$_historyRevision';
       for (var step = 0; step < 6; step++) {
-        final reply = await _request(
-          model,
-          key,
-          system,
-          turns,
-          anthropicMaxTokens: limit,
-          effort: effort,
-          capabilities: capabilities,
-          anthropicScope: anthropicScope,
-        );
+        final preview = _AgentTurnPreview(this, generation, key);
+        final AgentReply reply;
+        try {
+          reply = await _request(
+            model,
+            key,
+            system,
+            turns,
+            anthropicMaxTokens: limit,
+            effort: effort,
+            capabilities: capabilities,
+            anthropicScope: anthropicScope,
+            onDelta: preview.add,
+          );
+        } finally {
+          preview.close();
+        }
         if (!_live(generation)) return;
+        preview.commit(reply);
         final turn = reply.turn;
         if (reply.truncated && turn.calls.isNotEmpty) {
           throw const AgentApiException('AI 回复达到服务商长度上限，请缩小问题或继续提问');
         }
         turns.add(turn);
-        if (turn.text.isNotEmpty) {
-          _addEntry(AgentEntry(AgentEntryKind.assistant, turn.text));
-          if (!_live(generation)) return;
-        }
         if (turn.calls.isEmpty) {
           _trimHistory(turns);
           if (!_live(generation)) return;
@@ -362,13 +374,14 @@ class AgentController extends GetxController {
     }
   }
 
-  bool approveCommand(AgentCommandProposal proposal) =>
-      _approveCommand(proposal);
+  bool approveCommand(AgentCommandProposal proposal, {String? editedCommand}) =>
+      _approveCommand(proposal, editedCommand ?? proposal.command);
   void rejectCommand(AgentCommandProposal proposal) => _rejectCommand(proposal);
 
   void stop() {
     final wasBusy = busy.value;
     ++_generation;
+    _api.activeStream?.cancel();
     _tools.cancelOutputWait?.call();
     _tools.activeTargets = const [];
     waitingForApproval.value = false;

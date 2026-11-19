@@ -292,7 +292,7 @@ void main() {
         }
         await tester.pumpAndSettle();
         expect(find.text('将删除此凭证及其保存的密码或私钥。'), findsOneWidget);
-        await tester.tap(find.widgetWithText(shadcn.PrimaryButton, '删除'));
+        await tester.tap(find.widgetWithText(shadcn.DestructiveButton, '删除'));
         await tester.pumpAndSettle();
 
         expect(find.text('凭证正在被网关或服务使用，请先修改对应的凭证配置'), findsOneWidget);

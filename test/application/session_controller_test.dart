@@ -774,7 +774,7 @@ void main() {
       await Future<void>.delayed(Duration.zero);
       expect(terminal.isUsingAltBuffer, isTrue);
       terminal.textInput('echo 中文\r');
-      controller.sendCommandToSessions([id], 'pwd');
+      expect(controller.sendCommandToSession(id, 'pwd'), isTrue);
       expect(remote.written, ['echo 中文\r', '\x1b[200~pwd\x1b[201~\r']);
       terminal.resize(100, 30);
       expect(remote.resized.last, (100, 30));
@@ -785,7 +785,7 @@ void main() {
       expect(terminal.lines.length, 0);
     });
 
-    test('原生帧流结束时关闭对应终端页签', () async {
+    test('原生帧流结束时保留已断开终端页签', () async {
       final engine = _FakeEngine(nativeTerminal: true);
       final controller = SessionController(engine: engine);
       addTearDown(controller.onClose);
@@ -793,7 +793,8 @@ void main() {
       final remote = engine.created.single as _NativeEngineSession;
       await remote.frames.close();
       await Future<void>.delayed(Duration.zero);
-      expect(controller.sessions, isEmpty);
+      expect(controller.sessions.single.phase, SessionPhase.closed);
+      expect(controller.sessions.single.engineSession, isNull);
       expect(remote.closed, isTrue);
     });
 
@@ -852,7 +853,7 @@ void main() {
       );
       await _flush();
       expect(remote.acknowledged, isEmpty);
-      expect(controller.sessions, isEmpty);
+      expect(controller.sessions.single.phase, SessionPhase.closed);
       expect(remote.closed, isTrue);
     });
 
@@ -868,7 +869,7 @@ void main() {
       );
       await _flush();
       expect(remote.acknowledged, [31]);
-      expect(controller.sessions, isEmpty);
+      expect(controller.sessions.single.phase, SessionPhase.closed);
       expect(remote.closed, isTrue);
     });
 
@@ -913,7 +914,11 @@ void main() {
       ack.complete();
       await ended;
       await _flush();
-      expect(controller.sessions, isEmpty);
+      expect(controller.sessions.single.phase, SessionPhase.closed);
+      expect(
+        controller.sessions.single.terminal!.lines[0].getText(),
+        'last output',
+      );
       expect(remote.closed, isTrue);
     });
 
@@ -946,12 +951,11 @@ void main() {
       expect(controller.sessions.single.phase, SessionPhase.ready);
     });
 
-    test('批量命令仅发送到所选 SSH 终端，去重并排除传输和转发', () async {
+    test('命令只发送到指定 SSH 终端，传输和转发不能接收命令', () async {
       final engine = _FakeEngine();
       final controller = SessionController(engine: engine);
       addTearDown(controller.onClose);
       final first = await controller.open(_host, _credentials);
-      final second = await controller.open(_host, _credentials);
       await controller.open(_host, _credentials);
       final transfer = await controller.open(
         _host,
@@ -959,30 +963,19 @@ void main() {
         kind: SessionKind.fileTransfer,
       );
       final forward = controller.openForward(_host);
-      expect(controller.commandSessions.map((s) => s.id), [
-        first,
-        second,
-        controller.sessions[2].id,
-      ]);
-
-      final result = controller.sendCommandToSessions([
-        first,
-        second,
-        first,
-        transfer,
-        forward,
-      ], 'pwd');
-      expect(result.sent, 2);
-      expect(result.skipped, 2);
-      expect(result.failed, 0);
+      expect(controller.canSendCommandToSession(first), isTrue);
+      expect(controller.sendCommandToSession(first, 'pwd'), isTrue);
+      for (final id in [transfer, forward]) {
+        expect(controller.canSendCommandToSession(id), isFalse);
+        expect(controller.sendCommandToSession(id, 'pwd'), isFalse);
+      }
       expect(engine.created[0].written, ['pwd\r']);
-      expect(engine.created[1].written, ['pwd\r']);
+      expect(engine.created[1].written, isEmpty);
       expect(engine.created[2].written, isEmpty);
-      expect(engine.created[3].written, isEmpty);
       expect(controller.activeSessionId.value, forward);
     });
 
-    test('批量多行规范换行但保留缩进和 heredoc，并适配各终端的粘贴模式', () async {
+    test('多行命令保留缩进和 heredoc，并适配目标终端的粘贴模式', () async {
       final engine = _FakeEngine();
       final controller = SessionController(engine: engine);
       addTearDown(controller.onClose);
@@ -990,55 +983,44 @@ void main() {
       final second = await controller.open(_host, _credentials);
       controller.sessions[1].terminal!.setBracketedPaste(true);
       const command = "cat <<'EOF'\r\n  hello\rworld\r\nEOF";
-      final result = controller.sendCommandToSessions([first, second], command);
-      expect(result.sent, 2);
+      expect(controller.sendCommandToSession(first, command), isTrue);
+      expect(controller.sendCommandToSession(second, command), isTrue);
       expect(engine.created[0].written, ["cat <<'EOF'\r  hello\rworld\rEOF\r"]);
       expect(engine.created[1].written, [
         "\x1b[200~cat <<'EOF'\n  hello\nworld\nEOF\x1b[201~\r",
       ]);
-      controller.sendCommandToSessions([first], 'pwd\n');
+      expect(controller.sendCommandToSession(first, 'pwd\n'), isTrue);
       expect(engine.created[0].written.last, 'pwd\r');
     });
 
-    test('批量发送前复查连接，跳过关闭与过渡状态且一个失败不影响其他目标', () async {
+    test('发送命令时拒绝过渡、关闭或写入失败的会话', () async {
       final engine = _FakeEngine();
       final controller = SessionController(engine: engine);
       addTearDown(controller.onClose);
       final closed = await controller.open(_host, _credentials);
       final unavailable = await controller.open(_host, _credentials);
       final broken = await controller.open(_host, _credentials);
-      final ready = await controller.open(_host, _credentials);
       await controller.close(closed);
       engine.created[2].failWrites = true;
+      expect(controller.sendCommandToSession(closed, 'whoami'), isFalse);
+      expect(controller.sendCommandToSession(broken, 'whoami'), isFalse);
       for (final phase in SessionPhase.values.where(
         (phase) => phase != SessionPhase.ready,
       )) {
         controller.sessions[0] = controller.sessions[0].copyWith(phase: phase);
-        final result = controller.sendCommandToSessions([
-          closed,
-          unavailable,
-          broken,
-          ready,
-          'missing',
-        ], 'whoami');
-        expect(result.sent, 1);
-        expect(result.skipped, 3);
-        expect(result.failed, 1);
+        expect(controller.sendCommandToSession(unavailable, 'whoami'), isFalse);
       }
-      expect(engine.created[0].written, isEmpty);
-      expect(engine.created[1].written, isEmpty);
-      expect(engine.created[2].written, isEmpty);
-      expect(engine.created[3].written, everyElement('whoami\r'));
+      expect(engine.created.expand((session) => session.written), isEmpty);
     });
 
     test('空白命令、无目标以及已销毁控制器不写入终端', () async {
       final engine = _FakeEngine();
       final controller = SessionController(engine: engine);
       final id = await controller.open(_host, _credentials);
-      expect(controller.sendCommandToSessions([id], ' \r\n ').sent, 0);
-      expect(controller.sendCommandToSessions([], 'pwd').sent, 0);
+      expect(controller.sendCommandToSession(id, ' \r\n '), isFalse);
+      expect(controller.sendCommandToSession('missing', 'pwd'), isFalse);
       controller.onClose();
-      expect(controller.sendCommandToSessions([id], 'pwd').sent, 0);
+      expect(controller.sendCommandToSession(id, 'pwd'), isFalse);
       expect(engine.created.single.written, isEmpty);
     });
 
@@ -1279,7 +1261,7 @@ void main() {
     test('同主机终端退出保留文件传输标签与连接', () async {
       final engine = _FakeEngine();
       final controller = SessionController(engine: engine);
-      await controller.open(_host, _credentials);
+      final terminalId = await controller.open(_host, _credentials);
       final transferId = await controller.open(
         _host,
         _credentials,
@@ -1288,9 +1270,11 @@ void main() {
       expect(engine.created, hasLength(2));
       await engine.created.first._output.close();
       await _flush();
-      expect(controller.sessions.single.id, transferId);
+      expect(controller.sessions.first.phase, SessionPhase.closed);
+      expect(controller.activeSessionId.value, transferId);
       expect(engine.created.last.closed, isFalse);
       await controller.closeActive();
+      await controller.close(terminalId);
     });
 
     test('关闭文件传输标签取消该连接的在途任务', () async {
@@ -1369,7 +1353,7 @@ void main() {
       expect(controller.sessions.single.phase, SessionPhase.ready);
     });
 
-    test('retry 只对 failed 会话生效', () async {
+    test('ready 会话只响应显式重连，保留同一个标签', () async {
       final engine = _FakeEngine();
       final controller = SessionController(engine: engine);
       final id = await controller.open(_host, _credentials);
@@ -1377,32 +1361,52 @@ void main() {
       await controller.retry(id);
 
       expect(engine.calls, 1);
+      final first = engine.created.single;
+      await controller.reconnect(id);
+      expect(engine.calls, 2);
+      expect(first.closed, isTrue);
+      expect(controller.sessions.single.id, id);
+      expect(controller.sessions.single.phase, SessionPhase.ready);
+      await controller.close(id);
     });
 
-    test('远端 shell 结束后自动关闭该标签', () async {
+    test('SSH shell 结束后释放连接并保留只读终端', () async {
       final engine = _FakeEngine();
       final controller = SessionController(engine: engine);
-      await controller.open(_host, _credentials);
+      final id = await controller.open(_host, _credentials);
+      final terminal = controller.sessions.single.terminal!;
 
       await engine.created.single._output.close();
       await Future<void>.delayed(Duration.zero);
 
-      expect(controller.sessions, isEmpty);
-      expect(controller.activeSessionId.value, isNull);
+      final closed = controller.sessions.single;
+      expect(closed.phase, SessionPhase.closed);
+      expect(closed.terminal, same(terminal));
+      expect(terminal.isDisposed, isFalse);
+      expect(terminal.onOutput, isNull);
+      expect(closed.engineSession, isNull);
+      expect(engine.created.single.closed, isTrue);
+      expect(controller.activeSessionId.value, id);
+      await controller.close(id);
+      expect(terminal.isDisposed, isTrue);
     });
 
-    test('激活标签的 shell 断开后自动激活邻位标签', () async {
+    test('断开后保留激活标签，手动关闭才激活邻位', () async {
       final engine = _FakeEngine();
       final controller = SessionController(engine: engine);
       const other = Host(id: 'h2', name: 'db-01', hostname: '10.0.0.6');
 
       final first = await controller.open(_host, _credentials);
-      await controller.open(other, _credentials);
+      final second = await controller.open(other, _credentials);
 
       // 断开第二个（当前激活）标签的 shell。
       await engine.created[1]._output.close();
       await Future<void>.delayed(Duration.zero);
 
+      expect(controller.activeSessionId.value, second);
+      expect(controller.sessions.last.phase, SessionPhase.closed);
+
+      await controller.close(second);
       expect(controller.sessions.single.id, first);
       expect(controller.activeSessionId.value, first);
     });

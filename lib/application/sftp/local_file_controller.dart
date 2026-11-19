@@ -45,6 +45,21 @@ class LocalFileController extends GetxController {
     cwd.value.isEmpty ? files.homeDirectory : files.parentOf(cwd.value),
   );
 
+  /// 将创建失败交给命名弹窗显示，保持当前目录列表可用。
+  Future<void> createDirectory(String name) async {
+    if (_disposed) return;
+    final directory = cwd.value;
+    if (directory.isEmpty) throw StateError('请先打开目标目录');
+    final version = navigationRevision;
+    await files.createDirectory(
+      files.pathOf(directory, name),
+      rejectExisting: true,
+    );
+    if (!_disposed && version == navigationRevision && directory == cwd.value) {
+      await refreshDirectory();
+    }
+  }
+
   Future<void> rename(LocalFileEntry entry, String newName) =>
       _run(() => files.rename(entry.path, newName, isDir: entry.isDir));
 

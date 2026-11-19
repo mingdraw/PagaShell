@@ -207,7 +207,7 @@ class _DeleteFolderDialogState extends State<_DeleteFolderDialog> {
         onPressed: () => AppNavigation.closeDialog<bool>(),
         child: Text('取消'.tr),
       ),
-      shadcn.PrimaryButton(
+      shadcn.DestructiveButton(
         onPressed: () => AppNavigation.closeDialog(result: _deleteContents),
         child: Text('删除'.tr),
       ),

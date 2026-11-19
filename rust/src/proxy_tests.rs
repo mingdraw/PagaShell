@@ -185,6 +185,7 @@ async fn proxy_rules_cover_ipv4_ipv6_cidr_and_domain_boundaries() {
     let router = Router {
         mode: Mode::Rule,
         gateway: None,
+        traffic: Arc::default(),
         rules: vec![
             rule(RuleType::Ip, "10.0.0.0/16"),
             rule(RuleType::Ip, "2001:db8::/32"),
@@ -225,6 +226,7 @@ async fn proxy_rules_cover_ipv4_ipv6_cidr_and_domain_boundaries() {
     let router = Router {
         mode: Mode::Rule,
         gateway: None,
+        traffic: Arc::default(),
         rules: vec![rule(RuleType::Ip, "127.0.0.0/8"), rule(RuleType::Ip, "::1")],
     };
     assert!(router.use_gateway("localhost", 80).await.unwrap());
@@ -269,6 +271,9 @@ async fn proxy_http_streams_chunked_uploads_preserves_host_and_keepalive() {
         assert!(!auth);
         assert!(!hop);
     }
+    let (sent, received) = proxy.traffic();
+    assert!(sent > 2 * b"abcde".len() as u64);
+    assert!(received > 2 * b"origin response".len() as u64);
     proxy.stop().await;
 }
 
@@ -297,6 +302,7 @@ async fn proxy_connect_preserves_early_tls_bytes_and_half_close() {
         .unwrap()
         .unwrap();
     assert_eq!(echoed, [0x16, 3, 1, 0, 5, 0xff]);
+    assert_eq!(proxy.traffic(), (6, 6));
     proxy.stop().await;
 }
 
@@ -316,6 +322,7 @@ async fn proxy_socks_accepts_domain_ipv4_ipv6_and_rejects_unsupported_commands()
         let mut socket = socks_connect(port, host, target).await;
         echo_bytes(&mut socket).await;
     }
+    assert_eq!(proxy.traffic(), (24, 24));
     for (command, address_type, expected) in [(2, 1, 7), (3, 1, 7), (1, 7, 8)] {
         let mut socket = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
             .await
@@ -493,6 +500,37 @@ async fn proxy_api_wait_and_stop_release_registry_and_ports() {
             .await
             .unwrap(),
     );
+}
+
+#[tokio::test]
+async fn proxy_traffic_is_isolated_and_restarts_at_zero() {
+    use crate::api::proxy::{proxy_start, proxy_stop, proxy_traffic};
+
+    let (echo, _) = echo(false).await;
+    let first_port = port().await;
+    let settings = config(first_port, "rule", json!([]));
+    let first = proxy_start(settings.clone(), Some(u32::MAX), None)
+        .await
+        .unwrap();
+    let other_port = port().await;
+    let other = proxy_start(config(other_port, "rule", json!([])), Some(u32::MAX), None)
+        .await
+        .unwrap();
+
+    let mut socket = tunnel(first_port, &echo.address.to_string()).await;
+    echo_bytes(&mut socket).await;
+    let active = proxy_traffic(first).await.unwrap();
+    assert_eq!((active.sent, active.received), (8, 8));
+    let idle = proxy_traffic(other).await.unwrap();
+    assert_eq!((idle.sent, idle.received), (0, 0));
+
+    proxy_stop(first).await.unwrap();
+    assert!(proxy_traffic(first).await.is_none());
+    let restarted = proxy_start(settings, Some(u32::MAX), None).await.unwrap();
+    let fresh = proxy_traffic(restarted).await.unwrap();
+    assert_eq!((fresh.sent, fresh.received), (0, 0));
+    proxy_stop(restarted).await.unwrap();
+    proxy_stop(other).await.unwrap();
 }
 
 #[tokio::test]

@@ -9,6 +9,8 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:get/get.dart';
 import 'package:pagashell/app.dart';
+import 'package:pagashell/application/hosts/host_controller.dart';
+import 'package:pagashell/application/identities/identity_controller.dart';
 import 'package:pagashell/application/session/session.dart';
 import 'package:pagashell/application/session/session_controller.dart';
 import 'package:pagashell/application/session/session_layout.dart';
@@ -23,6 +25,7 @@ import 'package:pagashell/domain/ssh/server_status.dart';
 import 'package:pagashell/domain/ssh/ssh_engine.dart';
 import 'package:pagashell/presentation/components/app_icon_button.dart';
 import 'package:pagashell/presentation/components/app_text_form_field.dart';
+import 'package:pagashell/presentation/shell/command_palette.dart';
 import 'package:pagashell/presentation/terminal/docker_manager_panel.dart';
 import 'package:pagashell/presentation/theme/app_theme.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
@@ -36,12 +39,23 @@ import 'support/process_fixture.dart';
 import 'support/server_status_fixture.dart';
 import 'support/shadcn_test_app.dart';
 
+class _DockerLogs implements DockerLogSession {
+  final chunks = StreamController<String>();
+
+  @override
+  Stream<String> get output => chunks.stream;
+
+  @override
+  Future<void> close() => chunks.close();
+}
+
 class _Session extends FakeSftpSession
     implements
         ServerStatusSource,
         ProcessManagerSource,
         NetworkPortsSource,
         DockerManagerSource,
+        DockerLogsSource,
         DockerContainerActions,
         DockerImageActions {
   int portReads = 0;
@@ -92,6 +106,14 @@ class _Session extends FakeSftpSession
   Completer<DockerDetails>? dockerDetailsGate;
   List<DockerResource>? containerResources;
   Future<DockerDetails> Function(DockerResource)? dockerDetailsReader;
+  final dockerLogs = <(DockerResource, _DockerLogs)>[];
+
+  @override
+  Future<DockerLogSession> openDockerLogs(DockerResource container) async {
+    final logs = _DockerLogs();
+    dockerLogs.add((container, logs));
+    return logs;
+  }
 
   @override
   Future<List<DockerResource>> readDockerResources(
@@ -205,12 +227,16 @@ class _Session extends FakeSftpSession
   @override
   Future<void> close() async {
     unawaited(output.close());
+    for (final (_, logs) in dockerLogs) {
+      unawaited(logs.close());
+    }
     await super.close();
   }
 }
 
 class _Engine implements SshEngine {
   final sessions = <_Session>[];
+  final logins = <(Host, SshCredentials)>[];
   Completer<void>? nextConnection;
   Object? nextDockerShellFailure;
   final actions = <(DockerResource, DockerContainerAction, String?, bool)>[];
@@ -226,6 +252,7 @@ class _Engine implements SshEngine {
     Future<void>? cancelled,
     SshGateway? gateway,
   }) async {
+    logins.add((host, credentials));
     final gate = nextConnection;
     nextConnection = null;
     if (gate != null) await gate.future;
@@ -1600,6 +1627,211 @@ void main() {
     expect(engine.sessions[1].closes, 1);
     expect(controller.tabs, hasLength(1));
     expect(tester.takeException(), isNull);
+    await tester.runAsync(controller.closeAll);
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('最大化窗格和快捷键还原保留终端状态及分屏比例', (tester) async {
+    final (controller, engine, _) = await _mount(tester);
+    final first = await controller.open(_host, _credentials);
+    final second = (await controller.splitTerminal(
+      first,
+      SessionSplitAxis.horizontal,
+    ))!;
+    await tester.pumpAndSettle();
+    await tester.dragFrom(
+      tester.getCenter(find.byType(shadcn.HorizontalResizableDragger)),
+      const Offset(100, 0),
+    );
+    await tester.pumpAndSettle();
+    final firstSize = tester.getSize(_pane(first));
+    final secondSize = tester.getSize(_pane(second));
+    final terminal = tester.state<TerminalViewState>(
+      _terminal(controller, second),
+    );
+
+    await tester.tap(find.byKey(ValueKey('terminal-pane-zoom-$second')));
+    await tester.pumpAndSettle();
+    expect(tester.getSize(_pane(second)).width, greaterThan(secondSize.width));
+    expect(_pane(first), findsNothing);
+    expect(
+      tester.state<TerminalViewState>(_terminal(controller, second)),
+      same(terminal),
+    );
+    final hidden = find.byWidgetPredicate(
+      (widget) =>
+          widget is TerminalView &&
+          identical(
+            widget.terminal,
+            controller.sessions
+                .firstWhere((session) => session.id == first)
+                .terminal,
+          ),
+      skipOffstage: false,
+    );
+    expect(
+      tester.widget<TerminalView>(hidden).focusNode!.canRequestFocus,
+      isFalse,
+    );
+
+    await tester.tap(_terminal(controller, second));
+    await tester.pumpAndSettle();
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.pumpAndSettle();
+    expect(tester.getSize(_pane(first)), firstSize);
+    expect(tester.getSize(_pane(second)), secondSize);
+    expect(
+      tester.state<TerminalViewState>(_terminal(controller, second)),
+      same(terminal),
+    );
+    expect(engine.sessions.every((session) => session.written.isEmpty), isTrue);
+    await tester.runAsync(controller.closeAll);
+    await tester.pumpAndSettle();
+  }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
+
+  testWidgets('从侧栏拖入不同服务到左侧，键盘同步只影响当前标签', (tester) async {
+    final (controller, engine, _) = await _mount(tester);
+    final hosts = Get.find<HostController>();
+    const other = Host(id: 'two', name: 'Worker', hostname: 'worker.test');
+    await hosts.save(other);
+    await hosts.savePassword(other.id, 'fixture-worker-password');
+    Get.find<SettingsController>().sidebarVisible.value = true;
+    final outside = await controller.open(_host, _credentials);
+    final first = await controller.open(_host, _credentials);
+    await tester.pumpAndSettle();
+
+    final row = find.byKey(const ValueKey('sidebar-host-row-two'));
+    final left = find.byKey(ValueKey('terminal-drop-$first-left'));
+    final start = tester.getCenter(row);
+    final drag = await tester.startGesture(
+      start,
+      kind: PointerDeviceKind.mouse,
+    );
+    await drag.moveBy(const Offset(18, 0));
+    await tester.pump();
+    await drag.moveTo(tester.getCenter(left));
+    await tester.pump();
+    await drag.up();
+    await tester.pumpAndSettle();
+
+    final second = controller.activeSessionId.value!;
+    expect(controller.tabs, hasLength(2));
+    expect(controller.tabForSession(first)!.sessionIds, [second, first]);
+    expect(
+      tester.getRect(_pane(second)).right,
+      lessThan(tester.getRect(_pane(first)).left),
+    );
+    expect(engine.logins.last.$1.id, other.id);
+    expect(engine.logins.last.$2.password, 'fixture-worker-password');
+
+    await tester.tap(_button('input-sync'));
+    await tester.tap(_terminal(controller, second));
+    await tester.pumpAndSettle();
+    tester.testTextInput.enterText('中文');
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pump();
+    expect(engine.sessions.map((session) => session.written.join()), [
+      '',
+      '中文\r',
+      '中文\r',
+    ]);
+
+    controller.activateTab(outside);
+    await tester.pumpAndSettle();
+    controller.activateTab(first);
+    await tester.pumpAndSettle();
+    expect(controller.isInputSyncEnabled(first), isFalse);
+    tester.testTextInput.enterText('pwd');
+    await tester.pump();
+    expect(engine.sessions.map((session) => session.written.join()), [
+      '',
+      '中文\r',
+      '中文\rpwd',
+    ]);
+    await tester.runAsync(controller.closeAll);
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('Docker 实时日志在当前标签增量显示，关闭弹窗释放日志流', (tester) async {
+    final (controller, engine, _) = await _mount(tester);
+    final id = await controller.open(_host, _credentials);
+    await tester.pumpAndSettle();
+    await tester.tap(_button('toolbar-docker'));
+    await tester.pumpAndSettle();
+    final container = dockerResource();
+    await _dockerMenu(tester, container);
+    final logsItem = find.widgetWithText(shadcn.MenuButton, '查看实时日志'.tr);
+    expect(
+      tester.widget<shadcn.MenuButton>(logsItem).leading,
+      isA<AppIcon>().having((icon) => icon.icon, 'icon', AppIcons.fileText),
+    );
+    await tester.tap(logsItem);
+    await tester.pumpAndSettle();
+
+    final (opened, logs) = engine.sessions.last.dockerLogs.single;
+    expect(opened.id, container.id);
+    expect(controller.tabs.single.id, id);
+    final output = find.byKey(const ValueKey('docker-live-log-output'));
+    expect(output, findsOneWidget);
+    logs.chunks.add('first line\n');
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(tester.widget<shadcn.SelectableText>(output).data, 'first line\n');
+    logs.chunks.add('second line\n');
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(
+      tester.widget<shadcn.SelectableText>(output).data,
+      'first line\nsecond line\n',
+    );
+
+    await tester.tap(find.widgetWithText(shadcn.OutlineButton, '关闭'.tr).last);
+    await tester.pumpAndSettle();
+    expect(output, findsNothing);
+    expect(logs.chunks.isClosed, isTrue);
+    expect(controller.activeSession!.id, id);
+    await tester.runAsync(controller.closeAll);
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('命令面板临时 SSH 使用解析所得地址和即时凭据，不进入已保存服务或最近记录', (tester) async {
+    final (controller, engine, _) = await _mount(tester);
+    final hosts = Get.find<HostController>();
+    final settings = Get.find<SettingsController>();
+    unawaited(showCommandPalette(tester.element(find.byType(PagaShellApp))));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byType(shadcn.TextField).last,
+      'ssh -p 2224 deploy@[::1]',
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('palette-action-temporary-ssh')),
+      findsOneWidget,
+    );
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+    expect(find.text('保存为凭证，供其他服务复用'.tr), findsNothing);
+    await tester.enterText(
+      find.byType(AppTextFormField).last,
+      'fixture-password',
+    );
+    await tester.tap(find.widgetWithText(shadcn.PrimaryButton, '连接'.tr));
+    await tester.pumpAndSettle();
+
+    final (host, credentials) = engine.logins.single;
+    expect((host.hostname, host.username, host.port), ('::1', 'deploy', 2224));
+    expect(credentials.password, 'fixture-password');
+    expect(controller.activeSession!.host.id, host.id);
+    expect(controller.recentHostIds, isEmpty);
+    expect(settings.sidebarState.value.recentHostIds, isEmpty);
+    expect(hosts.hosts, isEmpty);
+    expect(await hosts.passwordOf(host.id), isNull);
+    expect(Get.find<IdentityController>().sorted, isEmpty);
     await tester.runAsync(controller.closeAll);
     await tester.pumpAndSettle();
   });

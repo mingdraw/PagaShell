@@ -95,7 +95,7 @@ class AppRadioCardField<T> extends FormField<T> {
                Text(
                  state.errorText!,
                  style: TextStyle(
-                   fontSize: AppTheme.inputFontSize,
+                   fontSize: 12,
                    color: shadcn.Theme.of(state.context)
                        .colorScheme
                        .destructive,
@@ -105,4 +105,18 @@ class AppRadioCardField<T> extends FormField<T> {
            ],
          ),
        );
+
+  @override
+  FormFieldState<T> createState() => _AppRadioCardFieldState<T>();
+}
+
+class _AppRadioCardFieldState<T> extends FormFieldState<T> {
+  @override
+  void didUpdateWidget(covariant AppRadioCardField<T> oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.initialValue != widget.initialValue &&
+        value != widget.initialValue) {
+      setValue(widget.initialValue);
+    }
+  }
 }

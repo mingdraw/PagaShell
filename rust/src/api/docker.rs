@@ -3,6 +3,22 @@ use std::time::Duration;
 
 use super::ssh::{read_only_exec, server_status_command, ReadOnlyExecPolicy};
 
+#[path = "docker_logs.rs"]
+mod logs;
+pub(super) use logs::close_session as close_logs_for_session;
+
+pub async fn ssh_open_docker_logs(session_id: u32, container_id: String) -> Result<u32> {
+    logs::open(session_id, &container_id).await
+}
+
+pub async fn ssh_next_docker_logs(log_id: u32) -> Result<Option<Vec<u8>>> {
+    logs::next(log_id).await
+}
+
+pub async fn ssh_close_docker_logs(log_id: u32) {
+    logs::close(log_id).await;
+}
+
 #[cfg(all(test, unix))]
 #[path = "docker_cli_tests.rs"]
 mod cli_tests;

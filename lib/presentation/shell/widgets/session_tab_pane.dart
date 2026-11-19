@@ -4,11 +4,13 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import '../../../application/ai/ai_settings_controller.dart';
+import '../../../application/hosts/host_controller.dart';
 import '../../../application/session/session.dart';
 import '../../../application/session/session_controller.dart';
 import '../../../application/session/session_layout.dart';
@@ -17,10 +19,10 @@ import '../../ai/agent_workspace.dart';
 import '../../components/app_icon.dart';
 import '../../components/app_icon_button.dart';
 import '../../components/app_menu.dart';
-import '../../navigation/app_navigation.dart';
+import '../../hosts/host_edit_dialog.dart';
 import '../../navigation/app_notice.dart';
-import '../../terminal/batch_command_dialog.dart';
 import '../../theme/app_theme.dart';
+import '../connect_flow.dart';
 import '../session_close_confirmation.dart';
 import 'settings_menu_button.dart';
 import 'window_controls.dart';
@@ -187,11 +189,11 @@ class _SessionTabPaneState extends State<SessionTabPane> {
   ) {
     if (widget.fullscreen) return widget.child;
     final tabs = widget.tabs;
+    final allSessionsById = {
+      for (final session in widget.sessions) session.id: session,
+    };
     final sessionsById = {
-      for (final tab in tabs)
-        tab.id: widget.sessions.firstWhere(
-          (session) => session.id == tab.selectedSessionId,
-        ),
+      for (final tab in tabs) tab.id: allSessionsById[tab.selectedSessionId]!,
     };
     final activeId = widget.activeId;
     final isMac = shadcn.Theme.of(context).platform == TargetPlatform.macOS;
@@ -267,35 +269,9 @@ class _SessionTabPaneState extends State<SessionTabPane> {
                           }}',
                         ),
                     ],
-                    actions: [('batch-command', '批量执行命令'.tr)],
-                    onSelected: (value) async {
-                      if (value != 'batch-command') {
-                        controller.activateTab(value);
-                        _scheduleReveal();
-                        return;
-                      }
-                      final result =
-                          await AppNavigation.dialog<BatchCommandResult>(
-                            BatchCommandDialog(controller: controller),
-                          );
-                      if (result == null) return;
-                      if (result.skipped > 0 || result.failed > 0) {
-                        AppNotice.error(
-                          '已发送至 @sent 个终端，@skipped 个已断开，@failed 个发送失败'.trParams(
-                            {
-                              'sent': '${result.sent}',
-                              'skipped': '${result.skipped}',
-                              'failed': '${result.failed}',
-                            },
-                          ),
-                        );
-                      } else {
-                        AppNotice.success(
-                          '命令已发送至 @count 个终端'.trParams({
-                            'count': '${result.sent}',
-                          }),
-                        );
-                      }
+                    onSelected: (value) {
+                      controller.activateTab(value);
+                      _scheduleReveal();
                     },
                   ),
                 ),
@@ -323,6 +299,107 @@ class _SessionTabPaneState extends State<SessionTabPane> {
             itemBuilder: (context, item, index) {
               final session = sessionsById[item.data]!;
               final tab = tabs.firstWhere((tab) => tab.id == item.data);
+              final tabSessions = [
+                for (final id in tab.sessionIds) ?allSessionsById[id],
+              ];
+              final canDuplicate =
+                  session.kind == SessionKind.terminal ||
+                  session.kind == SessionKind.remoteDesktop;
+              final canTransfer = controller.canOpenFileTransfer(session.id);
+              final canReconnect = controller.canReconnect(session.id);
+              final canEditHost =
+                  session.kind != SessionKind.containerTerminal &&
+                  Get.isRegistered<HostController>();
+              final hasRightTabs = index < tabs.length - 1;
+              final sessionActions = <(String, String)>[
+                if (canDuplicate) ('new-session', '新建会话'.tr),
+                if (canTransfer) ('open-transfer', '文件传输'.tr),
+                if (canReconnect) ('reconnect', '重新连接'.tr),
+                if (session.address.isNotEmpty) ('copy-address', '复制地址'.tr),
+                if (canEditHost) ('edit', '编辑服务'.tr),
+              ];
+              final closeActions = <(String, String)>[
+                ('close-current', '关闭当前标签'.tr),
+                ('close-right', '关闭右侧标签'.tr),
+                ('close-others', '关闭其他标签'.tr),
+                ('close-all', '关闭全部标签'.tr),
+              ];
+              const tabMenuIcons = <String, AppIcons>{
+                'reconnect': AppIcons.rotateCw,
+                'copy-address': AppIcons.copy,
+              };
+              Future<void> duplicate() async {
+                if (await controller.duplicateSession(session.id) != null ||
+                    !context.mounted) {
+                  return;
+                }
+                final liveHost = Get.isRegistered<HostController>()
+                    ? Get.find<HostController>().hosts.firstWhereOrNull(
+                            (h) => h.id == session.host.id,
+                          ) ??
+                          session.host
+                    : session.host;
+                await connectToHost(context, liveHost, forceNew: true);
+              }
+
+              void onTabAction(String action) {
+                switch (action) {
+                  case 'new-session':
+                    unawaited(duplicate());
+                  case 'open-transfer':
+                    unawaited(controller.openFileTransfer(session.id));
+                  case 'reconnect':
+                    unawaited(controller.reconnect(session.id));
+                  case 'copy-address':
+                    unawaited(
+                      Clipboard.setData(ClipboardData(text: session.address)),
+                    );
+                    AppNotice.success('已复制'.tr);
+                  case 'edit':
+                    final liveHost =
+                        Get.find<HostController>().hosts.firstWhereOrNull(
+                          (h) => h.id == session.host.id,
+                        ) ??
+                        session.host;
+                    unawaited(showHostEditDialog(context, host: liveHost));
+                  case 'close-current':
+                    unawaited(requestSessionTabClose(controller, [tab.id]));
+                  case 'close-right':
+                    final currentTabs = controller.tabs;
+                    final currentIndex = currentTabs.indexWhere(
+                      (item) => item.id == tab.id,
+                    );
+                    if (currentIndex >= 0 &&
+                        currentIndex < currentTabs.length - 1) {
+                      unawaited(
+                        requestSessionTabClose(
+                          controller,
+                          currentTabs
+                              .sublist(currentIndex + 1)
+                              .map((other) => other.id),
+                        ),
+                      );
+                    }
+                  case 'close-others':
+                    unawaited(
+                      requestSessionTabClose(
+                        controller,
+                        controller.tabs
+                            .where((other) => other.id != tab.id)
+                            .map((other) => other.id),
+                        keepSessionId: tab.id,
+                      ),
+                    );
+                  case 'close-all':
+                    unawaited(
+                      requestSessionTabClose(
+                        controller,
+                        controller.tabs.map((tab) => tab.id),
+                      ),
+                    );
+                }
+              }
+
               return shadcn.TabChildWidget(
                 indexed: true,
                 child: WindowDragBlocker(
@@ -335,36 +412,27 @@ class _SessionTabPaneState extends State<SessionTabPane> {
                           ? null
                           : _tabKeys.putIfAbsent(tab.id, GlobalKey.new),
                       child: shadcn.ContextMenu(
-                        items: appMenuItems<String>(
-                          [
-                            ('close-current', '关闭当前标签'.tr),
-                            ('close-others', '关闭其他标签'.tr),
-                            ('close-all', '关闭全部标签'.tr),
+                        items: [
+                          if (sessionActions.isNotEmpty) ...[
+                            ...appMenuItems<String>(
+                              sessionActions,
+                              onTabAction,
+                              icons: tabMenuIcons,
+                            ),
+                            const shadcn.MenuDivider(),
                           ],
-                          (action) => unawaited(switch (action) {
-                            'close-current' => requestSessionTabClose(
-                              controller,
-                              [tab.id],
-                            ),
-                            'close-others' => requestSessionTabClose(
-                              controller,
-                              controller.tabs
-                                  .where((other) => other.id != tab.id)
-                                  .map((other) => other.id),
-                              keepSessionId: tab.id,
-                            ),
-                            'close-all' => requestSessionTabClose(
-                              controller,
-                              controller.tabs.map((tab) => tab.id),
-                            ),
-                            _ => Future<void>.value(),
-                          }),
-                        ),
+                          ...appMenuItems<String>(
+                            closeActions,
+                            onTabAction,
+                            disabledValues: {if (!hasRightTabs) 'close-right'},
+                          ),
+                        ],
                         child: shadcn.KeyedTabItem<String>(
                           key: tab.id,
                           child: _SessionTab(
                             session: session,
                             tab: tab,
+                            tabSessions: tabSessions,
                             active: index == activeIndex,
                           ),
                         ),
@@ -386,11 +454,13 @@ class _SessionTab extends StatefulWidget {
   const _SessionTab({
     required this.session,
     required this.tab,
+    required this.tabSessions,
     required this.active,
   });
 
   final Session session;
   final SessionTab tab;
+  final List<Session> tabSessions;
   final bool active;
 
   @override
@@ -419,17 +489,30 @@ class _SessionTabState extends State<_SessionTab> {
       if (!mounted || _tooltipEntry != null) return;
       final overlay = Overlay.maybeOf(context);
       if (overlay == null) return;
+      final screenWidth = MediaQuery.sizeOf(context).width;
+      final render = context.findRenderObject();
+      final alignRight =
+          render is RenderBox &&
+          render.hasSize &&
+          render.localToGlobal(Offset.zero).dx + 260 > screenWidth - 8;
       final entry = OverlayEntry(
         builder: (_) => Positioned(
           left: 0,
           top: 0,
           child: CompositedTransformFollower(
             link: _layerLink,
-            targetAnchor: Alignment.bottomLeft,
-            followerAnchor: Alignment.topLeft,
+            targetAnchor: alignRight
+                ? Alignment.bottomRight
+                : Alignment.bottomLeft,
+            followerAnchor: alignRight ? Alignment.topRight : Alignment.topLeft,
             offset: const Offset(0, 6),
             child: IgnorePointer(
-              child: shadcn.TooltipContainer(child: Text(_tooltipText())),
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxWidth: math.max(120, screenWidth - 16),
+                ),
+                child: shadcn.TooltipContainer(child: Text(_tooltipText())),
+              ),
             ),
           ),
         ),
@@ -447,12 +530,21 @@ class _SessionTabState extends State<_SessionTab> {
     _tooltipEntry = null;
   }
 
-  Color get _statusColor => switch (widget.session.phase) {
-    SessionPhase.ready => StatusColors.ready,
-    SessionPhase.failed => StatusColors.failed,
-    SessionPhase.closed => StatusColors.closed,
-    _ => StatusColors.connecting,
-  };
+  Color get _statusColor {
+    final group = widget.tabSessions.isEmpty
+        ? [widget.session]
+        : widget.tabSessions;
+    if (group.any((item) => item.phase == SessionPhase.failed)) {
+      return StatusColors.failed;
+    }
+    if (group.any((item) => item.phase.isBusy)) {
+      return StatusColors.connecting;
+    }
+    if (group.any((item) => item.phase == SessionPhase.ready)) {
+      return StatusColors.ready;
+    }
+    return StatusColors.closed;
+  }
 
   String get _kindLabel => switch (widget.session.kind) {
     SessionKind.terminal => '终端'.tr,

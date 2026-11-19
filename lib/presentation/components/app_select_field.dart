@@ -48,8 +48,15 @@ class AppSelectField<T> extends FormField<T> {
                    canUnselect: canUnselect,
                    enabled: onChanged != null,
                    placeholder: Text(label),
-                   itemBuilder: (_, value) =>
-                       items.firstWhere((item) => item.value == value).child,
+                   itemBuilder: (_, value) => items
+                       .firstWhere(
+                         (item) => item.value == value,
+                         orElse: () => AppSelectOption(
+                           value: value,
+                           child: Text('$value'),
+                         ),
+                       )
+                       .child,
                    popup:
                        popupBuilder ??
                        shadcn.SelectPopup<T>(
@@ -97,4 +104,18 @@ class AppSelectField<T> extends FormField<T> {
            );
          },
        );
+
+  @override
+  FormFieldState<T> createState() => _AppSelectFieldState<T>();
+}
+
+class _AppSelectFieldState<T> extends FormFieldState<T> {
+  @override
+  void didUpdateWidget(covariant AppSelectField<T> oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.initialValue != widget.initialValue &&
+        value != widget.initialValue) {
+      setValue(widget.initialValue);
+    }
+  }
 }

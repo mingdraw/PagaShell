@@ -33,7 +33,11 @@ class InMemoryLocalFileRepository implements LocalFileRepository {
 
   @override
   String pathOf(String directory, String name) {
-    if (name.isEmpty || name == '.' || name == '..' || name.contains('/')) {
+    if (name.isEmpty ||
+        name == '.' ||
+        name == '..' ||
+        name.contains('/') ||
+        name.contains('\x00')) {
       throw ArgumentError.value(name, 'name');
     }
     return directory == '/' ? '/$name' : '$directory/$name';
@@ -58,13 +62,19 @@ class InMemoryLocalFileRepository implements LocalFileRepository {
   }
 
   @override
-  Future<void> createDirectory(String path) async {
+  Future<void> createDirectory(
+    String path, {
+    bool rejectExisting = false,
+  }) async {
     final parent = parentOf(path);
     if (deniedDirectories.contains(parent) ||
         deniedDirectories.contains(path)) {
       throw LocalDirectoryAccessDenied(parent);
     }
-    if (fs.containsKey(path)) return;
+    if (fs.containsKey(path)) {
+      if (rejectExisting) throw const LocalFileTargetExists();
+      return;
+    }
     final entries = fs[parent]!;
     if (entries.any((entry) => entry.path == path)) {
       throw const LocalFileTargetExists();

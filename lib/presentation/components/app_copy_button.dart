@@ -4,9 +4,20 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
 
+import '../navigation/app_notice.dart';
 import '../theme/app_theme.dart';
 import 'app_icon.dart';
 import 'app_icon_button.dart';
+
+Future<bool> copyAppText(String text) async {
+  try {
+    await Clipboard.setData(ClipboardData(text: text));
+    return true;
+  } on Exception {
+    AppNotice.error('复制失败，请重试');
+    return false;
+  }
+}
 
 /// 通用图标复制按钮，点击后短暂显示成功对勾与「已复制」提示。
 class AppCopyButton extends StatefulWidget {
@@ -47,10 +58,14 @@ class _AppCopyButtonState extends State<AppCopyButton> {
     super.dispose();
   }
 
-  void _copy() {
-    unawaited(Clipboard.setData(ClipboardData(text: widget.text)));
+  Future<void> _copy() async {
+    final text = widget.text;
+    final copied = await copyAppText(text);
+    if (!mounted || widget.text != text) return;
     _resetTimer?.cancel();
-    setState(() => _copied = true);
+    _resetTimer = null;
+    setState(() => _copied = copied);
+    if (!copied) return;
     _resetTimer = Timer(_feedbackDuration, () {
       if (!mounted) return;
       setState(() => _copied = false);
@@ -68,7 +83,7 @@ class _AppCopyButtonState extends State<AppCopyButton> {
         size: widget.size,
         color: _copied ? StatusColors.ready : null,
       ),
-      onPressed: _copy,
+      onPressed: () => unawaited(_copy()),
     );
   }
 }

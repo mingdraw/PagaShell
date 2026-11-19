@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/widgets.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
@@ -10,15 +12,26 @@ List<shadcn.MenuItem> appMenuItems<T>(
   ValueChanged<T> onSelected, {
   T? selectedValue,
   Set<T> disabledValues = const {},
+  Set<T> destructiveValues = const {},
+  Map<T, AppIcons> icons = const {},
 }) => [
   for (var index = 0; index < items.length; index++) ...[
-    if (index > 0 && items[index].$1 == 'delete') const shadcn.MenuDivider(),
+    if (index > 0 &&
+        (items[index].$1 == 'delete' ||
+            destructiveValues.contains(items[index].$1)))
+      const shadcn.MenuDivider(),
     _AppMenuItem(
       label: items[index].$2,
       icon: items[index].$1 == selectedValue
           ? AppIcons.check
-          : _menuIcon(items[index].$1),
-      destructive: items[index].$1 == 'delete',
+          : icons[items[index].$1] ??
+                _menuIcon(items[index].$1) ??
+                (destructiveValues.contains(items[index].$1)
+                    ? AppIcons.trash2
+                    : null),
+      destructive:
+          items[index].$1 == 'delete' ||
+          destructiveValues.contains(items[index].$1),
       enabled: !disabledValues.contains(items[index].$1),
       onPressed: () => onSelected(items[index].$1),
     ),
@@ -29,7 +42,6 @@ AppIcons? _menuIcon(Object? action) => switch (action) {
   'new-session' => AppIcons.terminal,
   'container-terminal' => AppIcons.terminal,
   'container-upgrade' => AppIcons.circleArrowUp,
-  'batch-command' => AppIcons.send,
   'open-transfer' => AppIcons.folderOpen,
   'new-host' => AppIcons.fileTerminal,
   'new-gateway' => AppIcons.network,
@@ -123,7 +135,10 @@ class AppMenuButton<T> extends StatelessWidget {
     this.semanticLabel = '',
     this.selectedValue,
     this.disabledValues = const {},
+    this.destructiveValues = const {},
+    this.icons = const {},
     this.enabled = true,
+    this.onMenuVisibilityChanged,
     this.tooltip,
     this.density = shadcn.ButtonDensity.icon,
     this.icon = const AppIcon(AppIcons.ellipsis, size: 16),
@@ -134,7 +149,10 @@ class AppMenuButton<T> extends StatelessWidget {
   final ValueChanged<T> onSelected;
   final T? selectedValue;
   final Set<T> disabledValues;
+  final Set<T> destructiveValues;
+  final Map<T, AppIcons> icons;
   final bool enabled;
+  final ValueChanged<bool>? onMenuVisibilityChanged;
   final String? tooltip;
   final shadcn.ButtonDensity density;
   final String semanticLabel;
@@ -149,23 +167,41 @@ class AppMenuButton<T> extends StatelessWidget {
       density: density,
       onPressed: !enabled
           ? null
-          : () => shadcn.showDropdown<void>(
-              context: anchorContext,
-              builder: (_) => shadcn.DropdownMenu(
-                children: [
-                  ...appMenuItems(
-                    items,
-                    onSelected,
-                    selectedValue: selectedValue,
-                    disabledValues: disabledValues,
-                  ),
-                  if (actions.isNotEmpty) ...[
-                    const shadcn.MenuDivider(),
-                    ...appMenuItems(actions, onSelected),
+          : () {
+              onMenuVisibilityChanged?.call(true);
+              final overlay = shadcn.showDropdown<void>(
+                context: anchorContext,
+                builder: (_) => shadcn.DropdownMenu(
+                  children: [
+                    ...appMenuItems(
+                      items,
+                      onSelected,
+                      selectedValue: selectedValue,
+                      disabledValues: disabledValues,
+                      destructiveValues: destructiveValues,
+                      icons: icons,
+                    ),
+                    if (actions.isNotEmpty) ...[
+                      const shadcn.MenuDivider(),
+                      ...appMenuItems(
+                        actions,
+                        onSelected,
+                        disabledValues: disabledValues,
+                        destructiveValues: destructiveValues,
+                        icons: icons,
+                      ),
+                    ],
                   ],
-                ],
-              ),
-            ),
+                ),
+              );
+              if (onMenuVisibilityChanged != null) {
+                unawaited(
+                  overlay.future.whenComplete(
+                    () => onMenuVisibilityChanged!(false),
+                  ),
+                );
+              }
+            },
     ),
   );
 }

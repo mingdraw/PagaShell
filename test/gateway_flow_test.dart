@@ -405,7 +405,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('服务高级选项默认收起，保存网关，重开可取消绑定', (tester) async {
+  testWidgets('未绑定时高级选项默认收起，绑定后自动展开且可取消绑定', (tester) async {
     await pumpApp(tester);
     final gateways = Get.find<GatewayController>();
     final hosts = Get.find<HostController>();
@@ -427,6 +427,7 @@ void main() {
     expect(find.byType(AppSelectField<String>), findsNothing);
     await tester.tap(find.byKey(const ValueKey('host-advanced-toggle')));
     await tester.pumpAndSettle();
+    await tester.ensureVisible(find.byType(shadcn.Select<String>));
     await tester.tap(find.byType(shadcn.Select<String>));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
@@ -447,9 +448,8 @@ void main() {
     expect(hosts.hosts.single.gatewayId, endpoint.id);
     final editing = showHostEditDialog(context, host: hosts.hosts.single);
     await tester.pumpAndSettle();
-    expect(find.byType(AppSelectField<String>), findsNothing);
-    await tester.tap(find.byKey(const ValueKey('host-advanced-toggle')));
-    await tester.pumpAndSettle();
+    expect(find.byType(AppSelectField<String>), findsOneWidget);
+    await tester.ensureVisible(find.byType(shadcn.Select<String>));
     final capture = Platform.environment['PAGASHELL_GATEWAY_CAPTURE_DIR'];
     if (capture != null) {
       final boundary = tester.renderObject<RenderRepaintBoundary>(
@@ -565,12 +565,7 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('Advanced options'), findsOneWidget);
-    expect(find.byType(AppSelectField<String>), findsNothing);
-    await tester.ensureVisible(
-      find.byKey(const ValueKey('host-advanced-toggle')),
-    );
-    await tester.tap(find.byKey(const ValueKey('host-advanced-toggle')));
-    await tester.pumpAndSettle();
+    expect(find.byType(AppSelectField<String>), findsOneWidget);
     await tester.ensureVisible(find.byType(AppSelectField<String>));
     expect(find.text('Save').hitTestable(), findsOneWidget);
     expect(find.text('Cancel').hitTestable(), findsOneWidget);
@@ -600,8 +595,7 @@ void main() {
       host: configured,
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('host-advanced-toggle')));
-    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.byType(shadcn.Select<String>));
     await tester.tap(find.byType(shadcn.Select<String>));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('gateway-clear-unavailable')));
@@ -613,6 +607,8 @@ void main() {
     await connectToHost(tester.element(find.text('网关')), hosts.hosts.single);
     expect(engine.calls, 1);
     expect(engine.gateway, isNull);
+    await tester.pumpAndSettle();
+    await tester.pump(const Duration(seconds: 6));
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
   });
