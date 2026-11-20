@@ -1617,6 +1617,15 @@ void main() {
     expect(engine.sessions[2].closes, 1);
     expect(controller.tabs.first.sessionIds, [first, second]);
     expect(tester.getRect(_pane(first)).width, closeTo(resized.width, 1));
+    final divider = tester.getCenter(
+      find.byType(shadcn.HorizontalResizableDragger),
+    );
+    await tester.tapAt(divider, kind: PointerDeviceKind.mouse);
+    await tester.pump(const Duration(milliseconds: 50));
+    await tester.tapAt(divider, kind: PointerDeviceKind.mouse);
+    await tester.pumpAndSettle();
+    expect(tester.getRect(_pane(first)).width, closeTo(before.width, 1));
+    expect(tester.getRect(_pane(second)).width, closeTo(other.width, 1));
     await tester.tap(find.byKey(ValueKey('terminal-pane-close-$first')));
     await tester.pumpAndSettle();
     expect(controller.tabs.first.id, first);
@@ -1634,6 +1643,21 @@ void main() {
   testWidgets('最大化窗格和快捷键还原保留终端状态及分屏比例', (tester) async {
     final (controller, engine, _) = await _mount(tester);
     final first = await controller.open(_host, _credentials);
+    await tester.pumpAndSettle();
+
+    Future<void> zoomChord() async {
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.enter);
+      await tester.sendKeyRepeatEvent(LogicalKeyboardKey.enter);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.enter);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await tester.pumpAndSettle();
+    }
+
+    await zoomChord();
+    expect(engine.sessions.single.written, isEmpty);
     final second = (await controller.splitTerminal(
       first,
       SessionSplitAxis.horizontal,
@@ -1649,11 +1673,17 @@ void main() {
     final terminal = tester.state<TerminalViewState>(
       _terminal(controller, second),
     );
+    final focus = tester
+        .widget<TerminalView>(_terminal(controller, second))
+        .focusNode!;
 
+    await tester.tap(_button('input-sync'));
     await tester.tap(find.byKey(ValueKey('terminal-pane-zoom-$second')));
     await tester.pumpAndSettle();
     expect(tester.getSize(_pane(second)).width, greaterThan(secondSize.width));
     expect(_pane(first), findsNothing);
+    expect(controller.isInputSyncEnabled(first), isFalse);
+    expect(focus.hasPrimaryFocus, isTrue);
     expect(
       tester.state<TerminalViewState>(_terminal(controller, second)),
       same(terminal),
@@ -1674,14 +1704,7 @@ void main() {
       isFalse,
     );
 
-    await tester.tap(_terminal(controller, second));
-    await tester.pumpAndSettle();
-    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
-    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
-    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
-    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
-    await tester.pumpAndSettle();
+    await zoomChord();
     expect(tester.getSize(_pane(first)), firstSize);
     expect(tester.getSize(_pane(second)), secondSize);
     expect(
@@ -1689,6 +1712,46 @@ void main() {
       same(terminal),
     );
     expect(engine.sessions.every((session) => session.written.isEmpty), isTrue);
+    expect(focus.hasPrimaryFocus, isTrue);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    expect(engine.sessions.map((session) => session.written.join()), [
+      '',
+      '\r',
+    ]);
+    await tester.runAsync(controller.closeAll);
+    await tester.pumpAndSettle();
+  }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
+
+  testWidgets('Windows 字号快捷键只在终端生效，Ctrl+- 发送撤销', (tester) async {
+    final (controller, engine, _) = await _mount(tester);
+    final id = await controller.open(_host, _credentials);
+    final settings = Get.find<SettingsController>();
+    settings.sidebarVisible.value = true;
+    await tester.pumpAndSettle();
+
+    Future<void> minus({required bool shift}) async {
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      if (shift) await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.minus);
+      if (shift) await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await tester.pumpAndSettle();
+    }
+
+    final initialSize = settings.terminalFontSize.value;
+    await tester.enterText(find.byKey(const ValueKey('sidebar-search')), 'ssh');
+    await minus(shift: true);
+    expect(settings.terminalFontSize.value, initialSize);
+    expect(engine.sessions.single.written, isEmpty);
+
+    await tester.tap(_terminal(controller, id));
+    await tester.pumpAndSettle();
+    await minus(shift: false);
+    expect(engine.sessions.single.written, ['\x1f']);
+    expect(settings.terminalFontSize.value, initialSize);
+    await minus(shift: true);
+    expect(settings.terminalFontSize.value, initialSize - 1);
+    expect(engine.sessions.single.written, ['\x1f']);
     await tester.runAsync(controller.closeAll);
     await tester.pumpAndSettle();
   }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
@@ -1740,6 +1803,31 @@ void main() {
       '中文\r',
     ]);
 
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async =>
+          call.method == 'Clipboard.getData' ? {'text': 'one\ntwo\n'} : null,
+    );
+    await tester.tap(
+      _terminal(controller, second),
+      buttons: kSecondaryMouseButton,
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('粘贴'.tr));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('将粘贴到 2 个窗格'), findsOneWidget);
+    expect(
+      find.textContaining('${other.name} · ${_host.name}'),
+      findsOneWidget,
+    );
+    await tester.tap(find.byKey(const ValueKey('terminal-paste-cancel')));
+    await tester.pumpAndSettle();
+    expect(engine.sessions.map((session) => session.written.join()), [
+      '',
+      '中文\r',
+      '中文\r',
+    ]);
+
     controller.activateTab(outside);
     await tester.pumpAndSettle();
     controller.activateTab(first);
@@ -1756,7 +1844,146 @@ void main() {
     await tester.pumpAndSettle();
   });
 
-  testWidgets('Docker 实时日志在当前标签增量显示，关闭弹窗释放日志流', (tester) async {
+  testWidgets('快捷键和下拉切换不同服务的窗格，保留各自的运维状态', (tester) async {
+    final (controller, engine, _) = await _mount(tester);
+    final first = await controller.open(_host, _credentials);
+    const other = Host(
+      id: 'monitor-two',
+      name: 'Worker',
+      hostname: 'worker.test',
+      port: 2207,
+    );
+    final second = (await controller.splitToHost(
+      first,
+      other,
+      _credentials,
+      edge: SessionSplitEdge.right,
+    ))!;
+    await tester.pumpAndSettle();
+    controller.activate(first);
+    await tester.pumpAndSettle();
+    await tester.tap(_button('toolbar-processes'));
+    await tester.pumpAndSettle();
+    final search = find.byKey(const ValueKey('process-manager-search'));
+    final firstTarget = '运维目标：@name'.trParams({'name': _host.name});
+    expect(find.text(firstTarget), findsOneWidget);
+    await tester.enterText(search, 'mem-worker');
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('process-manager-pause')));
+    await tester.pumpAndSettle();
+    final firstSource = engine.sessions.last;
+    final reads = firstSource.processReads;
+    await tester.tap(_terminal(controller, first));
+    await tester.pumpAndSettle();
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.altLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.bracketRight);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.altLeft);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.pumpAndSettle();
+    expect(controller.activeSessionId.value, second);
+    expect(find.text('运维目标：Worker'), findsOneWidget);
+    expect(find.text('mem-worker'), findsNothing);
+    expect(engine.logins.last.$1.id, other.id);
+    expect(find.text('rocky@worker.test:2207'), findsOneWidget);
+    expect(find.text('${other.name} / ${_host.name}'), findsOneWidget);
+    await tester.tap(_button('pane-picker'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    final worker = find.widgetWithText(shadcn.MenuButton, '2. ${other.name}');
+    expect(
+      tester.widget<shadcn.MenuButton>(worker).leading,
+      isA<AppIcon>().having((icon) => icon.icon, 'icon', AppIcons.check),
+    );
+    await tester.tap(
+      find.widgetWithText(shadcn.MenuButton, '1. ${_host.name}'),
+    );
+    await tester.pumpAndSettle();
+    expect(controller.activeSessionId.value, first);
+    expect(find.text('rocky@example.test'), findsOneWidget);
+    expect(find.text('rocky@worker.test:2207'), findsNothing);
+    expect(find.text('${_host.name} / ${other.name}'), findsOneWidget);
+    expect(
+      tester
+          .widget<TerminalView>(_terminal(controller, first))
+          .focusNode!
+          .hasPrimaryFocus,
+      isTrue,
+    );
+    expect(find.text('mem-worker'), findsOneWidget);
+    expect(find.text(firstTarget), findsOneWidget);
+    await tester.pump(const Duration(seconds: 4));
+    expect(firstSource.processReads, reads);
+    expect(
+      engine.sessions.take(2).every((session) => session.written.isEmpty),
+      isTrue,
+    );
+    await tester.runAsync(controller.closeAll);
+    await tester.pumpAndSettle();
+  }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
+
+  testWidgets('将首个窗格移到新标签时保留终端、滚动位置和连接，原标签保留其他窗格', (tester) async {
+    final (controller, engine, _) = await _mount(tester);
+    final first = await controller.open(_host, _credentials);
+    final outside = await controller.open(_host, _credentials);
+    final second = (await controller.splitTerminal(
+      first,
+      SessionSplitAxis.horizontal,
+    ))!;
+    await tester.pumpAndSettle();
+    controller.activate(first);
+    await tester.pumpAndSettle();
+    final originalState = tester.state<TerminalViewState>(
+      _terminal(controller, first),
+    );
+    final originalView = tester.widget<TerminalView>(
+      _terminal(controller, first),
+    );
+    final scroll = originalView.scrollController!;
+    final connection = engine.sessions.first;
+    connection.output.add(
+      List.generate(160, (i) => 'detach-line-$i\r\n').join(),
+    );
+    await tester.pumpAndSettle();
+    scroll.jumpTo(120);
+    await tester.pumpAndSettle();
+    await tester.tap(_button('input-sync'));
+    await tester.pumpAndSettle();
+    expect(controller.isInputSyncEnabled(first), isTrue);
+    await tester.tap(find.byKey(ValueKey('terminal-pane-detach-$first')));
+    await tester.pumpAndSettle();
+
+    final detached = controller.tabForSession(first)!;
+    expect(detached.id, isNot(first));
+    expect(controller.tabs.map((tab) => tab.id), [first, detached.id, outside]);
+    expect(controller.tabById(first)!.sessionIds, [second]);
+    expect(detached.sessionIds, [first]);
+    expect(controller.activeTabId, detached.id);
+    expect(controller.isInputSyncEnabled(first), isFalse);
+    expect(_button('pane-picker'), findsNothing);
+    expect(
+      tester.state<TerminalViewState>(_terminal(controller, first)),
+      same(originalState),
+    );
+    expect(scroll.offset, closeTo(120, 1));
+    expect(originalView.focusNode!.hasPrimaryFocus, isTrue);
+    expect(engine.sessions.map((session) => session.shellStarts), [1, 1, 1]);
+    expect(connection.closes, 0);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    expect(connection.written, ['\r']);
+    expect(
+      engine.sessions.skip(1).every((session) => session.written.isEmpty),
+      isTrue,
+    );
+    await tester.tap(find.byKey(ValueKey('session-tab-close-${detached.id}')));
+    await tester.pumpAndSettle();
+    expect(connection.closes, 1);
+    expect(controller.tabById(first)!.sessionIds, [second]);
+    await tester.runAsync(controller.closeAll);
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('Docker 实时日志使用独立连接，支持暂停、筛选、重连和释放', (tester) async {
     final (controller, engine, _) = await _mount(tester);
     final id = await controller.open(_host, _credentials);
     await tester.pumpAndSettle();
@@ -1777,22 +2004,51 @@ void main() {
     expect(controller.tabs.single.id, id);
     final output = find.byKey(const ValueKey('docker-live-log-output'));
     expect(output, findsOneWidget);
-    logs.chunks.add('first line\n');
+    logs.chunks.add('\x1b]8;;private');
+    logs.chunks.add('-uri\x1b\\first line\n');
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
-    expect(tester.widget<shadcn.SelectableText>(output).data, 'first line\n');
+    await tester.pumpAndSettle(const Duration(milliseconds: 110));
+    expect(find.text('first line'), findsOneWidget);
+    expect(find.textContaining('private-uri'), findsNothing);
+    final polling = engine.sessions.firstWhere(
+      (session) => session.dockerReads.isNotEmpty,
+    );
+    expect(polling, isNot(same(engine.sessions.last)));
+    polling.dockerGate = Completer<List<DockerResource>>();
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pump(const Duration(seconds: 11));
+    await tester.pump();
+    expect(polling.closes, 1);
+    expect(logs.chunks.isClosed, isFalse);
+    await tester.tap(find.byKey(const ValueKey('docker-log-follow')));
     logs.chunks.add('second line\n');
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
-    expect(
-      tester.widget<shadcn.SelectableText>(output).data,
-      'first line\nsecond line\n',
+    await tester.pump(const Duration(milliseconds: 110));
+    expect(find.text('second line'), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('docker-log-follow')));
+    await tester.pumpAndSettle();
+    expect(find.text('second line'), findsOneWidget);
+    await tester.enterText(
+      find.byKey(const ValueKey('docker-log-filter')),
+      'second',
     );
+    await tester.pumpAndSettle();
+    expect(find.text('first line'), findsNothing);
+    expect(find.text('second line'), findsOneWidget);
+    unawaited(logs.chunks.close());
+    await tester.pumpAndSettle();
+    final retry = find.byKey(const ValueKey('docker-log-retry'));
+    expect(retry, findsOneWidget);
+    await tester.tap(retry);
+    await tester.pumpAndSettle();
+    final (_, newLogs) = engine.sessions.last.dockerLogs.single;
+    expect(newLogs, isNot(same(logs)));
 
     await tester.tap(find.widgetWithText(shadcn.OutlineButton, '关闭'.tr).last);
     await tester.pumpAndSettle();
     expect(output, findsNothing);
     expect(logs.chunks.isClosed, isTrue);
+    expect(newLogs.chunks.isClosed, isTrue);
     expect(controller.activeSession!.id, id);
     await tester.runAsync(controller.closeAll);
     await tester.pumpAndSettle();
@@ -1994,7 +2250,7 @@ void main() {
     await tester.pumpAndSettle();
   });
 
-  testWidgets('工具栏左侧展示上下文、按钮靠右对齐且激活面板高亮，关闭按钮悬浮，不随外壳主题变色', (tester) async {
+  testWidgets('工具栏按上下文排列，悬浮窗格按钮不挡搜索，运维面板保持终端配色', (tester) async {
     final (controller, engine, captureKey) = await _mount(tester);
     final first = await controller.open(_host, _credentials);
     await tester.pumpAndSettle();
@@ -2019,7 +2275,7 @@ void main() {
         of: contextBar,
         matching: find.text('rocky@example.test'),
       ),
-      findsOneWidget,
+      findsNothing,
     );
     expect(tester.getRect(contextBar).right, lessThan(buttonBounds.first.left));
     expect(buttonBounds.first.left, greaterThan(toolbarBounds.center.dx));
@@ -2048,6 +2304,13 @@ void main() {
     expect(
       find.descendant(
         of: contextBar,
+        matching: find.text('rocky@example.test'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: contextBar,
         matching: find.text(
           '窗格 @index/@total'.trParams({'index': '2', 'total': '2'}),
         ),
@@ -2056,14 +2319,39 @@ void main() {
     );
     for (final id in [first, second]) {
       final paneBounds = tester.getRect(_pane(id));
-      final terminalBounds = tester.getRect(_terminal(controller, id));
-      final closeBounds = tester.getRect(
-        find.byKey(ValueKey('terminal-pane-close-$id')),
+      final terminalBounds = tester.getRect(
+        find.ancestor(
+          of: _terminal(controller, id),
+          matching: find.byType(TerminalPane),
+        ),
       );
-      expect(terminalBounds.top - paneBounds.top, lessThan(8));
-      expect(terminalBounds.contains(closeBounds.center), isTrue);
-      expect(closeBounds.right, closeTo(paneBounds.right - 5, 1));
+      expect(terminalBounds.top, closeTo(paneBounds.top + 1, 1));
+      for (final action in ['detach', 'zoom', 'close']) {
+        final control = tester.getRect(
+          find.byKey(ValueKey('terminal-pane-$action-$id')),
+        );
+        expect(terminalBounds.contains(control.center), isTrue);
+        expect(
+          control.top,
+          closeTo(terminalBounds.top + AppTheme.terminalPaneControlsInset, 1),
+        );
+      }
     }
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyF);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.pumpAndSettle();
+    final search = tester.getRect(
+      find.byKey(const ValueKey('terminal-find-input')),
+    );
+    final floating = tester.getRect(
+      find.byKey(ValueKey('terminal-pane-detach-$second')),
+    );
+    expect(search.right, lessThan(floating.left));
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pumpAndSettle();
     await tester.tap(_button('toolbar-status'));
     await tester.pumpAndSettle();
     final statusButtonWrapper = tester.widget<Container>(

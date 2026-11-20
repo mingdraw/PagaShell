@@ -136,7 +136,7 @@ class _AgentSessionInputState extends State<AgentSessionInput> {
   final _groups = ValueNotifier<List<_MentionGroup>>([]);
   final _highlight = ValueNotifier<int>(-1);
   TextEditingValue? _lastValue;
-  TextEditingValue? _dismissed;
+  int? _dismissedMentionStart;
   TextEditingValue? _buttonRequest;
   List<Object?> _lastOptions = [];
   int _revision = 0;
@@ -156,16 +156,20 @@ class _AgentSessionInputState extends State<AgentSessionInput> {
       widget.controller.retainSessions(widget.agent.canReferenceSession);
       if (widget.controller.mentions.length != count) {
         // 连接失效只解除引用，不把留下的 @ 文字当作新搜索自动打开弹层。
-        _buttonRequest = null;
-        _dismissed = widget.controller.value;
-        _popover.close();
+        _dismissPopover();
       }
     });
     _referencesChanged();
   }
 
-  void _referencesChanged() =>
-      widget.agent.setReferencedSessions(widget.controller.sessions);
+  void _referencesChanged() {
+    final value = widget.controller.value;
+    if (_dismissedMentionStart != null &&
+        _query(value)?.start != _dismissedMentionStart) {
+      _dismissedMentionStart = null;
+    }
+    widget.agent.setReferencedSessions(widget.controller.sessions);
+  }
 
   @override
   void didUpdateWidget(covariant AgentSessionInput oldWidget) {
@@ -240,19 +244,27 @@ class _AgentSessionInputState extends State<AgentSessionInput> {
     setState(() {
       // 每次点击保留独立快照，旧弹层的关闭回调不清除新的打开请求。
       _buttonRequest = widget.controller.value.copyWith();
-      _dismissed = null;
+      _dismissedMentionStart = null;
     });
+  }
+
+  void _dismissPopover() {
+    final value = widget.controller.value;
+    _buttonRequest = null;
+    _dismissedMentionStart = _query(value)?.start;
+    _popover.close();
   }
 
   void _syncPopover() {
     final value = widget.controller.value;
-    if (_dismissed != null && value != _dismissed) _dismissed = null;
+    final query = _query(value);
     if (_buttonRequest != value || !widget.focusNode.hasFocus) {
       _buttonRequest = null;
     }
     if (!widget.focusNode.hasFocus ||
-        (_query(value) == null && !_requestedByButton(value)) ||
-        value == _dismissed) {
+        (query == null && !_requestedByButton(value)) ||
+        (_dismissedMentionStart != null &&
+            query?.start == _dismissedMentionStart)) {
       _popover.close();
       return;
     }
@@ -504,11 +516,8 @@ class _AgentSessionInputState extends State<AgentSessionInput> {
                     _navigate(1),
                 const SingleActivator(LogicalKeyboardKey.arrowUp): () =>
                     _navigate(-1),
-                const SingleActivator(LogicalKeyboardKey.escape): () {
-                  _buttonRequest = null;
-                  _dismissed = widget.controller.value;
-                  _popover.close();
-                },
+                const SingleActivator(LogicalKeyboardKey.escape):
+                    _dismissPopover,
               },
             },
           },

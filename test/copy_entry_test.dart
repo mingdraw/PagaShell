@@ -336,7 +336,8 @@ void main() {
     );
     final source = controller.identities.single;
     expect(find.text('私钥'), findsWidgets);
-    expect(fieldText(tester, '私钥内容'), 'PRIVATE KEY');
+    expect(find.text('已载入私钥，内容已隐藏'), findsOneWidget);
+    expect(find.text('PRIVATE KEY'), findsNothing);
     expect(fieldText(tester, '私钥口令（可选）'), 'phrase');
     await tester.ensureVisible(find.text('保存'));
     await tester.tap(find.text('保存'));

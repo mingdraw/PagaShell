@@ -28,8 +28,12 @@ class RdpResolution {
       w = (w * ratio).floor().clamp(200, 8192);
       h = (h * ratio).floor().clamp(200, 8192);
     }
-    return RdpResolution(w - w % 2, h);
+    return RdpResolution(w - w % 2, h - h % 2);
   }
+
+  /// Some servers align the requested desktop dimensions by a few pixels.
+  bool matchesAligned(RdpResolution other) =>
+      (width - other.width).abs() <= 4 && (height - other.height).abs() <= 4;
 
   String get label => '$width × $height';
   @override

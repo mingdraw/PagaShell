@@ -10,7 +10,6 @@ import 'package:get/get.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import '../../../application/ai/ai_settings_controller.dart';
-import '../../../application/hosts/host_controller.dart';
 import '../../../application/session/session.dart';
 import '../../../application/session/session_controller.dart';
 import '../../../application/session/session_layout.dart';
@@ -307,16 +306,13 @@ class _SessionTabPaneState extends State<SessionTabPane> {
                   session.kind == SessionKind.remoteDesktop;
               final canTransfer = controller.canOpenFileTransfer(session.id);
               final canReconnect = controller.canReconnect(session.id);
-              final canEditHost =
-                  session.kind != SessionKind.containerTerminal &&
-                  Get.isRegistered<HostController>();
+              final hosts = savedHostControllerForSession(session);
               final hasRightTabs = index < tabs.length - 1;
               final sessionActions = <(String, String)>[
                 if (canDuplicate) ('new-session', '新建会话'.tr),
                 if (canTransfer) ('open-transfer', '文件传输'.tr),
                 if (canReconnect) ('reconnect', '重新连接'.tr),
                 if (session.address.isNotEmpty) ('copy-address', '复制地址'.tr),
-                if (canEditHost) ('edit', '编辑服务'.tr),
               ];
               final closeActions = <(String, String)>[
                 ('close-current', '关闭当前标签'.tr),
@@ -328,40 +324,25 @@ class _SessionTabPaneState extends State<SessionTabPane> {
                 'reconnect': AppIcons.rotateCw,
                 'copy-address': AppIcons.copy,
               };
-              Future<void> duplicate() async {
-                if (await controller.duplicateSession(session.id) != null ||
-                    !context.mounted) {
-                  return;
-                }
-                final liveHost = Get.isRegistered<HostController>()
-                    ? Get.find<HostController>().hosts.firstWhereOrNull(
-                            (h) => h.id == session.host.id,
-                          ) ??
-                          session.host
-                    : session.host;
-                await connectToHost(context, liveHost, forceNew: true);
-              }
-
               void onTabAction(String action) {
                 switch (action) {
                   case 'new-session':
-                    unawaited(duplicate());
+                    unawaited(duplicateSessionConnection(context, session));
                   case 'open-transfer':
                     unawaited(controller.openFileTransfer(session.id));
                   case 'reconnect':
-                    unawaited(controller.reconnect(session.id));
+                    unawaited(
+                      session.phase == SessionPhase.failed
+                          ? retryFailedSession(context, session)
+                          : controller.reconnect(session.id),
+                    );
                   case 'copy-address':
                     unawaited(
                       Clipboard.setData(ClipboardData(text: session.address)),
                     );
                     AppNotice.success('已复制'.tr);
                   case 'edit':
-                    final liveHost =
-                        Get.find<HostController>().hosts.firstWhereOrNull(
-                          (h) => h.id == session.host.id,
-                        ) ??
-                        session.host;
-                    unawaited(showHostEditDialog(context, host: liveHost));
+                    unawaited(showSessionHostEditDialog(context, session));
                   case 'close-current':
                     unawaited(requestSessionTabClose(controller, [tab.id]));
                   case 'close-right':
@@ -400,6 +381,47 @@ class _SessionTabPaneState extends State<SessionTabPane> {
                 }
               }
 
+              final tabItem = shadcn.KeyedTabItem<String>(
+                key: tab.id,
+                child: _SessionTab(
+                  session: session,
+                  tab: tab,
+                  tabSessions: tabSessions,
+                  active: index == activeIndex,
+                ),
+              );
+              Widget menu({required bool canEdit}) {
+                final actions = [
+                  ...sessionActions,
+                  if (canEdit)
+                    (
+                      'edit',
+                      (session.kind.usesGatewayEndpoint ? '编辑网关' : '编辑服务').tr,
+                    ),
+                ];
+                return shadcn.ContextMenu(
+                  items: [
+                    if (actions.isNotEmpty) ...[
+                      ...appMenuItems<String>(
+                        actions,
+                        onTabAction,
+                        icons: tabMenuIcons,
+                      ),
+                      const shadcn.MenuDivider(),
+                    ],
+                    ...appMenuItems<String>(
+                      closeActions,
+                      onTabAction,
+                      disabledValues: {
+                        if (!hasRightTabs) 'close-right',
+                        if (tabs.length < 2) 'close-others',
+                      },
+                    ),
+                  ],
+                  child: tabItem,
+                );
+              }
+
               return shadcn.TabChildWidget(
                 indexed: true,
                 child: WindowDragBlocker(
@@ -411,32 +433,15 @@ class _SessionTabPaneState extends State<SessionTabPane> {
                               null
                           ? null
                           : _tabKeys.putIfAbsent(tab.id, GlobalKey.new),
-                      child: shadcn.ContextMenu(
-                        items: [
-                          if (sessionActions.isNotEmpty) ...[
-                            ...appMenuItems<String>(
-                              sessionActions,
-                              onTabAction,
-                              icons: tabMenuIcons,
+                      child: hosts == null
+                          ? menu(canEdit: false)
+                          : Obx(
+                              () => menu(
+                                canEdit: hosts.hosts.any(
+                                  (h) => h.id == session.host.id,
+                                ),
+                              ),
                             ),
-                            const shadcn.MenuDivider(),
-                          ],
-                          ...appMenuItems<String>(
-                            closeActions,
-                            onTabAction,
-                            disabledValues: {if (!hasRightTabs) 'close-right'},
-                          ),
-                        ],
-                        child: shadcn.KeyedTabItem<String>(
-                          key: tab.id,
-                          child: _SessionTab(
-                            session: session,
-                            tab: tab,
-                            tabSessions: tabSessions,
-                            active: index == activeIndex,
-                          ),
-                        ),
-                      ),
                     ),
                   ),
                 ),
@@ -472,7 +477,20 @@ class _SessionTabState extends State<_SessionTab> {
   OverlayEntry? _tooltipEntry;
   Timer? _tooltipTimer;
   bool _hovered = false;
-  bool _middleButtonDown = false;
+  int? _middlePointer;
+
+  @override
+  void didUpdateWidget(covariant _SessionTab oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final tooltip = _tooltipEntry;
+    if (tooltip != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && identical(_tooltipEntry, tooltip)) {
+          tooltip.markNeedsBuild();
+        }
+      });
+    }
+  }
 
   @override
   void dispose() {
@@ -480,8 +498,18 @@ class _SessionTabState extends State<_SessionTab> {
     super.dispose();
   }
 
-  String _tooltipText() =>
-      '${widget.session.title} · ${widget.session.address} · $_kindLabel（$_phaseLabel）';
+  String _tooltipText() {
+    final session = widget.session;
+    final title =
+        '${session.title} · ${session.address} · '
+        '${'@kind（@phase）'.trParams({'kind': _kindLabel, 'phase': _phaseLabel(session.kind, _groupPhase)})}';
+    if (widget.tabSessions.length < 2) return title;
+    return [
+      title,
+      for (final pane in widget.tabSessions)
+        '${pane.title} · ${pane.address} · ${_phaseLabel(pane.kind, pane.phase)}',
+    ].join('\n');
+  }
 
   void _showTooltipLater() {
     _tooltipTimer?.cancel();
@@ -530,21 +558,26 @@ class _SessionTabState extends State<_SessionTab> {
     _tooltipEntry = null;
   }
 
-  Color get _statusColor {
+  SessionPhase get _groupPhase {
     final group = widget.tabSessions.isEmpty
         ? [widget.session]
         : widget.tabSessions;
     if (group.any((item) => item.phase == SessionPhase.failed)) {
-      return StatusColors.failed;
+      return SessionPhase.failed;
     }
-    if (group.any((item) => item.phase.isBusy)) {
-      return StatusColors.connecting;
-    }
-    if (group.any((item) => item.phase == SessionPhase.ready)) {
-      return StatusColors.ready;
-    }
-    return StatusColors.closed;
+    return group.firstWhereOrNull((item) => item.phase.isBusy)?.phase ??
+        group
+            .firstWhereOrNull((item) => item.phase == SessionPhase.ready)
+            ?.phase ??
+        SessionPhase.closed;
   }
+
+  Color get _statusColor => switch (_groupPhase) {
+    SessionPhase.failed => StatusColors.failed,
+    SessionPhase.ready => StatusColors.ready,
+    SessionPhase.closed => StatusColors.closed,
+    _ => StatusColors.connecting,
+  };
 
   String get _kindLabel => switch (widget.session.kind) {
     SessionKind.terminal => '终端'.tr,
@@ -555,14 +588,44 @@ class _SessionTabState extends State<_SessionTab> {
     SessionKind.remoteDesktop => '远程桌面'.tr,
   };
 
-  String get _phaseLabel => switch (widget.session.phase) {
+  String _phaseLabel(SessionKind kind, SessionPhase phase) => switch (phase) {
     SessionPhase.ready => '已连接'.tr,
     SessionPhase.failed => '失败'.tr,
-    SessionPhase.closed => '未启用'.tr,
+    SessionPhase.closed => (kind.usesGatewayEndpoint ? '未启用' : '已断开').tr,
     SessionPhase.stopping => '正在停止'.tr,
     SessionPhase.hostKeyPending => '等待确认主机指纹'.tr,
+    SessionPhase.authenticating => '正在认证'.tr,
+    SessionPhase.credentialsPending => '等待输入密码'.tr,
+    SessionPhase.reconnecting => '正在重新连接'.tr,
     _ => '正在连接'.tr,
   };
+
+  bool _insideTab(Offset position) =>
+      (Offset.zero & context.size!).contains(position);
+
+  void _wheel(PointerSignalEvent event) {
+    if (event is! PointerScrollEvent ||
+        event.scrollDelta.dy == 0 ||
+        event.scrollDelta.dx != 0) {
+      return;
+    }
+    final position = Scrollable.maybeOf(
+      context,
+      axis: Axis.horizontal,
+    )?.position;
+    if (position == null ||
+        !position.hasContentDimensions ||
+        position.maxScrollExtent <= position.minScrollExtent) {
+      return;
+    }
+    final delta = position.axisDirection == AxisDirection.left
+        ? -event.scrollDelta.dy
+        : event.scrollDelta.dy;
+    GestureBinding.instance.pointerSignalResolver.register(
+      event,
+      (_) => position.pointerScroll(delta),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -579,19 +642,31 @@ class _SessionTabState extends State<_SessionTab> {
       },
       child: Listener(
         behavior: HitTestBehavior.translucent,
+        onPointerSignal: _wheel,
         onPointerDown: (event) {
           _hideTooltip();
-          _middleButtonDown = event.buttons == kMiddleMouseButton;
+          if (event.buttons == kMiddleMouseButton) {
+            _middlePointer = event.pointer;
+          }
         },
-        onPointerUp: (_) {
-          if (_middleButtonDown) {
-            _middleButtonDown = false;
+        onPointerMove: (event) {
+          if (event.pointer == _middlePointer &&
+              !_insideTab(event.localPosition)) {
+            _middlePointer = null;
+          }
+        },
+        onPointerUp: (event) {
+          if (event.pointer == _middlePointer) {
+            _middlePointer = null;
+            if (!_insideTab(event.localPosition)) return;
             unawaited(
               requestSessionTabClose(Get.find<SessionController>(), [tab.id]),
             );
           }
         },
-        onPointerCancel: (_) => _middleButtonDown = false,
+        onPointerCancel: (event) {
+          if (event.pointer == _middlePointer) _middlePointer = null;
+        },
         child: ConstrainedBox(
           constraints: const BoxConstraints(
             minWidth: AppTheme.sessionTabMinWidth,

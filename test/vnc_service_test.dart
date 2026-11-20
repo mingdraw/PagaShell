@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -215,6 +216,8 @@ void main() {
   });
 
   testWidgets('VNC 桌面复用页签、键盘发送 keysym，失焦释放，断线重连和关闭释放', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
     final engine = FakeVncEngine();
     await pumpApp(tester, engine);
     final hosts = Get.find<HostController>();
@@ -247,6 +250,11 @@ void main() {
     await tester.sendKeyDownEvent(LogicalKeyboardKey.keyA, character: 'A');
     await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
     await tester.sendKeyUpEvent(LogicalKeyboardKey.keyA);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.altLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.keyF, character: 'ƒ');
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.keyF);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.altLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.numpad7, character: '7');
     await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
     await tester.pump();
     FocusManager.instance.primaryFocus?.unfocus();
@@ -258,6 +266,12 @@ void main() {
         (65, true),
         (0xffe1, false),
         (65, false),
+        (0xffe9, true),
+        (102, true),
+        (102, false),
+        (0xffe9, false),
+        (0xffb7, true),
+        (0xffb7, false),
       ]),
     );
     expect(desktop.symbols, contains((0xffe3, false)));
@@ -274,6 +288,7 @@ void main() {
     expect(engine.attempts.last.password, 'test-only');
     await sessions.closeAll();
     await tester.pumpAndSettle();
+    debugDefaultTargetPlatformOverride = null;
     expect(engine.created.last.closes, 1);
     expect(tester.takeException(), isNull);
   });

@@ -7,6 +7,7 @@ import '../components/app_dialog.dart';
 import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
 import '../components/app_text_form_field.dart';
+import '../localization/app_translations.dart';
 import '../theme/app_theme.dart';
 
 class RdpPasswordDialog extends StatefulWidget {
@@ -73,9 +74,16 @@ class _RdpPasswordDialogState extends State<RdpPasswordDialog> {
             const SizedBox(height: 8),
             if (!host.isVnc)
               Text('用户名：@username'.trParams({'username': request.username})),
-            if (host.rdpDomain.isNotEmpty) ...[
+            if (!host.isVnc && request.domain.isNotEmpty) ...[
               const SizedBox(height: 8),
-              Text('域：@domain'.trParams({'domain': host.rdpDomain})),
+              Text('域：@domain'.trParams({'domain': request.domain})),
+            ],
+            if (request.error.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(
+                AppTranslations.error(request.error),
+                style: TextStyle(fontSize: 12, color: colors.mutedForeground),
+              ),
             ],
             const SizedBox(height: 20),
             AppTextFormField(

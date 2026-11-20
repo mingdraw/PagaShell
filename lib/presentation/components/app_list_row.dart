@@ -8,6 +8,7 @@ class AppSurfaceAction extends StatelessWidget {
     this.onTap,
     this.onDoubleTap,
     this.hoverColor,
+    this.hoverIconColor,
     this.selectedColor,
     this.selected = false,
     this.borderRadius,
@@ -18,6 +19,7 @@ class AppSurfaceAction extends StatelessWidget {
   final VoidCallback? onTap;
   final VoidCallback? onDoubleTap;
   final Color? hoverColor;
+  final Color? hoverIconColor;
   final Color? selectedColor;
   final bool selected;
   final BorderRadius? borderRadius;
@@ -28,6 +30,13 @@ class AppSurfaceAction extends StatelessWidget {
     disableTransition: disableTransition,
     onPressed: onTap,
     onDoubleTap: onDoubleTap,
+    iconTheme: hoverIconColor == null
+        ? null
+        : WidgetStateProperty.resolveWith(
+            (states) => states.contains(WidgetState.hovered)
+                ? IconThemeData(color: hoverIconColor)
+                : null,
+          ),
     decoration: WidgetStateProperty.resolveWith(
       (states) => BoxDecoration(
         borderRadius: borderRadius,

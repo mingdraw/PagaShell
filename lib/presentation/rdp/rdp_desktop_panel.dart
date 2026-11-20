@@ -159,7 +159,10 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
       final layoutChanged =
           previousWidth != _surface.width || previousHeight != _surface.height;
       final actual = RdpResolution(_surface.width, _surface.height);
-      final resizeConfirmed = _awaitingResolution == actual;
+      final awaiting = _awaitingResolution;
+      final resizeConfirmed =
+          awaiting == actual ||
+          (layoutChanged && awaiting?.matchesAligned(actual) == true);
       if (resizeConfirmed) {
         _resizeConfirmation?.cancel();
         _awaitingResolution = null;
@@ -184,7 +187,11 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
 
   void _fail(Object error) {
     if (!mounted || _failed) return;
-    _failed = true;
+    setState(() {
+      _failed = true;
+      _typingText = false;
+    });
+    _inputs.cancel();
     _resizeDebounce?.cancel();
     _resizeConfirmation?.cancel();
     _clipboard?.setActive(false);
@@ -193,13 +200,9 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     );
   }
 
-  void _send(
-    Future<void> Function() action, {
-    bool movement = false,
-    bool wheel = false,
-  }) {
+  void _send(Future<void> Function() action, {bool movement = false}) {
     if (_failed) return;
-    _inputs.add(action, movement: movement, wheel: wheel);
+    _inputs.add(action, movement: movement);
   }
 
   void _syncFrames() {
@@ -242,6 +245,11 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     if (!widget.active && oldWidget.active) {
       _release();
       _focus.unfocus();
+      _resizeDebounce?.cancel();
+      _resizeConfirmation?.cancel();
+      _resizeSerial++;
+      _awaitingResolution = null;
+      _resizeBusy = false;
     }
     if (widget.fullscreen != oldWidget.fullscreen) {
       _release();
@@ -252,6 +260,7 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
   }
 
   void _release() {
+    _fullscreenShortcutHeld = false;
     _moveTimer?.cancel();
     _moveTimer = null;
     _move = null;
@@ -342,17 +351,20 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     }
     if (event.logicalKey == LogicalKeyboardKey.enter ||
         event.logicalKey == LogicalKeyboardKey.numpadEnter) {
+      if (event is KeyDownEvent) _fullscreenShortcutHeld = false;
       if (_fullscreenShortcutHeld) {
         if (event is KeyUpEvent) _fullscreenShortcutHeld = false;
         return KeyEventResult.handled;
       }
       if (widget.onToggleFullscreen != null &&
-          event is KeyDownEvent &&
           HardwareKeyboard.instance.isControlPressed &&
-          HardwareKeyboard.instance.isAltPressed) {
-        _fullscreenShortcutHeld = true;
-        _release();
-        if (!widget.fullscreenBusy) widget.onToggleFullscreen!();
+          HardwareKeyboard.instance.isAltPressed &&
+          (event is KeyDownEvent || event is KeyRepeatEvent)) {
+        if (event is KeyDownEvent) {
+          _release();
+          _fullscreenShortcutHeld = true;
+          if (!widget.fullscreenBusy) widget.onToggleFullscreen!();
+        }
         return KeyEventResult.handled;
       }
     }
@@ -372,8 +384,8 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     final down = event is! KeyUpEvent;
     if (down) {
       _pressed.add(scan);
-    } else {
-      _pressed.remove(scan);
+    } else if (!_pressed.remove(scan)) {
+      return KeyEventResult.handled;
     }
     final paste =
         down &&
@@ -388,16 +400,12 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     return KeyEventResult.handled;
   }
 
-  void _pointer(Offset position, int flags, {int wheel = 0}) {
+  void _pointer(Offset position, int flags) {
     final image = _surface;
     if (!image.hasImage) return;
     final x = position.dx.round().clamp(0, image.width - 1);
     final y = position.dy.round().clamp(0, image.height - 1);
-    _send(
-      () => widget.session.pointer(x, y, flags, wheel: wheel),
-      movement: flags == 0x0800,
-      wheel: wheel != 0,
-    );
+    _send(() => widget.session.pointer(x, y, flags), movement: flags == 0x0800);
   }
 
   void _flushMove() {
@@ -411,18 +419,28 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
   void _flushWheel() {
     _wheelTimer?.cancel();
     _wheelTimer = null;
-    final dy = _wheelDeltaY;
-    final dx = _wheelDeltaX;
-    _wheelDeltaY = 0;
-    _wheelDeltaX = 0;
-    if (dy != 0) {
-      final flags = 0x0200 | (dy > 0 ? 0x0100 : 0);
-      _pointer(_wheelPosition, flags, wheel: dy.abs().round().clamp(1, 255));
-    }
-    if (dx != 0) {
-      final flags = 0x0400 | (dx > 0 ? 0x0100 : 0);
-      _pointer(_wheelPosition, flags, wheel: dx.abs().round().clamp(1, 255));
-    }
+    final dy = _wheelDeltaY.round();
+    final dx = _wheelDeltaX.round();
+    _wheelDeltaY -= dy;
+    _wheelDeltaX -= dx;
+    if (_failed || !_surface.hasImage) return;
+    final x = _wheelPosition.dx.round().clamp(0, _surface.width - 1);
+    final y = _wheelPosition.dy.round().clamp(0, _surface.height - 1);
+    final session = widget.session;
+    _inputs.addWheel(dx, dy, (horizontal, vertical) async {
+      Future<void> sendAxis(int delta, int axis) async {
+        final flags = axis | (delta > 0 ? 0x0100 : 0);
+        var remaining = delta.abs();
+        while (remaining > 0 && !_failed) {
+          final step = math.min(remaining, 255);
+          await session.pointer(x, y, flags, wheel: step);
+          remaining -= step;
+        }
+      }
+
+      await sendAxis(vertical, 0x0200);
+      await sendAxis(horizontal, 0x0400);
+    });
   }
 
   void _moving(PointerEvent event) {
@@ -461,6 +479,7 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
   void _scroll(PointerSignalEvent event) {
     if (!widget.active || event is! PointerScrollEvent) return;
     GestureBinding.instance.pointerSignalResolver.register(event, (resolved) {
+      if (_originalSize && _panOriginalSize(event.scrollDelta)) return;
       _flushMove();
       _wheelPosition = event.localPosition;
       _wheelDeltaY += event.scrollDelta.dy;
@@ -469,12 +488,29 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     });
   }
 
+  bool _panOriginalSize(Offset delta) {
+    final dx = _horizontalScroll.hasClients ? _horizontalScroll.position : null;
+    final dy = _verticalScroll.hasClients ? _verticalScroll.position : null;
+    final horizontal = dx != null && dx.maxScrollExtent > 0;
+    final vertical = dy != null && dy.maxScrollExtent > 0;
+    if (horizontal && delta.dx != 0) dx.pointerScroll(delta.dx);
+    if (vertical && delta.dy != 0) {
+      dy.pointerScroll(delta.dy);
+    } else if (horizontal && delta.dx == 0 && delta.dy != 0) {
+      dx.pointerScroll(delta.dy);
+    }
+    return horizontal || vertical;
+  }
+
   void _scheduleAutomaticResize() {
     _resizeDebounce?.cancel();
     if (!widget.dynamicResolution ||
         _originalSize ||
         _resolution != null ||
         _viewport == null ||
+        _viewport!.matchesAligned(
+          RdpResolution(_surface.width, _surface.height),
+        ) ||
         _resizeBusy ||
         !widget.active ||
         _failed ||
@@ -561,7 +597,7 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
       _awaitingResolution = null;
       _resolution = RdpResolution(_surface.width, _surface.height);
     });
-    AppNotice.error(message);
+    if (widget.active) AppNotice.error(message);
   }
 
   void _secureAttention() {
@@ -795,9 +831,8 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
   ) {
     final fitted = FittedBox(fit: BoxFit.contain, child: desktop);
     if (!_originalSize) return fitted;
-    final dpr = MediaQuery.devicePixelRatioOf(context);
-    final width = _surface.width / dpr;
-    final height = _surface.height / dpr;
+    final width = _surface.width.toDouble();
+    final height = _surface.height.toDouble();
     final contentWidth = math.max(width, size.maxWidth);
     final contentHeight = math.max(height, size.maxHeight);
     return RawScrollbar(
@@ -995,7 +1030,12 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
         ),
         if (widget.fullscreen)
           Positioned(
-            top: 0,
+            top: math.max(
+              MediaQuery.paddingOf(context).top,
+              shadcn.Theme.of(context).platform == TargetPlatform.macOS
+                  ? 24
+                  : 0,
+            ),
             left: 0,
             right: 0,
             child: Align(

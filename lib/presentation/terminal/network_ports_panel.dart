@@ -6,6 +6,7 @@ import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import '../../application/session/network_ports_controller.dart';
 import '../../domain/ssh/network_ports.dart';
+import '../../domain/ssh/process_manager.dart';
 import '../../domain/ssh/ssh_engine.dart';
 import '../components/app_copy_button.dart';
 import '../components/app_icon.dart';
@@ -40,7 +41,7 @@ class _NetworkPortsPanelState extends State<NetworkPortsPanel> {
   final _search = TextEditingController();
   final _scroll = ScrollController();
   bool _showingTermination = false;
-  bool _lookingUpProcess = false;
+  String? _lookingUpPort;
 
   @override
   void initState() {
@@ -175,69 +176,78 @@ class _NetworkPortsPanelState extends State<NetworkPortsPanel> {
         ),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-          child: Obx(
-            () => Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    '@shown / @total 个端口'.trParams({
-                      'shown': '${controller.visiblePorts.length}',
-                      'total': '${controller.ports.length}',
-                    }),
-                    key: const ValueKey('network-ports-count'),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: _secondary,
-                  ),
-                ),
-                const SizedBox(width: 6),
-                SizedBox(
-                  width: 156,
-                  child: shadcn.RadioGroup<NetworkPortsFilter>(
-                    value: controller.filter.value,
-                    onChanged: (value) => controller.filter.value = value,
-                    child: Row(
-                      children: [
-                        for (final filter in NetworkPortsFilter.values) ...[
-                          if (filter != NetworkPortsFilter.all)
-                            const SizedBox(width: 4),
-                          Expanded(
-                            child: shadcn.RadioCard<NetworkPortsFilter>(
-                              key: ValueKey(
-                                'network-ports-filter-${filter.name}',
+          child: LayoutBuilder(
+            builder: (_, constraints) => Obx(() {
+              final count = Text(
+                '@shown / @total 个端口'.trParams({
+                  'shown': '${controller.visiblePorts.length}',
+                  'total': '${controller.ports.length}',
+                }),
+                key: const ValueKey('network-ports-count'),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: _secondary,
+              );
+              final filters = SizedBox(
+                width: 156,
+                child: shadcn.RadioGroup<NetworkPortsFilter>(
+                  value: controller.filter.value,
+                  onChanged: (value) => controller.filter.value = value,
+                  child: Row(
+                    children: [
+                      for (final filter in NetworkPortsFilter.values) ...[
+                        if (filter != NetworkPortsFilter.all)
+                          const SizedBox(width: 4),
+                        Expanded(
+                          child: shadcn.RadioCard<NetworkPortsFilter>(
+                            key: ValueKey(
+                              'network-ports-filter-${filter.name}',
+                            ),
+                            value: filter,
+                            theme: const shadcn.RadioCardTheme(
+                              padding: EdgeInsets.symmetric(
+                                horizontal: 3,
+                                vertical: 2,
                               ),
-                              value: filter,
-                              theme: const shadcn.RadioCardTheme(
-                                padding: EdgeInsets.symmetric(
-                                  horizontal: 3,
-                                  vertical: 2,
-                                ),
-                              ),
-                              child: Center(
-                                child: Text(
-                                  filter == NetworkPortsFilter.all
-                                      ? '全部'.tr
-                                      : filter.name.toUpperCase(),
-                                  maxLines: 1,
-                                  style: const TextStyle(fontSize: 11),
-                                ),
+                            ),
+                            child: Center(
+                              child: Text(
+                                filter == NetworkPortsFilter.all
+                                    ? '全部'.tr
+                                    : filter.name.toUpperCase(),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(fontSize: 11),
                               ),
                             ),
                           ),
-                        ],
+                        ),
                       ],
-                    ),
+                    ],
                   ),
                 ),
-              ],
-            ),
+              );
+              if (constraints.maxWidth < 256) {
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [count, const SizedBox(height: 5), filters],
+                );
+              }
+              return Row(
+                children: [
+                  Expanded(child: count),
+                  const SizedBox(width: 6),
+                  filters,
+                ],
+              );
+            }),
           ),
         ),
         Expanded(
           child: Obx(() {
             final entries = controller.visiblePorts;
             final actionError = controller.actionError.value;
-            final error = actionError ?? controller.error.value;
+            final error = controller.error.value;
             final notice = controller.notice.value;
             final failures = controller.actionFailures.toList();
             final loading = controller.loading.value;
@@ -249,7 +259,11 @@ class _NetworkPortsPanelState extends State<NetworkPortsPanel> {
             return LayoutBuilder(
               builder: (_, constraints) => Column(
                 children: [
-                  if (error != null || notice != null || limited || missing)
+                  if (error != null ||
+                      limited ||
+                      missing ||
+                      actionError != null ||
+                      notice != null)
                     ConstrainedBox(
                       constraints: BoxConstraints(
                         maxHeight: constraints.maxHeight * .4,
@@ -257,26 +271,58 @@ class _NetworkPortsPanelState extends State<NetworkPortsPanel> {
                       child: SingleChildScrollView(
                         child: Padding(
                           padding: const EdgeInsets.fromLTRB(10, 0, 10, 8),
-                          child: Align(
-                            alignment: Alignment.centerLeft,
-                            child: Text(
-                              error != null
-                                  ? '${actionError == null && hasData ? '${'更新失败，显示上次数据'.tr}\n' : ''}${AppTranslations.error(error)}${failures.isEmpty ? '' : '\n${failures.map((f) => 'PID ${f.pid} · ${AppTranslations.error(f.message)}').join('\n')}'}'
-                                  : notice != null
-                                  ? notice.tr
-                                  : (limited
-                                            ? '当前权限可能无法显示全部端口及进程信息'
-                                            : '部分端口的进程信息不可见')
-                                        .tr,
-                              key: const ValueKey('network-ports-message'),
-                              style: _secondary.copyWith(
-                                color: error != null
-                                    ? StatusColors.failed
-                                    : notice != null
-                                    ? AppTheme.serverStatusCpuColor
-                                    : AppTheme.terminalMutedForeground,
-                              ),
-                            ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              if (limited || missing)
+                                Text(
+                                  (limited
+                                          ? '当前权限可能无法显示全部端口及进程信息'
+                                          : '部分端口的进程信息不可见')
+                                      .tr,
+                                  key: const ValueKey(
+                                    'network-ports-permissions',
+                                  ),
+                                  style: _secondary,
+                                ),
+                              if (error != null)
+                                Text(
+                                  '${hasData ? '${'更新失败，显示上次数据'.tr}\n' : ''}${AppTranslations.error(error)}',
+                                  key: const ValueKey('network-ports-message'),
+                                  style: _secondary.copyWith(
+                                    color: StatusColors.failed,
+                                  ),
+                                ),
+                              if (actionError != null || notice != null)
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: Text(
+                                        actionError == null
+                                            ? notice!.tr
+                                            : [
+                                                AppTranslations.error(
+                                                  actionError,
+                                                ),
+                                                for (final failure in failures)
+                                                  'PID ${failure.pid} · ${AppTranslations.error(failure.message)}',
+                                              ].join('\n'),
+                                        style: _secondary.copyWith(
+                                          color: actionError == null
+                                              ? AppTheme.serverStatusCpuColor
+                                              : StatusColors.failed,
+                                        ),
+                                      ),
+                                    ),
+                                    AppIconButton(
+                                      semanticLabel: '关闭提示'.tr,
+                                      tooltip: '关闭提示'.tr,
+                                      onPressed: controller.clearActionFeedback,
+                                      icon: const AppIcon(AppIcons.x, size: 12),
+                                    ),
+                                  ],
+                                ),
+                            ],
                           ),
                         ),
                       ),
@@ -347,12 +393,18 @@ class _NetworkPortsPanelState extends State<NetworkPortsPanel> {
                 Expanded(child: _processLink(controller, port, owners)),
                 const SizedBox(width: 4),
                 if (owners.isNotEmpty)
-                  AppCopyButton(
-                    key: ValueKey('network-port-copy-pid-${port.identity}'),
-                    text: owners.map((owner) => owner.pid).toSet().join(','),
-                    semanticLabel: '复制进程 ID'.tr,
+                  SizedBox.square(
+                    dimension: 22,
+                    child: AppCopyButton(
+                      key: ValueKey('network-port-copy-pid-${port.identity}'),
+                      text: owners.map((owner) => owner.pid).toSet().join(','),
+                      semanticLabel: '复制进程 ID'.tr,
+                    ),
                   ),
-                _stopButton(controller, port),
+                SizedBox.square(
+                  dimension: 22,
+                  child: _stopButton(controller, port),
+                ),
               ],
             ),
             for (final address in port.addresses)
@@ -430,26 +482,37 @@ class _NetworkPortsPanelState extends State<NetworkPortsPanel> {
                 key: ValueKey('network-port-process-${port.identity}'),
                 size: shadcn.ButtonSize.small,
                 density: shadcn.ButtonDensity.compact,
-                onPressed: () {
-                  if (owners.length == 1) {
-                    unawaited(_openProcess(controller, port, owners.single));
-                  } else {
-                    shadcn.showDropdown<void>(
-                      context: anchor,
-                      builder: (_) => shadcn.DropdownMenu(
-                        children: appMenuItems(
-                          [
-                            for (final owner in owners)
-                              (owner, _processLabel(owner)),
-                          ],
-                          (owner) =>
-                              unawaited(_openProcess(controller, port, owner)),
-                        ),
-                      ),
-                    );
-                  }
-                },
-                child: text,
+                onPressed: _lookingUpPort != null
+                    ? null
+                    : () {
+                        if (owners.length == 1) {
+                          unawaited(
+                            _openProcess(controller, port, owners.single),
+                          );
+                        } else {
+                          shadcn.showDropdown<void>(
+                            context: anchor,
+                            builder: (_) => shadcn.DropdownMenu(
+                              children: appMenuItems(
+                                [
+                                  for (final owner in owners)
+                                    (owner, _processLabel(owner)),
+                                ],
+                                (owner) => unawaited(
+                                  _openProcess(controller, port, owner),
+                                ),
+                              ),
+                            ),
+                          );
+                        }
+                      },
+                child: _lookingUpPort == port.identity
+                    ? const SizedBox.square(
+                        key: ValueKey('network-port-process-loading'),
+                        dimension: 12,
+                        child: shadcn.CircularProgressIndicator(),
+                      )
+                    : text,
               ),
             )
           : text,
@@ -461,26 +524,28 @@ class _NetworkPortsPanelState extends State<NetworkPortsPanel> {
     ListeningNetworkPort port,
     NetworkPortProcess owner,
   ) async {
-    if (_lookingUpProcess) return;
-    _lookingUpProcess = true;
+    if (_lookingUpPort != null) return;
+    setState(() => _lookingUpPort = port.identity);
+    final RemoteProcess process;
     try {
-      final process = await controller.locateProcess(port, owner);
-      if (!mounted || !widget.active || _controller != controller) return;
-      await AppNavigation.dialog<void>(
-        ProcessDetailsDialog(
-          process: process,
-          readDetails: controller.readProcessDetails,
-        ),
-      );
+      process = await controller.locateProcess(port, owner);
     } on Object catch (error) {
       if (mounted && widget.active && _controller == controller) {
         AppNotice.error(
           error is SshEngineException ? error.message : '无法读取进程详情，请重试',
         );
       }
+      return;
     } finally {
-      _lookingUpProcess = false;
+      if (mounted) setState(() => _lookingUpPort = null);
     }
+    if (!mounted || !widget.active || _controller != controller) return;
+    await AppNavigation.dialog<void>(
+      ProcessDetailsDialog(
+        process: process,
+        readDetails: controller.readProcessDetails,
+      ),
+    );
   }
 
   Widget _stopButton(

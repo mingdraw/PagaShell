@@ -68,6 +68,15 @@ class DriftHostRepository implements HostRepository {
   Future<void> upsert(Host host) => _db.transaction(() async {
     ForwardPort.validateAll(host.forwardPorts);
     host.proxyConfig.validate();
+    final otherGroup =
+        await (_db.selectOnly(_db.hosts)
+              ..addColumns([_db.hosts.id])
+              ..where(
+                _db.hosts.id.equals(host.id) &
+                    _db.hosts.isGateway.equals(!gateways),
+              ))
+            .getSingleOrNull();
+    if (otherGroup != null) throw StateError('服务与网关不能使用相同标识');
     if (gateways && host.isDesktop) throw StateError('网关支持 SSH 或 Page 类型');
     if (gateways && host.gatewayId != null) {
       throw ArgumentError('网关不能引用其他网关');

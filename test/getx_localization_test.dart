@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:get/get.dart';
 import 'package:pagashell/app.dart';
 import 'package:pagashell/application/hosts/host_controller.dart';
+import 'package:pagashell/domain/ai/agent_skill.dart';
 import 'package:pagashell/domain/entities/host.dart';
 import 'package:pagashell/domain/ssh/host_key.dart';
 import 'package:pagashell/presentation/components/app_dialog.dart';
@@ -14,7 +15,15 @@ import 'package:pagashell/presentation/ssh/host_key_confirmation.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import 'support/in_memory_binding.dart';
+import 'support/in_memory_settings_repository.dart';
 import 'support/shadcn_test_app.dart';
+
+class _FailingLanguageRepository extends InMemorySettingsRepository {
+  @override
+  Future<void> saveLanguageCode(String code) async {
+    throw StateError('fixture write failure');
+  }
+}
 
 void main() {
   setUp(() {
@@ -29,9 +38,14 @@ void main() {
   });
 
   testWidgets('左下角通用设置切换中英文，保留控制器和用户数据', (tester) async {
-    await tester.pumpWidget(
-      PagaShellApp(binding: InMemoryBinding(), platform: TargetPlatform.macOS),
+    final settings = InMemorySettingsRepository();
+    Future<void> mount() => tester.pumpWidget(
+      PagaShellApp(
+        binding: InMemoryBinding(settingsRepository: settings),
+        platform: TargetPlatform.macOS,
+      ),
     );
+    await mount();
     await tester.pumpAndSettle();
     final controller = Get.find<HostController>();
     await controller.save(
@@ -48,12 +62,13 @@ void main() {
     await tester.tap(find.byType(shadcn.Select<Locale>));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
-    // GetX 4 通过 performReassemble 切换语言，需要让重建离开 fakeAsync 时钟。
+    // GetX 4 的语言刷新走 performReassemble，需离开 fakeAsync 时钟。
     await tester.runAsync(() async {
       await tester.tap(find.text('English').last);
       await Future<void>.delayed(const Duration(milliseconds: 20));
     });
     await tester.pumpAndSettle();
+    expect(settings.languageCode, 'en');
     expect(Get.locale, AppTranslations.englishLocale);
     expect(find.text('Services'), findsOneWidget);
     expect(find.text('Credentials'), findsOneWidget);
@@ -62,6 +77,17 @@ void main() {
     expect(tester.takeException(), isNull);
     await tester.tap(find.widgetWithText(shadcn.OutlineButton, 'Close'));
     await tester.pumpAndSettle();
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    Get.reset();
+    Get.locale = AppTranslations.defaultLocale;
+    await mount();
+    await tester.pump();
+    expect(find.text('服务'), findsNothing);
+    await tester.pumpAndSettle();
+    expect(find.text('Services'), findsOneWidget);
+    expect(Get.locale, AppTranslations.englishLocale);
+    final restartedController = Get.find<HostController>();
 
     await tester.tap(findAppIconButton('Settings'));
     await tester.pumpAndSettle();
@@ -74,7 +100,8 @@ void main() {
     });
     await tester.pumpAndSettle();
     expect(find.text('服务'), findsOneWidget);
-    expect(Get.find<HostController>(), same(controller));
+    expect(settings.languageCode, 'zh');
+    expect(Get.find<HostController>(), same(restartedController));
   });
 
   testWidgets('切换语言保留打开的表单与输入，校验使用当前语言', (tester) async {
@@ -113,6 +140,37 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byType(AppDialog), findsNothing);
     expect(Get.find<HostController>().hosts.single.name, '数据库-01');
+  });
+
+  testWidgets('语言写入失败时保留当前译文和选择', (tester) async {
+    await tester.pumpWidget(
+      PagaShellApp(
+        binding: InMemoryBinding(
+          settingsRepository: _FailingLanguageRepository(),
+        ),
+        platform: TargetPlatform.macOS,
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(findAppIconButton('设置'));
+    await tester.pumpAndSettle();
+    final selector = find.byType(shadcn.Select<Locale>);
+    await tester.tap(selector);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('English').last);
+    await tester.pumpAndSettle();
+    expect(find.text('语言设置保存失败，请重试'), findsOneWidget);
+    expect(find.text('服务'), findsOneWidget);
+    expect(
+      tester.widget<shadcn.Select<Locale>>(selector).value,
+      AppTranslations.defaultLocale,
+    );
+    expect(
+      find.descendant(of: selector, matching: find.text('简体中文')),
+      findsOneWidget,
+    );
+    await tester.pump(const Duration(seconds: 6));
+    await tester.pumpAndSettle();
   });
 
   testWidgets('英文主机密钥变更提示保留指纹并阻止信任', (tester) async {
@@ -187,6 +245,36 @@ void main() {
       AppTranslations.error('RDP 会话初始化失败：连接读写失败（IO UnexpectedEof）'),
       'RDP session initialization failed: Reading or writing the connection '
       'failed (IO UnexpectedEof)',
+    );
+  });
+
+  test('英文发送与代理模式按语境翻译，原生错误保留底层诊断', () {
+    Get.addTranslations(AppTranslations().keys);
+    Get.locale = AppTranslations.englishLocale;
+    expect('发送'.tr, 'Send');
+    expect('已发送'.tr, 'Sent');
+    expect('关闭代理'.tr, 'Off');
+    expect('关闭'.tr, 'Close');
+    expect('停止'.tr, 'Stop');
+    expect('测试'.tr, 'Test');
+    expect(
+      '@kind（@phase）'.trParams({'kind': 'Terminal', 'phase': 'Connected'}),
+      'Terminal (Connected)',
+    );
+    for (final skill in AgentSkill.builtIn) {
+      expect(skill.description.tr, isNot(skill.description));
+    }
+    expect(
+      AppTranslations.error('所选网关不可用'),
+      'The selected gateway is unavailable',
+    );
+    expect(
+      AppTranslations.error('RDP 服务连接失败：RDP TCP 连接失败: Connection refused'),
+      'RDP service connection failed: The RDP TCP connection failed: Connection refused',
+    );
+    expect(
+      AppTranslations.error('传输失败：远程服务无响应，已达到重试上限（2 次，30 秒）'),
+      contains('retry limit was reached'),
     );
   });
 }

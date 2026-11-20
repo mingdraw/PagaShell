@@ -182,8 +182,9 @@ class _DynamicProxyPanelState extends State<DynamicProxyPanel> {
   ]);
 
   void _showRulePreview() {
+    if (!(_form.currentState?.validate() ?? false)) return;
     try {
-      final config = ProxyConfig(mode: _mode, rules: _ruleDraft())..validate();
+      final config = _read();
       unawaited(
         AppNavigation.dialog<void>(ProxyRulePreviewDialog(config: config)),
       );
@@ -294,7 +295,7 @@ class _DynamicProxyPanelState extends State<DynamicProxyPanel> {
           '\$env:HTTPS_PROXY="http://127.0.0.1:$validHttp"',
         ],
         if (validSocks != null)
-          '\$env:ALL_PROXY="socks5://127.0.0.1:$validSocks"',
+          '\$env:ALL_PROXY="socks5h://127.0.0.1:$validSocks"',
       ];
       return parts.join('; ');
     }
@@ -303,7 +304,7 @@ class _DynamicProxyPanelState extends State<DynamicProxyPanel> {
         'http_proxy=http://127.0.0.1:$validHttp',
         'https_proxy=http://127.0.0.1:$validHttp',
       ],
-      if (validSocks != null) 'all_proxy=socks5://127.0.0.1:$validSocks',
+      if (validSocks != null) 'all_proxy=socks5h://127.0.0.1:$validSocks',
     ];
     return 'export ${parts.join(' ')}';
   }
@@ -482,13 +483,6 @@ class _DynamicProxyPanelState extends State<DynamicProxyPanel> {
     ),
   );
 
-  String _typeLabel(ProxyRuleType type) => switch (type) {
-    ProxyRuleType.ip => 'IP / CIDR',
-    ProxyRuleType.domainExact => '域名全匹配',
-    ProxyRuleType.domainPrefix => '域名前缀',
-    ProxyRuleType.domainSuffix => '域名后缀',
-  };
-
   Widget _rule(_RuleEditor row, bool editable) => Padding(
     key: row.key,
     padding: const EdgeInsets.only(bottom: 12),
@@ -501,13 +495,16 @@ class _DynamicProxyPanelState extends State<DynamicProxyPanel> {
             inlineLabel: true,
             items: [
               for (final t in ProxyRuleType.values)
-                AppSelectOption(value: t, child: Text(_typeLabel(t).tr)),
+                AppSelectOption(
+                  value: t,
+                  child: Text(proxyRuleTypeLabel(t).tr),
+                ),
             ],
             onChanged: editable
                 ? (t) {
                     if (t == null) return;
                     setState(() => row.type = t);
-                    _changed();
+                    if (row.value.text.trim().isNotEmpty) _changed();
                   }
                 : null,
           );
@@ -652,9 +649,13 @@ class _DynamicProxyPanelState extends State<DynamicProxyPanel> {
               key: const ValueKey('proxy-locked-hint'),
               style: TextStyle(fontSize: 12, color: colors.mutedForeground),
             ),
-            if (session.proxySession case final DynamicProxyTrafficSource source
-                when widget.active)
-              ProxyTrafficStatus(key: ObjectKey(source), source: source),
+            if (session.proxySession
+                case final DynamicProxyTrafficSource source)
+              ProxyTrafficStatus(
+                key: ObjectKey(source),
+                source: source,
+                active: widget.active,
+              ),
           ],
           const SizedBox(height: 16),
           Expanded(
@@ -744,7 +745,6 @@ class _DynamicProxyPanelState extends State<DynamicProxyPanel> {
                                       ),
                                     ),
                                   );
-                                  _changed();
                                 }
                               : null,
                           leading: const AppIcon(AppIcons.plus, size: 16),

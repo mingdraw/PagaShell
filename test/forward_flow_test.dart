@@ -16,6 +16,7 @@ import 'package:pagashell/application/session/session_controller.dart';
 import 'package:pagashell/domain/entities/forward_port.dart';
 import 'package:pagashell/domain/entities/host.dart';
 import 'package:pagashell/domain/repositories/host_repository.dart';
+import 'package:pagashell/domain/repositories/known_host_repository.dart';
 import 'package:pagashell/domain/ssh/host_key.dart';
 import 'package:pagashell/domain/ssh/ssh_engine.dart';
 import 'package:pagashell/infrastructure/db/in_memory_folder_repository.dart';
@@ -40,6 +41,22 @@ class _Secrets extends InMemorySecretStore {
     reads++;
     return super.read(ref);
   }
+}
+
+class _UntrustedHosts implements KnownHostRepository {
+  @override
+  Future<SshHostKey?> find(
+    String hostname,
+    int port, {
+    ServerIdentityProtocol protocol = ServerIdentityProtocol.ssh,
+  }) async => null;
+
+  @override
+  Future<bool> trustIfAbsent(SshHostKey key) =>
+      throw StateError('Test host must remain untrusted');
+
+  @override
+  Future<bool> removeIfMatches(SshHostKey key) async => false;
 }
 
 class _ForwardSession
@@ -106,6 +123,9 @@ class _ForwardEngine implements SshEngine, GatewayForwardEngine {
   final credentials = <SshCredentials>[];
   final gateways = <SshGateway?>[];
   Completer<void>? connectGate;
+  SshHostKey? hostKey;
+  bool? hostKeyAccepted;
+  bool cancelled = false;
   int ordinaryConnects = 0;
 
   @override
@@ -113,7 +133,11 @@ class _ForwardEngine implements SshEngine, GatewayForwardEngine {
     SshGateway gateway, {
     HostKeyVerifier? verifyHostKey,
     Future<void>? cancelled,
-  }) => _create(gateway.host, gateway.credentials, gateway);
+  }) async {
+    unawaited(cancelled?.then((_) => this.cancelled = true));
+    if (hostKey case final key?) hostKeyAccepted = await verifyHostKey!(key);
+    return _create(gateway.host, gateway.credentials, gateway);
+  }
 
   @override
   Future<SshEngineSession> connect(
@@ -210,7 +234,11 @@ void main() {
       RepaintBoundary(
         key: const ValueKey('forward-capture'),
         child: PagaShellApp(
-          binding: InMemoryBinding(sshEngine: engine, secretStore: secrets),
+          binding: InMemoryBinding(
+            sshEngine: engine,
+            secretStore: secrets,
+            knownHosts: _UntrustedHosts(),
+          ),
           platform: TargetPlatform.macOS,
         ),
       ),
@@ -638,6 +666,38 @@ void main() {
       isTrue,
     );
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('等待主机指纹时可取消转发，释放迟到连接且保留标签', (tester) async {
+    final (engine, _) = await pump(tester);
+    final id = await open(tester);
+    final sessions = Get.find<SessionController>();
+    engine.hostKey = const SshHostKey(
+      hostname: 'jump.test',
+      port: 22,
+      keyType: 'ssh-ed25519',
+      fingerprint: 'SHA256:test-only',
+    );
+    engine.connectGate = Completer<void>();
+    await tester.tap(find.text('启动转发'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(sessions.sessions.single.phase, SessionPhase.hostKeyPending);
+    expect(find.text('信任并连接'), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('forward-cancel-connect')));
+    await tester.pump();
+    expect(engine.cancelled, isTrue);
+    expect(engine.hostKeyAccepted, isFalse);
+    expect(sessions.sessions.single.phase, SessionPhase.stopping);
+    engine.connectGate!.complete();
+    await tester.pumpAndSettle();
+
+    expect(engine.sessions.single.closed, isTrue);
+    expect(engine.sessions.single.ports, isNull);
+    expect(sessions.sessions.single.id, id);
+    expect(sessions.sessions.single.phase, SessionPhase.closed);
+    expect(find.text('启动转发').hitTestable(), findsOneWidget);
   });
 
   testWidgets('重新启动读取最新网关、密文和目标地址，不读取服务凭据', (tester) async {

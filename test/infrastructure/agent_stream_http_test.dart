@@ -72,7 +72,7 @@ Map<String, Object> _response(String text, {bool withTool = false}) => {
 Iterable<Map<String, Object>> _openingEvents(AiApiFormat format) =>
     switch (format) {
       AiApiFormat.openai => [
-        _chat({'reasoning_content': _summary}),
+        _chat({'reasoning_content': _summary}, ''),
         _chat({'content': _opening}),
         _chat({
           'tool_calls': [
@@ -143,7 +143,8 @@ Iterable<Map<String, Object>> _finishToolTurn(AiApiFormat format) =>
 Iterable<Map<String, Object>> _answerEvents(AiApiFormat format) =>
     switch (format) {
       AiApiFormat.openai => [
-        _chat({'content': _answer}),
+        _chat({'content': _answer.substring(0, 7)}, ''),
+        _chat({'content': _answer.substring(7)}),
         _chat({}, 'stop'),
       ],
       AiApiFormat.openaiResponses => [_response(_answer)],
@@ -290,7 +291,11 @@ void main() {
         .send('Explain file transfer')
         .timeout(const Duration(seconds: 5));
     expect(agent.error.value, 'AI 回复流意外中断，请重试');
-    expect(agent.entries.any((entry) => entry.text == _opening), isTrue);
+    final partial = agent.entries.singleWhere(
+      (entry) => entry.kind == AgentEntryKind.assistant,
+    );
+    expect(partial.text, _opening);
+    expect(partial.requestState.value, AgentRequestState.failed);
     expect(agent.entries.where((e) => e.kind == AgentEntryKind.tool), isEmpty);
   });
 
@@ -336,6 +341,11 @@ void main() {
         agent.entries.first.requestState.value,
         AgentRequestState.cancelled,
       );
+      final partial = agent.entries.singleWhere(
+        (entry) => entry.kind == AgentEntryKind.assistant,
+      );
+      expect(partial.text, _opening);
+      expect(partial.requestState.value, AgentRequestState.cancelled);
       await agent.send('Try again').timeout(const Duration(seconds: 5));
     } finally {
       finish.complete();

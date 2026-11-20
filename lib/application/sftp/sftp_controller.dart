@@ -132,22 +132,22 @@ class SftpController extends GetxController {
     }
   }
 
-  Future<void> createDir(String name) =>
+  Future<String?> createDir(String name) =>
       _run(() => engine.createDir(pathOf(name)));
 
-  Future<void> rename(String oldName, String newName) =>
+  Future<String?> rename(String oldName, String newName) =>
       _run(() => engine.rename(pathOf(oldName), pathOf(newName)));
 
-  Future<void> remove(SftpDirEntry entry) =>
+  Future<String?> remove(SftpDirEntry entry) =>
       _run(() => engine.remove(pathOf(entry.name), isDir: entry.isDir));
 
   /// 同一连接、同一目录中的批量删除；连接失效时停止后续请求。
-  Future<void> removeMany(List<SftpDirEntry> selected) async {
+  Future<String?> removeMany(List<SftpDirEntry> selected) async {
     if (_disposed ||
         needsReconnect.value ||
         reconnecting.value ||
         selected.isEmpty) {
-      return;
+      return null;
     }
     final directory = cwd.value;
     final revision = _request;
@@ -162,7 +162,7 @@ class SftpController extends GetxController {
     final removed = <String>{};
     var failed = false;
     for (final entry in List<SftpDirEntry>.of(selected)) {
-      if (!current()) return;
+      if (!current()) return null;
       try {
         if (entry.name.isEmpty ||
             entry.name == '.' ||
@@ -176,41 +176,49 @@ class SftpController extends GetxController {
         );
         removed.add(entry.name);
       } on Object catch (e) {
-        if (!current()) return;
+        if (!current()) return null;
         if (e is SshEngineException && e.isConnectionClosed) {
           // 无法刷新失效连接，先从当前列表移除已确认成功的条目。
           entries.removeWhere((entry) => removed.contains(entry.name));
           _recordError(e, '远程文件操作失败，请重试');
-          return;
+          return null;
         }
         failed = true;
       }
     }
-    if (!current()) return;
+    if (!current()) return null;
     await refreshDirectory(reconnectIfNeeded: false);
     if (!_disposed &&
         revision + 1 == _request &&
         cwd.value == directory &&
         identical(activeEngine, engine) &&
-        error.value == null &&
         failed) {
-      error.value = '部分文件删除失败，请重试';
+      return '部分文件删除失败，请重试';
     }
+    return null;
   }
 
-  Future<void> _run(Future<void> Function() action) async {
-    if (_disposed || needsReconnect.value || reconnecting.value) return;
+  Future<String?> _run(Future<void> Function() action) async {
+    if (_disposed || needsReconnect.value || reconnecting.value) return null;
     final activeEngine = engine;
+    final revision = _request;
     try {
       await action();
-      if (!_disposed && identical(activeEngine, engine)) {
+      if (!_disposed &&
+          revision == _request &&
+          identical(activeEngine, engine)) {
         await refreshDirectory(reconnectIfNeeded: false);
       }
     } on Object catch (e) {
       if (!_disposed && identical(activeEngine, engine)) {
-        _recordError(e, '远程文件操作失败，请重试');
+        if (e is SshEngineException && e.isConnectionClosed) {
+          _recordError(e, '远程文件操作失败，请重试');
+        } else if (revision == _request) {
+          return e is SshEngineException ? e.message : '远程文件操作失败，请重试';
+        }
       }
     }
+    return null;
   }
 
   void _recordError(Object failure, String fallback) {

@@ -7,9 +7,17 @@ abstract interface class SettingsRepository {
 
   Future<void> saveThemeMode(AppThemeMode mode);
 
+  Future<String?> readLanguageCode();
+
+  Future<void> saveLanguageCode(String code);
+
   Future<SidebarState> readSidebarState();
 
   Future<void> saveSidebarState(SidebarState state);
+
+  Future<bool> readCloseTerminalOnDisconnect();
+
+  Future<void> saveCloseTerminalOnDisconnect(bool enabled);
 
   Future<bool> readAutomaticUpdates();
 

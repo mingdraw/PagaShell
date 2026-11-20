@@ -267,6 +267,7 @@ void main() {
     controller.setEnabled(true);
     source.reads.first.$2.completeError(const SshEngineException('Docker 未运行'));
     await tester.pump();
+    expect(controller.autoRefreshPaused.value, isTrue);
     await tester.pump(const Duration(seconds: 30));
     controller.setEnabled(false);
     controller.setEnabled(true);
@@ -281,12 +282,12 @@ void main() {
     await failedRetry;
     await tester.pump(const Duration(seconds: 30));
     expect(source.reads, hasLength(2));
-    final retry = controller.refreshResources();
+    controller.setAutoRefreshPaused(false);
     source.reads.last.$2.complete([
       dockerResource(kind: DockerResourceKind.image),
     ]);
     await tester.pump();
-    await retry;
+    expect(controller.autoRefreshPaused.value, isFalse);
     await tester.pump(const Duration(seconds: 5));
     expect(source.reads, hasLength(4));
     expect(source.reads.last.$1, DockerResourceKind.image);
@@ -668,6 +669,41 @@ void main() {
     controller.setEnabled(false);
     await tester.pump(const Duration(seconds: 20));
     expect(source.reads, hasLength(2));
+  });
+
+  testWidgets('暂停时首次打开分类只查询一次，切回已加载分类不重查', (tester) async {
+    final source = _Source();
+    final controller = DockerManagerController(source: source);
+    addTearDown(controller.onClose);
+    controller.setEnabled(true);
+    final container = dockerResource();
+    source.reads.single.$2.complete([container]);
+    await tester.pump();
+    await tester.pump(controller.interval);
+
+    controller.setAutoRefreshPaused(true);
+    controller.select(DockerResourceKind.image);
+    expect(source.reads, hasLength(2));
+    source.reads.last.$2.complete([]);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 1));
+
+    expect(source.reads.map((read) => read.$1), [
+      DockerResourceKind.container,
+      DockerResourceKind.container,
+      DockerResourceKind.image,
+    ]);
+    final image = dockerResource(kind: DockerResourceKind.image);
+    source.reads.last.$2.complete([image]);
+    await tester.pump();
+    expect(controller.current.resources, [image]);
+    controller.select(DockerResourceKind.container);
+    expect(controller.current.resources, [container]);
+    controller.select(DockerResourceKind.image);
+    await tester.pump(controller.interval * 2);
+    expect(source.reads, hasLength(3));
+    expect(controller.autoRefreshPaused.value, isTrue);
+    controller.setEnabled(false);
   });
 
   testWidgets('隐藏或关闭时忽略在途结果，重新展开只补一次刷新', (tester) async {

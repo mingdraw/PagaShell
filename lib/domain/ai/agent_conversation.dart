@@ -47,16 +47,23 @@ class AgentArchivedCommand {
 }
 
 class AgentToolSummary {
-  const AgentToolSummary(this.target, {this.elapsedMs, this.outputLength});
+  const AgentToolSummary(
+    this.target, {
+    this.elapsedMs,
+    this.outputLength,
+    this.cancelled = false,
+  });
 
   final String? target;
   final int? elapsedMs;
   final int? outputLength;
+  final bool cancelled;
 
   Map<String, dynamic> toJson() => {
     'target': target,
     'elapsedMs': elapsedMs,
     'outputLength': outputLength,
+    if (cancelled) 'cancelled': true,
   };
 
   factory AgentToolSummary.fromJson(Map<String, dynamic> json) =>
@@ -64,6 +71,8 @@ class AgentToolSummary {
         json['target'] as String?,
         elapsedMs: json['elapsedMs'] as int?,
         outputLength: json['outputLength'] as int?,
+        // Older snapshots could save a running tool before Stop finalized it.
+        cancelled: json['cancelled'] == true || json['elapsedMs'] == null,
       );
 }
 
@@ -75,6 +84,7 @@ class AgentMessage {
     this.requestState,
     this.requestError,
     this.toolSummary,
+    this.hadSessionReferences = false,
   });
 
   final AgentEntryKind kind;
@@ -83,6 +93,7 @@ class AgentMessage {
   final AgentRequestState? requestState;
   final String? requestError;
   final AgentToolSummary? toolSummary;
+  final bool hadSessionReferences;
 
   Map<String, dynamic> toJson() => {
     'kind': kind.name,
@@ -91,6 +102,7 @@ class AgentMessage {
     if (requestState != null) 'requestState': requestState!.name,
     if (requestError != null) 'requestError': requestError,
     if (toolSummary != null) 'toolSummary': toolSummary!.toJson(),
+    if (hadSessionReferences) 'hadSessionReferences': true,
   };
 
   factory AgentMessage.fromJson(Map<String, dynamic> json) => AgentMessage(
@@ -109,6 +121,7 @@ class AgentMessage {
       _ => null,
     },
     requestError: json['requestError'] as String?,
+    hadSessionReferences: json['hadSessionReferences'] == true,
     toolSummary: json['toolSummary'] == null
         ? null
         : AgentToolSummary.fromJson(

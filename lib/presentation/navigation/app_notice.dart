@@ -9,6 +9,17 @@ import '../theme/app_theme.dart';
 
 /// shadcn 提示条；调用方只传经过脱敏的用户文案。
 abstract final class AppNotice {
+  static final _active =
+      Expando<Map<(AppIcons, String), shadcn.ToastOverlay>>();
+
+  static Widget surfaceTheme(BuildContext context, Widget child) =>
+      shadcn.ComponentTheme<shadcn.ToastTheme>(
+        data: const shadcn.ToastTheme(
+          toastConstraints: BoxConstraints(maxWidth: 400),
+        ),
+        child: child,
+      );
+
   static void error(String message) {
     _show(
       AppTranslations.error(message),
@@ -22,11 +33,18 @@ abstract final class AppNotice {
   }
 
   static void _show(String message, AppIcons icon, Color accent) {
-    final context = Get.overlayContext;
+    final context = Get.key.currentState?.overlay?.context;
     if (context == null) return;
-    shadcn.showToast(
+    final notices = _active[context] ??= {};
+    final key = (icon, message);
+    if (notices[key]?.isShowing == true) return;
+    late final shadcn.ToastOverlay handle;
+    handle = shadcn.showToast(
       context: context,
       location: shadcn.ToastLocation.bottomCenter,
+      onClosed: () {
+        if (identical(notices[key], handle)) notices.remove(key);
+      },
       builder: (context, overlay) => ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 400),
         child: shadcn.SurfaceCard(
@@ -54,5 +72,6 @@ abstract final class AppNotice {
         ),
       ),
     );
+    notices[key] = handle;
   }
 }

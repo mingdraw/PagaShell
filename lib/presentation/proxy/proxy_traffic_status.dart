@@ -7,9 +7,14 @@ import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 import '../../domain/proxy/dynamic_proxy_engine.dart';
 
 class ProxyTrafficStatus extends StatefulWidget {
-  const ProxyTrafficStatus({required this.source, super.key});
+  const ProxyTrafficStatus({
+    required this.source,
+    this.active = true,
+    super.key,
+  });
 
   final DynamicProxyTrafficSource source;
+  final bool active;
 
   @override
   State<ProxyTrafficStatus> createState() => _ProxyTrafficStatusState();
@@ -22,6 +27,8 @@ class _ProxyTrafficStatusState extends State<ProxyTrafficStatus> {
   int _sampleTime = 0;
   double _sentRate = 0;
   double _receivedRate = 0;
+  bool _sampling = false;
+  int _generation = 0;
 
   @override
   void initState() {
@@ -29,31 +36,47 @@ class _ProxyTrafficStatusState extends State<ProxyTrafficStatus> {
     unawaited(_sample());
   }
 
+  @override
+  void didUpdateWidget(ProxyTrafficStatus oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.active != widget.active) {
+      _generation++;
+      _timer?.cancel();
+      if (widget.active) unawaited(_sample());
+    }
+  }
+
   Future<void> _sample() async {
-    ProxyTraffic? sample;
+    if (!widget.active || _sampling) return;
+    _sampling = true;
+    final generation = _generation;
     try {
-      sample = await widget.source.readTraffic().timeout(
+      final sample = await widget.source.readTraffic().timeout(
         const Duration(seconds: 3),
       );
-    } on Object {
-      // A failed statistics read must not affect the proxy.
-    }
-    if (!mounted) return;
-    final now = _clock.elapsedMilliseconds;
-    final previous = _last;
-    setState(() {
+      if (!mounted || generation != _generation || sample == null) return;
+      final now = _clock.elapsedMilliseconds;
+      final previous = _last;
       final elapsed = (now - _sampleTime) / 1000;
-      _sentRate = sample != null && previous != null && elapsed > 0
-          ? (sample.sent - previous.sent).clamp(0, sample.sent) / elapsed
-          : 0;
-      _receivedRate = sample != null && previous != null && elapsed > 0
-          ? (sample.received - previous.received).clamp(0, sample.received) /
-                elapsed
-          : 0;
-      _last = sample;
-      _sampleTime = now;
-    });
-    _timer = Timer(const Duration(seconds: 1), () => unawaited(_sample()));
+      setState(() {
+        _sentRate = previous != null && elapsed > 0
+            ? (sample.sent - previous.sent).clamp(0, sample.sent) / elapsed
+            : 0;
+        _receivedRate = previous != null && elapsed > 0
+            ? (sample.received - previous.received).clamp(0, sample.received) /
+                  elapsed
+            : 0;
+        _last = sample;
+        _sampleTime = now;
+      });
+    } on Object {
+      // Keep the last successful statistics and the rate baseline.
+    } finally {
+      _sampling = false;
+      if (mounted && widget.active) {
+        _timer = Timer(const Duration(seconds: 1), () => unawaited(_sample()));
+      }
+    }
   }
 
   @override
@@ -63,7 +86,7 @@ class _ProxyTrafficStatusState extends State<ProxyTrafficStatus> {
   }
 
   String _amount(num bytes) {
-    const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
     var unit = 0;
     var value = bytes.toDouble();
     while (value >= 1024 && unit < units.length - 1) {
@@ -80,7 +103,11 @@ class _ProxyTrafficStatusState extends State<ProxyTrafficStatus> {
     return Padding(
       padding: const EdgeInsets.only(top: 8),
       child: DefaultTextStyle.merge(
-        style: TextStyle(fontSize: 12, color: colors.mutedForeground),
+        style: TextStyle(
+          fontSize: 12,
+          color: colors.mutedForeground,
+          fontFeatures: const [FontFeature.tabularFigures()],
+        ),
         child: sample == null
             ? Text('等待流量采样…'.tr)
             : Wrap(

@@ -12,6 +12,7 @@ import 'package:get/get.dart';
 import 'package:pagashell/app.dart';
 import 'package:pagashell/application/ai/agent_controller.dart';
 import 'package:pagashell/application/ai/ai_settings_controller.dart';
+import 'package:pagashell/application/network/app_connect.dart';
 import 'package:pagashell/application/session/session.dart';
 import 'package:pagashell/application/session/session_controller.dart';
 import 'package:pagashell/application/settings/settings_controller.dart';
@@ -49,6 +50,55 @@ class _Binding extends InMemoryBinding {
 class _SshSession extends Fake implements SshEngineSession {
   @override
   Future<void> close() async {}
+}
+
+class _StreamAiConnect extends AppConnect {
+  final streamClient = _StreamAiHttp();
+
+  @override
+  GetHttpClient get httpClient => streamClient;
+}
+
+class _StreamAiHttp extends Fake implements GetHttpClient {
+  final responses = <StreamController<List<int>>>[];
+
+  @override
+  Future<Response<T>> post<T>(
+    String? url, {
+    dynamic body,
+    String? contentType,
+    Map<String, String>? headers,
+    Map<String, dynamic>? query,
+    Decoder<T>? decoder,
+    ResponseInterceptor<T>? responseInterceptor,
+    Progress? uploadProgress,
+  }) async {
+    final response = StreamController<List<int>>();
+    responses.add(response);
+    return Response<T>(
+      statusCode: 200,
+      headers: const {'content-type': 'text/event-stream'},
+      bodyBytes: response.stream,
+    );
+  }
+
+  @override
+  void close() {
+    for (final response in responses) {
+      unawaited(response.close());
+    }
+  }
+}
+
+void _streamText(StreamController<List<int>> response, String text) {
+  final delta = jsonEncode({
+    'choices': [
+      {
+        'delta': {'content': text},
+      },
+    ],
+  });
+  response.add(utf8.encode('data: $delta\n\n'));
 }
 
 Future<void> _capture(WidgetTester tester, GlobalKey key, String name) async {
@@ -100,7 +150,7 @@ void main() {
   Future<GlobalKey> pump(
     WidgetTester tester, {
     Size size = const Size(1280, 800),
-    FakeAiConnect? connect,
+    GetConnect? connect,
     TargetPlatform platform = TargetPlatform.macOS,
   }) async {
     tester.view.physicalSize = size;
@@ -158,7 +208,7 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  testWidgets('Agent 翻阅历史时发送或重试也不会跳到底部', (tester) async {
+  testWidgets('Agent 重试历史消息保留阅读位置，发送新消息恢复跟随', (tester) async {
     final connect = FakeAiConnect((_) => openAiReply('收到新回复'));
     await pump(tester, connect: connect);
     await Get.find<AiSettingsController>().saveApi(
@@ -200,6 +250,14 @@ void main() {
     final readingOffset = position.pixels;
     expect(readingOffset, lessThan(position.maxScrollExtent));
 
+    final retry = find.byKey(const ValueKey('agent-entry-retry')).hitTestable();
+    expect(retry, findsOneWidget);
+    await tester.tap(retry);
+    await tester.pumpAndSettle();
+    expect(connect.requests, hasLength(1));
+    expect(position.pixels, readingOffset);
+    expect(find.byKey(const ValueKey('agent-scroll-bottom')), findsOneWidget);
+
     await tester.enterText(
       find.byKey(const ValueKey('agent-input')),
       '翻阅历史时的新提问',
@@ -207,16 +265,130 @@ void main() {
     await tester.pump();
     await tester.tap(find.byKey(const ValueKey('agent-send')));
     await tester.pumpAndSettle();
-    expect(connect.requests, hasLength(1));
-    expect(position.pixels, readingOffset);
+    expect(connect.requests, hasLength(2));
+    expect(position.pixels, position.maxScrollExtent);
+    expect(find.byKey(const ValueKey('agent-scroll-bottom')), findsNothing);
+  });
 
-    final retry = find.byKey(const ValueKey('agent-entry-retry')).hitTestable();
+  testWidgets('Agent 流式增量保留选区和复制反馈，长回复中断仍可从底部重试', (tester) async {
+    final connect = _StreamAiConnect();
+    await pump(tester, connect: connect);
+    await Get.find<AiSettingsController>().saveApi(
+      format: AiApiFormat.openai,
+      baseUrl: 'https://api.test/v1',
+      defaultModel: 'test-model',
+      apiKey: 'test-key',
+    );
+    await tester.tap(find.byKey(const ValueKey('agent-toggle')));
+    await tester.pumpAndSettle();
+    String? copied;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'Clipboard.setData') {
+          copied = (call.arguments as Map)['text'] as String?;
+        }
+        return null;
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      ),
+    );
+
+    final agent = Get.find<AgentController>();
+    final earlier = AgentEntry(AgentEntryKind.assistant, '**Earlier reply**');
+    agent.entries.assignAll([
+      AgentEntry(AgentEntryKind.user, 'Earlier question'),
+      earlier,
+    ]);
+    final running = agent.send('Long reply question');
+    await tester.pump();
+    final stream = connect.streamClient.responses.single;
+    const opening = '**Partial reply**';
+    _streamText(stream, opening);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+    await tester.pump();
+
+    final reply = find.byKey(ObjectKey(agent.entries.last));
+    final earlierMarkdown = find.descendant(
+      of: find.byKey(ObjectKey(earlier)),
+      matching: find.byType(AgentMessageBody),
+    );
+    final savedWidget = tester.widget<AgentMessageBody>(earlierMarkdown);
+    final copyButton = find.descendant(
+      of: reply,
+      matching: findAppIconButton('复制回复'),
+    );
+    await tester.tap(copyButton);
+    await tester.pump();
+    expect(copied, opening);
+    final live = find.descendant(
+      of: reply,
+      matching: find.byType(EditableText),
+    );
+    final editable = tester.widget<EditableText>(live);
+    editable.focusNode.requestFocus();
+    await tester.pump();
+    const selection = TextSelection(baseOffset: 2, extentOffset: 9);
+    editable.controller.selection = selection;
+
+    _streamText(stream, '\n\nAnother paragraph');
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+    await tester.pump();
+    expect(tester.widget<AgentMessageBody>(earlierMarkdown), same(savedWidget));
+    expect(
+      tester.widget<EditableText>(live).controller,
+      same(editable.controller),
+    );
+    expect(editable.controller.selection, selection);
+    expect(editable.controller.text, contains('Another paragraph'));
+    expect(
+      find.descendant(of: copyButton, matching: findAppIcon(AppIcons.check)),
+      findsOneWidget,
+    );
+    editable.focusNode.unfocus();
+
+    _streamText(
+      stream,
+      List.generate(40, (i) => '\n\nParagraph $i continues.').join(),
+    );
+    stream.addError(const SocketException('The fixture disconnected'));
+    await tester.pump();
+    // Let the stream subscription complete cancellation outside the test clock.
+    await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+    await tester.pumpAndSettle();
+    await running;
+    unawaited(stream.close());
+    expect(find.byKey(ObjectKey(agent.entries[2])).hitTestable(), findsNothing);
+    expect(
+      find.byKey(const ValueKey('agent-reply-interrupted')),
+      findsOneWidget,
+    );
+    expect(find.text('Partial reply'), findsOneWidget);
+    final error = find.byKey(const ValueKey('agent-error'));
+    expect(tester.widget<Text>(error).data, 'AI 回复流意外中断，请重试');
+    final retry = find.byKey(const ValueKey('agent-error-retry')).hitTestable();
     expect(retry, findsOneWidget);
     await tester.tap(retry);
+    await tester.pump();
+    expect(connect.streamClient.responses, hasLength(2));
+
+    // Stop before the 45 ms preview timer, but after the SSE delta arrived.
+    final retried = connect.streamClient.responses.last;
+    _streamText(retried, 'Received just before stop');
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('agent-stop')));
     await tester.pumpAndSettle();
-    expect(connect.requests, hasLength(2));
-    expect(position.pixels, readingOffset);
-    expect(find.byKey(const ValueKey('agent-scroll-bottom')), findsOneWidget);
+    expect(agent.entries.last.text, 'Received just before stop');
+    expect(agent.entries.last.requestState.value, AgentRequestState.cancelled);
+    expect(find.text('Received just before stop'), findsOneWidget);
+    unawaited(retried.close());
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 
   testWidgets('模型配置支持 Responses、空地址、Key 前置、刷新选择和手动输入', (tester) async {
@@ -852,12 +1024,16 @@ ss -lntp
       expect(popover, findsNothing);
       await tester.enterText(input, '@Windows');
       await pumpModelOptions(tester);
+      expect(popover, findsNothing);
+      await tester.enterText(input, '');
+      await tester.enterText(input, '@Windows');
+      await pumpModelOptions(tester);
       expect(popover, findsOneWidget);
       expect(last.hitTestable(), findsOneWidget);
       // 关闭动画尚未结束时再打开，也不复用旧弹层的 GlobalKey。
       await tester.sendKeyEvent(LogicalKeyboardKey.escape);
       await tester.pump();
-      await tester.enterText(input, '@desktop.test');
+      await tester.enterText(input, '@Windows @desktop.test');
       await pumpModelOptions(tester);
       await tester.sendKeyEvent(LogicalKeyboardKey.enter);
       await pumpModelOptions(tester);
@@ -1962,10 +2138,14 @@ ss -lntp
         await tester.ensureVisible(edit);
         await tester.tap(edit);
         await tester.pumpAndSettle();
-        await tester.enterText(
-          find.byKey(const ValueKey('agent-command-input')),
-          edited,
+        final input = find.byKey(const ValueKey('agent-command-input'));
+        final editable = tester.widget<EditableText>(
+          find.descendant(of: input, matching: find.byType(EditableText)),
         );
+        expect(editable.smartDashesType, SmartDashesType.disabled);
+        expect(editable.smartQuotesType, SmartQuotesType.disabled);
+        expect(editable.style.fontFamily, 'FiraCode Nerd Font Mono');
+        await tester.enterText(input, edited);
         await tester.pumpAndSettle();
       }
       final send = find.byKey(const ValueKey('agent-command-send'));

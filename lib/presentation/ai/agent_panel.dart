@@ -33,6 +33,7 @@ class AgentPanel extends StatefulWidget {
 
 class AgentPanelState extends State<AgentPanel> {
   static const _maxMessageLength = 20000;
+  static const _bottomTolerance = 1.0;
   final _input = AgentInputController();
   final _focus = FocusNode();
   final _scroll = ScrollController();
@@ -64,7 +65,7 @@ class AgentPanelState extends State<AgentPanel> {
     if (!position.hasContentDimensions) return;
     // A wheel or trackpad can move only a few pixels per event. Even this
     // small move away from the bottom must cancel a pending follow.
-    final atBottom = position.extentAfter == 0;
+    final atBottom = position.extentAfter <= _bottomTolerance;
     if (atBottom != _stickToBottom) {
       setState(() => _stickToBottom = atBottom);
     }
@@ -146,6 +147,7 @@ class AgentPanelState extends State<AgentPanel> {
     }
     final targets = _input.sessions;
     final labels = _input.referenceLabels;
+    _scrollToBottom();
     _input.clear();
     _focus.requestFocus();
     unawaited(
@@ -295,6 +297,10 @@ class AgentPanelState extends State<AgentPanel> {
                   rows.add([entry]);
                 }
               }
+              final rowIndices = {
+                for (var i = 0; i < rows.length; i++)
+                  ObjectKey(rows[i].first): i,
+              };
               return Stack(
                 fit: StackFit.expand,
                 children: [
@@ -311,6 +317,7 @@ class AgentPanelState extends State<AgentPanel> {
                       controller: _scroll,
                       padding: const EdgeInsets.all(12),
                       itemCount: rows.length,
+                      findChildIndexCallback: (key) => rowIndices[key],
                       itemBuilder: (context, index) {
                         final row = rows[index];
                         return row.first.kind.isActivity
@@ -318,7 +325,10 @@ class AgentPanelState extends State<AgentPanel> {
                                 key: ObjectKey(row.first),
                                 entries: row,
                               )
-                            : _entry(row.single);
+                            : KeyedSubtree(
+                                key: ObjectKey(row.first),
+                                child: _entry(row.single),
+                              );
                       },
                     ),
                   ),
@@ -391,28 +401,7 @@ class AgentPanelState extends State<AgentPanel> {
                   )
                 : const SizedBox.shrink(),
           ),
-          Obx(() {
-            final err = _agent.error.value;
-            if (err == null) return const SizedBox.shrink();
-            AgentEntry? lastUser;
-            for (var i = _agent.entries.length - 1; i >= 0; i--) {
-              if (_agent.entries[i].kind == AgentEntryKind.user) {
-                lastUser = _agent.entries[i];
-                break;
-              }
-            }
-            if (lastUser?.requestError.value == err) {
-              return const SizedBox.shrink();
-            }
-            return Padding(
-              padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-              child: Text(
-                err.tr,
-                key: const ValueKey('agent-error'),
-                style: TextStyle(fontSize: 12, color: colors.destructive),
-              ),
-            );
-          }),
+          _AgentRequestNotice(agent: _agent),
           Container(
             decoration: BoxDecoration(
               border: Border(top: BorderSide(color: AppTheme.border(context))),
@@ -837,120 +826,222 @@ class AgentPanelState extends State<AgentPanel> {
         ),
       );
     }
-    final user = entry.kind == AgentEntryKind.user;
+    if (entry.kind != AgentEntryKind.user) {
+      return _AgentReply(entry: entry, onInsertToTerminal: _insertToTerminal);
+    }
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
-      padding: EdgeInsets.all(user ? 10 : 0),
-      decoration: user
-          ? BoxDecoration(
-              color: AppTheme.surface(context),
-              borderRadius: BorderRadius.circular(8),
-            )
-          : null,
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: AppTheme.surface(context),
+        borderRadius: BorderRadius.circular(8),
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Row(
             children: [
               Text(
-                user ? '你'.tr : 'Agent',
+                '你'.tr,
                 style: const TextStyle(
                   fontSize: 11,
                   fontWeight: FontWeight.w600,
                 ),
               ),
-              if (!user && entry.text.trim().isNotEmpty) ...[
-                const Spacer(),
-                AppCopyButton(
-                  text: entry.text,
-                  size: 12,
-                  semanticLabel: '复制回复'.tr,
-                ),
-              ],
-              if (user) ...[
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Obx(() {
-                    final state = entry.requestState.value;
-                    final label = switch (state) {
-                      AgentRequestState.queued => '排队中',
-                      AgentRequestState.running => '处理中…',
-                      AgentRequestState.failed => '请求失败',
-                      AgentRequestState.cancelled => '已取消',
-                      _ => '',
-                    };
-                    final canRetry =
-                        (state == AgentRequestState.failed ||
-                            state == AgentRequestState.cancelled) &&
-                        _agent.currentModel != null;
-                    return Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            label.tr,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontSize: 11,
-                              color: state == AgentRequestState.failed
-                                  ? shadcn.Theme.of(context)
-                                        .colorScheme
-                                        .destructive
-                                  : shadcn.Theme.of(context)
-                                        .colorScheme
-                                        .mutedForeground,
-                            ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Obx(() {
+                  final state = entry.requestState.value;
+                  final label = switch (state) {
+                    AgentRequestState.queued => '排队中',
+                    AgentRequestState.running => '处理中…',
+                    AgentRequestState.failed => '请求失败',
+                    AgentRequestState.cancelled => '已取消',
+                    _ => '',
+                  };
+                  final canRetry =
+                      (state == AgentRequestState.failed ||
+                          state == AgentRequestState.cancelled) &&
+                      _agent.currentModel != null;
+                  return Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          label.tr,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: state == AgentRequestState.failed
+                                ? shadcn.Theme.of(context)
+                                      .colorScheme
+                                      .destructive
+                                : shadcn.Theme.of(context)
+                                      .colorScheme
+                                      .mutedForeground,
                           ),
                         ),
-                        if (canRetry)
-                          shadcn.GhostButton(
-                            key: const ValueKey('agent-entry-retry'),
-                            size: shadcn.ButtonSize.small,
-                            density: shadcn.ButtonDensity.compact,
-                            onPressed: () => unawaited(_agent.send(entry.text)),
-                            child: Text(
-                              '重试'.tr,
-                              style: const TextStyle(fontSize: 11),
-                            ),
+                      ),
+                      if (canRetry)
+                        shadcn.GhostButton(
+                          key: const ValueKey('agent-entry-retry'),
+                          size: shadcn.ButtonSize.small,
+                          density: shadcn.ButtonDensity.compact,
+                          onPressed: () => unawaited(_agent.retry(entry)),
+                          child: Text(
+                            '重试'.tr,
+                            style: const TextStyle(fontSize: 11),
                           ),
-                      ],
-                    );
-                  }),
+                        ),
+                    ],
+                  );
+                }),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          shadcn.SelectableText(
+            entry.text,
+            style: const TextStyle(fontSize: 13, height: 1.6),
+          ),
+          Obx(
+            () => entry.requestError.value == null
+                ? const SizedBox.shrink()
+                : Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Text(
+                      entry.requestError.value!.tr,
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: shadcn.Theme.of(context).colorScheme.destructive,
+                      ),
+                    ),
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AgentRequestNotice extends StatelessWidget {
+  const _AgentRequestNotice({required this.agent});
+
+  final AgentController agent;
+
+  @override
+  Widget build(BuildContext context) => Obx(() {
+    // Keep a failure in sight while the next queued message starts. Each
+    // original user message also keeps its own status in the transcript.
+    AgentEntry? failed;
+    for (var i = agent.entries.length - 1; i >= 0; i--) {
+      final entry = agent.entries[i];
+      if (entry.kind != AgentEntryKind.user) continue;
+      final state = entry.requestState.value;
+      if (state == AgentRequestState.failed) failed = entry;
+      if (state == AgentRequestState.completed ||
+          state == AgentRequestState.failed ||
+          state == AgentRequestState.cancelled) {
+        break;
+      }
+    }
+    final failure = failed;
+    final requestError = failure?.requestError.value;
+    final error = agent.error.value ?? requestError;
+    if (error == null) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              error.tr,
+              key: const ValueKey('agent-error'),
+              style: TextStyle(
+                fontSize: 12,
+                color: shadcn.Theme.of(context).colorScheme.destructive,
+              ),
+            ),
+          ),
+          if (failure != null &&
+              requestError == error &&
+              agent.currentModel != null)
+            shadcn.GhostButton(
+              key: const ValueKey('agent-error-retry'),
+              size: shadcn.ButtonSize.small,
+              density: shadcn.ButtonDensity.compact,
+              onPressed: agent.busy.value
+                  ? null
+                  : () => unawaited(agent.retry(failure)),
+              child: Text('重试'.tr),
+            ),
+        ],
+      ),
+    );
+  });
+}
+
+class _AgentReply extends StatelessWidget {
+  const _AgentReply({required this.entry, required this.onInsertToTerminal});
+
+  final AgentEntry entry;
+  final ValueChanged<String> onInsertToTerminal;
+
+  @override
+  Widget build(BuildContext context) => Obx(() {
+    final text = entry.text;
+    final state = entry.requestState.value;
+    final colors = shadcn.Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              const Text(
+                'Agent',
+                style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
+              ),
+              if (state == AgentRequestState.failed ||
+                  state == AgentRequestState.cancelled) ...[
+                const SizedBox(width: 8),
+                Flexible(
+                  child: Text(
+                    '已中断'.tr,
+                    key: const ValueKey('agent-reply-interrupted'),
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: colors.mutedForeground,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+              if (text.trim().isNotEmpty) ...[
+                const Spacer(),
+                AppCopyButton(
+                  text: text,
+                  size: 12,
+                  semanticLabel: '复制回复'.tr,
+                  resetOnTextChange: false,
                 ),
               ],
             ],
           ),
           const SizedBox(height: 4),
-          user
-              ? shadcn.SelectableText(
-                  entry.text,
-                  style: const TextStyle(fontSize: 13, height: 1.6),
-                )
-              : AgentMessageBody(
-                  entry.text,
-                  onInsertToTerminal: _insertToTerminal,
-                ),
-          if (user)
-            Obx(
-              () => entry.requestError.value == null
-                  ? const SizedBox.shrink()
-                  : Padding(
-                      padding: const EdgeInsets.only(top: 6),
-                      child: Text(
-                        entry.requestError.value!.tr,
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: shadcn.Theme.of(context)
-                              .colorScheme
-                              .destructive,
-                        ),
-                      ),
-                    ),
-            ),
+          AgentStreamingText(
+            key: const ValueKey('agent-reply-body'),
+            text: text,
+            streaming: state == AgentRequestState.running,
+            style: const TextStyle(fontSize: 13, height: 1.65),
+            buildFinal: (text) =>
+                AgentMessageBody(text, onInsertToTerminal: onInsertToTerminal),
+          ),
         ],
       ),
     );
-  }
+  });
 }
 
 void _showTerminalInsertResult(
@@ -1012,52 +1103,7 @@ class _AgentActivityTimelineState extends State<_AgentActivityTimeline> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   for (final entry in widget.entries)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 4),
-                      child: entry.kind == AgentEntryKind.reasoning
-                          ? shadcn.SelectableText(
-                              entry.text,
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: colors.mutedForeground,
-                              ),
-                            )
-                          : Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  entry.text.tr,
-                                  style: const TextStyle(
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                                if (entry.toolSummary case final summary?) ...[
-                                  if (summary.target case final target?)
-                                    Text(
-                                      '目标：@host'.trParams({'host': target}),
-                                      style: TextStyle(
-                                        fontSize: 11,
-                                        color: colors.mutedForeground,
-                                      ),
-                                    ),
-                                  Text(
-                                    summary.elapsedMs == null
-                                        ? '等待工具结果'.tr
-                                        : '耗时 @ms ms · 输出 @count 字符'.trParams({
-                                            'ms': '${summary.elapsedMs}',
-                                            'count':
-                                                '${summary.outputLength ?? 0}',
-                                          }),
-                                    style: TextStyle(
-                                      fontSize: 11,
-                                      color: colors.mutedForeground,
-                                    ),
-                                  ),
-                                ],
-                              ],
-                            ),
-                    ),
+                    _AgentActivityItem(key: ObjectKey(entry), entry: entry),
                 ],
               ),
             ),
@@ -1065,6 +1111,62 @@ class _AgentActivityTimelineState extends State<_AgentActivityTimeline> {
       ),
     );
   }
+}
+
+class _AgentActivityItem extends StatelessWidget {
+  const _AgentActivityItem({required this.entry, super.key});
+
+  final AgentEntry entry;
+
+  @override
+  Widget build(BuildContext context) => Obx(() {
+    final color = shadcn.Theme.of(context).colorScheme.mutedForeground;
+    final text = entry.text;
+    final summary = entry.toolSummary;
+    final reasoningStyle = TextStyle(fontSize: 12, color: color);
+    final detailStyle = TextStyle(fontSize: 11, color: color);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: entry.kind == AgentEntryKind.reasoning
+          ? AgentStreamingText(
+              text: text,
+              streaming: entry.requestState.value == AgentRequestState.running,
+              style: reasoningStyle,
+              buildFinal: (text) =>
+                  shadcn.SelectableText(text, style: reasoningStyle),
+            )
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  text.tr,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                if (summary != null) ...[
+                  if (summary.target case final target?)
+                    Text(
+                      '目标：@host'.trParams({'host': target}),
+                      style: detailStyle,
+                    ),
+                  Text(
+                    summary.cancelled
+                        ? '工具调用已取消'.tr
+                        : summary.elapsedMs == null
+                        ? '等待工具结果'.tr
+                        : '耗时 @ms ms · 输出 @count 字符'.trParams({
+                            'ms': '${summary.elapsedMs}',
+                            'count': '${summary.outputLength ?? 0}',
+                          }),
+                    style: detailStyle,
+                  ),
+                ],
+              ],
+            ),
+    );
+  });
 }
 
 class _CommandCard extends StatefulWidget {
@@ -1267,7 +1369,19 @@ class _CommandCardState extends State<_CommandCard> {
                 autofocus: true,
                 minLines: 1,
                 maxLines: 5,
-                style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+                smartDashesType: SmartDashesType.disabled,
+                smartQuotesType: SmartQuotesType.disabled,
+                autocorrect: false,
+                style: const TextStyle(
+                  fontFamily: 'FiraCode Nerd Font Mono',
+                  fontFamilyFallback: [
+                    'Menlo',
+                    'PingFang SC',
+                    'Microsoft YaHei',
+                    'monospace',
+                  ],
+                  fontSize: 12,
+                ),
                 onChanged: (_) => setState(() {}),
               ),
             )

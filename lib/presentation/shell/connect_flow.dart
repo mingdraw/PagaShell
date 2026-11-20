@@ -20,6 +20,7 @@ import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
 import '../components/app_select_field.dart';
 import '../components/app_text_form_field.dart';
+import '../localization/app_translations.dart';
 import '../navigation/app_navigation.dart';
 import '../navigation/app_notice.dart';
 import '../ssh/private_key_fields.dart';
@@ -40,17 +41,83 @@ Future<void> connectToHost(
   SessionKind kind = SessionKind.terminal,
   String? forwardSessionId,
   ({String sessionId, SessionSplitEdge edge})? splitTarget,
-}) async {
+}) => _runConnectionFlow(
+  context,
+  () => _connectToHost(
+    context,
+    host,
+    forceNew: forceNew,
+    temporary: temporary,
+    kind: kind,
+    forwardSessionId: forwardSessionId,
+    splitTarget: splitTarget,
+  ),
+);
+
+HostController? savedHostControllerForSession(Session session) {
+  if (session.kind == SessionKind.containerTerminal ||
+      Get.find<SessionController>().isTemporarySession(session.id)) {
+    return null;
+  }
+  if (session.kind.usesGatewayEndpoint) {
+    return Get.isRegistered<GatewayController>()
+        ? Get.find<GatewayController>()
+        : null;
+  }
+  return Get.isRegistered<HostController>() ? Get.find<HostController>() : null;
+}
+
+Future<void> duplicateSessionConnection(
+  BuildContext context,
+  Session session,
+) => _runConnectionFlow(context, () async {
+  final controller = Get.find<SessionController>();
+  if (await controller.duplicateSession(session.id) != null ||
+      !context.mounted) {
+    return;
+  }
+  final hosts = savedHostControllerForSession(session);
+  final host = await hosts?.findSaved(session.host.id);
+  if (!context.mounted) return;
+  await connectToHost(
+    context,
+    host ?? session.host,
+    forceNew: true,
+    temporary: host == null,
+  );
+});
+
+Future<void> retryFailedSession(BuildContext context, Session session) =>
+    _runConnectionFlow(context, () async {
+      final controller = Get.find<SessionController>();
+      bool isCurrent() => controller.sessions.any((s) => identical(s, session));
+      if (!isCurrent() || !controller.canRetry(session.id)) return;
+      final hosts = savedHostControllerForSession(session);
+      final host = await hosts?.findSaved(session.host.id);
+      if (!context.mounted || !isCurrent()) return;
+      if (host == null) {
+        await controller.retry(session.id);
+        return;
+      }
+      if (session.kind == SessionKind.fileTransfer && host.isDesktop) {
+        throw const SshEngineException('远程桌面服务不支持 SSH 文件传输或端口转发');
+      }
+      final login = await _prepareHostConnection(context, host, hosts);
+      if (login == null || !context.mounted || !isCurrent()) return;
+      await controller.retryWithLogin(
+        session.id,
+        login.host,
+        login.credentials,
+        gateway: login.gateway,
+      );
+    });
+
+Future<void> _runConnectionFlow(
+  BuildContext context,
+  Future<void> Function() action,
+) async {
   try {
-    await _connectToHost(
-      context,
-      host,
-      forceNew: forceNew,
-      temporary: temporary,
-      kind: kind,
-      forwardSessionId: forwardSessionId,
-      splitTarget: splitTarget,
-    );
+    await action();
   } on SecretStoreException catch (e) {
     if (context.mounted) {
       AppNotice.error(e.message);
@@ -87,8 +154,20 @@ Future<void> _connectToHost(
           !sessionController.canSplitToHost(splitTarget.sessionId, host))) {
     return;
   }
+  if (splitTarget != null &&
+      sessionController.sessions.any(
+        (session) =>
+            session.id == splitTarget.sessionId && session.host.id == host.id,
+      )) {
+    await sessionController.splitTerminal(
+      splitTarget.sessionId,
+      splitTarget.edge.axis,
+      before: splitTarget.edge.before,
+    );
+    return;
+  }
 
-  if (kind == SessionKind.portForward || kind == SessionKind.dynamicProxy) {
+  if (kind.usesGatewayEndpoint) {
     final session = sessionController.sessions.firstWhereOrNull(
       (s) => s.id == forwardSessionId && s.host.id == host.id && s.kind == kind,
     );
@@ -115,29 +194,15 @@ Future<void> _connectToHost(
       sessionController.focusExisting(host.id, kind: kind)) {
     return;
   }
-  final login = await _prepareLogin(
+  final login = await _prepareHostConnection(
     context,
     host,
     temporary ? null : Get.find<HostController>(),
   );
   if (login == null || !context.mounted) return;
-  SshGateway? gateway;
-  final gatewayId = login.$1.gatewayId;
-  if (gatewayId != null) {
-    if (!Get.isRegistered<GatewayController>()) {
-      throw const SshEngineException('所选网关不可用，请检查服务的网关配置');
-    }
-    final controller = Get.find<GatewayController>();
-    final endpoint = controller.hosts.firstWhereOrNull(
-      (h) => h.id == gatewayId,
-    );
-    if (endpoint == null) throw const SshEngineException('所选网关已不存在');
-    gateway = await _prepareGateway(context, endpoint, controller);
-    if (gateway == null || !context.mounted) return;
-  }
   // 准备凭据及网关期间可能已有同类标签打开，创建前再检查一次。
   if (splitTarget != null) {
-    if (!sessionController.canSplitToHost(splitTarget.sessionId, login.$1)) {
+    if (!sessionController.canSplitToHost(splitTarget.sessionId, login.host)) {
       return;
     }
   } else if (!forceNew &&
@@ -154,20 +219,44 @@ Future<void> _connectToHost(
   if (splitTarget != null) {
     await sessionController.splitToHost(
       splitTarget.sessionId,
-      login.$1,
-      login.$2,
+      login.host,
+      login.credentials,
       edge: splitTarget.edge,
-      gateway: gateway,
+      gateway: login.gateway,
+      temporary: temporary,
     );
     return;
   }
   await sessionController.open(
-    login.$1,
-    login.$2,
+    login.host,
+    login.credentials,
     kind: kind,
-    gateway: gateway,
+    gateway: login.gateway,
     temporary: temporary,
   );
+}
+
+Future<({Host host, SshCredentials credentials, SshGateway? gateway})?>
+_prepareHostConnection(
+  BuildContext context,
+  Host host,
+  HostController? hostController,
+) async {
+  final login = await _prepareLogin(context, host, hostController);
+  if (login == null || !context.mounted) return null;
+  SshGateway? gateway;
+  if (login.$1.gatewayId case final gatewayId?) {
+    if (!Get.isRegistered<GatewayController>()) {
+      throw const SshEngineException('所选网关不可用，请检查服务的网关配置');
+    }
+    final controller = Get.find<GatewayController>();
+    final endpoint = await controller.findSaved(gatewayId);
+    if (!context.mounted) return null;
+    if (endpoint == null) throw const SshEngineException('所选网关已不存在');
+    gateway = await _prepareGateway(context, endpoint, controller);
+    if (gateway == null) return null;
+  }
+  return (host: login.$1, credentials: login.$2, gateway: gateway);
 }
 
 Future<SshGateway?> _prepareGateway(
@@ -213,11 +302,26 @@ Future<(Host, SshCredentials)?> _prepareLogin(
   }
 
   if (!context.mounted) return null;
-  final choice = await AppNavigation.dialog<_ConnectChoice>(
-    _ConnectDialog(host: host, canRemember: hostController != null),
+  return AppNavigation.dialog<(Host, SshCredentials)>(
+    _ConnectDialog(
+      host: host,
+      canRemember: hostController != null,
+      resolve: (choice) => _resolveConnectChoice(
+        host,
+        hostController,
+        identityController,
+        choice,
+      ),
+    ),
   );
-  if (choice == null) return null;
+}
 
+Future<(Host, SshCredentials)> _resolveConnectChoice(
+  Host host,
+  HostController? hostController,
+  IdentityController identityController,
+  _ConnectChoice choice,
+) async {
   if (choice.identity != null) {
     final identity = choice.identity!;
     final credentials = await identityController.credentialsOf(identity);
@@ -272,10 +376,15 @@ class _ConnectChoice {
 }
 
 class _ConnectDialog extends StatefulWidget {
-  const _ConnectDialog({required this.host, required this.canRemember});
+  const _ConnectDialog({
+    required this.host,
+    required this.canRemember,
+    required this.resolve,
+  });
 
   final Host host;
   final bool canRemember;
+  final Future<(Host, SshCredentials)> Function(_ConnectChoice) resolve;
 
   @override
   State<_ConnectDialog> createState() => _ConnectDialogState();
@@ -292,6 +401,9 @@ class _ConnectDialogState extends State<_ConnectDialog> {
   Identity? _selectedIdentity;
   bool _obscure = true;
   bool _save = false;
+  bool _submitting = false;
+  String? _error;
+  String? _duplicateName;
   AuthType _authType = AuthType.password;
 
   @override
@@ -313,25 +425,55 @@ class _ConnectDialogState extends State<_ConnectDialog> {
     super.dispose();
   }
 
-  void _submit() {
-    final identity = _selectedIdentity;
-    if (identity != null) {
-      AppNavigation.closeDialog(result: _ConnectChoice.identity(identity));
-      return;
+  String? _validateIdentityName(String? value) {
+    final name = value?.trim() ?? '';
+    if (name.isEmpty) return '必填'.tr;
+    if (_duplicateName == name ||
+        Get.find<IdentityController>().isNameTaken(name)) {
+      return '同级下已存在同名凭证'.tr;
     }
-    if (!_formKey.currentState!.validate()) return;
-    AppNavigation.closeDialog(
-      result: _ConnectChoice.manual(
-        credentials: _authType == AuthType.privateKey
-            ? SshCredentials.privateKey(
-                _privateKey.text.trim(),
-                passphrase: _passphrase.text,
-              )
-            : SshCredentials.password(_password.text),
-        saveAsIdentity: _save && _identityName.text.trim().isNotEmpty,
-        identityName: _identityName.text.trim(),
-      ),
-    );
+    return null;
+  }
+
+  Future<void> _submit() async {
+    if (_submitting) return;
+    final identity = _selectedIdentity;
+    if (identity == null && !_formKey.currentState!.validate()) return;
+    final choice = identity == null
+        ? _ConnectChoice.manual(
+            credentials: _authType == AuthType.privateKey
+                ? SshCredentials.privateKey(
+                    _privateKey.text.trim(),
+                    passphrase: _passphrase.text,
+                  )
+                : SshCredentials.password(_password.text),
+            saveAsIdentity: _save,
+            identityName: _identityName.text.trim(),
+          )
+        : _ConnectChoice.identity(identity);
+    setState(() {
+      _submitting = true;
+      _error = null;
+    });
+    try {
+      final result = await widget.resolve(choice);
+      if (mounted) AppNavigation.closeDialog(result: result);
+    } on ArgumentError catch (error) {
+      if (mounted && choice.saveAsIdentity && error.message == '同级下已存在同名凭证') {
+        _duplicateName = choice.identityName;
+        _formKey.currentState?.validate();
+      } else if (mounted) {
+        setState(() => _error = '无法准备连接，请重试');
+      }
+    } on SecretStoreException catch (error) {
+      if (mounted) setState(() => _error = error.message);
+    } on SshEngineException catch (error) {
+      if (mounted) setState(() => _error = error.message);
+    } on Object {
+      if (mounted) setState(() => _error = '无法准备连接，请重试');
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
   }
 
   @override
@@ -345,160 +487,190 @@ class _ConnectDialogState extends State<_ConnectDialog> {
         )
         .toList();
 
-    return AppDialog(
-      scrollable: true,
-      title: Text('连接到 @name'.trParams({'name': widget.host.name})),
-      content: SizedBox(
-        width: 420,
-        child: Form(
-          key: _formKey,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                widget.host.address,
-                style: TextStyle(fontSize: 12, color: colors.mutedForeground),
+    return PopScope(
+      canPop: !_submitting,
+      child: AppDialog(
+        scrollable: true,
+        title: Text('连接到 @name'.trParams({'name': widget.host.name})),
+        feedback: _error == null
+            ? null
+            : Text(
+                AppTranslations.error(_error!),
+                style: TextStyle(color: colors.destructive),
               ),
-              const SizedBox(height: 16),
-              if (identities.isNotEmpty) ...[
-                AppSelectField<String>(
-                  initialValue: _selectedIdentity?.id ?? '',
-                  label: '凭证'.tr,
-                  items: [
-                    AppSelectOption(
-                      value: '',
-                      child: Text(
-                        (widget.host.isDesktop ? '即时提供密码' : '即时提供密码或私钥').tr,
-                      ),
-                    ),
-                    for (final identity in identities)
-                      AppSelectOption(
-                        value: identity.id,
-                        child: Text(
-                          widget.host.isVnc
-                              ? identity.name
-                              : '@name（@username · @auth）'.trParams({
-                                  'name': identity.name,
-                                  'username': identity.username,
-                                  'auth':
-                                      (identity.authType == AuthType.privateKey
-                                              ? '私钥'
-                                              : '密码')
-                                          .tr,
-                                }),
-                        ),
-                      ),
-                  ],
-                  onChanged: (id) => setState(() {
-                    _selectedIdentity = identities.firstWhereOrNull(
-                      (identity) => identity.id == id,
-                    );
-                  }),
-                ),
-                const SizedBox(height: 12),
-              ],
-              if (_selectedIdentity == null) ...[
-                AppSelectField<AuthType>(
-                  initialValue: _authType,
-                  label: '认证方式'.tr,
-                  items: [
-                    AppSelectOption(
-                      value: AuthType.password,
-                      child: Text('密码'.tr),
-                    ),
-                    if (!widget.host.isDesktop)
-                      AppSelectOption(
-                        value: AuthType.privateKey,
-                        child: Text('私钥'.tr),
-                      ),
-                  ],
-                  onChanged: (type) {
-                    if (type != null) setState(() => _authType = type);
-                  },
-                ),
-                const SizedBox(height: 12),
-                if (_authType == AuthType.privateKey)
-                  PrivateKeyFields(
-                    privateKey: _privateKey,
-                    passphrase: _passphrase,
-                  )
-                else
-                  AppTextFormField(
-                    controller: _password,
-                    autofocus: true,
-                    obscureText: _obscure,
-                    validator: (value) =>
-                        !widget.host.isVnc && (value == null || value.isEmpty)
-                        ? '请输入密码'.tr
-                        : null,
-                    onFieldSubmitted: (_) => _submit(),
-                    decoration: AppInputDecoration(
-                      labelText: '密码'.tr,
-                      suffixIcon: AppIconButton(
-                        density: shadcn.ButtonDensity.compact,
-                        icon: AppIcon(
-                          _obscure ? AppIcons.eyeOff : AppIcons.eye,
-                          size: AppTheme.inputIconSize,
-                        ),
-                        onPressed: () => setState(() => _obscure = !_obscure),
-                      ),
-                    ),
-                  ),
-                if (widget.canRemember) ...[
-                  const SizedBox(height: 4),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    child: shadcn.Checkbox(
-                      state: _save
-                          ? shadcn.CheckboxState.checked
-                          : shadcn.CheckboxState.unchecked,
-                      onChanged: (state) => setState(
-                        () => _save = state == shadcn.CheckboxState.checked,
-                      ),
-                      trailing: Text(
-                        '保存为凭证，供其他服务复用'.tr,
-                        style: TextStyle(fontSize: 13),
-                      ),
-                    ),
-                  ),
-                ],
-                if (_save) ...[
-                  AppTextFormField(
-                    controller: _identityName,
-                    decoration: AppInputDecoration(labelText: '凭证名称'.tr),
-                  ),
-                  const SizedBox(height: 8),
+        content: AbsorbPointer(
+          absorbing: _submitting,
+          child: SizedBox(
+            width: 420,
+            child: Form(
+              key: _formKey,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
                   Text(
-                    '密码或私钥及口令加密保存在本机，服务和凭证信息仅保存在本机'.tr,
+                    widget.host.address,
                     style: TextStyle(
-                      fontSize: 11,
+                      fontSize: 12,
                       color: colors.mutedForeground,
                     ),
                   ),
+                  const SizedBox(height: 16),
+                  if (identities.isNotEmpty) ...[
+                    AppSelectField<String>(
+                      initialValue: _selectedIdentity?.id ?? '',
+                      label: '凭证'.tr,
+                      items: [
+                        AppSelectOption(
+                          value: '',
+                          child: Text(
+                            (widget.host.isDesktop ? '即时提供密码' : '即时提供密码或私钥').tr,
+                          ),
+                        ),
+                        for (final identity in identities)
+                          AppSelectOption(
+                            value: identity.id,
+                            child: Text(
+                              widget.host.isVnc
+                                  ? identity.name
+                                  : '@name（@username · @auth）'.trParams({
+                                      'name': identity.name,
+                                      'username': identity.username,
+                                      'auth':
+                                          (identity.authType ==
+                                                      AuthType.privateKey
+                                                  ? '私钥'
+                                                  : '密码')
+                                              .tr,
+                                    }),
+                            ),
+                          ),
+                      ],
+                      onChanged: (id) => setState(() {
+                        _selectedIdentity = identities.firstWhereOrNull(
+                          (identity) => identity.id == id,
+                        );
+                      }),
+                    ),
+                    const SizedBox(height: 12),
+                  ],
+                  if (_selectedIdentity == null) ...[
+                    if (!widget.host.isDesktop) ...[
+                      AppSelectField<AuthType>(
+                        initialValue: _authType,
+                        label: '认证方式'.tr,
+                        items: [
+                          AppSelectOption(
+                            value: AuthType.password,
+                            child: Text('密码'.tr),
+                          ),
+                          AppSelectOption(
+                            value: AuthType.privateKey,
+                            child: Text('私钥'.tr),
+                          ),
+                        ],
+                        onChanged: (type) {
+                          if (type != null) setState(() => _authType = type);
+                        },
+                      ),
+                      const SizedBox(height: 12),
+                    ],
+                    if (_authType == AuthType.privateKey)
+                      PrivateKeyFields(
+                        privateKey: _privateKey,
+                        passphrase: _passphrase,
+                      )
+                    else
+                      AppTextFormField(
+                        controller: _password,
+                        autofocus: true,
+                        obscureText: _obscure,
+                        validator: (value) =>
+                            !widget.host.isVnc &&
+                                (value == null || value.isEmpty)
+                            ? '请输入密码'.tr
+                            : null,
+                        onFieldSubmitted: (_) => _submit(),
+                        decoration: AppInputDecoration(
+                          labelText: '密码'.tr,
+                          suffixIcon: AppIconButton(
+                            density: shadcn.ButtonDensity.compact,
+                            icon: AppIcon(
+                              _obscure ? AppIcons.eyeOff : AppIcons.eye,
+                              size: AppTheme.inputIconSize,
+                            ),
+                            onPressed: () =>
+                                setState(() => _obscure = !_obscure),
+                          ),
+                        ),
+                      ),
+                    if (widget.canRemember) ...[
+                      const SizedBox(height: 4),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        child: shadcn.Checkbox(
+                          state: _save
+                              ? shadcn.CheckboxState.checked
+                              : shadcn.CheckboxState.unchecked,
+                          onChanged: (state) => setState(
+                            () => _save = state == shadcn.CheckboxState.checked,
+                          ),
+                          trailing: Text(
+                            '保存为凭证，供其他服务复用'.tr,
+                            style: TextStyle(fontSize: 13),
+                          ),
+                        ),
+                      ),
+                    ],
+                    if (_save) ...[
+                      AppTextFormField(
+                        controller: _identityName,
+                        key: const ValueKey('connect-identity-name'),
+                        decoration: AppInputDecoration(labelText: '凭证名称'.tr),
+                        validator: _validateIdentityName,
+                        onFieldSubmitted: (_) => _submit(),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        '密码或私钥及口令加密保存在本机，服务和凭证信息仅保存在本机'.tr,
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: colors.mutedForeground,
+                        ),
+                      ),
+                    ],
+                  ] else
+                    Text(
+                      !widget.canRemember
+                          ? '将使用所选凭证连接'.tr
+                          : widget.host.isVnc
+                          ? '将使用所选凭证连接，并记住此绑定'.tr
+                          : '将以 @username 连接，并记住此绑定'.trParams({
+                              'username': _selectedIdentity!.username,
+                            }),
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: colors.mutedForeground,
+                      ),
+                    ),
                 ],
-              ] else
-                Text(
-                  !widget.canRemember
-                      ? '将使用所选凭证连接'.tr
-                      : widget.host.isVnc
-                      ? '将使用所选凭证连接，并记住此绑定'.tr
-                      : '将以 @username 连接，并记住此绑定'.trParams({
-                          'username': _selectedIdentity!.username,
-                        }),
-                  style: TextStyle(fontSize: 12, color: colors.mutedForeground),
-                ),
-            ],
+              ),
+            ),
           ),
         ),
+        actions: [
+          shadcn.OutlineButton(
+            onPressed: _submitting
+                ? null
+                : () => AppNavigation.closeDialog<void>(),
+            child: Text('取消'.tr),
+          ),
+          shadcn.PrimaryButton(
+            onPressed: _submitting ? null : _submit,
+            child: Text((_submitting ? '正在处理…' : '连接').tr),
+          ),
+        ],
       ),
-      actions: [
-        shadcn.OutlineButton(
-          onPressed: () => AppNavigation.closeDialog<void>(),
-          child: Text('取消'.tr),
-        ),
-        shadcn.PrimaryButton(onPressed: _submit, child: Text('连接'.tr)),
-      ],
     );
   }
 }

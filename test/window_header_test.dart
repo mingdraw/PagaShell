@@ -568,83 +568,92 @@ void main() {
     });
   }
 
-  for (final hasSessions in [false, true]) {
-    testWidgets('macOS ${hasSessions ? '有' : '无'}标签时双击中间空白与顶部留白可放大还原', (
-      tester,
-    ) async {
-      final appWindow = FakeAppWindow();
-      final nativeCalls = <String>[];
-      const nativeChannel = MethodChannel('pagashell/window');
-      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-        nativeChannel,
-        (call) async {
-          nativeCalls.add(call.method);
-          return null;
-        },
-      );
-      addTearDown(() {
+  for (final (platform, hasSessions) in [
+    (TargetPlatform.macOS, false),
+    (TargetPlatform.macOS, true),
+    (TargetPlatform.windows, true),
+    (TargetPlatform.linux, true),
+  ]) {
+    testWidgets(
+      '${platform.name} ${hasSessions ? '有' : '无'}标签时双击中间空白与顶部留白可放大还原',
+      (tester) async {
+        final appWindow = FakeAppWindow();
+        final nativeCalls = <String>[];
+        const nativeChannel = MethodChannel('pagashell/window');
         tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
           nativeChannel,
-          null,
+          (call) async {
+            nativeCalls.add(call.method);
+            return null;
+          },
         );
-      });
-      await pumpApp(tester, TargetPlatform.macOS, appWindow: appWindow);
-      final controller = Get.find<SessionController>();
-      if (hasSessions) {
-        controller.sessions.assignAll([
-          for (final name in ['Alpha', 'Beta'])
-            Session(
-              id: name,
-              host: Host(id: name, name: name, hostname: 'fixture.invalid'),
-              phase: SessionPhase.failed,
-              error: 'fixture',
-            ),
-        ]);
-        controller.activate('Beta');
-        await tester.pumpAndSettle();
-      }
-      appWindow.calls.clear();
-      nativeCalls.clear();
-
-      Future<void> doubleTapAt(Offset position) async {
-        await tester.tapAt(position);
-        await tester.pump(const Duration(milliseconds: 100));
-        await tester.tapAt(position);
-        await tester.pumpAndSettle();
-      }
-
-      final trailing = tester.getRect(find.byType(WindowDragArea).last);
-      final pane = tester.getRect(find.byType(shadcn.TabPane<String>));
-      final blank = Offset(trailing.left - 40, trailing.center.dy);
-      final topMargin = Offset(
-        blank.dx,
-        pane.top - AppTheme.sessionPaneTopMargin / 2,
-      );
-      for (final position in [blank, topMargin, trailing.center]) {
-        await doubleTapAt(position);
-        expect(appWindow.calls, ['isMaximized', 'maximize']);
-        expect(appWindow.maximized, isTrue);
+        addTearDown(() {
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            nativeChannel,
+            null,
+          );
+        });
+        await pumpApp(tester, platform, appWindow: appWindow);
+        final controller = Get.find<SessionController>();
+        if (hasSessions) {
+          controller.sessions.assignAll([
+            for (final name in ['Alpha', 'Beta'])
+              Session(
+                id: name,
+                host: Host(id: name, name: name, hostname: 'fixture.invalid'),
+                phase: SessionPhase.failed,
+                error: 'fixture',
+              ),
+          ]);
+          controller.activate('Beta');
+          await tester.pumpAndSettle();
+        }
         appWindow.calls.clear();
-        await doubleTapAt(position);
-        expect(appWindow.calls, ['isMaximized', 'unmaximize']);
-        expect(appWindow.maximized, isFalse);
-        appWindow.calls.clear();
-      }
+        nativeCalls.clear();
 
-      if (hasSessions) {
-        final tab = find.byWidgetPredicate(
-          (widget) =>
-              widget is shadcn.KeyedTabItem<String> && widget.tabKey == 'Alpha',
+        Future<void> doubleTapAt(Offset position) async {
+          await tester.tapAt(position);
+          await tester.pump(const Duration(milliseconds: 100));
+          await tester.tapAt(position);
+          await tester.pumpAndSettle();
+        }
+
+        final trailing = tester.getRect(find.byType(WindowDragArea).last);
+        final pane = tester.getRect(find.byType(shadcn.TabPane<String>));
+        final blank = Offset(trailing.left - 40, trailing.center.dy);
+        final topMargin = Offset(
+          blank.dx,
+          pane.top - AppTheme.sessionPaneTopMargin / 2,
         );
-        await doubleTapAt(tester.getRect(tab).centerLeft + const Offset(32, 0));
-        expect(controller.activeSessionId.value, 'Alpha');
-        expect(controller.sessions, hasLength(2));
-      }
-      await doubleTapAt(tester.getCenter(find.byType(Workspace)));
-      expect(appWindow.calls, isEmpty);
-      expect(nativeCalls, isEmpty);
-      expect(tester.takeException(), isNull);
-    });
+        for (final position in [blank, topMargin, trailing.center]) {
+          await doubleTapAt(position);
+          expect(appWindow.calls, ['isMaximized', 'maximize']);
+          expect(appWindow.maximized, isTrue);
+          appWindow.calls.clear();
+          await doubleTapAt(position);
+          expect(appWindow.calls, ['isMaximized', 'unmaximize']);
+          expect(appWindow.maximized, isFalse);
+          appWindow.calls.clear();
+        }
+
+        if (hasSessions) {
+          final tab = find.byWidgetPredicate(
+            (widget) =>
+                widget is shadcn.KeyedTabItem<String> &&
+                widget.tabKey == 'Alpha',
+          );
+          await doubleTapAt(
+            tester.getRect(tab).centerLeft + const Offset(32, 0),
+          );
+          expect(controller.activeSessionId.value, 'Alpha');
+          expect(controller.sessions, hasLength(2));
+        }
+        await doubleTapAt(tester.getCenter(find.byType(Workspace)));
+        expect(appWindow.calls, isEmpty);
+        expect(nativeCalls, isEmpty);
+        expect(tester.takeException(), isNull);
+      },
+    );
   }
 
   testWidgets('Windows 窗口按钮调用原生操作，空白可拖动及双击缩放，交互按钮不触发拖动', (tester) async {

@@ -13,7 +13,6 @@ import 'package:pagashell/domain/entities/host.dart';
 import 'package:pagashell/domain/entities/identity.dart';
 import 'package:pagashell/domain/repositories/host_repository.dart';
 import 'package:pagashell/domain/repositories/identity_repository.dart';
-import 'package:pagashell/domain/ssh/ssh_engine.dart';
 import 'package:pagashell/domain/vault/secret_store.dart';
 import 'package:pagashell/infrastructure/vault/in_memory_secret_store.dart';
 import 'package:pagashell/presentation/folders/folder_dialogs.dart';
@@ -138,6 +137,25 @@ void main() {
 
   final checkbox = find.byKey(const ValueKey('delete-folder-contents'));
 
+  Future<void> confirmDeleteContents(
+    WidgetTester tester,
+    _Fixture fixture,
+  ) async {
+    final confirmation = fixture.confirm(tester);
+    await tester.pumpAndSettle();
+    await tester.tap(checkbox);
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(shadcn.DestructiveButton, '删除'));
+    await tester.pumpAndSettle();
+    await confirmation;
+  }
+
+  Future<void> expectDeleteError(WidgetTester tester, String message) async {
+    expect(find.text(message), findsOneWidget);
+    await tester.pump(const Duration(seconds: 6));
+    await tester.pumpAndSettle();
+  }
+
   for (final kind in _Kind.values) {
     testWidgets('${kind.name} 默认不勾选，删除目录后保留内容并上移', (tester) async {
       await pumpApp(tester);
@@ -242,10 +260,8 @@ void main() {
       final fixture = _Fixture(kind);
       await fixture.seed();
       secrets.failDelete = true;
-      await expectLater(
-        fixture.removeWithContents(),
-        throwsA(isA<SecretStoreException>()),
-      );
+      await confirmDeleteContents(tester, fixture);
+      await expectDeleteError(tester, '钥匙串不可用');
       expect(await fixture.folders.folderRepository.getAll(), hasLength(5));
       expect(await _itemFolders(kind), hasLength(3));
       expect(await secrets.read(fixture.direct.secretRef), 'test-secret');
@@ -275,11 +291,12 @@ void main() {
           gatewayId: kind == _Kind.gateway ? fixture.nested.id : null,
         ),
       );
-      await expectLater(
-        fixture.removeWithContents(),
+      await confirmDeleteContents(tester, fixture);
+      await expectDeleteError(
+        tester,
         kind == _Kind.identity
-            ? throwsStateError
-            : throwsA(isA<SshEngineException>()),
+            ? '凭证正在被网关或服务使用，请先修改对应的凭证配置'
+            : '网关正在被服务使用，请先修改服务的网关配置',
       );
       expect(await fixture.folders.folderRepository.getAll(), hasLength(5));
       expect(await _itemFolders(kind), hasLength(3));

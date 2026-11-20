@@ -8,6 +8,8 @@ class AppDialog extends StatelessWidget {
   const AppDialog({
     required this.title,
     required this.content,
+    this.header,
+    this.scrollKey,
     this.feedback,
     this.actions = const [],
     this.scrollable = false,
@@ -17,6 +19,8 @@ class AppDialog extends StatelessWidget {
 
   final Widget title;
   final Widget content;
+  final Widget? header;
+  final Key? scrollKey;
   final Widget? feedback;
   final List<Widget> actions;
   final bool scrollable;
@@ -43,9 +47,14 @@ class AppDialog extends StatelessWidget {
                 child: title,
               ),
               const SizedBox(height: 20),
+              if (header case final widget?) ...[
+                widget,
+                const SizedBox(height: 20),
+              ],
               Flexible(
                 child: scrollable
                     ? SingleChildScrollView(
+                        key: scrollKey,
                         // 为输入框外侧的焦点边框和桌面滚动条保留空间。
                         padding: AppTheme.dialogScrollPadding(context),
                         child: content,

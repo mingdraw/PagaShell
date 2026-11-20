@@ -98,7 +98,12 @@ class _DockerDetailsDialogState extends State<DockerDetailsDialog> {
       if (resource.kind != DockerResourceKind.compose)
         _row('ID', resource.id, 'id', copyable: true),
       for (final field in resource.fields.entries)
-        _row(field.key.label, field.key.display(field.value), field.key.name),
+        _row(
+          field.key.label,
+          field.key.display(field.value),
+          field.key.name,
+          copyable: field.value.trim().isNotEmpty,
+        ),
     ],
   );
 

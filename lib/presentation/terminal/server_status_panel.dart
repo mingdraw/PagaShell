@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/widgets.dart';
@@ -97,20 +98,23 @@ class _ServerStatusPanelState extends State<ServerStatusPanel> {
                   ),
                   const SizedBox(width: 8),
                   Expanded(child: _heading()),
-                  if (_controller case final controller?)
+                  if (_controller case final controller?) ...[
                     PanelRefreshPauseButton(
                       key: const ValueKey('server-status-pause'),
                       paused: controller.autoRefreshPaused,
                       onChanged: controller.setAutoRefreshPaused,
                     ),
-                  AppIconButton(
-                    semanticLabel: '刷新服务状态'.tr,
-                    tooltip: '刷新服务状态'.tr,
-                    icon: const AppIcon(AppIcons.statusRefresh, size: 15),
-                    onPressed: _controller == null
-                        ? null
-                        : () => _controller?.refreshStatus(),
-                  ),
+                    Obx(
+                      () => AppIconButton(
+                        semanticLabel: '刷新服务状态'.tr,
+                        tooltip: '刷新服务状态'.tr,
+                        icon: const AppIcon(AppIcons.statusRefresh, size: 15),
+                        onPressed: controller.loading.value || !widget.active
+                            ? null
+                            : () => unawaited(controller.refreshStatus()),
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -192,11 +196,16 @@ class _ServerStatusPanelState extends State<ServerStatusPanel> {
                   border: Border.all(color: _errorColor.withValues(alpha: .3)),
                   borderRadius: BorderRadius.circular(6),
                 ),
-                child: Text(
-                  AppTranslations.error(error),
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 11, color: _errorColor),
+                child: shadcn.Tooltip(
+                  tooltip: (_) => shadcn.TooltipContainer(
+                    child: Text(AppTranslations.error(error)),
+                  ),
+                  child: Text(
+                    AppTranslations.error(error),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 11, color: _errorColor),
+                  ),
                 ),
               ),
               if (status != null) ...[
@@ -336,7 +345,7 @@ class _ServerStatusPanelState extends State<ServerStatusPanel> {
                 status.network,
                 history,
                 '接收'.tr,
-                '发送'.tr,
+                '已发送'.tr,
               ),
               _ioCard(
                 'disk-io',
@@ -699,6 +708,7 @@ class _ServerStatusPanelState extends State<ServerStatusPanel> {
             ),
             ServerStatusTrend(
               key: ValueKey('server-status-$id-trend'),
+              peakLabel: (peak) => '峰值 @rate'.trParams({'rate': _speed(peak)}),
               series: [
                 [
                   for (final sample in history)

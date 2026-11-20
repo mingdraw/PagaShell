@@ -340,7 +340,10 @@ void main() {
         expect(_scroll(tester).pixels, greaterThan(before));
         expect(_selection(tester).selection!.end.y, greaterThan(firstExtent));
       }
-      expect(_selection(tester).selection!.begin, const CellOffset(2, 75));
+      expect(
+        _selection(tester).selection!.begin,
+        CellOffset(upward ? 3 : 2, 75),
+      );
       await mouse.up();
       await tester.pump();
       final stopped = _scroll(tester).pixels;
@@ -352,6 +355,26 @@ void main() {
       await tester.pumpWidget(const SizedBox.shrink());
     });
   }
+
+  testWidgets('跨行正向和反向拖选复制相同的首尾字符', (tester) async {
+    final terminal = await _openTerminal(tester);
+    final first = _cellPosition(tester, 10, 75);
+    final last = _cellPosition(tester, 4, 76);
+    for (final (from, to) in [(first, last), (last, first)]) {
+      final mouse = await tester.startGesture(
+        from,
+        kind: PointerDeviceKind.mouse,
+      );
+      await mouse.moveTo(to);
+      await mouse.up();
+      await tester.pump(const Duration(milliseconds: 350));
+      final selection = _selection(tester).selection!;
+      expect(selection.normalized.begin, const CellOffset(10, 75));
+      expect(selection.normalized.end, const CellOffset(5, 76));
+      expect(terminal.buffer.getText(selection), 'cdefghijklmnop\nrow-0');
+    }
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 
   for (final stop in ['移回中间', '取消手势', '切换页签', '关闭页签']) {
     testWidgets('拖选自动滚动在$stop时停止', (tester) async {
@@ -422,7 +445,40 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(output, isNotEmpty);
+    final firstScroll = List<String>.of(output);
+    final normal = TerminalFrameFixture(
+      columns: terminal.viewWidth,
+      rows: terminal.viewHeight,
+    );
+    terminal.applyFrame(normal.snapshot());
+    await tester.pumpAndSettle();
+    output.clear();
+    terminal.showAlternateScreen();
+    await tester.pumpAndSettle();
+    await tester.sendEventToBinding(
+      PointerScrollEvent(
+        position: rect.center,
+        scrollDelta: const Offset(0, 80),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(output, firstScroll);
     expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('距离底部不足一个像素时，后续输出继续贴底；全选包含历史', (tester) async {
+    final terminal = await _openTerminal(tester);
+    final position = _scroll(tester);
+    position.jumpTo(position.maxScrollExtent - 0.5);
+    await tester.pump();
+    terminal.writeText('final output\r\n');
+    await tester.pumpAndSettle();
+    expect(position.pixels, position.maxScrollExtent);
+    final pane = tester.state<TerminalPaneState>(find.byType(TerminalPane));
+    pane.selectAll();
+    expect(pane.selectedText, startsWith('row-000'));
+    expect(pane.selectedText, contains('final output'));
     await tester.pumpWidget(const SizedBox.shrink());
   });
 }

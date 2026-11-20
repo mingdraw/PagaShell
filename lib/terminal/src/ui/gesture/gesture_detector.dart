@@ -84,6 +84,7 @@ class _TerminalGestureDetectorState extends State<TerminalGestureDetector> {
   void _handleTapUp(TapUpDetails details) {
     if (!_isDoubleTap) {
       widget.onSingleTapUp?.call(details);
+      _doubleTapTimer?.cancel();
       _lastTapOffset = details.globalPosition;
       _doubleTapTimer = Timer(kDoubleTapTimeout, _doubleTapTimeout);
     }
@@ -102,6 +103,12 @@ class _TerminalGestureDetectorState extends State<TerminalGestureDetector> {
 
     final Offset difference = secondTapOffset - _lastTapOffset!;
     return difference.distance <= kDoubleTapSlop;
+  }
+
+  @override
+  void dispose() {
+    _doubleTapTimer?.cancel();
+    super.dispose();
   }
 
   @override

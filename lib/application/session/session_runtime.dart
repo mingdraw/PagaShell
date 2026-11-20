@@ -14,6 +14,7 @@ class _SessionRuntime {
   Future<void>? shellCleanup;
   Future<SshEngineSession>? fileTransferReconnect;
   StreamSubscription<PortForwardEvent>? forwardSubscription;
+  Completer<void>? forwardStarting;
   Future<void>? forwardCleanup;
   Future<void>? proxyCleanup;
   Completer<void>? proxyStarting;

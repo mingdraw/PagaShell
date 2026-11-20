@@ -6,13 +6,17 @@ import 'package:pagashell/domain/repositories/settings_repository.dart';
 class InMemorySettingsRepository implements SettingsRepository {
   InMemorySettingsRepository({
     this.themeMode = AppThemeMode.system,
+    this.languageCode,
     this.automaticUpdates = true,
+    this.closeTerminalOnDisconnect = false,
     this.proxySettings = const AppProxySettings(),
     SidebarState? sidebarState,
   }) : sidebarState = sidebarState ?? SidebarState();
 
   AppThemeMode themeMode;
+  String? languageCode;
   bool automaticUpdates;
+  bool closeTerminalOnDisconnect;
   AppProxySettings proxySettings;
 
   @override
@@ -30,11 +34,25 @@ class InMemorySettingsRepository implements SettingsRepository {
   Future<void> saveThemeMode(AppThemeMode mode) async => themeMode = mode;
 
   @override
+  Future<String?> readLanguageCode() async => languageCode;
+
+  @override
+  Future<void> saveLanguageCode(String code) async => languageCode = code;
+
+  @override
   Future<SidebarState> readSidebarState() async => sidebarState;
 
   @override
   Future<void> saveSidebarState(SidebarState state) async =>
       sidebarState = state;
+
+  @override
+  Future<bool> readCloseTerminalOnDisconnect() async =>
+      closeTerminalOnDisconnect;
+
+  @override
+  Future<void> saveCloseTerminalOnDisconnect(bool enabled) async =>
+      closeTerminalOnDisconnect = enabled;
 
   @override
   Future<AppProxySettings> readProxySettings() async => proxySettings;

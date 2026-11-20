@@ -127,9 +127,14 @@ class AppTextFormField extends FormField<String> {
              return Row(
                crossAxisAlignment: CrossAxisAlignment.start,
                children: [
-                 Padding(padding: const EdgeInsets.only(top: 8), child: label),
+                 Flexible(
+                   child: Padding(
+                     padding: const EdgeInsets.only(top: 8),
+                     child: label,
+                   ),
+                 ),
                  const SizedBox(width: 12),
-                 Expanded(child: input),
+                 Expanded(flex: 2, child: input),
                ],
              );
            }

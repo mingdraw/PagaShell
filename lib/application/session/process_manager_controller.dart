@@ -25,11 +25,12 @@ class ProcessManagerController extends GetxController {
   final RxSet<String> terminating = <String>{}.obs;
   ProcessSnapshot? _previous;
   Timer? _timer;
+  Timer? _feedbackTimer;
   final autoRefreshPaused = false.obs;
   bool _enabled = false;
   bool _disposed = false;
   bool _inFlight = false;
-  bool _refreshAgain = false;
+  bool _manualRefreshQueued = false;
   int _generation = 0;
 
   List<ProcessUsage> get visibleProcesses {
@@ -58,7 +59,7 @@ class ProcessManagerController extends GetxController {
     _previous = null;
     _timer?.cancel();
     loading.value = false;
-    if (enabled) unawaited(refreshProcesses(automatic: true));
+    if (enabled) unawaited(refreshProcesses(automatic: !_manualRefreshQueued));
   }
 
   void setAutoRefreshPaused(bool paused) {
@@ -72,12 +73,12 @@ class ProcessManagerController extends GetxController {
     if (automatic && autoRefreshPaused.value) return;
     if (_disposed || !_enabled) return;
     if (_inFlight) {
-      _refreshAgain = true;
+      if (!automatic) _manualRefreshQueued = true;
       return;
     }
     _timer?.cancel();
     _inFlight = true;
-    _refreshAgain = false;
+    _manualRefreshQueued = false;
     final generation = _generation;
     loading.value = true;
     try {
@@ -105,13 +106,13 @@ class ProcessManagerController extends GetxController {
       _inFlight = false;
       if (!_disposed && _enabled) {
         loading.value = false;
-        if (!autoRefreshPaused.value &&
-            error.value != '进程管理仅支持 Linux 和 macOS') {
+        final manual = _manualRefreshQueued;
+        if (manual ||
+            (!autoRefreshPaused.value &&
+                error.value != '进程管理仅支持 Linux 和 macOS')) {
           _timer = Timer(
-            _refreshAgain || generation != _generation
-                ? Duration.zero
-                : interval,
-            () => unawaited(refreshProcesses(automatic: true)),
+            manual || generation != _generation ? Duration.zero : interval,
+            () => unawaited(refreshProcesses(automatic: !manual)),
           );
         }
       }
@@ -141,17 +142,22 @@ class ProcessManagerController extends GetxController {
       return false;
     }
     terminating.add(process.identity);
-    actionError.value = null;
-    notice.value = null;
+    clearActionFeedback();
     try {
       await source.terminateProcess(process);
       if (_disposed) return false;
       notice.value = '已发送结束请求';
-      await refreshProcesses();
+      _expireActionFeedback();
+      if (_enabled) {
+        await refreshProcesses();
+      } else {
+        _manualRefreshQueued = true;
+      }
       return true;
     } on Object catch (e) {
       if (!_disposed) {
         actionError.value = e is SshEngineException ? e.message : '结束进程失败，请重试';
+        _expireActionFeedback();
       }
       return false;
     } finally {
@@ -159,11 +165,23 @@ class ProcessManagerController extends GetxController {
     }
   }
 
+  void clearActionFeedback() {
+    _feedbackTimer?.cancel();
+    notice.value = null;
+    actionError.value = null;
+  }
+
+  void _expireActionFeedback() {
+    _feedbackTimer?.cancel();
+    _feedbackTimer = Timer(const Duration(seconds: 8), clearActionFeedback);
+  }
+
   @override
   void onClose() {
     _disposed = true;
     _generation++;
     _timer?.cancel();
+    _feedbackTimer?.cancel();
     super.onClose();
   }
 }

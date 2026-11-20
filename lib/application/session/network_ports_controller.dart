@@ -32,11 +32,12 @@ class NetworkPortsController extends GetxController {
   final limited = false.obs;
   final updatedAt = Rxn<DateTime>();
   Timer? _timer;
+  Timer? _feedbackTimer;
   final autoRefreshPaused = false.obs;
   bool _enabled = false;
   bool _disposed = false;
   bool _inFlight = false;
-  bool _refreshAgain = false;
+  bool _manualRefreshQueued = false;
   int _generation = 0;
 
   bool get canTerminate => source is ProcessManagerSource;
@@ -156,7 +157,7 @@ class NetworkPortsController extends GetxController {
     _generation++;
     _timer?.cancel();
     loading.value = false;
-    if (enabled) unawaited(refreshPorts(automatic: true));
+    if (enabled) unawaited(refreshPorts(automatic: !_manualRefreshQueued));
   }
 
   void setAutoRefreshPaused(bool paused) {
@@ -170,11 +171,11 @@ class NetworkPortsController extends GetxController {
     if (automatic && autoRefreshPaused.value) return;
     if (_disposed || !_enabled) return;
     if (_inFlight) {
-      _refreshAgain = true;
+      if (!automatic) _manualRefreshQueued = true;
       return;
     }
     _inFlight = true;
-    _refreshAgain = false;
+    _manualRefreshQueued = false;
     _timer?.cancel();
     final generation = _generation;
     loading.value = true;
@@ -206,14 +207,14 @@ class NetworkPortsController extends GetxController {
       _inFlight = false;
       if (!_disposed && _enabled) {
         loading.value = false;
-        if (!autoRefreshPaused.value &&
-            error.value != '网络端口仅支持 Linux 和 macOS' &&
-            error.value != '未找到端口采集工具，请安装 ss 或 lsof') {
+        final manual = _manualRefreshQueued;
+        if (manual ||
+            (!autoRefreshPaused.value &&
+                error.value != '网络端口仅支持 Linux 和 macOS' &&
+                error.value != '未找到端口采集工具，请安装 ss 或 lsof')) {
           _timer = Timer(
-            _refreshAgain || generation != _generation
-                ? Duration.zero
-                : interval,
-            () => unawaited(refreshPorts(automatic: true)),
+            manual || generation != _generation ? Duration.zero : interval,
+            () => unawaited(refreshPorts(automatic: !manual)),
           );
         }
       }
@@ -235,9 +236,7 @@ class NetworkPortsController extends GetxController {
     }
     final generation = _generation;
     preparing.addAll(displayed.keys);
-    actionError.value = null;
-    actionFailures.clear();
-    notice.value = null;
+    clearActionFeedback();
     try {
       final processes = await (() async {
         final snapshot = await (source as ProcessManagerSource).readProcesses();
@@ -273,6 +272,7 @@ class NetworkPortsController extends GetxController {
             : e is SshEngineException
             ? e.message
             : '无法核对端口对应的进程，请重试';
+        _expireActionFeedback();
       }
       return null;
     } finally {
@@ -299,9 +299,7 @@ class NetworkPortsController extends GetxController {
       return false;
     }
     terminating.addAll(targets.keys);
-    actionError.value = null;
-    actionFailures.clear();
-    notice.value = null;
+    clearActionFeedback();
     try {
       final generation = _generation;
       final current = await source.readNetworkPorts().timeout(timeout);
@@ -312,6 +310,7 @@ class NetworkPortsController extends GetxController {
         throw const SshEngineException('端口对应的进程已变化，请刷新后重试');
       }
       var sent = 0;
+      final failures = <NetworkPortTerminationFailure>[];
       for (final process in processes) {
         if (_disposed) return false;
         try {
@@ -319,7 +318,7 @@ class NetworkPortsController extends GetxController {
           sent++;
         } on Object catch (e) {
           if (!_disposed) {
-            actionFailures.add((
+            failures.add((
               pid: process.pid,
               message: e is SshEngineException ? e.message : '结束进程失败，请重试',
             ));
@@ -327,16 +326,23 @@ class NetworkPortsController extends GetxController {
         }
       }
       if (_disposed) return false;
-      if (actionFailures.isEmpty) {
+      actionFailures.assignAll(failures);
+      if (failures.isEmpty) {
         notice.value = '已向全部关联进程发送结束请求';
       } else {
         actionError.value = sent > 0 ? '部分进程未能结束，请查看失败原因' : '未能结束端口关联的进程';
       }
-      await refreshPorts();
-      return actionFailures.isEmpty;
+      _expireActionFeedback();
+      if (_enabled) {
+        await refreshPorts();
+      } else {
+        _manualRefreshQueued = true;
+      }
+      return failures.isEmpty;
     } on Object catch (e) {
       if (!_disposed) {
         actionError.value = e is SshEngineException ? e.message : '结束进程失败，请重试';
+        _expireActionFeedback();
       }
       return false;
     } finally {
@@ -344,11 +350,24 @@ class NetworkPortsController extends GetxController {
     }
   }
 
+  void clearActionFeedback() {
+    _feedbackTimer?.cancel();
+    actionError.value = null;
+    actionFailures.clear();
+    notice.value = null;
+  }
+
+  void _expireActionFeedback() {
+    _feedbackTimer?.cancel();
+    _feedbackTimer = Timer(const Duration(seconds: 8), clearActionFeedback);
+  }
+
   @override
   void onClose() {
     _disposed = true;
     _generation++;
     _timer?.cancel();
+    _feedbackTimer?.cancel();
     super.onClose();
   }
 }

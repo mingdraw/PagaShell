@@ -43,7 +43,7 @@ class FilePathBreadcrumb extends StatelessWidget {
           final widths = [
             for (var index = 0; index < parts.length; index++)
               _textWidth(context, parts[index], style) +
-                  (index == parts.length - 1 ? 0 : 8),
+                  (index == parts.length - 1 && onTapEmpty == null ? 0 : 8),
           ];
           final visible = List.generate(parts.length, (index) => index);
           final hidden = <int>[];
@@ -92,17 +92,24 @@ class FilePathBreadcrumb extends StatelessWidget {
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
             );
-            if (index == parts.length - 1) {
+            final current = index == parts.length - 1;
+            if (current && onTapEmpty == null) {
               return SizedBox(width: widths[index], child: label);
             }
             final target = paths.joinAll(parts.take(index + 1));
             return SizedBox(
               width: widths[index],
               child: shadcn.TextButton(
-                key: ValueKey('sftp-path-segment-$target'),
+                key: current
+                    ? ValueKey(
+                        'sftp-path-current-${remote ? 'remote' : 'local'}',
+                      )
+                    : ValueKey('sftp-path-segment-$target'),
                 size: shadcn.ButtonSize.small,
                 density: shadcn.ButtonDensity.compact,
-                onPressed: onNavigate == null
+                onPressed: current
+                    ? onTapEmpty
+                    : onNavigate == null
                     ? null
                     : () => onNavigate!(target),
                 child: SizedBox(
@@ -163,10 +170,14 @@ class FilePathBreadcrumb extends StatelessWidget {
             ),
           );
           if (onTapEmpty == null) return breadcrumb;
-          return Stack(
-            alignment: Alignment.centerLeft,
+          return Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Positioned.fill(
+              SizedBox(
+                width: math.min(requiredWidth(), constraints.maxWidth),
+                child: Center(child: breadcrumb),
+              ),
+              Expanded(
                 child: MouseRegion(
                   cursor: SystemMouseCursors.text,
                   child: GestureDetector(
@@ -179,7 +190,6 @@ class FilePathBreadcrumb extends StatelessWidget {
                   ),
                 ),
               ),
-              breadcrumb,
             ],
           );
         },

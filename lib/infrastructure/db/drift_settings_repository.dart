@@ -11,9 +11,30 @@ class DriftSettingsRepository implements SettingsRepository {
 
   final AppDatabase _db;
   static const _themeModeKey = 'theme_mode';
+  static const _languageCodeKey = 'language_code';
   static const _sidebarStateKey = 'sidebar_state';
+  static const _closeTerminalOnDisconnectKey = 'close_terminal_on_disconnect';
   static const _automaticUpdatesKey = 'automatic_updates';
   static const _proxySettingsKey = 'proxy_settings';
+
+  @override
+  Future<bool> readCloseTerminalOnDisconnect() async {
+    final row =
+        await (_db.select(_db.appSettings)
+              ..where((s) => s.key.equals(_closeTerminalOnDisconnectKey)))
+            .getSingleOrNull();
+    return row?.value == 'true';
+  }
+
+  @override
+  Future<void> saveCloseTerminalOnDisconnect(bool enabled) => _db
+      .into(_db.appSettings)
+      .insertOnConflictUpdate(
+        AppSettingsCompanion.insert(
+          key: _closeTerminalOnDisconnectKey,
+          value: enabled.toString(),
+        ),
+      );
 
   @override
   Future<bool> readAutomaticUpdates() async {
@@ -49,6 +70,21 @@ class DriftSettingsRepository implements SettingsRepository {
       .into(_db.appSettings)
       .insertOnConflictUpdate(
         AppSettingsCompanion.insert(key: _themeModeKey, value: mode.name),
+      );
+
+  @override
+  Future<String?> readLanguageCode() async {
+    final row = await (_db.select(
+      _db.appSettings,
+    )..where((s) => s.key.equals(_languageCodeKey))).getSingleOrNull();
+    return row?.value;
+  }
+
+  @override
+  Future<void> saveLanguageCode(String code) => _db
+      .into(_db.appSettings)
+      .insertOnConflictUpdate(
+        AppSettingsCompanion.insert(key: _languageCodeKey, value: code),
       );
 
   @override

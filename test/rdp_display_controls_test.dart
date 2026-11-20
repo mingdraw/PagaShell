@@ -161,14 +161,15 @@ void main() {
     Get.locale = null;
   });
 
-  test('自适应尺寸满足协议范围、偶数宽度和客户端像素上限', () {
+  test('自适应尺寸满足协议范围、偶数宽高和客户端像素上限', () {
     expect(
       RdpResolution.fromViewport(1367.8, 767.9),
-      const RdpResolution(1366, 767),
+      const RdpResolution(1366, 766),
     );
     expect(RdpResolution.fromViewport(100, 100), const RdpResolution(200, 200));
     final large = RdpResolution.fromViewport(16000, 12000);
     expect(large.width.isEven, isTrue);
+    expect(large.height.isEven, isTrue);
     expect(large.width * large.height, lessThanOrEqualTo(16777216));
     expect(large.width, inInclusiveRange(200, 8192));
     expect(large.height, inInclusiveRange(200, 8192));
@@ -249,7 +250,11 @@ void main() {
     final viewport = tester.getSize(fitted);
     final target = RdpResolution.fromViewport(viewport.width, viewport.height);
     expect(requested, (target.width, target.height));
-    await _frame(tester, session, requested.$1, requested.$2);
+    // A server may align the requested height and send only that frame.
+    await _frame(tester, session, requested.$1, requested.$2 - 4);
+    await tester.pump(const Duration(seconds: 9));
+    expect(session.resizes, hasLength(1));
+    expect(find.text('远端未确认分辨率调整，已保留当前画面'), findsNothing);
     for (final width in [900.0, 1000.0, 1200.0]) {
       tester.view.physicalSize = Size(width, 800);
       await tester.pump();
@@ -280,16 +285,22 @@ void main() {
       TargetPlatform.macOS,
       appWindow: native,
     );
-    await _desktop(tester, sessions);
+    final desktop = await _desktop(tester, sessions);
     await tester.tap(find.byKey(_enterKey));
     await tester.pumpAndSettle();
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer(location: const Offset(6, 120));
+    await mouse.down(tester.getCenter(find.text('RDP · 1280 × 800')));
+    await mouse.up();
+    expect(desktop.pointers.where((e) => e.$3 == 0x9000), isEmpty);
+    await mouse.moveTo(const Offset(6, 120));
+    await tester.pump();
     await tester.pump(const Duration(seconds: 2));
     expect(find.byKey(_exitKey), findsNothing);
 
     final reveal = find.byKey(const ValueKey('rdp-fullscreen-reveal'));
-    expect(tester.getSize(reveal).height, 4);
-    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
-    await mouse.addPointer(location: const Offset(6, 120));
+    expect(tester.getSize(reveal).height, greaterThan(4));
+    expect(tester.getTopLeft(reveal).dy, greaterThan(0));
     await mouse.moveTo(tester.getCenter(reveal));
     await tester.pump();
     expect(find.byKey(_exitKey).hitTestable(), findsOneWidget);
@@ -309,7 +320,7 @@ void main() {
     await tester.pumpAndSettle();
   });
 
-  testWidgets('原尺寸按设备像素显示，双轴滚动后点击仍指向远端像素', (tester) async {
+  testWidgets('Retina 原尺寸可用滚轮双轴平移，点击仍指向正确远端像素', (tester) async {
     final session = await _panel(tester);
     tester.view.physicalSize = const Size(1000, 700);
     tester.view.devicePixelRatio = 2;
@@ -330,20 +341,22 @@ void main() {
           find.byKey(const ValueKey('rdp-vertical-scroll')),
         )
         .controller!;
-    expect(horizontal.position.maxScrollExtent, 140);
+    expect(horizontal.position.maxScrollExtent, 780);
     expect(vertical.position.maxScrollExtent, greaterThan(75));
-    horizontal.jumpTo(120);
-    vertical.jumpTo(75);
-    await tester.pump();
     final viewport = tester.getTopLeft(
       find.byKey(const ValueKey('rdp-horizontal-scroll')),
     );
-    await tester.tapAt(
-      viewport + const Offset(30, 30),
-      kind: PointerDeviceKind.mouse,
+    final point = viewport + const Offset(30, 30);
+    tester.binding.handlePointerEvent(
+      PointerScrollEvent(position: point, scrollDelta: const Offset(120, 75)),
     );
+    await tester.pump();
+    expect(horizontal.offset, 120);
+    expect(vertical.offset, 75);
+    await tester.tapAt(point, kind: PointerDeviceKind.mouse);
     await tester.pump(const Duration(seconds: 1));
-    expect(session.pointers, contains((300, 210, 0x9000, 0)));
+    expect(session.pointers, contains((150, 105, 0x9000, 0)));
+    expect(session.pointers.where((event) => event.$4 != 0), isEmpty);
     expect(session.resizes, isEmpty);
     await tester.pumpWidget(const SizedBox.shrink());
     await session.close();

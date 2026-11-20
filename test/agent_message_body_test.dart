@@ -4,7 +4,6 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:get/get.dart';
 import 'package:pagashell/presentation/ai/agent_message_body.dart';
-import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import 'support/shadcn_test_app.dart';
 
@@ -26,8 +25,8 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  shadcn.SelectableText paragraph(WidgetTester tester, String text) => tester
-      .widgetList<shadcn.SelectableText>(find.byType(shadcn.SelectableText))
+  Text paragraph(WidgetTester tester, String text) => tester
+      .widgetList<Text>(find.byType(Text))
       .firstWhere((widget) => widget.textSpan?.toPlainText().trim() == text);
 
   testWidgets('Markdown 显示标题、行内格式、嵌套列表、引用、任务和转义', (tester) async {
@@ -53,14 +52,14 @@ void main() {
 ''');
     expect(paragraph(tester, '排障步骤').style?.fontSize, 19);
     expect(paragraph(tester, '排障步骤').style?.fontWeight, FontWeight.w600);
-    final formatted = paragraph(
-      tester,
-      '粗体、斜体、旧方案、ssh -v、*原样星号*',
-    ).textSpan!.children!.whereType<TextSpan>().toList();
-    expect(formatted[0].style?.fontWeight, FontWeight.w600);
-    expect(formatted[2].style?.fontStyle, FontStyle.italic);
-    expect(formatted[4].style?.decoration, TextDecoration.lineThrough);
-    expect(formatted[6].style?.fontFamily, 'FiraCode Nerd Font Mono');
+    final formatted =
+        paragraph(tester, '粗体、斜体、旧方案、ssh -v、*原样星号*').textSpan! as TextSpan;
+    final spans = formatted.children!.whereType<TextSpan>().toList();
+    expect(spans[0].style?.fontWeight, FontWeight.w600);
+    expect(spans[2].style?.fontStyle, FontStyle.italic);
+    expect(spans[4].style?.decoration, TextDecoration.lineThrough);
+    expect(spans[6].style?.fontFamily, 'FiraCode Nerd Font Mono');
+    expect(spans[6].style?.fontFamilyFallback, contains('PingFang SC'));
     expect(find.text('3.'), findsOneWidget);
     expect(find.text('4.'), findsOneWidget);
     expect(paragraph(tester, '检查 DNS'), isNotNull);
@@ -100,6 +99,40 @@ void main() {
     expect(scrollable.position.pixels, greaterThan(0));
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('鼠标可跨 Markdown 段落选中并复制，保留换行', (tester) async {
+    final clipboard =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    String? copied;
+    clipboard.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+      if (call.method == 'Clipboard.setData') {
+        copied = (call.arguments as Map<Object?, Object?>)['text'] as String;
+      }
+      return null;
+    });
+    addTearDown(
+      () => clipboard.setMockMethodCallHandler(SystemChannels.platform, null),
+    );
+    await pump(tester, 'First paragraph\n\nSecond paragraph');
+    final first = tester.getRect(
+      find.byWidget(paragraph(tester, 'First paragraph')),
+    );
+    final last = tester.getRect(
+      find.byWidget(paragraph(tester, 'Second paragraph')),
+    );
+    final mouse = await tester.startGesture(
+      first.centerLeft + const Offset(1, 0),
+      kind: PointerDeviceKind.mouse,
+    );
+    await mouse.moveTo(last.centerRight - const Offset(2, 0));
+    await mouse.up();
+    await tester.pumpAndSettle();
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyC);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+    await tester.pumpAndSettle();
+    expect(copied, 'First paragraph\nSecond paragraph');
+  }, variant: const TargetPlatformVariant({TargetPlatform.macOS}));
 
   testWidgets('标准围栏和缩进代码保留空白、语言与原文复制，消息更新后重解析', (tester) async {
     String? copied;

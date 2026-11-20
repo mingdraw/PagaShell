@@ -745,7 +745,7 @@ void main() {
       expect(task.status.value, TransferStatus.cancelled);
     });
 
-    test('clearFinished 只保留进行中的任务', () async {
+    test('clearFinished 保留进行中和可重试的失败任务', () async {
       final running = controller.startDownload(
         sessionId: 's1',
         engineSession: session,
@@ -759,10 +759,26 @@ void main() {
         localPath: '/tmp/b',
       );
       done.status.value = TransferStatus.done;
+      final broken = _FakeTransferSession();
+      addTearDown(broken.dispose);
+      final failed = controller.startDownload(
+        sessionId: 's1',
+        engineSession: broken,
+        remotePath: '/c',
+        localPath: '/tmp/c',
+      );
+      broken.progress.addError(const SshEngineException('传输失败'));
+      await pump();
+      expect(failed.status.value, TransferStatus.failed);
+      expect(controller.canRetry(failed), isTrue);
 
       controller.clearFinished();
 
-      expect(controller.tasks.map((t) => t.id), [running.id]);
+      expect(
+        controller.tasks.map((t) => t.id),
+        unorderedEquals([running.id, failed.id]),
+      );
+      expect(controller.canRetry(failed), isTrue);
     });
 
     test('cancelSession 只取消指定标签，其他标签继续传输', () async {

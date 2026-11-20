@@ -13,10 +13,11 @@ class _AgentTurnPreview {
   AgentEntry? _answerEntry;
   AgentEntry? _reasoningEntry;
   Timer? _timer;
+  bool _finished = false;
   static const _previewLimit = 512 * 1024;
 
   void add(String delta, bool reasoning) {
-    if (!controller._live(generation)) return;
+    if (_finished || !controller._live(generation)) return;
     final buffer = reasoning ? _reasoning : _answer;
     final remaining = (reasoning ? 8000 : _previewLimit) - buffer.length;
     if (remaining <= 0) return;
@@ -25,43 +26,66 @@ class _AgentTurnPreview {
     );
     _timer ??= Timer(const Duration(milliseconds: 45), () {
       _timer = null;
-      _update(_reasoning.toString(), _answer.toString());
+      if (controller._live(generation)) {
+        _update(
+          _reasoning.toString(),
+          _answer.toString(),
+          AgentRequestState.running,
+        );
+      }
     });
   }
 
-  void close() {
+  AgentEntry? _finish(
+    String reasoning,
+    String answer,
+    AgentRequestState state,
+  ) {
+    if (_finished) return _answerEntry;
+    _finished = true;
     _timer?.cancel();
-    _update(_reasoning.toString(), _answer.toString());
+    _timer = null;
+    _update(reasoning, answer, state);
+    return _answerEntry;
   }
 
-  void commit(AgentReply reply) => _update(reply.reasoning, reply.turn.text);
+  AgentEntry? commit(AgentReply reply) =>
+      _finish(reply.reasoning, reply.turn.text, AgentRequestState.completed);
 
-  void _update(String reasoning, String answer) {
-    if (!controller._live(generation)) return;
-    var refresh = false;
-    AgentEntry? apply(AgentEntryKind kind, String text, AgentEntry? existing) {
-      if (text.isEmpty) return existing;
+  AgentEntry? interrupt(AgentRequestState state) =>
+      _finish(_reasoning.toString(), _answer.toString(), state);
+
+  void _update(String reasoning, String answer, AgentRequestState state) {
+    void apply(AgentEntryKind kind, String text) {
+      final existing = kind == AgentEntryKind.reasoning
+          ? _reasoningEntry
+          : _answerEntry;
       if (existing == null) {
-        final entry = AgentEntry(kind, text);
+        if (text.isEmpty) return;
+        final entry = AgentEntry(kind, text, requestState: state);
+        if (kind == AgentEntryKind.reasoning) {
+          _reasoningEntry = entry;
+        } else {
+          _answerEntry = entry;
+        }
         controller._addEntry(entry, persist: false);
-        return entry;
+        return;
       }
-      if (existing.text != text) {
-        existing._text = text;
-        refresh = true;
+      if (text.isNotEmpty) existing._text.value = text;
+      if (state != AgentRequestState.running || controller._live(generation)) {
+        existing.requestState.value = state;
       }
-      return existing;
     }
 
     final summary = reasoning
         .replaceAll(key, '[redacted]')
         .replaceAll(RegExp(r'[\x00-\x08\x0b-\x1f\x7f-\x9f]'), '');
-    _reasoningEntry = apply(
+    apply(
       AgentEntryKind.reasoning,
       summary.length > 8000 ? '${summary.substring(0, 7999)}…' : summary,
-      _reasoningEntry,
     );
-    _answerEntry = apply(AgentEntryKind.assistant, answer, _answerEntry);
-    if (refresh) controller.entries.refresh();
+    if (state != AgentRequestState.running || controller._live(generation)) {
+      apply(AgentEntryKind.assistant, answer);
+    }
   }
 }

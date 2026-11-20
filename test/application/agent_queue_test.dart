@@ -313,6 +313,77 @@ void main() {
     );
   });
 
+  test('重试只用原消息的会话和标签，重连或恢复历史后要求重新选择', () async {
+    var count = 0;
+    final connect = FakeAiConnect(
+      (_) => ++count == 1
+          ? const Response<dynamic>(statusCode: 401)
+          : openAiReply('Retried'),
+    );
+    final app = await _App.create(connect);
+    final agent = app.agent;
+    final original = _terminal('original');
+    final draft = _terminal('draft');
+    app.sessions.sessions.addAll([original, draft]);
+    await agent.send(
+      '@Original summary',
+      referencedSessions: [original],
+      referenceLabels: {original.id: '@Original label'},
+    );
+    final failed = agent.entries.first;
+    agent.setReferencedSessions([draft]);
+    await agent.retry(failed);
+    expect(connect.requests, hasLength(2));
+    final retry = jsonEncode(connect.requests.last.body);
+    expect(retry, contains('original.internal'));
+    expect(retry, contains('@Original label'));
+    expect(retry, isNot(contains('draft.internal')));
+    expect(agent.selectedSessions, [draft]);
+
+    final conversationId = agent.currentConversationId.value!;
+    await agent.historySaved;
+    final saved = AgentConversation.fromJson(
+      app.history.items[conversationId]!.toJson(),
+    );
+    expect(saved.messages.first.hadSessionReferences, isTrue);
+    app.sessions.sessions[0] = _terminal('original');
+    await agent.retry(failed);
+    const reselect = '原消息引用的会话不可用，请重新选择会话后发送';
+    expect(agent.error.value, reselect);
+    expect(connect.requests, hasLength(2));
+
+    agent.clear();
+    expect(agent.openConversation(conversationId), isTrue);
+    agent.setReferencedSessions([draft]);
+    await agent.retry(agent.entries.first);
+    expect(agent.error.value, reselect);
+    expect(agent.selectedSessions, [draft]);
+    expect(connect.requests, hasLength(2));
+  });
+
+  test('原消息没有会话引用时，重试不带入下一条草稿引用', () async {
+    var count = 0;
+    final connect = FakeAiConnect(
+      (_) => ++count == 1
+          ? const Response<dynamic>(statusCode: 401)
+          : openAiReply('Retried'),
+    );
+    final app = await _App.create(connect);
+    await app.agent.send('Explain the UI');
+    final draft = _terminal('draft');
+    app.sessions.sessions.add(draft);
+    app.agent.setReferencedSessions([draft]);
+
+    await app.agent.retry(app.agent.entries.first);
+
+    expect(connect.requests, hasLength(2));
+    expect(
+      jsonEncode(connect.requests.last.body),
+      contains('No session was selected with @.'),
+    );
+    expect(app.agent.selectedSessions, [draft]);
+  });
+
   for (final action in ['stop', 'clear', 'open', 'delete', 'exit']) {
     test('$action 取消运行和待执行消息，迟到响应不影响新请求', () async {
       final responses = List.generate(2, (_) => Completer<Response<dynamic>>());

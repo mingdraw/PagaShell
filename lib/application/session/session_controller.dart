@@ -43,6 +43,7 @@ class SessionController extends GetxController {
     this._rdpEngine,
     this._vncEngine,
     this._systemProxy,
+    this._shouldCloseTerminalOnDisconnect,
   });
 
   final SshEngine _engine;
@@ -51,6 +52,7 @@ class SessionController extends GetxController {
   final SystemProxy? _systemProxy;
   final KnownHostRepository? _knownHosts;
   final TransferController? _transfers;
+  final bool Function()? _shouldCloseTerminalOnDisconnect;
   bool _disposed = false;
 
   final RxList<Session> sessions = <Session>[].obs;
@@ -85,55 +87,72 @@ class SessionController extends GetxController {
   bool canSplitTerminal(String id) => _canReuseTerminalConnection(id);
 
   /// 同页签的同主机窗格共用采集连接。混排时随当前主机切换数据源。
-  ServerStatusSource? serverStatusSource(String tabId) =>
-      _monitoringConnection(tabId, (session) => session is ServerStatusSource);
-
-  ProcessManagerSource? processManagerSource(String tabId) =>
+  ServerStatusSource? serverStatusSource(String tabId, {String? hostId}) =>
       _monitoringConnection(
         tabId,
+        hostId,
+        (session) => session is ServerStatusSource,
+      );
+
+  ProcessManagerSource? processManagerSource(String tabId, {String? hostId}) =>
+      _monitoringConnection(
+        tabId,
+        hostId,
         (session) => session is ProcessManagerSource,
       );
 
-  DockerManagerSource? dockerManagerSource(String tabId) =>
-      _monitoringConnection(tabId, (session) => session is DockerManagerSource);
+  DockerManagerSource? dockerManagerSource(String tabId, {String? hostId}) =>
+      _monitoringConnection(
+        tabId,
+        hostId,
+        (session) => session is DockerManagerSource,
+      );
 
-  NetworkPortsSource? networkPortsSource(String tabId) =>
-      _monitoringConnection(tabId, (session) => session is NetworkPortsSource);
+  NetworkPortsSource? networkPortsSource(String tabId, {String? hostId}) =>
+      _monitoringConnection(
+        tabId,
+        hostId,
+        (session) => session is NetworkPortsSource,
+      );
 
   ServerStatusConnection? _monitoringConnection(
     String tabId,
+    String? hostId,
     bool Function(SshEngineSession?) supports,
   ) {
     if (_disposed) return null;
     final tab = tabById(tabId);
     if (tab == null) return null;
-    final selected = _find(tab.selectedSessionId);
-    if (selected == null || selected.kind != SessionKind.terminal) {
-      return null;
-    }
-    final key = (tabId, selected.host.id);
+    final target = hostId ?? _find(tab.selectedSessionId)?.host.id;
+    if (target == null) return null;
+    final key = (tabId, target);
     final existing = _serverStatusConnections[key];
-    if (existing != null) return existing;
+    Session? source;
     for (final id in tab.sessionIds) {
       if (!_canReuseTerminalConnection(id)) continue;
       final session = _find(id)!;
-      if (session.host.id != selected.host.id) continue;
+      if (session.host.id != target || session.kind != SessionKind.terminal) {
+        continue;
+      }
       if (!supports(session.engineSession)) continue;
-      final runtime = _runtimes[id]!;
-      final host = session.host;
-      final credentials = runtime.credentials!;
-      final gateway = runtime.gateway;
-      return _serverStatusConnections[key] = ServerStatusConnection(
-        connect: (cancelled) => _engine.connect(
-          host,
-          credentials,
-          gateway: gateway,
-          cancelled: cancelled,
-          verifyHostKey: (key) => _verifyStatusHostKey(tabId, key),
-        ),
-      );
+      source = session;
+      if (id == tab.selectedSessionId) break;
     }
-    return null;
+    if (source == null) return null;
+    if (existing != null) return existing;
+    final runtime = _runtimes[source.id]!;
+    final host = source.host;
+    final credentials = runtime.credentials!;
+    final gateway = runtime.gateway;
+    return _serverStatusConnections[key] = ServerStatusConnection(
+      connect: (cancelled) => _engine.connect(
+        host,
+        credentials,
+        gateway: gateway,
+        cancelled: cancelled,
+        verifyHostKey: (key) => _verifyStatusHostKey(tabId, key),
+      ),
+    );
   }
 
   Future<bool> _verifyStatusHostKey(String tabId, SshHostKey key) async {
@@ -157,7 +176,11 @@ class SessionController extends GetxController {
   }
 
   /// 使用当前连接的运行时凭据和网关，为同一主机建立独立 SSH 连接。
-  Future<String?> splitTerminal(String id, SessionSplitAxis axis) async {
+  Future<String?> splitTerminal(
+    String id,
+    SessionSplitAxis axis, {
+    bool before = false,
+  }) async {
     if (!canSplitTerminal(id)) return null;
     final session = _find(id)!;
     final runtime = _runtimes[id]!;
@@ -168,6 +191,7 @@ class SessionController extends GetxController {
       gateway: runtime.gateway,
       splitFrom: id,
       splitAxis: axis,
+      splitBefore: before,
       dockerTarget: session.dockerTarget,
       temporary: runtime.temporary,
     );
@@ -176,7 +200,6 @@ class SessionController extends GetxController {
   bool canSplitToHost(String id, Host host) {
     final current = _find(id);
     return current?.kind == SessionKind.terminal &&
-        current!.host.id != host.id &&
         !host.isDesktop &&
         canSplitTerminal(id);
   }
@@ -187,6 +210,7 @@ class SessionController extends GetxController {
     SshCredentials credentials, {
     required SessionSplitEdge edge,
     SshGateway? gateway,
+    bool temporary = false,
   }) async {
     if (!canSplitToHost(id, host)) return null;
     return _openSession(
@@ -196,6 +220,7 @@ class SessionController extends GetxController {
       splitFrom: id,
       splitAxis: edge.axis,
       splitBefore: edge.before,
+      temporary: temporary,
     );
   }
 
@@ -322,17 +347,36 @@ class SessionController extends GetxController {
     if (targets != null) _inputSync.value = (tabId: tabId, targets: targets);
   }
 
+  void stopInputSync(String tabId) {
+    if (isInputSyncEnabled(tabId)) _inputSync.value = null;
+  }
+
+  List<String> inputSyncPaneNames(String sourceId) {
+    final sync = _inputSync.value;
+    if (sync == null || activeSessionId.value != sourceId) return const [];
+    final live = _inputTargets(sync.tabId);
+    if (live == null || !_matchesInputTargets(sync.targets, live)) {
+      return const [];
+    }
+    return [for (final id in live.keys) _find(id)!.title];
+  }
+
+  bool _matchesInputTargets(
+    Map<String, Terminal> expected,
+    Map<String, Terminal> live,
+  ) =>
+      expected.length == live.length &&
+      live.entries.every(
+        (entry) => identical(entry.value, expected[entry.key]),
+      );
+
   /// Only keyboard, IME and accepted paste from the selected view use this path.
   /// Re-encode keys and bracketed paste for each terminal's own input modes.
   void syncUserInput(String sourceId, void Function(Terminal) send) {
     final sync = _inputSync.value;
     if (sync == null || activeSessionId.value != sourceId) return;
     final live = _inputTargets(sync.tabId);
-    if (live == null ||
-        live.length != sync.targets.length ||
-        live.entries.any(
-          (entry) => !identical(entry.value, sync.targets[entry.key]),
-        )) {
+    if (live == null || !_matchesInputTargets(sync.targets, live)) {
       _inputSync.value = null;
       return;
     }
@@ -432,6 +476,8 @@ class SessionController extends GetxController {
     );
   }
 
+  bool isTemporarySession(String id) => _runtimes[id]?.temporary ?? false;
+
   Future<String> _openSession(
     Host host,
     SshCredentials credentials, {
@@ -529,8 +575,10 @@ class SessionController extends GetxController {
       return;
     }
     ForwardPort.validateAll(host.forwardPorts, allowEmpty: false);
-    _runtimes[id]?.credentials = credentials;
-    _runtimes[id]?.gateway = null;
+    final runtime = _runtimes[id]!;
+    final starting = runtime.forwardStarting = Completer<void>();
+    runtime.credentials = credentials;
+    runtime.gateway = null;
     _update(
       id,
       (s) => Session(
@@ -540,7 +588,12 @@ class SessionController extends GetxController {
         loginUsername: credentials.username ?? host.username,
       ),
     );
-    await _connect(id, host, credentials);
+    try {
+      await _connect(id, host, credentials);
+    } finally {
+      runtime.forwardStarting = null;
+      starting.complete();
+    }
   }
 
   void updateForwardHost(Host host) {
@@ -847,13 +900,46 @@ class SessionController extends GetxController {
   /// 在原标签和窗格中重新连接，允许用户主动替换仍存活的连接。
   Future<void> reconnect(String id) => _reconnect(id, allowReady: true);
 
-  Future<void> _reconnect(String id, {required bool allowReady}) async {
+  /// 用重新准备的凭据重试失败的服务。协议改变导致视图不兼容时另开标签。
+  Future<void> retryWithLogin(
+    String id,
+    Host host,
+    SshCredentials credentials, {
+    SshGateway? gateway,
+  }) async {
+    final session = _find(id);
+    if (session == null ||
+        session.host.id != host.id ||
+        !canRetry(id) ||
+        session.kind == SessionKind.containerTerminal ||
+        isTemporarySession(id)) {
+      return;
+    }
+    if (session.kind == SessionKind.fileTransfer && host.isDesktop) {
+      throw const SshEngineException('远程桌面服务不支持 SSH 文件传输或端口转发');
+    }
+    if (host.isDesktop != (session.kind == SessionKind.remoteDesktop)) {
+      await close(id);
+      if (!_disposed) await open(host, credentials, gateway: gateway);
+      return;
+    }
+    final runtime = _runtimes[id]!;
+    runtime.credentials = credentials;
+    runtime.gateway = gateway;
+    await _reconnect(id, allowReady: false, updatedHost: host);
+  }
+
+  Future<void> _reconnect(
+    String id, {
+    required bool allowReady,
+    Host? updatedHost,
+  }) async {
     if (!(allowReady ? canReconnect(id) : canRetry(id))) return;
     final session = _find(id);
     if (session?.kind == SessionKind.fileTransfer &&
         session?.engineSession != null) {
       try {
-        await reconnectFileTransfer(id);
+        await _startFileTransferReconnect(id, updatedHost: updatedHost);
       } on SshEngineException {
         // 失败状态已写入会话，继续使用既有失败界面。
       }
@@ -861,13 +947,16 @@ class SessionController extends GetxController {
     }
     final credentials = _runtimes[id]?.credentials;
     if (session == null || credentials == null) return;
+    final host = updatedHost ?? session.host;
     _update(
       id,
       (s) => Session(
         id: s.id,
-        host: s.host,
+        host: host,
         kind: s.kind,
-        loginUsername: s.loginUsername,
+        loginUsername: updatedHost == null
+            ? s.loginUsername
+            : credentials.username ?? host.username,
         dockerTarget: s.dockerTarget,
       ),
     );
@@ -880,14 +969,20 @@ class SessionController extends GetxController {
     if (_disposed || _find(id) == null) return;
     await _connect(
       id,
-      session.host,
+      host,
       credentials,
-      passwordRequest: session.passwordRequest,
+      passwordRequest: updatedHost == null ? session.passwordRequest : null,
     );
   }
 
   /// 文件传输独立重连：同一标签的重复请求共用一次连接尝试。
-  Future<SshEngineSession> reconnectFileTransfer(String id) {
+  Future<SshEngineSession> reconnectFileTransfer(String id) =>
+      _startFileTransferReconnect(id);
+
+  Future<SshEngineSession> _startFileTransferReconnect(
+    String id, {
+    Host? updatedHost,
+  }) {
     final runtime = _runtimes[id];
     if (runtime?.fileTransferReconnect case final pending?) return pending;
     final session = _find(id);
@@ -900,7 +995,11 @@ class SessionController extends GetxController {
         credentials == null) {
       return Future.error(const SshEngineException('无法重新连接，请关闭文件传输标签后重试'));
     }
-    final pending = _reconnectFileTransfer(session, credentials);
+    final pending = _reconnectFileTransfer(
+      session,
+      updatedHost ?? session.host,
+      credentials,
+    );
     runtime!.fileTransferReconnect = pending;
     void clear() {
       if (identical(runtime.fileTransferReconnect, pending)) {
@@ -914,10 +1013,18 @@ class SessionController extends GetxController {
 
   Future<SshEngineSession> _reconnectFileTransfer(
     Session previous,
+    Host host,
     SshCredentials credentials,
   ) async {
     final id = previous.id;
-    _update(id, (s) => s.copyWith(phase: SessionPhase.reconnecting));
+    _update(
+      id,
+      (s) => s.copyWith(
+        host: host,
+        loginUsername: credentials.username ?? host.username,
+        phase: SessionPhase.reconnecting,
+      ),
+    );
     try {
       await _transfers?.interruptSession(id);
       try {
@@ -928,7 +1035,7 @@ class SessionController extends GetxController {
       if (_disposed || _find(id) == null) {
         throw const SshEngineException('文件传输标签已关闭');
       }
-      await _connect(id, previous.host, credentials);
+      await _connect(id, host, credentials);
       final current = _find(id);
       if (current != null &&
           current.phase == SessionPhase.ready &&
@@ -1043,6 +1150,7 @@ class SessionController extends GetxController {
       final request = RdpPasswordRequest(
         host: host,
         username: login.username ?? host.username,
+        domain: login.rdpDomain ?? host.rdpDomain,
         error: failure.message,
       );
       if (!await _replaceRdpPassword(id, request)) return;
@@ -1080,6 +1188,7 @@ class SessionController extends GetxController {
     _runtimes[id]?.credentials = SshCredentials.password(
       password,
       username: _runtimes[id]?.credentials?.username,
+      rdpDomain: _runtimes[id]?.credentials?.rdpDomain,
     );
     _update(
       id,
@@ -1122,7 +1231,9 @@ class SessionController extends GetxController {
           : null;
       if (cleanup != null) {
         await cleanup;
-        if (_disposed || _find(id) == null) return null;
+        if (_disposed || _find(id) == null || cancellation.isCompleted) {
+          return null;
+        }
       }
       if (host.gatewayId != null &&
           _runtimes[id]?.gateway?.host.id != host.gatewayId) {
@@ -1155,10 +1266,14 @@ class SessionController extends GetxController {
         }
         final forwarder = await (engine as GatewayForwardEngine).connectForward(
           SshGateway(host: host, credentials: credentials),
-          verifyHostKey: (key) => _verifyHostKey(id, key),
+          verifyHostKey: (key) => _verifyHostKey(
+            id,
+            key,
+            connectionCancelled: () => cancellation.isCompleted,
+          ),
           cancelled: cancellation.future,
         );
-        if (_disposed || _find(id) == null) {
+        if (_disposed || _find(id) == null || cancellation.isCompleted) {
           await forwarder.close();
           return null;
         }
@@ -1167,6 +1282,7 @@ class SessionController extends GetxController {
             .startPortForwards(host.forwardPorts)
             .listen(
               (event) {
+                if (!identical(_find(id)?.forwardSession, forwarder)) return;
                 if (event.kind == 'ready') {
                   _update(id, (s) => s.copyWith(phase: SessionPhase.ready));
                 } else if (event.kind == 'connectionError') {
@@ -1306,10 +1422,15 @@ class SessionController extends GetxController {
     return null;
   }
 
-  Future<bool> _verifyHostKey(String id, SshHostKey key) async {
+  Future<bool> _verifyHostKey(
+    String id,
+    SshHostKey key, {
+    bool Function()? connectionCancelled,
+  }) async {
     final repository = _knownHosts;
     bool cancelled() =>
         _disposed ||
+        connectionCancelled?.call() == true ||
         _find(id) == null ||
         _find(id)?.phase == SessionPhase.stopping;
     if (repository == null || cancelled()) return false;
@@ -1341,12 +1462,15 @@ class SessionController extends GetxController {
         onTimeout: () => false,
       );
     } finally {
-      _runtimes[id]?.hostKeyDecision = null;
+      if (identical(_runtimes[id]?.hostKeyDecision, decision)) {
+        _runtimes[id]?.hostKeyDecision = null;
+      }
     }
+    if (cancelled()) return false;
     if (review.hasChanged && !key.isRdp) {
       throw HostKeyChangedException(review, '主机指纹已变更，已拒绝连接；请通过可信渠道核验服务器密钥');
     }
-    if (!accepted || cancelled()) return false;
+    if (!accepted) return false;
     if (key.isRdp && (review.hasChanged || key.certificateError != null)) {
       // Explicit exception applies only to this TLS connection, never silently
       // replacing the saved certificate or suppressing future PKI warnings.
@@ -1381,11 +1505,14 @@ class SessionController extends GetxController {
     decision.complete(trust && (review.presented.isRdp || !review.hasChanged));
   }
 
-  /// SSH 输出结束时断开传输通道，保留终端内容供查看和重连。
+  /// SSH 输出结束后，按设置关闭窗格或保留历史供查看和重连。
   void _onShellEnded(String id) {
     final session = _find(id);
-    if (session == null || session.phase != SessionPhase.ready) return;
-    if (session.kind == SessionKind.containerTerminal) {
+    if (_disposed || session == null || session.phase != SessionPhase.ready) {
+      return;
+    }
+    if (session.kind == SessionKind.containerTerminal ||
+        _shouldCloseTerminalOnDisconnect?.call() == true) {
       unawaited(close(id));
       return;
     }
@@ -1472,6 +1599,29 @@ class SessionController extends GetxController {
     if (tab != null) activate(tab.selectedSessionId);
   }
 
+  /// 把现有窗格移到原标签右侧的独立标签，沿用会话和运行时连接。
+  void movePaneToNewTab(String id) {
+    final session = _find(id);
+    if (_disposed ||
+        session == null ||
+        !session.kind.isInteractiveTerminal ||
+        _runtimes[id]?.tabCloseRequest != null) {
+      return;
+    }
+    final currentTabs = tabs;
+    final index = currentTabs.indexWhere((tab) => tab.sessionIds.contains(id));
+    if (index < 0) return;
+    final source = currentTabs[index];
+    if (source.layout is! SessionSplit) return;
+    stopInputSync(source.id);
+    final newId = _tabState.detach(source, id);
+    reorder(
+      currentTabs.map((tab) => tab.id).toList()..insert(index + 1, newId),
+    );
+    _selectSession(id);
+    unawaited(_closeUnusedMonitoring(source.id, session.host.id));
+  }
+
   /// 按标签 ID 调整顺序，保留最新会话快照和当前激活项。
   /// 拖动期间关闭的标签不再插回，新增的标签保留在末尾。
   void reorder(Iterable<String> ids) {
@@ -1513,7 +1663,8 @@ class SessionController extends GetxController {
     final session = _find(id);
     if (session == null ||
         session.kind != SessionKind.portForward ||
-        session.phase != SessionPhase.ready) {
+        !session.phase.isAlive ||
+        session.phase == SessionPhase.stopping) {
       return;
     }
     _update(
@@ -1526,10 +1677,18 @@ class SessionController extends GetxController {
         loginUsername: s.loginUsername,
       ),
     );
-    await _cleanupForward(session);
+    final runtime = _runtimes[id];
+    runtime?.cancelPending();
+    await _cleanupForward(
+      session,
+      waitForStart: runtime?.forwardStarting?.future,
+    );
   }
 
-  Future<void> _cleanupForward(Session session) async {
+  Future<void> _cleanupForward(
+    Session session, {
+    Future<void>? waitForStart,
+  }) async {
     final existing = _runtimes[session.id]?.forwardCleanup;
     if (existing != null) {
       await existing;
@@ -1540,6 +1699,7 @@ class SessionController extends GetxController {
     final cleanup = () async {
       if (previous != null) await previous;
       try {
+        await waitForStart;
         await _releaseResources(session);
       } finally {
         if (_find(session.id)?.phase == SessionPhase.stopping) {
@@ -1710,17 +1870,14 @@ class SessionController extends GetxController {
       );
     }
     _runtimes[id]?.cancelPending();
-    final stillMonitored =
-        tabById(tab.id)?.sessionIds
-            .any((id) => _find(id)?.host.id == session.host.id) ??
-        false;
-    final statusClose = stillMonitored
-        ? null
-        : _serverStatusConnections.remove((tab.id, session.host.id))?.close();
+    final statusClose = _closeUnusedMonitoring(tab.id, session.host.id);
 
     try {
       if (session.kind == SessionKind.portForward) {
-        await _cleanupForward(session);
+        await _cleanupForward(
+          session,
+          waitForStart: _runtimes[id]?.forwardStarting?.future,
+        );
       } else if (session.kind == SessionKind.dynamicProxy) {
         await _cleanupProxy(session);
       } else {
@@ -1732,6 +1889,14 @@ class SessionController extends GetxController {
       await statusClose;
       _forgetClosedRuntime(id);
     }
+  }
+
+  Future<void>? _closeUnusedMonitoring(String tabId, String hostId) {
+    final stillMonitored = tabById(tabId)?.sessionIds
+        .any((id) => _find(id)?.host.id == hostId);
+    return stillMonitored == true
+        ? null
+        : _serverStatusConnections.remove((tabId, hostId))?.close();
   }
 
   void _forgetClosedRuntime(String id) {

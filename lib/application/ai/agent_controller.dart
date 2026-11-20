@@ -36,18 +36,23 @@ class AgentEntry {
     this.archivedCommand,
     AgentRequestState? requestState,
     String? requestError,
-    this.toolSummary,
-  }) : _text = text,
+    AgentToolSummary? toolSummary,
+    this.hadSessionReferences = false,
+  }) : _text = text.obs,
+       _toolSummary = Rxn<AgentToolSummary>(toolSummary),
        requestState = Rxn<AgentRequestState>(requestState),
        requestError = RxnString(requestError);
   final AgentEntryKind kind;
-  String _text;
-  String get text => _text;
-  AgentToolSummary? toolSummary;
+  final RxString _text;
+  String get text => _text.value;
+  final Rxn<AgentToolSummary> _toolSummary;
+  AgentToolSummary? get toolSummary => _toolSummary.value;
   final AgentCommandProposal? command;
   final AgentArchivedCommand? archivedCommand;
   final Rxn<AgentRequestState> requestState;
   final RxnString requestError;
+  final bool hadSessionReferences;
+  _AgentSessionReferences? _references;
 
   AgentMessage toMessage() => AgentMessage(
     kind,
@@ -58,7 +63,12 @@ class AgentEntry {
       final state => state,
     },
     requestError: requestError.value,
-    toolSummary: toolSummary,
+    toolSummary: switch (toolSummary) {
+      final summary? when summary.elapsedMs == null && !summary.cancelled =>
+        AgentToolSummary(summary.target, cancelled: true),
+      final summary => summary,
+    },
+    hadSessionReferences: hadSessionReferences,
     command: command == null
         ? archivedCommand
         : AgentArchivedCommand(
@@ -283,6 +293,30 @@ class AgentController extends GetxController {
     referenceLabels: referenceLabels,
   );
 
+  /// Retry the original text and live connection identities, not the draft.
+  Future<void> retry(AgentEntry entry) async {
+    final state = entry.requestState.value;
+    if (isClosed ||
+        entry.kind != AgentEntryKind.user ||
+        (state != AgentRequestState.failed &&
+            state != AgentRequestState.cancelled) ||
+        !entries.contains(entry)) {
+      return;
+    }
+    final references = entry._references;
+    if ((entry.hadSessionReferences && references == null) ||
+        references?.targets.any((target) => _boundSession(target) == null) ==
+            true) {
+      error.value = '原消息引用的会话不可用，请重新选择会话后发送';
+      return;
+    }
+    await _enqueue(
+      entry.text,
+      referencedSessions: references?.targets ?? const [],
+      referenceLabels: references?.labels ?? const {},
+    );
+  }
+
   Future<void> _runRequest(_AgentQueuedRequest request, int generation) async {
     final text = request.entry.text;
     final targets = request.targets;
@@ -320,24 +354,22 @@ class AgentController extends GetxController {
           '${AgentApiCodec.responsesScope(model)}#$system#${effort.name}#$_historyRevision';
       for (var step = 0; step < 6; step++) {
         final preview = _AgentTurnPreview(this, generation, key);
-        final AgentReply reply;
-        try {
-          reply = await _request(
-            model,
-            key,
-            system,
-            turns,
-            anthropicMaxTokens: limit,
-            effort: effort,
-            capabilities: capabilities,
-            anthropicScope: anthropicScope,
-            onDelta: preview.add,
-          );
-        } finally {
-          preview.close();
-        }
+        request.preview = preview;
+        final reply = await _request(
+          model,
+          key,
+          system,
+          turns,
+          anthropicMaxTokens: limit,
+          effort: effort,
+          capabilities: capabilities,
+          anthropicScope: anthropicScope,
+          onDelta: preview.add,
+        );
         if (!_live(generation)) return;
-        preview.commit(reply);
+        request.lastAnswer = preview.commit(reply) ?? request.lastAnswer;
+        request.preview = null;
+        if (!_live(generation)) return;
         final turn = reply.turn;
         if (reply.truncated && turn.calls.isNotEmpty) {
           throw const AgentApiException('AI 回复达到服务商长度上限，请缩小问题或继续提问');
@@ -369,6 +401,9 @@ class AgentController extends GetxController {
       // 不展示平台/服务端异常原文，以免其中带入请求头或密钥。
       if (_live(generation)) error.value = 'AI 请求失败，请检查模型配置或凭据存储';
     } finally {
+      if (!committed && _live(generation)) {
+        request.interrupt(AgentRequestState.failed);
+      }
       _finishRequest(request, generation, committed: committed);
       if (!request.done.isCompleted) request.done.complete();
     }
@@ -379,9 +414,13 @@ class AgentController extends GetxController {
   void rejectCommand(AgentCommandProposal proposal) => _rejectCommand(proposal);
 
   void stop() {
-    final wasBusy = busy.value;
+    final active = _queue.active;
+    final wasBusy = busy.value || active != null;
     ++_generation;
     _api.activeStream?.cancel();
+    active?.interrupt(AgentRequestState.cancelled);
+    _tools.cancelRunningTool?.call();
+    _tools.cancelRunningTool = null;
     _tools.cancelOutputWait?.call();
     _tools.activeTargets = const [];
     waitingForApproval.value = false;

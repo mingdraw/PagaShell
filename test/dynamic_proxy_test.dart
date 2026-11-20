@@ -54,11 +54,25 @@ class _Proxy implements DynamicProxySession {
   }();
 }
 
+class _TrafficProxy extends _Proxy implements DynamicProxyTrafficSource {
+  int reads = 0;
+  final resumedSample = Completer<ProxyTraffic>();
+
+  @override
+  Future<ProxyTraffic?> readTraffic() async {
+    reads++;
+    if (reads == 1) return (sent: 1024, received: 2);
+    if (reads == 2) throw StateError('sample unavailable');
+    return resumedSample.future;
+  }
+}
+
 class _Engine implements SshEngine, DynamicProxyEngine {
   final proxies = <_Proxy>[];
   final gateways = <SshGateway?>[];
   final configs = <ProxyConfig>[];
   Completer<void>? startGate;
+  _Proxy Function() createProxy = _Proxy.new;
   bool cancelled = false;
   Object? failure;
 
@@ -72,7 +86,7 @@ class _Engine implements SshEngine, DynamicProxyEngine {
     configs.add(config);
     gateways.add(gateway);
     unawaited(cancelled?.then((_) => this.cancelled = true));
-    final proxy = _Proxy();
+    final proxy = createProxy();
     proxies.add(proxy);
     await startGate?.future;
     if (failure != null) throw failure!;
@@ -429,6 +443,38 @@ void main() {
     });
   }
 
+  testWidgets('流量读取失败和切签时保留累计数据，隐藏期间暂停采样', (tester) async {
+    final (engine, _, sessions) = await pump(tester);
+    final traffic = _TrafficProxy();
+    engine.createProxy = () => traffic;
+    final id = sessions.openProxy(_gateway);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('启动代理'));
+    await tester.pumpAndSettle();
+    final original = find.textContaining('累计 1.0 KB');
+    expect(original, findsOneWidget);
+
+    await tester.pump(const Duration(seconds: 1));
+    expect(traffic.reads, 2);
+    expect(original, findsOneWidget);
+
+    sessions.openForward(_gateway);
+    await tester.pumpAndSettle();
+    await tester.pump(const Duration(seconds: 3));
+    expect(traffic.reads, 2);
+    expect(original, findsNothing);
+    sessions.activate(id);
+    await tester.pumpAndSettle();
+    expect(traffic.reads, 3);
+    expect(original, findsOneWidget);
+    traffic.resumedSample.complete((sent: 2048, received: 2));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('累计 2.0 KB'), findsOneWidget);
+
+    await sessions.closeAll();
+    await tester.pumpAndSettle();
+  });
+
   testWidgets('代理规则自动保存；无效输入不覆盖；关闭有效草稿立即保存', (tester) async {
     final host = _gateway.copyWith(
       proxyConfig: const ProxyConfig(mode: ProxyMode.rule),
@@ -449,6 +495,17 @@ void main() {
       (await controller.findSaved(host.id))!.proxyConfig.rules.single.value,
       'internal.test',
     );
+    final preview = find.byKey(const ValueKey('proxy-test-rules'));
+    final previewTarget = find.byKey(const ValueKey('proxy-preview-target'));
+    await tester.ensureVisible(preview);
+    await tester.tap(preview);
+    await tester.pumpAndSettle();
+    await tester.enterText(previewTarget, 'api.internal.test');
+    await tester.tap(find.byKey(const ValueKey('proxy-preview-evaluate')));
+    await tester.pumpAndSettle();
+    expect(find.text('通过网关 · 命中 域名后缀 · internal.test'), findsOneWidget);
+    Get.back<void>();
+    await tester.pumpAndSettle();
     await tester.enterText(value, 'https://invalid.test');
     await tester.pump(const Duration(milliseconds: 400));
     await tester.pumpAndSettle();
@@ -456,6 +513,9 @@ void main() {
       (await controller.findSaved(host.id))!.proxyConfig.rules.single.value,
       'internal.test',
     );
+    await tester.tap(preview);
+    await tester.pumpAndSettle();
+    expect(previewTarget, findsNothing);
     await tester.enterText(value, 'new.internal.test');
     await sessions.close(id);
     await tester.pumpAndSettle();

@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import '../paga_terminal.dart';
+import 'ui/render.dart';
 
 /// 将拖选起点固定在缓冲区文本上，滚动视口时继续延伸选区。
 class TerminalPane extends StatefulWidget {
@@ -56,7 +57,6 @@ class TerminalPaneState extends State<TerminalPane> {
   Timer? _autoScroll;
   bool _updateScheduled = false;
   bool _reportScheduled = false;
-  final _searchMarks = <TerminalHighlight>[];
   Offset? _hoverAt;
   ({Uri url, TerminalTextMatch range})? _hoveredLink;
   TerminalHighlight? _linkMark;
@@ -64,29 +64,28 @@ class TerminalPaneState extends State<TerminalPane> {
   bool get atBottom =>
       !_scroll.hasClients ||
       !_scroll.position.hasContentDimensions ||
-      _scroll.position.maxScrollExtent - _scroll.position.pixels <= 1;
+      _scroll.position.maxScrollExtent - _scroll.position.pixels <=
+          RenderTerminal.scrollBottomTolerance;
 
   void scrollToBottom() {
-    if (_scroll.hasClients) _scroll.jumpTo(_scroll.position.maxScrollExtent);
+    if (_scroll.hasClients && _scroll.position.hasContentDimensions) {
+      _scroll.jumpTo(_scroll.position.maxScrollExtent);
+    }
   }
 
-  void revealMatch(TerminalTextMatch match, {double topInset = 0}) {
+  void revealMatch(TerminalTextMatch match) {
     if (!match.attached || !_scroll.hasClients) return;
     final render = _viewKey.currentState?.renderTerminal;
     if (render == null) return;
     final position = _scroll.position;
-    final inset = math.min(topInset, position.viewportDimension / 2);
     final top = match.first.index * render.lineHeight;
     final bottom = (match.last.index + 1) * render.lineHeight;
-    if (top >= position.pixels + inset &&
+    if (top >= position.pixels &&
         bottom <= position.pixels + position.viewportDimension) {
       return;
     }
     _scroll.jumpTo(
-      (top - math.max(inset, render.lineHeight * 2)).clamp(
-        0.0,
-        position.maxScrollExtent,
-      ),
+      (top - render.lineHeight * 2).clamp(0.0, position.maxScrollExtent),
     );
   }
 
@@ -95,23 +94,15 @@ class TerminalPaneState extends State<TerminalPane> {
     int selected, {
     required Color matchColor,
     required Color selectedColor,
-  }) {
-    for (final mark in _searchMarks) {
-      mark.dispose();
-    }
-    _searchMarks.clear();
-    for (var i = 0; i < matches.length; i++) {
-      final match = matches[i];
-      if (!match.attached) continue;
-      _searchMarks.add(
-        _selection.highlight(
-          p1: match.first.createAnchor(match.start),
-          p2: match.last.createAnchor(match.end),
-          color: i == selected ? selectedColor : matchColor,
-        ),
-      );
-    }
-  }
+  }) => _selection.setSearchMatches(
+    widget.terminal.buffer,
+    matches,
+    selected,
+    matchColor: matchColor,
+    selectedColor: selectedColor,
+  );
+
+  void selectSearchMatch(int index) => _selection.selectSearchMatch(index);
 
   bool get hasSelection => _selection.selection != null;
 
@@ -123,26 +114,15 @@ class TerminalPaneState extends State<TerminalPane> {
 
   void clearSelection() => _selection.clearSelection();
 
-  void selectAll() {
-    final terminal = widget.terminal;
-    _selection.setSelection(
-      terminal.buffer.createAnchor(
-        0,
-        terminal.buffer.height - terminal.viewHeight,
-      ),
-      terminal.buffer.createAnchor(
-        terminal.viewWidth,
-        terminal.buffer.height - 1,
-      ),
-      mode: SelectionMode.line,
-    );
-  }
+  void selectAll() => _selection.selectAll(widget.terminal.buffer);
 
   @override
   void initState() {
     super.initState();
     _selection = _DragSelectionController(
       extentAtPointer: _extentAtPointer,
+      anchorAt: (offset) =>
+          widget.terminal.buffer.createAnchorFromOffset(offset),
       onDragged: _updateAutoScroll,
     );
     _scroll.addListener(_onScroll);
@@ -184,6 +164,7 @@ class TerminalPaneState extends State<TerminalPane> {
   bool get _canSelect =>
       widget.active &&
       !widget.terminal.isUsingAltBuffer &&
+      widget.terminal.buffer.height > 0 &&
       _viewKey.currentState != null;
 
   void _onPointerDown(PointerDownEvent event) {
@@ -251,7 +232,7 @@ class TerminalPaneState extends State<TerminalPane> {
     _selection.endPointer();
   }
 
-  CellAnchor _extentAtPointer(CellOffset start) {
+  CellOffset _extentAtPointer() {
     final render = _viewKey.currentState!.renderTerminal;
     final local = render.globalToLocal(_pointerPosition!);
     // 鼠标可以拖出视口；只选到当前可见边缘，再由自动滚动延伸。
@@ -259,9 +240,7 @@ class TerminalPaneState extends State<TerminalPane> {
       local.dx.clamp(0, math.max(0, render.size.width - 1)).toDouble(),
       local.dy.clamp(0, math.max(0, render.size.height - 1)).toDouble(),
     );
-    var end = render.getCellOffset(clamped);
-    if (end.x >= start.x) end = CellOffset(end.x + 1, end.y);
-    return widget.terminal.buffer.createAnchorFromOffset(end);
+    return render.getCellOffset(clamped);
   }
 
   void _onScroll() {
@@ -466,10 +445,12 @@ class TerminalPaneState extends State<TerminalPane> {
 class _DragSelectionController extends TerminalController {
   _DragSelectionController({
     required this.extentAtPointer,
+    required this.anchorAt,
     required this.onDragged,
   });
 
-  final CellAnchor Function(CellOffset start) extentAtPointer;
+  final CellOffset Function() extentAtPointer;
+  final CellAnchor Function(CellOffset) anchorAt;
   final VoidCallback onDragged;
   CellAnchor? _start;
   bool _dragging = false;
@@ -504,9 +485,14 @@ class _DragSelectionController extends TerminalController {
   void updateDragSelection() {
     if (!dragging) return;
     final start = _start!;
+    final end = extentAtPointer();
+    final reverse = selectionMode == SelectionMode.block
+        ? end.x < start.x
+        : end.isBefore(start.offset);
+    final currentEnd = reverse ? end : end.trailingEdge;
     super.setSelection(
-      start.line!.createAnchor(start.x),
-      extentAtPointer(start.offset),
+      start.line!.createAnchor(start.x + (reverse ? 1 : 0)),
+      anchorAt(currentEnd),
     );
   }
 }

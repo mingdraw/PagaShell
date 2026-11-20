@@ -33,6 +33,7 @@ class ServerStatusConnection
   Future<void>? _closing;
   bool _closed = false;
   int _generation = 0;
+  final _logConnections = <_DockerLogConnection>{};
 
   Future<SshEngineSession> _getSession() async {
     if (_closed) throw const SshEngineException('连接已取消');
@@ -225,16 +226,25 @@ class ServerStatusConnection
 
   @override
   Future<DockerLogSession> openDockerLogs(DockerResource container) async {
-    final session = await _getSession();
-    if (session is! DockerLogsSource) {
-      throw const SshEngineException('此连接不支持查看容器日志');
-    }
-    final logs = await (session as DockerLogsSource).openDockerLogs(container);
-    if (_closed || !identical(_session, session)) {
-      await logs.close();
+    final connect = _connect;
+    if (_closed || connect == null) {
       throw const SshEngineException('Docker 管理连接已关闭');
     }
-    return logs;
+    // 查询超时会重置采集连接；流式日志拥有自己的 SSH 生命周期。
+    final logs = _DockerLogConnection(_logConnections.remove);
+    _logConnections.add(logs);
+    try {
+      await logs
+          .open(connect, container)
+          .timeout(
+            dockerTimeout,
+            onTimeout: () => throw const SshEngineException('容器日志连接超时，请重试'),
+          );
+      return logs;
+    } on Object {
+      unawaited(logs.close());
+      rethrow;
+    }
   }
 
   @override
@@ -322,7 +332,10 @@ class ServerStatusConnection
     if (_closing case final closing?) return closing;
     _closed = true;
     _connect = null;
-    return _closing = _resetConnection(_generation);
+    return _closing = Future.wait<void>([
+      _resetConnection(_generation),
+      for (final logs in _logConnections.toList()) logs.close(),
+    ]).then((_) {});
   }
 
   static Future<void> _closeSession(SshEngineSession? session) async {
@@ -330,6 +343,63 @@ class ServerStatusConnection
       await session?.close();
     } on Object {
       // 采集连接可能已因远端断开而关闭。
+    }
+  }
+}
+
+class _DockerLogConnection implements DockerLogSession {
+  _DockerLogConnection(this._onClose);
+
+  final void Function(_DockerLogConnection) _onClose;
+  final _cancel = Completer<void>();
+  SshEngineSession? _session;
+  DockerLogSession? _logs;
+  Future<void>? _closing;
+
+  Future<void> open(
+    Future<SshEngineSession> Function(Future<void>) connect,
+    DockerResource container,
+  ) async {
+    final session = await connect(_cancel.future);
+    if (_cancel.isCompleted) {
+      await ServerStatusConnection._closeSession(session);
+      throw const SshEngineException('连接已取消');
+    }
+    _session = session;
+    if (session is! DockerLogsSource) {
+      throw const SshEngineException('此连接不支持查看容器日志');
+    }
+    final logs = await (session as DockerLogsSource).openDockerLogs(container);
+    if (_cancel.isCompleted) {
+      await _closeLogs(logs);
+      throw const SshEngineException('连接已取消');
+    }
+    _logs = logs;
+  }
+
+  @override
+  Stream<String> get output => _logs?.output ?? const Stream.empty();
+
+  @override
+  Future<void> close() {
+    if (_closing case final closing?) return closing;
+    _cancel.complete();
+    _onClose(this);
+    final logs = _logs;
+    final session = _session;
+    _logs = null;
+    _session = null;
+    return _closing = () async {
+      await _closeLogs(logs);
+      await ServerStatusConnection._closeSession(session);
+    }();
+  }
+
+  static Future<void> _closeLogs(DockerLogSession? logs) async {
+    try {
+      await logs?.close();
+    } on Object {
+      // 远端可能已经结束日志通道，仍要释放其独立连接。
     }
   }
 }

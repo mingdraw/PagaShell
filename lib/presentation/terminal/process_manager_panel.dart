@@ -6,6 +6,7 @@ import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import '../../application/session/process_manager_controller.dart';
 import '../../domain/ssh/process_manager.dart';
+import '../components/app_copy_button.dart';
 import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
 import '../localization/app_translations.dart';
@@ -186,57 +187,89 @@ class _ProcessManagerPanelState extends State<ProcessManagerPanel> {
         ),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-          child: Obx(
-            () => Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    '@shown / @total 个进程'.trParams({
-                      'shown': '${controller.visibleProcesses.length}',
-                      'total': '${controller.processes.length}',
-                    }),
-                    key: const ValueKey('process-manager-count'),
-                    style: _secondaryStyle,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                SizedBox(
-                  width: Get.locale?.languageCode == 'en' ? 152 : 136,
-                  child: _sortSelector(controller),
-                ),
-              ],
-            ),
+          child: LayoutBuilder(
+            builder: (_, constraints) => Obx(() {
+              final count = Text(
+                '@shown / @total 个进程'.trParams({
+                  'shown': '${controller.visibleProcesses.length}',
+                  'total': '${controller.processes.length}',
+                }),
+                key: const ValueKey('process-manager-count'),
+                style: _secondaryStyle,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              );
+              final sort = SizedBox(
+                width: Get.locale?.languageCode == 'en' ? 152 : 136,
+                child: _sortSelector(controller),
+              );
+              if (constraints.maxWidth < 256) {
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [count, const SizedBox(height: 5), sort],
+                );
+              }
+              return Row(
+                children: [
+                  Expanded(child: count),
+                  const SizedBox(width: 8),
+                  sort,
+                ],
+              );
+            }),
           ),
         ),
         Expanded(
           child: Obx(() {
             final entries = controller.visibleProcesses;
-            final error =
-                controller.actionError.value ?? controller.error.value;
+            final error = controller.error.value;
+            final actionError = controller.actionError.value;
             final notice = controller.notice.value;
             final terminating = controller.terminating.toSet();
             final loading = controller.loading.value;
             final updated = controller.updatedAt.value;
             return Column(
               children: [
-                if (error != null || notice != null)
+                if (error != null)
                   Padding(
                     padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
                     child: Align(
                       alignment: Alignment.centerLeft,
                       child: Text(
-                        error != null
-                            ? AppTranslations.error(error)
-                            : notice!.tr,
+                        AppTranslations.error(error),
                         key: const ValueKey('process-manager-message'),
                         style: _secondaryStyle.copyWith(
-                          color: error != null
-                              ? StatusColors.failed
-                              : AppTheme.serverStatusCpuColor,
+                          color: StatusColors.failed,
                         ),
                       ),
+                    ),
+                  ),
+                if (actionError != null || notice != null)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(10, 0, 4, 8),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            actionError == null
+                                ? notice!.tr
+                                : AppTranslations.error(actionError),
+                            style: _secondaryStyle.copyWith(
+                              color: actionError == null
+                                  ? AppTheme.serverStatusCpuColor
+                                  : StatusColors.failed,
+                            ),
+                            maxLines: 3,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        AppIconButton(
+                          semanticLabel: '关闭提示'.tr,
+                          tooltip: '关闭提示'.tr,
+                          onPressed: controller.clearActionFeedback,
+                          icon: const AppIcon(AppIcons.x, size: 12),
+                        ),
+                      ],
                     ),
                   ),
                 Expanded(
@@ -413,11 +446,27 @@ class _ProcessManagerPanelState extends State<ProcessManagerPanel> {
               ],
             ),
             const SizedBox(height: 2),
-            Text(
-              'PID ${process.pid} · ${process.user}',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: _secondaryStyle,
+            Row(
+              children: [
+                Flexible(
+                  child: Text(
+                    'PID ${process.pid} · ${process.user}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: _secondaryStyle,
+                  ),
+                ),
+                const SizedBox(width: 3),
+                SizedBox.square(
+                  dimension: 22,
+                  child: AppCopyButton(
+                    key: ValueKey('process-copy-pid-${process.pid}'),
+                    text: '${process.pid}',
+                    size: 12,
+                    semanticLabel: '复制进程 ID'.tr,
+                  ),
+                ),
+              ],
             ),
             const SizedBox(height: 6),
             Row(

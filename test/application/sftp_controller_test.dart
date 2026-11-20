@@ -137,7 +137,7 @@ void main() {
     engine.result = [_file('a'), _file('b'), _file('c')];
     engine.removeFailures['/home/test/b'] = const SshEngineException('没有权限');
     await controller.initialize();
-    await controller.removeMany(List.of(controller.entries));
+    final error = await controller.removeMany(List.of(controller.entries));
     expect(engine.operations, [
       'remove:/home/test/a:false',
       'remove:/home/test/b:false',
@@ -145,7 +145,8 @@ void main() {
     ]);
     expect(controller.entries.map((entry) => entry.name), ['b']);
     expect(engine.requests, ['/home/test', '/home/test']);
-    expect(controller.error.value, '部分文件删除失败，请重试');
+    expect(error, '部分文件删除失败，请重试');
+    expect(controller.error.value, isNull);
   });
 
   test('远程批量删除遇连接失效立即停止，保留未完成条目并允许重连', () async {

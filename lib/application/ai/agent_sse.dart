@@ -210,8 +210,8 @@ class _Decoder {
         }
       }
     }
-    final reason = choice['finish_reason'] as String?;
-    if (reason != null) {
+    if (choice['finish_reason'] case final String reason
+        when reason.isNotEmpty) {
       _finishReason = reason;
       incomplete = reason == 'length' || reason == 'content_filter';
       done = true;

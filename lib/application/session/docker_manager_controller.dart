@@ -59,6 +59,7 @@ class DockerManagerController extends GetxController {
   bool _refreshAgain = false;
   bool _manualRefreshQueued = false;
   bool _automaticRefreshPaused = false;
+  bool _userPaused = false;
   final autoRefreshPaused = false.obs;
   int _failureRevision = 0;
   int _generation = 0;
@@ -85,7 +86,12 @@ class DockerManagerController extends GetxController {
     if (_disposed || selected.value == kind) return;
     selected.value = kind;
     _timer?.cancel();
-    if (_enabled) unawaited(_refreshResources(automatic: true));
+    if (_enabled &&
+        (!_userPaused || states[kind]!.updatedAt.value == null) &&
+        !_automaticRefreshPaused) {
+      // In a paused panel, explicitly opening an unloaded category reads it once.
+      unawaited(_refreshResources(automatic: !_userPaused));
+    }
   }
 
   /// 工具栏手动刷新；只有手动请求成功后才能解除错误造成的暂停。
@@ -93,7 +99,9 @@ class DockerManagerController extends GetxController {
 
   void setAutoRefreshPaused(bool paused) {
     if (_disposed || autoRefreshPaused.value == paused) return;
-    autoRefreshPaused.value = paused;
+    _userPaused = paused;
+    if (!paused) _automaticRefreshPaused = false;
+    _publishPauseState();
     _timer?.cancel();
     if (!paused) unawaited(_refreshResources(automatic: true));
   }
@@ -102,7 +110,7 @@ class DockerManagerController extends GetxController {
     if (_disposed ||
         !_enabled ||
         busy ||
-        (automatic && (_automaticRefreshPaused || autoRefreshPaused.value))) {
+        (automatic && autoRefreshPaused.value)) {
       return;
     }
     if (_inFlight) {
@@ -381,6 +389,7 @@ class DockerManagerController extends GetxController {
 
   void _pauseAutomaticRefresh() {
     _automaticRefreshPaused = true;
+    _publishPauseState();
     _failureRevision++;
     _refreshAgain = false;
     _manualRefreshQueued = false;
@@ -391,14 +400,19 @@ class DockerManagerController extends GetxController {
     if (failureRevision != _failureRevision) return;
     final wasPaused = _automaticRefreshPaused;
     _automaticRefreshPaused = false;
+    _publishPauseState();
     if (wasPaused && !_inFlight) _scheduleRefresh(interval);
+  }
+
+  void _publishPauseState() {
+    autoRefreshPaused.value = _userPaused || _automaticRefreshPaused;
   }
 
   void _scheduleRefresh(Duration delay, {bool automatic = true}) {
     if (_disposed ||
         !_enabled ||
         busy ||
-        (automatic && (_automaticRefreshPaused || autoRefreshPaused.value))) {
+        (automatic && autoRefreshPaused.value)) {
       return;
     }
     _timer?.cancel();

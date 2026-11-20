@@ -118,6 +118,29 @@ void main() {
     expect(await db.select(db.appSettings).get(), hasLength(1));
   });
 
+  test('终端断开行为默认保留窗格，保存的选择重开数据库后恢复', () async {
+    final directory = await Directory.systemTemp.createTemp(
+      'pagashell-terminal-settings-',
+    );
+    addTearDown(() => directory.delete(recursive: true));
+    final file = File('${directory.path}/test.sqlite');
+    final db = AppDatabase.forTesting(NativeDatabase(file));
+    final repository = DriftSettingsRepository(db);
+    try {
+      expect(await repository.readCloseTerminalOnDisconnect(), isFalse);
+      await repository.saveCloseTerminalOnDisconnect(true);
+    } finally {
+      await db.close();
+    }
+
+    final reopened = AppDatabase.forTesting(NativeDatabase(file));
+    addTearDown(reopened.close);
+    final settings = DriftSettingsRepository(reopened);
+    expect(await settings.readCloseTerminalOnDisconnect(), isTrue);
+    await settings.saveCloseTerminalOnDisconnect(false);
+    expect(await settings.readCloseTerminalOnDisconnect(), isFalse);
+  });
+
   test('版本 2 升级保留主机和指纹，主题选择关闭重开后恢复', () async {
     final directory = await Directory.systemTemp.createTemp(
       'pagashell-settings-',

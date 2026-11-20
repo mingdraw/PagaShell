@@ -1,4 +1,3 @@
-import '../../domain/entities/host.dart';
 import '../../domain/repositories/host_repository.dart';
 import '../../domain/ssh/ssh_engine.dart';
 import '../../domain/vault/secret_store.dart';
@@ -21,14 +20,6 @@ class GatewayController extends HostController {
   final SessionController? _sessions;
   final HostRepository _gateways;
   final HostRepository services;
-
-  /// 启动前读取已保存配置，避免树订阅尚未刷新时沿用旧端点。
-  Future<Host?> findSaved(String id) async {
-    for (final gateway in await _gateways.getAll()) {
-      if (gateway.id == id) return gateway;
-    }
-    return null;
-  }
 
   /// 先检查全部网关，避免因后面的网关被引用而提前删除前面的网关。
   @override

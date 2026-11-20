@@ -31,12 +31,14 @@ class _Source implements NetworkPortsSource, ProcessManagerSource {
   Object? failure;
   final failures = <int, Object>{};
   Completer<void>? gate;
+  Completer<void>? lookupGate;
 
   @override
   Future<NetworkPortsSnapshot> readNetworkPorts() async => ports;
   @override
   Future<ProcessSnapshot> readProcesses() async {
     processReads++;
+    await lookupGate?.future;
     return processes;
   }
 
@@ -187,13 +189,22 @@ void main() {
   });
 
   testWidgets('监听端口的 PID 打开所属进程详情，端口转交后拒绝旧入口', (tester) async {
-    final source = _Source();
+    final lookupGate = Completer<void>();
+    final source = _Source()..lookupGate = lookupGate;
     final port = source.ports.ports.last;
     await _mount(tester, source);
     final link = find.byKey(ValueKey('network-port-process-${port.identity}'));
     await tester.ensureVisible(link);
     await tester.tap(link);
+    await tester.pump();
+    final loading = find.byKey(const ValueKey('network-port-process-loading'));
+    expect(loading, findsOneWidget);
+    expect(find.text('进程详情'), findsNothing);
+    await tester.tap(link);
+    expect(source.processReads, 1);
+    lookupGate.complete();
     await tester.pumpAndSettle();
+    expect(loading, findsNothing);
     expect(find.text('进程详情'), findsOneWidget);
     expect(source.detailsRead.single.pid, 42);
     expect(source.terminated, isEmpty);

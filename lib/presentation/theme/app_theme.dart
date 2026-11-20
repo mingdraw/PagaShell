@@ -7,7 +7,7 @@ abstract final class AppTheme {
   static const Color terminalForeground = Color(0xFFCDD2DA);
   static const Color terminalMutedForeground = Color(0xFF8B939F);
   static const Color terminalSearchMatch = Color(0x4460A5FA);
-  static const Color terminalSearchSelected = Color(0x88B45309);
+  static const Color terminalSearchSelected = Color(0xFFE8B93E);
   static const Color terminalSearchOption = Color(0xFF93C5FD);
   static const Color terminalBorder = Color(0xFF24282F);
   static const Color terminalSelectedBorder = Color(0xFF536A80);
@@ -104,10 +104,14 @@ abstract final class AppTheme {
   static const double toolbarIconSize = 15;
   static const double terminalToolbarHeight = 36;
   static const double terminalToolbarButtonSize = 28;
-  static const double terminalPaneCloseSize = 24;
+  static const double terminalPaneControlSize = 24;
+  static const double terminalPaneControlsInset = 4;
+  static const double terminalPaneControlsWidth = terminalPaneControlSize * 3;
   static const double terminalPaneMinWidth = 160;
   static const double terminalDisconnectCompactWidth = 250;
   static const double terminalPaneMinHeight = 100;
+  static const double terminalPaneDividerSize = 1;
+  static const double terminalPaneDividerHitSize = 12;
   static const double terminalSelectionEdgeExtent = 24;
   static const Duration terminalSelectionScrollInterval = Duration(
     milliseconds: 40,
@@ -151,6 +155,10 @@ abstract final class AppTheme {
   static const double sidebarResizeWidth = 5;
   static const double sidebarFooterHeight = 40;
   static const double settingsDialogMaxWidth = 600;
+  static const EdgeInsets settingsTabPadding = EdgeInsets.symmetric(
+    horizontal: 8,
+    vertical: 6,
+  );
   static const double proxyModeCardWidth = 320;
   static const double clashScriptDialogMaxWidth = 840;
   static const double agentMinWidth = 300;

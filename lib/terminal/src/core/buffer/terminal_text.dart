@@ -72,29 +72,121 @@ Future<List<TerminalTextMatch>> searchTerminalText(
   required bool regex,
   required bool caseSensitive,
 }) async {
-  if (query.isEmpty) return const [];
-  final lines = <_LogicalLine>[];
-  final rows = <BufferLine>[];
-  for (var index = 0; index < buffer.height; index++) {
-    final row = buffer.lines[index];
-    if ((!row.isWrapped || rows.length >= 256) && rows.isNotEmpty) {
-      lines.add(_LogicalLine(rows));
-      rows.clear();
-    }
-    rows.add(row);
+  final search = TerminalTextSearch();
+  try {
+    return await search.find(
+      buffer,
+      query,
+      regex: regex,
+      caseSensitive: caseSensitive,
+    );
+  } finally {
+    search.dispose();
   }
-  if (rows.isNotEmpty) lines.add(_LogicalLine(rows));
-  final request = (
-    lines: [for (final line in lines) line.text],
-    query: query,
-    regex: regex,
-    caseSensitive: caseSensitive,
-  );
-  final matches = regex ? await _boundedRegexSearch(request) : _find(request);
-  return [
-    for (final match in matches)
-      ?lines[match.row].range(match.start, match.end),
-  ];
+}
+
+/// Reuses an isolate during a search session. Only immutable text crosses the
+/// isolate boundary; cell coordinates are resolved against still-live rows.
+class TerminalTextSearch {
+  TerminalTextSearch({this.timeout = const Duration(milliseconds: 650)});
+
+  final Duration timeout;
+  final _ports = <ReceivePort>{};
+  Isolate? _worker;
+  Future<SendPort>? _ready;
+  int _generation = 0;
+  bool _disposed = false;
+
+  Future<List<TerminalTextMatch>> find(
+    Buffer buffer,
+    String query, {
+    required bool regex,
+    required bool caseSensitive,
+  }) async {
+    if (_disposed || query.isEmpty) return const [];
+    final generation = _generation;
+    final lines = <_LogicalLine>[];
+    final rows = <BufferLine>[];
+    for (var index = 0; index < buffer.height; index++) {
+      final row = buffer.lines[index];
+      if ((!row.isWrapped || rows.length >= 256) && rows.isNotEmpty) {
+        lines.add(_LogicalLine(rows));
+        rows.clear();
+      }
+      rows.add(row);
+    }
+    if (rows.isNotEmpty) lines.add(_LogicalLine(rows));
+    final request = (
+      lines: [for (final line in lines) line.text],
+      query: query,
+      regex: regex,
+      caseSensitive: caseSensitive,
+    );
+    final replies = _openPort();
+    try {
+      final sendPort = await (_ready ??= _start(generation)).timeout(timeout);
+      if (generation != _generation) return const [];
+      sendPort.send((request, replies.sendPort));
+      final reply = await replies.first.timeout(timeout);
+      if (generation != _generation) return const [];
+      if (reply == null) throw const FormatException();
+      final matches = reply as List<_TextMatch>;
+      return [
+        for (final match in matches)
+          ?lines[match.row].range(match.start, match.end),
+      ];
+    } on Object catch (error) {
+      if (generation != _generation) return const [];
+      // A pathological RegExp cannot be interrupted cooperatively. Replace the
+      // worker after a timeout so subsequent queries can still run.
+      if (error is! FormatException) cancel();
+      rethrow;
+    } finally {
+      _closePort(replies);
+    }
+  }
+
+  ReceivePort _openPort() {
+    final port = ReceivePort();
+    _ports.add(port);
+    return port;
+  }
+
+  void _closePort(ReceivePort port) {
+    if (_ports.remove(port)) port.close();
+  }
+
+  Future<SendPort> _start(int generation) async {
+    final ready = _openPort();
+    try {
+      final worker = await Isolate.spawn(_searchWorker, ready.sendPort);
+      if (_generation != generation) {
+        worker.kill(priority: Isolate.immediate);
+        throw StateError('Terminal search cancelled');
+      }
+      _worker = worker;
+      return (await ready.first) as SendPort;
+    } finally {
+      _closePort(ready);
+    }
+  }
+
+  void cancel() {
+    _generation++;
+    _worker?.kill(priority: Isolate.immediate);
+    _worker = null;
+    _ready = null;
+    final ports = _ports.toList();
+    _ports.clear();
+    for (final port in ports) {
+      port.close();
+    }
+  }
+
+  void dispose() {
+    _disposed = true;
+    cancel();
+  }
 }
 
 List<_TextMatch> _find(_SearchRequest request) {
@@ -118,29 +210,17 @@ List<_TextMatch> _find(_SearchRequest request) {
   return matches.reversed.toList();
 }
 
-Future<List<_TextMatch>> _boundedRegexSearch(_SearchRequest request) async {
-  // Compile before starting the worker to report invalid expressions separately.
-  RegExp(request.query, caseSensitive: request.caseSensitive, unicode: true);
-  final replies = ReceivePort();
-  Isolate? worker;
-  try {
-    worker = await Isolate.spawn(_searchWorker, (
-      request,
-      replies.sendPort,
-    ), onExit: replies.sendPort);
-    final result = await replies.first.timeout(
-      const Duration(milliseconds: 650),
-    );
-    if (result is! List<_TextMatch>) throw const FormatException();
-    return result;
-  } finally {
-    worker?.kill(priority: Isolate.immediate);
-    replies.close();
+Future<void> _searchWorker(SendPort ready) async {
+  final requests = ReceivePort();
+  ready.send(requests.sendPort);
+  await for (final Object? message in requests) {
+    final (request, reply) = message as (_SearchRequest, SendPort);
+    try {
+      reply.send(_find(request));
+    } on FormatException {
+      reply.send(null);
+    }
   }
-}
-
-void _searchWorker((_SearchRequest, SendPort) message) {
-  message.$2.send(_find(message.$1));
 }
 
 final _linkPattern = RegExp(r'https?://[^\s<>"\x27]+', caseSensitive: false);

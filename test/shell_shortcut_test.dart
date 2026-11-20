@@ -5,6 +5,7 @@ import 'package:get/get.dart';
 import 'package:pagashell/app.dart';
 import 'package:pagashell/application/session/session.dart';
 import 'package:pagashell/application/session/session_controller.dart';
+import 'package:pagashell/application/settings/settings_controller.dart';
 import 'package:pagashell/domain/entities/host.dart';
 import 'package:pagashell/presentation/hosts/host_edit_dialog.dart';
 import 'package:pagashell/presentation/navigation/app_navigation.dart';
@@ -22,6 +23,62 @@ void main() {
     TargetPlatform.windows,
     TargetPlatform.linux,
   ]) {
+    testWidgets('$platform 支持循环切换标签和打开并聚焦侧栏搜索', (tester) async {
+      await tester.pumpWidget(
+        PagaShellApp(binding: InMemoryBinding(), platform: platform),
+      );
+      await tester.pumpAndSettle();
+      final sessions = Get.find<SessionController>();
+      sessions.sessions.addAll([_session('first'), _session('second')]);
+      sessions.activate('first');
+      await tester.pumpAndSettle();
+
+      Future<void> press(
+        LogicalKeyboardKey key,
+        List<LogicalKeyboardKey> modifiers,
+      ) async {
+        for (final modifier in modifiers) {
+          await tester.sendKeyDownEvent(modifier);
+        }
+        await tester.sendKeyEvent(key);
+        for (final modifier in modifiers.reversed) {
+          await tester.sendKeyUpEvent(modifier);
+        }
+        await tester.pumpAndSettle();
+      }
+
+      const ctrl = LogicalKeyboardKey.controlLeft;
+      const shift = LogicalKeyboardKey.shiftLeft;
+      const meta = LogicalKeyboardKey.metaLeft;
+      await press(LogicalKeyboardKey.tab, [ctrl]);
+      expect(sessions.activeSessionId.value, 'second');
+      await press(LogicalKeyboardKey.tab, [ctrl]);
+      expect(sessions.activeSessionId.value, 'first');
+      await press(LogicalKeyboardKey.tab, [ctrl, shift]);
+      expect(sessions.activeSessionId.value, 'second');
+      if (platform == TargetPlatform.macOS) {
+        await press(LogicalKeyboardKey.digit1, [meta]);
+        expect(sessions.activeSessionId.value, 'first');
+      }
+      final settings = Get.find<SettingsController>();
+      await settings.setSidebarVisible(false);
+      await tester.pumpAndSettle();
+      await press(
+        LogicalKeyboardKey.keyF,
+        platform == TargetPlatform.macOS
+            ? [meta, shift]
+            : [ctrl, LogicalKeyboardKey.altLeft],
+      );
+      expect(settings.sidebarVisible.value, isTrue);
+      final sidebarInput = tester.widget<EditableText>(
+        find.descendant(
+          of: find.byKey(const ValueKey('sidebar-search')),
+          matching: find.byType(EditableText),
+        ),
+      );
+      expect(sidebarInput.focusNode.hasFocus, isTrue);
+    });
+
     for (final focus in ['工作区', '搜索框', '终端', '页面外焦点']) {
       testWidgets('$platform $focus 快速连接、新建和设置快捷键可用，W 组合键不关标签', (tester) async {
         tester.view.physicalSize = const Size(1280, 800);

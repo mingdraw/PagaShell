@@ -26,7 +26,7 @@ class AgentToggleButton extends StatelessWidget {
   Widget build(BuildContext context) => AppIconButton(
     key: const ValueKey('agent-toggle'),
     semanticLabel: (expanded ? '收起 Agent' : 'AI Agent').tr,
-    tooltip: 'Agent',
+    tooltip: (expanded ? '收起 Agent' : '展开 Agent').tr,
     icon: const AppIcon(AppIcons.bot, size: 16),
     onPressed: () => toggleAgentPanel(),
   );
@@ -208,7 +208,7 @@ class _AgentWorkspaceState extends State<AgentWorkspace> {
             ),
           );
           return AgentSidebarScope(
-            sidebarHiddenForSpace: visible && compact && sidebarVisible,
+            sidebarHiddenForSpace: visible && compact,
             showSidebar: () async {
               await settings.setPanel(visible: false);
               await generalSettings.setSidebarVisible(true);

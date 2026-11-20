@@ -331,6 +331,7 @@ class _ForwardSessionPanelState extends State<ForwardSessionPanel> {
     final session = widget.session;
     final running = session.phase == SessionPhase.ready;
     final stopping = session.phase == SessionPhase.stopping;
+    final connecting = session.phase.isAlive && !running && !stopping;
     final busy = session.phase.isBusy || _starting;
     final editable = !session.phase.isAlive && !_starting;
     final colors = shadcn.Theme.of(context).colorScheme;
@@ -459,14 +460,19 @@ class _ForwardSessionPanelState extends State<ForwardSessionPanel> {
                 onPressed: editable
                     ? () {
                         setState(() => _ports.add(_PortEditors(null)));
-                        _changed();
                       }
                     : null,
                 child: Text('添加映射'.tr),
               ),
+              if (connecting)
+                shadcn.OutlineButton(
+                  key: const ValueKey('forward-cancel-connect'),
+                  onPressed: () => controller.stopForward(session.id),
+                  child: Text('取消连接'.tr),
+                ),
               if (running || stopping)
                 shadcn.OutlineButton(
-                  onPressed: busy
+                  onPressed: stopping
                       ? null
                       : () => controller.stopForward(session.id),
                   child: _ForwardButtonContent(

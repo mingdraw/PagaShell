@@ -41,7 +41,6 @@ class ServerStatusController extends GetxController {
   void setAutoRefreshPaused(bool paused) {
     if (_disposed || autoRefreshPaused.value == paused) return;
     autoRefreshPaused.value = paused;
-    _previous = null;
     _timer?.cancel();
     if (!paused) unawaited(refreshStatus(automatic: true));
   }

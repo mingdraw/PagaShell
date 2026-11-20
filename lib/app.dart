@@ -6,6 +6,7 @@ import 'application/app_binding.dart';
 import 'application/settings/settings_controller.dart';
 import 'domain/entities/app_theme_mode.dart';
 import 'presentation/localization/app_translations.dart';
+import 'presentation/navigation/app_notice.dart';
 import 'presentation/navigation/app_routes.dart';
 import 'presentation/theme/app_theme.dart';
 
@@ -41,10 +42,16 @@ class _PagaShellAppState extends State<PagaShellApp> {
     return Obx(() {
       // 首帧使用已保存的模式，避免启动时先显示系统主题再跳变。
       if (!_settings.isLoaded.value) return const SizedBox.shrink();
+      final languageCode = _settings.languageCode.value;
+      final savedLocale = AppTranslations.supportedLocales
+          .where((locale) => locale.languageCode == languageCode)
+          .firstOrNull;
+      if (savedLocale != null) Get.locale = savedLocale;
       return shadcn.ShadcnApp(
         title: 'PagaShell',
         debugShowCheckedModeBanner: false,
         enableScrollInterception: false,
+        surfaceBuilder: AppNotice.surfaceTheme,
         locale: Get.locale ?? AppTranslations.defaultLocale,
         supportedLocales: AppTranslations.supportedLocales,
         themeMode: switch (_settings.themeMode.value) {

@@ -21,7 +21,7 @@ abstract class BufferRange {
   BufferRange get normalized;
 
   /// Convert this range to segments of single lines.
-  Iterable<BufferSegment> toSegments();
+  Iterable<BufferSegment> toSegments({int? firstLine, int? lastLine});
 
   /// Returns true if the given[position] is within this range.
   bool contains(CellOffset position);

@@ -138,14 +138,23 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('私钥').last);
     await tester.pumpAndSettle();
-    expect(find.widgetWithText(AppTextFormField, '私钥内容'), findsOneWidget);
+    expect(find.text('粘贴私钥'), findsOneWidget);
   }
 
   Future<void> enterKey(WidgetTester tester) async {
-    await tester.enterText(
-      find.widgetWithText(AppTextFormField, '私钥内容'),
-      'test-private-key',
+    final messenger = tester.binding.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+      return call.method == 'Clipboard.getData'
+          ? {'text': 'test-private-key'}
+          : null;
+    });
+    addTearDown(
+      () => messenger.setMockMethodCallHandler(SystemChannels.platform, null),
     );
+    final pasteKey = find.byKey(const ValueKey('paste-private-key'));
+    await tester.ensureVisible(pasteKey);
+    await tester.tap(pasteKey);
+    await tester.pumpAndSettle();
     await tester.enterText(
       find.widgetWithText(AppTextFormField, '私钥口令（可选）'),
       'test-phrase',
@@ -192,13 +201,10 @@ void main() {
       (context) =>
           () => showIdentityEditDialog(context, identity: identity),
     );
-    final keyField = tester.widget<AppTextFormField>(
-      find.widgetWithText(AppTextFormField, '私钥内容'),
-    );
     final phraseField = tester.widget<AppTextFormField>(
       find.widgetWithText(AppTextFormField, '私钥口令（可选）'),
     );
-    expect(keyField.controller.text, isEmpty);
+    expect(find.text('已保存；留空保持原私钥与口令'), findsOneWidget);
     expect(phraseField.controller.text, isEmpty);
     await tester.enterText(
       find.widgetWithText(AppTextFormField, '名称'),
@@ -329,13 +335,21 @@ void main() {
     await tester.tap(find.text('连接'));
     await tester.pumpAndSettle();
     expect(find.text('无法准备连接，请重试'), findsOneWidget);
+    expect(find.byType(AppDialog), findsOneWidget);
+    expect(
+      tester
+          .widget<AppTextFormField>(
+            find.widgetWithText(AppTextFormField, '私钥口令（可选）'),
+          )
+          .controller
+          .text,
+      'test-phrase',
+    );
     expect(find.textContaining('sensitive-database-error'), findsNothing);
     expect(await identities.getAll(), isEmpty);
     expect(await hosts.getAll(), isEmpty);
     expect(engine.calls, isEmpty);
     expect(tester.takeException(), isNull);
-    await tester.pump(const Duration(seconds: 6));
-    await tester.pumpAndSettle();
   });
 
   testWidgets('选择已有私钥凭证使用凭证用户名并持久化绑定', (tester) async {

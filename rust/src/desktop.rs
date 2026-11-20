@@ -499,14 +499,27 @@ fn input_events(
             if text.len() > 8192 {
                 bail!("RDP 文本过长");
             }
-            text.encode_utf16()
-                .flat_map(|c| {
-                    [
+            let mut input = text.encode_utf16().peekable();
+            let mut events = Vec::with_capacity(text.len() * 2);
+            while let Some(c) = input.next() {
+                if c == u16::from(b'\r') && input.peek() == Some(&u16::from(b'\n')) {
+                    input.next();
+                }
+                match c {
+                    0x09 | 0x0a | 0x0d => {
+                        let scan = if c == 0x09 { 0x0f } else { 0x1c };
+                        events.extend([
+                            FastPathInputEvent::KeyboardEvent(KeyboardFlags::empty(), scan),
+                            FastPathInputEvent::KeyboardEvent(KeyboardFlags::RELEASE, scan),
+                        ]);
+                    }
+                    _ => events.extend([
                         FastPathInputEvent::UnicodeKeyboardEvent(KeyboardFlags::empty(), c),
                         FastPathInputEvent::UnicodeKeyboardEvent(KeyboardFlags::RELEASE, c),
-                    ]
-                })
-                .collect()
+                    ]),
+                }
+            }
+            events
         }
         _ => bail!("无效的 RDP 输入"),
     })
@@ -1331,5 +1344,19 @@ mod tests {
             events[1],
             FastPathInputEvent::UnicodeKeyboardEvent(KeyboardFlags::RELEASE, 0x4e2d)
         ));
+    }
+
+    #[test]
+    fn clipboard_text_uses_one_enter_for_crlf_and_tab_scan_codes() {
+        let events = input_events(2, 0, 0, 0, 0, "\r\n\t\n".into()).unwrap();
+        assert_eq!(events.len(), 6);
+        for (i, scan) in [0x1c, 0x0f, 0x1c].into_iter().enumerate() {
+            assert!(matches!(events[2 * i],
+                FastPathInputEvent::KeyboardEvent(flags, code)
+                if flags.is_empty() && code == scan));
+            assert!(matches!(events[2 * i + 1],
+                FastPathInputEvent::KeyboardEvent(KeyboardFlags::RELEASE, code)
+                if code == scan));
+        }
     }
 }

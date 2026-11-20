@@ -12,7 +12,6 @@ import '../../application/session/session.dart';
 import '../../application/session/session_controller.dart';
 import '../../application/settings/settings_controller.dart';
 import '../../application/updates/app_update_controller.dart';
-import '../../domain/entities/sidebar_state.dart';
 import '../../domain/proxy/system_proxy.dart';
 import '../../domain/window/app_window.dart';
 import '../ai/agent_workspace.dart';
@@ -62,6 +61,7 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
   AppUpdateController? _updates;
   late final Future<bool> Function(Future<void> Function()) _updateExit;
   final _shortcutKeys = <PhysicalKeyboardKey>{};
+  final _sidebar = GlobalKey<SidebarStateView>();
   SessionController get _sessions => Get.find<SessionController>();
   late final AppWindow _window = Get.find<AppWindow>();
 
@@ -85,6 +85,7 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
     FocusManager.instance.addEarlyKeyEventHandler(_handleShortcut);
     _window.addListener(this);
     _lifecycle = AppLifecycleListener(
+      onInactive: _shortcutKeys.clear,
       onExitRequested: () async =>
           await _prepareExit() ? AppExitResponse.exit : AppExitResponse.cancel,
     );
@@ -108,8 +109,10 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
     final updates = _updates!;
     final release = await updates.checkOnStartup();
     if (release == null) return;
-    // A startup result should wait for the user's current form or dialog.
-    while (mounted && Get.isDialogOpen == true) {
+    // Delay the prompt until the current form or remote desktop is closed.
+    while (mounted &&
+        !_destroying &&
+        (Get.isDialogOpen == true || _fullscreenId != null)) {
       await Future<void>.delayed(const Duration(milliseconds: 300));
     }
     if (mounted &&
@@ -307,11 +310,14 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
 
   bool get _canRunWorkspaceCommand =>
       mounted &&
+      _fullscreenId == null &&
       Get.isDialogOpen != true &&
       ModalRoute.of(context)?.isCurrent == true;
 
   void _openQuickConnect() {
-    if (_canRunWorkspaceCommand) unawaited(showCommandPalette(context));
+    if (_canRunWorkspaceCommand) {
+      unawaited(showCommandPalette(_sidebar.currentContext ?? context));
+    }
   }
 
   void _newService() {
@@ -329,31 +335,108 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
     if (_canRunWorkspaceCommand) unawaited(showSettingsDialog());
   }
 
-  void _adjustTerminalFontSize(double? delta) {
-    if (!Get.isRegistered<SettingsController>()) return;
-    final settings = Get.find<SettingsController>();
-    final next = delta == null
-        ? SidebarState.defaultTerminalFontSize
-        : (settings.terminalFontSize.value + delta).clamp(
-            SidebarState.minTerminalFontSize,
-            SidebarState.maxTerminalFontSize,
-          );
-    unawaited(settings.setTerminalFontSize(next).catchError((Object _) {}));
+  @override
+  void onWindowBlur() => _shortcutKeys.clear();
+
+  void _cycleTab(int step) {
+    final tabs = _sessions.tabs;
+    if (tabs.isEmpty) return;
+    final current = tabs.indexWhere((tab) => tab.id == _sessions.activeTabId);
+    final index = current < 0
+        ? (step > 0 ? 0 : tabs.length - 1)
+        : (current + step) % tabs.length;
+    _sessions.activateTab(tabs[index].id);
+  }
+
+  void _selectTabAt(int index) {
+    final tabs = _sessions.tabs;
+    if (index < tabs.length) _sessions.activateTab(tabs[index].id);
+  }
+
+  Future<void> _focusSidebarSearch() async {
+    final sidebarContext = _sidebar.currentContext;
+    if (sidebarContext == null) return;
+    final scope = AgentSidebarScope.maybeOf(sidebarContext);
+    try {
+      if (scope?.sidebarHiddenForSpace ?? false) {
+        await scope!.showSidebar();
+      } else {
+        await Get.find<SettingsController>().setSidebarVisible(true);
+      }
+      if (!mounted) return;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_canRunWorkspaceCommand) _sidebar.currentState?.focusSearch();
+      });
+      WidgetsBinding.instance.ensureVisualUpdate();
+    } on Object {
+      if (mounted) AppNotice.error('保存失败，请重试');
+    }
   }
 
   KeyEventResult _handleShortcut(KeyEvent event) {
     // Consume the complete shortcut key sequence, including repeats and key-up,
     // so terminal/RDP input cannot intercept or forward it to the remote host.
-    if (_shortcutKeys.contains(event.physicalKey)) {
+    if (_fullscreenId != null) {
+      _shortcutKeys.clear();
+      return KeyEventResult.ignored;
+    }
+    if (event is KeyDownEvent) {
+      _shortcutKeys.remove(event.physicalKey);
+    }
+    if ((event is KeyRepeatEvent || event is KeyUpEvent) &&
+        _shortcutKeys.contains(event.physicalKey)) {
       if (event is KeyUpEvent) _shortcutKeys.remove(event.physicalKey);
       return KeyEventResult.handled;
     }
-    if (!_canRunWorkspaceCommand ||
-        _fullscreenId != null ||
-        event is! KeyDownEvent) {
+    if (!_canRunWorkspaceCommand || event is! KeyDownEvent) {
       return KeyEventResult.ignored;
     }
     final isMac = shadcn.Theme.of(context).platform == TargetPlatform.macOS;
+    final keyboard = HardwareKeyboard.instance;
+    final key = event.logicalKey;
+    bool matches({
+      bool control = false,
+      bool meta = false,
+      bool alt = false,
+      bool shift = false,
+    }) => SingleActivator(
+      key,
+      control: control,
+      meta: meta,
+      alt: alt,
+      shift: shift,
+      includeRepeats: false,
+    ).accepts(event, keyboard);
+
+    const numberKeys = [
+      LogicalKeyboardKey.digit1,
+      LogicalKeyboardKey.digit2,
+      LogicalKeyboardKey.digit3,
+      LogicalKeyboardKey.digit4,
+      LogicalKeyboardKey.digit5,
+      LogicalKeyboardKey.digit6,
+      LogicalKeyboardKey.digit7,
+      LogicalKeyboardKey.digit8,
+      LogicalKeyboardKey.digit9,
+    ];
+    final number = isMac ? numberKeys.indexOf(key) : -1;
+    if (key == LogicalKeyboardKey.tab &&
+        matches(control: true, shift: keyboard.isShiftPressed)) {
+      _shortcutKeys.add(event.physicalKey);
+      _cycleTab(keyboard.isShiftPressed ? -1 : 1);
+      return KeyEventResult.handled;
+    }
+    if (number >= 0 && matches(meta: true)) {
+      _shortcutKeys.add(event.physicalKey);
+      _selectTabAt(number);
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.keyF &&
+        matches(meta: isMac, shift: isMac, control: !isMac, alt: !isMac)) {
+      _shortcutKeys.add(event.physicalKey);
+      unawaited(_focusSidebarSearch());
+      return KeyEventResult.handled;
+    }
     final bindings = <LogicalKeyboardKey, ({VoidCallback run, bool shift})>{
       LogicalKeyboardKey.keyK: (run: _openQuickConnect, shift: !isMac),
       LogicalKeyboardKey.keyN: (run: _newService, shift: !isMac),
@@ -372,41 +455,6 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
       command.run();
       return KeyEventResult.handled;
     }
-    if (_sessions.activeSession?.kind.isInteractiveTerminal == true &&
-        Get.isRegistered<SettingsController>()) {
-      final keyboard = HardwareKeyboard.instance;
-      final primary = isMac
-          ? keyboard.isMetaPressed &&
-                !keyboard.isControlPressed &&
-                !keyboard.isAltPressed
-          : keyboard.isControlPressed &&
-                !keyboard.isMetaPressed &&
-                !keyboard.isAltPressed;
-      if (primary) {
-        final key = event.logicalKey;
-        if (key == LogicalKeyboardKey.equal ||
-            key == LogicalKeyboardKey.add ||
-            key == LogicalKeyboardKey.numpadAdd) {
-          _shortcutKeys.add(event.physicalKey);
-          _adjustTerminalFontSize(1);
-          return KeyEventResult.handled;
-        }
-        if ((key == LogicalKeyboardKey.minus ||
-                key == LogicalKeyboardKey.numpadSubtract) &&
-            !keyboard.isShiftPressed) {
-          _shortcutKeys.add(event.physicalKey);
-          _adjustTerminalFontSize(-1);
-          return KeyEventResult.handled;
-        }
-        if ((key == LogicalKeyboardKey.digit0 ||
-                key == LogicalKeyboardKey.numpad0) &&
-            !keyboard.isShiftPressed) {
-          _shortcutKeys.add(event.physicalKey);
-          _adjustTerminalFontSize(null);
-          return KeyEventResult.handled;
-        }
-      }
-    }
     return KeyEventResult.ignored;
   }
 
@@ -420,6 +468,12 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
           alt: true,
           includeRepeats: false,
         ): _toggleFullscreen,
+        const SingleActivator(
+          LogicalKeyboardKey.numpadEnter,
+          control: true,
+          alt: true,
+          includeRepeats: false,
+        ): _toggleFullscreen,
       },
       child: Focus(
         autofocus: true,
@@ -429,9 +483,9 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
           enter: _enterFullscreen,
           exit: _exitFullscreen,
           child: shadcn.Scaffold(
-            child: const AgentWorkspace(
-              sidebar: _AnimatedSidebar(),
-              child: Workspace(),
+            child: AgentWorkspace(
+              sidebar: _AnimatedSidebar(sidebarKey: _sidebar),
+              child: const Workspace(),
             ),
           ),
         ),
@@ -442,7 +496,8 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
 
 /// 保持树的挂载和原宽度，只动画可见区域，避免文本在收起过程中反复换行。
 class _AnimatedSidebar extends StatelessWidget {
-  const _AnimatedSidebar();
+  const _AnimatedSidebar({required this.sidebarKey});
+  final GlobalKey<SidebarStateView> sidebarKey;
 
   @override
   Widget build(BuildContext context) {
@@ -475,14 +530,15 @@ class _AnimatedSidebar extends StatelessWidget {
             ),
           ),
         ),
-        child: const _SidebarPanel(),
+        child: _SidebarPanel(sidebarKey: sidebarKey),
       );
     });
   }
 }
 
 class _SidebarPanel extends StatefulWidget {
-  const _SidebarPanel();
+  const _SidebarPanel({required this.sidebarKey});
+  final GlobalKey<SidebarStateView> sidebarKey;
 
   @override
   State<_SidebarPanel> createState() => _SidebarPanelState();
@@ -521,7 +577,7 @@ class _SidebarPanelState extends State<_SidebarPanel> {
                       ],
                     ),
                   ),
-                  const Expanded(child: Sidebar()),
+                  Expanded(child: Sidebar(key: widget.sidebarKey)),
                 ],
               ),
             ),

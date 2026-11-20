@@ -20,14 +20,17 @@ import '../components/app_icon_button.dart';
 import '../components/app_list_row.dart';
 import '../hosts/host_edit_dialog.dart';
 import '../navigation/app_navigation.dart';
+import '../navigation/app_notice.dart';
 import '../settings/settings_dialog.dart';
 import '../theme/app_theme.dart';
+import 'agent_sidebar_scope.dart';
 import 'connect_flow.dart';
 
 /// 命令面板（⌘K / Ctrl+Shift+K）：多词模糊搜服务、切换已打开标签、快捷执行工作区操作。
 Future<void> showCommandPalette(BuildContext context) {
+  final sidebar = AgentSidebarScope.maybeOf(context);
   return AppNavigation.dialog<void>(
-    const _CommandPalette(),
+    _CommandPalette(sidebar: sidebar),
     barrierColor: const Color(0x61000000),
   );
 }
@@ -60,6 +63,11 @@ final class _TabPaletteEntry extends _PaletteEntry {
 
   final SessionTab tab;
   final Session session;
+  bool get isSplit => tab.layout is SessionSplit;
+  String get paneLabel => '窗格 @index/@total'.trParams({
+    'index': '${tab.sessionIds.toList().indexOf(session.id) + 1}',
+    'total': '${tab.sessionIds.length}',
+  });
 
   @override
   _PaletteSection get section => _PaletteSection.tabs;
@@ -94,7 +102,9 @@ final class _ActionPaletteEntry extends _PaletteEntry {
 }
 
 class _CommandPalette extends StatefulWidget {
-  const _CommandPalette();
+  const _CommandPalette({this.sidebar});
+
+  final AgentSidebarScope? sidebar;
 
   @override
   State<_CommandPalette> createState() => _CommandPaletteState();
@@ -102,14 +112,18 @@ class _CommandPalette extends StatefulWidget {
 
 class _CommandPaletteState extends State<_CommandPalette> {
   final _scroll = ScrollController();
+  final _input = TextEditingController();
   String _query = '';
   int _selected = 0;
   bool _keyboardScrolling = false;
   bool _movingUp = false;
+  bool _confirming = false;
+  ({PhysicalKeyboardKey key, bool transfer, bool newSession})? _pendingEnter;
 
   @override
   void dispose() {
     _scroll.dispose();
+    _input.dispose();
     super.dispose();
   }
 
@@ -141,15 +155,27 @@ class _CommandPaletteState extends State<_CommandPalette> {
     return result;
   }
 
-  List<_PaletteEntry> _buildEntries(
-    List<Host> allHosts,
-    Set<String> recentIds,
-    List<SessionTab> tabs,
-    Map<String, Session> sessionsById,
-    Set<String> connectedHostIds,
-    SessionController? sessionController,
-    SettingsController? settingsController,
-  ) {
+  List<_PaletteEntry> _buildEntries(List<Host> allHosts) {
+    final sessionController = Get.isRegistered<SessionController>()
+        ? Get.find<SessionController>()
+        : null;
+    final settingsController = Get.isRegistered<SettingsController>()
+        ? Get.find<SettingsController>()
+        : null;
+    final recentIds = <String>{
+      if (sessionController != null) ...sessionController.recentHostIds,
+      if (settingsController != null)
+        ...settingsController.sidebarState.value.recentHostIds,
+    };
+    final sessions = sessionController?.sessions.toList() ?? const [];
+    final tabs = sessionController?.tabs ?? const [];
+    final sessionsById = {for (final s in sessions) s.id: s};
+    final connectedHostIds = {
+      for (final s in sessions)
+        if (s.phase == SessionPhase.ready &&
+            s.kind != SessionKind.containerTerminal)
+          s.host.id,
+    };
     final tokens = _query
         .trim()
         .toLowerCase()
@@ -163,8 +189,9 @@ class _CommandPaletteState extends State<_CommandPalette> {
     final entries = <_PaletteEntry>[];
 
     for (final host in ordered) {
-      final target = '${host.searchText} ${host.port} ${host.note}'
-          .toLowerCase();
+      final target =
+          '${host.searchText} ${host.port} ${host.note} ${host.serviceType.label}'
+              .toLowerCase();
       if (matches(target)) {
         entries.add(
           _HostPaletteEntry(
@@ -177,14 +204,20 @@ class _CommandPaletteState extends State<_CommandPalette> {
     }
 
     for (final tab in tabs) {
-      final session = sessionsById[tab.selectedSessionId];
-      if (session == null) continue;
-      final tabEntry = _TabPaletteEntry(tab: tab, session: session);
-      final searchTarget =
-          '${session.title} ${session.address} ${tabEntry.kindLabel}'
-              .toLowerCase();
-      if (matches(searchTarget)) {
-        entries.add(tabEntry);
+      for (final id in [
+        tab.selectedSessionId,
+        ...tab.sessionIds.where((id) => id != tab.selectedSessionId),
+      ]) {
+        final session = sessionsById[id];
+        if (session == null) continue;
+        final tabEntry = _TabPaletteEntry(tab: tab, session: session);
+        final searchTarget =
+            '${session.title} ${session.address} '
+            '${tabEntry.kindLabel} ${session.host.serviceType.label}';
+        if (matches(searchTarget.toLowerCase())) {
+          entries.add(tabEntry);
+          if (tokens.isEmpty) break;
+        }
       }
     }
 
@@ -198,11 +231,7 @@ class _CommandPaletteState extends State<_CommandPalette> {
             icon: AppIcons.panelLeftOpen,
             title: '切换侧边栏'.tr,
             keywords: 'sidebar panel left 侧边栏 收起 展开',
-            onRun: (_) => unawaited(
-              settingsController
-                  .setSidebarVisible(!settingsController.sidebarVisible.value)
-                  .catchError((Object _) {}),
-            ),
+            onRun: (_) => unawaited(_toggleSidebar(settingsController)),
           ),
         if (Get.isRegistered<AiSettingsController>())
           _ActionPaletteEntry(
@@ -269,20 +298,36 @@ class _CommandPaletteState extends State<_CommandPalette> {
     return entries;
   }
 
+  Future<void> _toggleSidebar(SettingsController settings) async {
+    try {
+      if (widget.sidebar?.sidebarHiddenForSpace ?? false) {
+        await widget.sidebar!.showSidebar();
+      } else {
+        await settings.setSidebarVisible(!settings.sidebarVisible.value);
+      }
+    } on Object {
+      AppNotice.error('保存失败，请重试');
+    }
+  }
+
   void _confirm(
     List<_PaletteEntry> entries,
     List<Host> allHosts, {
     bool openTransfer = false,
     bool forceNew = false,
   }) {
-    final workspaceContext = Get.context!;
-    AppNavigation.closeDialog<void>();
+    if (_confirming) return;
     if (entries.isEmpty) {
-      if (allHosts.isEmpty) {
-        unawaited(showHostEditDialog(workspaceContext));
+      if (allHosts.isEmpty && _query.trim().isEmpty) {
+        _confirming = true;
+        AppNavigation.closeDialog<void>();
+        unawaited(showHostEditDialog(Get.context!));
       }
       return;
     }
+    final workspaceContext = Get.context!;
+    _confirming = true;
+    AppNavigation.closeDialog<void>();
     final entry = entries[_selected.clamp(0, entries.length - 1)];
     switch (entry) {
       case _HostPaletteEntry(:final host):
@@ -297,9 +342,9 @@ class _CommandPaletteState extends State<_CommandPalette> {
         } else {
           unawaited(connectToHost(workspaceContext, host, forceNew: forceNew));
         }
-      case _TabPaletteEntry(:final tab):
+      case _TabPaletteEntry(:final session):
         if (Get.isRegistered<SessionController>()) {
-          Get.find<SessionController>().activateTab(tab.id);
+          Get.find<SessionController>().activate(session.id);
         }
       case _ActionPaletteEntry(:final onRun):
         onRun(workspaceContext);
@@ -307,13 +352,36 @@ class _CommandPaletteState extends State<_CommandPalette> {
   }
 
   KeyEventResult _onKey(
-    FocusNode node,
     KeyEvent event,
     List<_PaletteEntry> entries,
     List<Host> allHosts,
   ) {
+    final enter =
+        event.logicalKey == LogicalKeyboardKey.enter ||
+        event.logicalKey == LogicalKeyboardKey.numpadEnter;
+    if (enter && event is KeyUpEvent) {
+      final pending = _pendingEnter;
+      if (pending == null || event.physicalKey != pending.key) {
+        return KeyEventResult.ignored;
+      }
+      _pendingEnter = null;
+      if (!event.synthesized && _input.value.composing.isCollapsed) {
+        _confirm(
+          // Text input can change before the next frame rebuilds the rows.
+          _buildEntries(allHosts),
+          allHosts,
+          openTransfer: pending.transfer,
+          forceNew: pending.newSession,
+        );
+      }
+      return KeyEventResult.handled;
+    }
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
       return KeyEventResult.ignored;
+    }
+    if (enter && event is KeyDownEvent) _pendingEnter = null;
+    if (!_input.value.composing.isCollapsed) {
+      return KeyEventResult.skipRemainingHandlers;
     }
     switch (event.logicalKey) {
       case LogicalKeyboardKey.arrowDown:
@@ -328,15 +396,14 @@ class _CommandPaletteState extends State<_CommandPalette> {
         });
         return KeyEventResult.handled;
       case LogicalKeyboardKey.enter:
+      case LogicalKeyboardKey.numpadEnter:
+        if (event is KeyRepeatEvent) return KeyEventResult.handled;
         final keyboard = HardwareKeyboard.instance;
-        final openTransfer =
-            keyboard.isMetaPressed || keyboard.isControlPressed;
-        final forceNew = keyboard.isShiftPressed;
-        _confirm(
-          entries,
-          allHosts,
-          openTransfer: openTransfer,
-          forceNew: forceNew,
+        // Wait for release so repeats cannot reach the newly focused terminal.
+        _pendingEnter = (
+          key: event.physicalKey,
+          transfer: keyboard.isMetaPressed || keyboard.isControlPressed,
+          newSession: keyboard.isShiftPressed,
         );
         return KeyEventResult.handled;
       default:
@@ -348,6 +415,15 @@ class _CommandPaletteState extends State<_CommandPalette> {
     _PaletteSection.hosts => '最近与服务'.tr,
     _PaletteSection.tabs => '已打开标签'.tr,
     _PaletteSection.actions => '工作区操作'.tr,
+  };
+
+  String _shortcutHint(_PaletteEntry entry, bool isMac) => switch (entry) {
+    _HostPaletteEntry(:final host) when host.isDesktop => '回车连接 · ⇧↵ 新建会话',
+    _HostPaletteEntry() =>
+      isMac ? '回车连接 · ⌘↵ 文件传输 · ⇧↵ 新建会话' : '回车连接 · Ctrl+↵ 文件传输 · ⇧↵ 新建会话',
+    _TabPaletteEntry(:final isSplit) => isSplit ? '回车聚焦窗格' : '回车切换标签',
+    _ActionPaletteEntry(id: 'temporary-ssh') => '回车连接',
+    _ActionPaletteEntry() => '回车执行',
   };
 
   @override
@@ -369,35 +445,7 @@ class _CommandPaletteState extends State<_CommandPalette> {
           // 面板不受侧边栏搜索词影响，读取全量列表自行过滤。
           child: Obx(() {
             final allHosts = controller.sorted;
-            final sessionController = Get.isRegistered<SessionController>()
-                ? Get.find<SessionController>()
-                : null;
-            final settingsController = Get.isRegistered<SettingsController>()
-                ? Get.find<SettingsController>()
-                : null;
-            final recentIds = <String>{
-              if (sessionController != null) ...sessionController.recentHostIds,
-              if (settingsController != null)
-                ...settingsController.sidebarState.value.recentHostIds,
-            };
-            final sessions = sessionController?.sessions.toList() ?? const [];
-            final tabs = sessionController?.tabs ?? const [];
-            final sessionsById = {for (final s in sessions) s.id: s};
-            final connectedHostIds = {
-              for (final s in sessions)
-                if (s.phase.isAlive && s.kind != SessionKind.containerTerminal)
-                  s.host.id,
-            };
-            final entries = _buildEntries(
-              allHosts,
-              recentIds,
-              tabs,
-              sessionsById,
-              connectedHostIds,
-              sessionController,
-              settingsController,
-            );
-            final hasHostEntries = entries.any((e) => e is _HostPaletteEntry);
+            final entries = _buildEntries(allHosts);
             final activeIndex = entries.isEmpty
                 ? 0
                 : _selected.clamp(0, entries.length - 1);
@@ -464,8 +512,10 @@ class _CommandPaletteState extends State<_CommandPalette> {
                 children: [
                   Focus(
                     onKeyEvent: (node, event) =>
-                        _onKey(node, event, entries, allHosts),
+                        _onKey(event, entries, allHosts),
                     child: shadcn.TextField(
+                      key: const ValueKey('command-palette-input'),
+                      controller: _input,
                       autofocus: true,
                       onChanged: (v) {
                         if (_scroll.hasClients) _scroll.jumpTo(0);
@@ -493,7 +543,9 @@ class _CommandPaletteState extends State<_CommandPalette> {
                     Padding(
                       padding: const EdgeInsets.all(20),
                       child: Text(
-                        allHosts.isEmpty ? '还没有服务，回车直接新建'.tr : '没有匹配的服务'.tr,
+                        allHosts.isEmpty && _query.trim().isEmpty
+                            ? '还没有服务，回车直接新建'.tr
+                            : '没有匹配的服务'.tr,
                         style: TextStyle(
                           fontSize: 13,
                           color: colors.mutedForeground,
@@ -516,17 +568,14 @@ class _CommandPaletteState extends State<_CommandPalette> {
                         ),
                       ),
                     ),
-                  if (hasHostEntries) ...[
+                  if (entries.isNotEmpty) ...[
                     const shadcn.Divider(),
                     Padding(
                       padding: const EdgeInsets.only(top: 10, bottom: 2),
                       child: Align(
                         alignment: Alignment.centerLeft,
                         child: Text(
-                          (isMac
-                                  ? '回车连接 · ⌘↵ 文件传输 · ⇧↵ 新建会话'
-                                  : '回车连接 · Ctrl+↵ 文件传输 · ⇧↵ 新建会话')
-                              .tr,
+                          _shortcutHint(entries[activeIndex], isMac).tr,
                           key: const ValueKey('command-palette-shortcuts'),
                           style: TextStyle(
                             fontSize: 11,
@@ -681,7 +730,11 @@ class _CommandPaletteState extends State<_CommandPalette> {
           _ => StatusColors.connecting,
         };
         return AppListRow(
-          key: ValueKey('palette-tab-${tab.id}'),
+          key: ValueKey(
+            session.id == tab.selectedSessionId
+                ? 'palette-tab-${tab.id}'
+                : 'palette-pane-${session.id}',
+          ),
           selected: selected,
           contentPadding: AppTheme.commandPaletteItemPadding,
           borderRadius: BorderRadius.circular(
@@ -702,8 +755,8 @@ class _CommandPaletteState extends State<_CommandPalette> {
             color: statusColor,
           ),
           title: Text(
-            tab.sessionIds.length > 1
-                ? '${session.title} · ${tab.sessionIds.length}'
+            entry.isSplit
+                ? '${session.title} · ${entry.paneLabel}'
                 : session.title,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
@@ -719,7 +772,10 @@ class _CommandPaletteState extends State<_CommandPalette> {
             ),
           ),
           trailing: shadcn.OutlineBadge(
-            child: Text('切换标签'.tr, style: const TextStyle(fontSize: 10)),
+            child: Text(
+              (entry.isSplit ? '聚焦窗格' : '切换标签').tr,
+              style: const TextStyle(fontSize: 10),
+            ),
           ),
           onTap: onTap,
         );

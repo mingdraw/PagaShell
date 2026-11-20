@@ -98,6 +98,13 @@ class AppBinding extends Bindings {
       TransferController(),
       permanent: true,
     );
+    final settings = Get.put<SettingsController>(
+      SettingsController(
+        repository: settingsRepository,
+        secretStore: secretStore,
+      ),
+      permanent: true,
+    );
     final sessions = Get.put<SessionController>(
       SessionController(
         engine: sshEngine,
@@ -106,6 +113,8 @@ class AppBinding extends Bindings {
         knownHosts: knownHosts,
         transfers: transfers,
         systemProxy: DesktopSystemProxy(),
+        shouldCloseTerminalOnDisconnect: () =>
+            settings.closeTerminalOnDisconnect.value,
       ),
       permanent: true,
     );
@@ -161,13 +170,6 @@ class AppBinding extends Bindings {
     Get.put<LocalClipboard>(SystemClipboard(), permanent: true);
     Get.put<LocalFileRepository>(
       IoLocalFileRepository(userHomeDirectory: localHomeDirectory),
-      permanent: true,
-    );
-    final settings = Get.put<SettingsController>(
-      SettingsController(
-        repository: settingsRepository,
-        secretStore: secretStore,
-      ),
       permanent: true,
     );
     final proxyResolver = AppProxyResolver(

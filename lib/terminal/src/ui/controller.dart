@@ -1,12 +1,22 @@
 import 'package:flutter/widgets.dart';
 import 'package:pagashell/terminal/src/base/disposable.dart';
+import 'package:pagashell/terminal/src/core/buffer/buffer.dart';
 import 'package:pagashell/terminal/src/core/buffer/cell_offset.dart';
 import 'package:pagashell/terminal/src/core/buffer/line.dart';
 import 'package:pagashell/terminal/src/core/buffer/range.dart';
 import 'package:pagashell/terminal/src/core/buffer/range_block.dart';
 import 'package:pagashell/terminal/src/core/buffer/range_line.dart';
+import 'package:pagashell/terminal/src/core/buffer/terminal_text.dart';
 import 'package:pagashell/terminal/src/ui/pointer_input.dart';
 import 'package:pagashell/terminal/src/ui/selection_mode.dart';
+
+typedef TerminalSearchHighlight = ({
+  TerminalTextMatch match,
+  int index,
+  int version,
+  int? start,
+  int? end,
+});
 
 class TerminalController with ChangeNotifier {
   TerminalController({
@@ -32,6 +42,63 @@ class TerminalController with ChangeNotifier {
 
   List<TerminalHighlight> get highlights => _highlights;
   final _highlights = <TerminalHighlight>[];
+  final _searchByRow =
+      Map<BufferLine, List<TerminalSearchHighlight>>.identity();
+  int _selectedSearchMatch = -1;
+  Color _searchMatchColor = const Color(0x00000000);
+  Color _selectedSearchColor = const Color(0x00000000);
+
+  Iterable<TerminalSearchHighlight> searchHighlightsFor(BufferLine line) =>
+      _searchByRow[line] ?? const [];
+
+  bool isSelectedSearchMatch(int index) => _selectedSearchMatch == index;
+
+  Color searchHighlightColor(int index) =>
+      isSelectedSearchMatch(index) ? _selectedSearchColor : _searchMatchColor;
+
+  /// Index by row identity: log trimming and scrolling do not require a re-sort.
+  /// Links and selection use their own highlights and are left alone.
+  void setSearchMatches(
+    Buffer buffer,
+    List<TerminalTextMatch> matches,
+    int selected, {
+    required Color matchColor,
+    required Color selectedColor,
+  }) {
+    _searchByRow.clear();
+    _selectedSearchMatch = selected;
+    _searchMatchColor = matchColor;
+    _selectedSearchColor = selectedColor;
+    for (var index = 0; index < matches.length; index++) {
+      final match = matches[index];
+      if (!match.attached) continue;
+      final first = match.first.index;
+      final last = match.last.index;
+      if (first > last ||
+          last >= buffer.height ||
+          !identical(buffer.lines[first], match.first) ||
+          !identical(buffer.lines[last], match.last)) {
+        continue;
+      }
+      for (var row = first; row <= last; row++) {
+        final line = buffer.lines[row];
+        (_searchByRow[line] ??= []).add((
+          match: match,
+          index: index,
+          version: line.version,
+          start: row == first ? match.start : null,
+          end: row == last ? match.end : null,
+        ));
+      }
+    }
+    notifyListeners();
+  }
+
+  void selectSearchMatch(int index) {
+    if (_selectedSearchMatch == index) return;
+    _selectedSearchMatch = index;
+    notifyListeners();
+  }
 
   BufferRange? get selection {
     final base = _selectionBase;
@@ -63,6 +130,19 @@ class TerminalController with ChangeNotifier {
     }
 
     notifyListeners();
+  }
+
+  /// 选择当前屏幕及其可用的回滚记录。
+  void selectAll(Buffer buffer) {
+    if (buffer.height == 0) {
+      clearSelection();
+      return;
+    }
+    setSelection(
+      buffer.createAnchor(0, 0),
+      buffer.createAnchor(buffer.viewWidth, buffer.height - 1),
+      mode: SelectionMode.line,
+    );
   }
 
   BufferRange _createRange(CellOffset begin, CellOffset end) {
@@ -153,6 +233,7 @@ class TerminalController with ChangeNotifier {
     _selectionBase = null;
     _selectionExtent?.dispose();
     _selectionExtent = null;
+    _searchByRow.clear();
     for (final highlight in List<TerminalHighlight>.of(_highlights)) {
       highlight.dispose();
     }

@@ -60,41 +60,41 @@ class LocalFileController extends GetxController {
     }
   }
 
-  Future<void> rename(LocalFileEntry entry, String newName) =>
+  Future<String?> rename(LocalFileEntry entry, String newName) =>
       _run(() => files.rename(entry.path, newName, isDir: entry.isDir));
 
-  Future<void> remove(LocalFileEntry entry) =>
+  Future<String?> remove(LocalFileEntry entry) =>
       _run(() => files.remove(entry.path, isDir: entry.isDir));
 
   /// 同一目录批量删除，完成后只刷新一次；失败项仍保留在列表中。
-  Future<void> removeMany(List<LocalFileEntry> selected) async {
-    if (_disposed || selected.isEmpty) return;
+  Future<String?> removeMany(List<LocalFileEntry> selected) async {
+    if (_disposed || selected.isEmpty) return null;
     final directory = cwd.value;
     final revision = navigationRevision;
     bool current() =>
         !_disposed && revision == navigationRevision && cwd.value == directory;
     var failed = false;
     for (final entry in List<LocalFileEntry>.of(selected)) {
-      if (!current()) return;
+      if (!current()) return null;
       try {
         await files.remove(entry.path, isDir: entry.isDir);
       } on Object {
         failed = true;
       }
     }
-    if (!current()) return;
+    if (!current()) return null;
     await refreshDirectory();
     if (!_disposed &&
         navigationRevision == revision + 1 &&
         cwd.value == directory &&
-        error.value == null &&
         failed) {
-      error.value = '部分文件删除失败，请重试';
+      return '部分文件删除失败，请重试';
     }
+    return null;
   }
 
-  Future<void> _run(Future<void> Function() action) async {
-    if (_disposed) return;
+  Future<String?> _run(Future<void> Function() action) async {
+    if (_disposed) return null;
     final directory = cwd.value;
     final revision = navigationRevision;
     try {
@@ -108,11 +108,10 @@ class LocalFileController extends GetxController {
       if (!_disposed &&
           revision == navigationRevision &&
           directory == cwd.value) {
-        error.value = e is LocalFileTargetExists
-            ? '目标位置已存在同名文件或目录'
-            : '本地文件操作失败，请重试';
+        return e is LocalFileTargetExists ? '目标位置已存在同名文件或目录' : '本地文件操作失败，请重试';
       }
     }
+    return null;
   }
 
   Future<void> navigate(String path) async {

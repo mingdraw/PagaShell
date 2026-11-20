@@ -142,7 +142,7 @@ void main() {
     controller.setEnabled(false);
   });
 
-  testWidgets('成功发送 TERM 后刷新，关闭的面板不能再发结束请求', (tester) async {
+  testWidgets('暂停时成功发送 TERM 后仍执行排队刷新，操作提示按时清除', (tester) async {
     final source = _Source();
     final controller = ProcessManagerController(source: source);
     addTearDown(controller.onClose);
@@ -150,14 +150,24 @@ void main() {
     source.reads.first.complete(processSnapshot());
     await tester.pump();
     final process = controller.processes.first.process;
+    await tester.pump(const Duration(seconds: 3));
+    expect(source.reads, hasLength(2));
+    controller.setAutoRefreshPaused(true);
     final pending = controller.terminate(process);
     await tester.pump();
     expect(source.reads, hasLength(2));
+    source.reads.last.complete(processSnapshot(time: 1003));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 1));
+    expect(source.reads, hasLength(3));
     source.reads.last.complete(processSnapshot(time: 1003, processes: []));
     await tester.pump();
     expect(await pending, true);
     expect(controller.notice.value, '已发送结束请求');
     expect(controller.processes, isEmpty);
+    await tester.pump(const Duration(seconds: 8));
+    expect(controller.notice.value, isNull);
+    expect(source.reads, hasLength(3));
     controller.setEnabled(false);
     expect(await controller.terminate(process), false);
     expect(source.terminations, hasLength(1));

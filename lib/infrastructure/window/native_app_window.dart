@@ -57,8 +57,11 @@ class NativeAppWindow implements AppWindow {
         _setFullScreenState(true);
       case WindowExitedFullScreenEvent():
         _setFullScreenState(false);
-      case WindowFocusedEvent():
       case WindowBlurredEvent():
+        for (final listener in _listeners.toList()) {
+          if (_listeners.contains(listener)) listener.onWindowBlur();
+        }
+      case WindowFocusedEvent():
       case WindowMinimizedEvent():
       case WindowMaximizedEvent():
       case WindowRestoredEvent():

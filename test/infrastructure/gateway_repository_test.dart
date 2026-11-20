@@ -121,6 +121,30 @@ void main() {
     );
   });
 
+  test('旧入口误保存时不能把 Page 网关覆盖为服务', () async {
+    final db = AppDatabase.forTesting(NativeDatabase.memory());
+    addTearDown(db.close);
+    final gateways = DriftHostRepository(db, gateways: true);
+    final services = DriftHostRepository(db);
+    final original = gateway.copyWith(
+      gatewayType: GatewayType.page,
+      pageClientId: 'site-a',
+      pageServerFingerprint: 'a' * 64,
+    );
+    await gateways.upsert(original);
+    await services.upsert(service);
+    await expectLater(services.upsert(gateway), throwsStateError);
+    await expectLater(
+      gateways.upsert(service.copyWith(gatewayId: null)),
+      throwsStateError,
+    );
+    final saved = (await gateways.getAll()).single;
+    expect(saved.gatewayType, GatewayType.page);
+    expect(saved.pageClientId, original.pageClientId);
+    expect(saved.pageServerFingerprint, original.pageServerFingerprint);
+    expect((await services.getAll()).single.gatewayId, saved.id);
+  });
+
   test('版本 4 升级保留服务、目录和凭证绑定，旧服务默认直连', () async {
     final dir = await Directory.systemTemp.createTemp(
       'pagashell-gateway-migration-',

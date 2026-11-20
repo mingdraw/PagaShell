@@ -8,6 +8,7 @@ class AppSelectOption<T> {
 }
 
 /// shadcn Select 与 Flutter 核心 Form 校验互通。
+/// 父组件通过 initialValue 提供当前已接受的值。
 class AppSelectField<T> extends FormField<T> {
   AppSelectField({
     required String label,
@@ -20,6 +21,7 @@ class AppSelectField<T> extends FormField<T> {
     super.validator,
     super.key,
   }) : super(
+         enabled: onChanged != null,
          builder: (state) {
            final colors = shadcn.Theme.of(state.context).colorScheme;
            final labelText = Text(
@@ -48,15 +50,19 @@ class AppSelectField<T> extends FormField<T> {
                    canUnselect: canUnselect,
                    enabled: onChanged != null,
                    placeholder: Text(label),
-                   itemBuilder: (_, value) => items
-                       .firstWhere(
-                         (item) => item.value == value,
-                         orElse: () => AppSelectOption(
-                           value: value,
-                           child: Text('$value'),
-                         ),
-                       )
-                       .child,
+                   itemBuilder: (_, value) => DefaultTextStyle.merge(
+                     maxLines: 1,
+                     overflow: TextOverflow.ellipsis,
+                     child: items
+                         .firstWhere(
+                           (item) => item.value == value,
+                           orElse: () => AppSelectOption(
+                             value: value,
+                             child: Text('$value'),
+                           ),
+                         )
+                         .child,
+                   ),
                    popup:
                        popupBuilder ??
                        shadcn.SelectPopup<T>(
@@ -65,14 +71,18 @@ class AppSelectField<T> extends FormField<T> {
                              for (final item in items)
                                shadcn.SelectItemButton<T>(
                                  value: item.value,
-                                 child: item.child,
+                                 child: DefaultTextStyle.merge(
+                                   maxLines: 2,
+                                   overflow: TextOverflow.ellipsis,
+                                   child: item.child,
+                                 ),
                                ),
                            ],
                          ),
                        ).call,
                    onChanged: (value) {
-                     state.didChange(value);
                      onChanged?.call(value);
+                     if (state.mounted) state.didChange(state.value);
                    },
                  ),
                ),
@@ -89,12 +99,14 @@ class AppSelectField<T> extends FormField<T> {
              return Row(
                crossAxisAlignment: CrossAxisAlignment.start,
                children: [
-                 Padding(
-                   padding: const EdgeInsets.only(top: 8),
-                   child: labelText,
+                 Flexible(
+                   child: Padding(
+                     padding: const EdgeInsets.only(top: 8),
+                     child: labelText,
+                   ),
                  ),
                  const SizedBox(width: 12),
-                 Expanded(child: input),
+                 Expanded(flex: 2, child: input),
                ],
              );
            }

@@ -17,6 +17,7 @@ class AppRadioCardOption<T> {
 }
 
 /// 等宽的 shadcn Radio Card 选项，与 Flutter 核心 Form 校验互通。
+/// 父组件通过 initialValue 提供当前已接受的值。
 class AppRadioCardField<T> extends FormField<T> {
   AppRadioCardField({
     required String label,
@@ -45,8 +46,8 @@ class AppRadioCardField<T> extends FormField<T> {
                onChanged: onChanged == null
                    ? null
                    : (value) {
-                       state.didChange(value);
                        onChanged(value);
+                       if (state.mounted) state.didChange(state.value);
                      },
                child: Row(
                  children: [
@@ -78,7 +79,13 @@ class AppRadioCardField<T> extends FormField<T> {
                                      ),
                                      const SizedBox(width: 6),
                                    ],
-                                   items[i].child,
+                                   Flexible(
+                                     child: DefaultTextStyle.merge(
+                                       maxLines: 2,
+                                       overflow: TextOverflow.ellipsis,
+                                       child: items[i].child,
+                                     ),
+                                   ),
                                  ],
                                ),
                              ),

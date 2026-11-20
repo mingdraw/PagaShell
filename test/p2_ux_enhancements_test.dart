@@ -200,6 +200,53 @@ void main() {
     expect(tags.data, 'infra');
   });
 
+  testWidgets('侧栏按协议搜索时只匹配服务或网关的实际协议', (tester) async {
+    viewport(tester);
+    await tester.pumpWidget(
+      PagaShellApp(binding: InMemoryBinding(), platform: TargetPlatform.macOS),
+    );
+    await tester.pumpAndSettle();
+    await Get.find<HostController>().save(
+      const Host(id: 'a', name: 'Linux box', hostname: 'a.test'),
+    );
+    await Get.find<HostController>().save(
+      const Host(
+        id: 'b',
+        name: 'Windows box',
+        hostname: 'b.test',
+        serviceType: ServiceType.rdp,
+      ),
+    );
+    await Get.find<HostController>().save(
+      const Host(
+        id: 'c',
+        name: 'Screen share',
+        hostname: 'c.test',
+        serviceType: ServiceType.vnc,
+      ),
+    );
+    await Get.find<GatewayController>().save(
+      const Host(id: 'd', name: 'Bastion', hostname: 'd.test'),
+    );
+    await Get.find<GatewayController>().save(
+      const Host(
+        id: 'e',
+        name: 'Site relay',
+        hostname: 'e.test',
+        gatewayType: GatewayType.page,
+      ),
+    );
+    await tester.pumpAndSettle();
+    final search = find.byKey(const ValueKey('sidebar-search'));
+    await tester.enterText(search, 'ssh');
+    await tester.pumpAndSettle();
+    expect(find.text('Linux box'), findsOneWidget);
+    expect(find.text('Bastion'), findsOneWidget);
+    expect(find.text('Windows box'), findsNothing);
+    expect(find.text('Screen share'), findsNothing);
+    expect(find.text('Site relay'), findsNothing);
+  });
+
   testWidgets('终端查找导航到历史匹配，新输出提示可回到底部', (tester) async {
     final terminal = Terminal();
     addTearDown(terminal.dispose);
@@ -221,14 +268,53 @@ void main() {
     await tester.sendKeyEvent(LogicalKeyboardKey.keyF);
     await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
     await tester.pumpAndSettle();
-    await tester.enterText(
-      find.byKey(const ValueKey('terminal-find-input')),
-      'alpha',
-    );
+    final search = find.byKey(const ValueKey('terminal-find-input'));
+    expect(find.text('0/0'), findsNothing);
+    await tester.enterText(search, 'alpha');
     await tester.pump(const Duration(milliseconds: 170));
+    for (var i = 0; i < 50 && find.text('2/2').evaluate().isEmpty; i++) {
+      // The search worker runs outside the widget test clock.
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 20)),
+      );
+      await tester.pump();
+    }
     await tester.pumpAndSettle();
     expect(find.text('2/2'), findsOneWidget);
-    await tester.tap(findAppIconButton('上一个匹配'));
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyF);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+    final editor = tester.widget<EditableText>(
+      find.descendant(of: search, matching: find.byType(EditableText)),
+    );
+    expect(
+      editor.controller.selection,
+      const TextSelection(baseOffset: 0, extentOffset: 5),
+    );
+    const composing = TextEditingValue(
+      text: 'alpha',
+      selection: TextSelection.collapsed(offset: 5),
+      composing: TextRange(start: 0, end: 5),
+    );
+    tester.testTextInput.updateEditingValue(composing);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pumpAndSettle();
+    expect(search, findsOneWidget);
+    expect(editor.focusNode.hasFocus, isTrue);
+    expect(editor.controller.value, composing);
+    tester.testTextInput.updateEditingValue(
+      composing.copyWith(composing: TextRange.empty),
+    );
+    await tester.pump(const Duration(milliseconds: 170));
+    for (var i = 0; i < 50 && find.text('2/2').evaluate().isEmpty; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 20)),
+      );
+      await tester.pump();
+    }
+    expect(find.text('2/2'), findsOneWidget);
+    await tester.sendKeyEvent(LogicalKeyboardKey.numpadEnter);
     await tester.pumpAndSettle();
     expect(find.text('1/2'), findsOneWidget);
     expect(position.pixels, lessThan(position.maxScrollExtent));
@@ -238,6 +324,10 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('terminal-scroll-bottom')));
     await tester.pumpAndSettle();
     expect(position.pixels, position.maxScrollExtent);
+    expect(focus.hasPrimaryFocus, isTrue);
+    terminal.showAlternateScreen();
+    await tester.pump();
+    expect(find.text('1/2'), findsNothing);
     await tester.pumpWidget(const SizedBox.shrink());
   });
 

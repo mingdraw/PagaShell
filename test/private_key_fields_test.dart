@@ -1,10 +1,9 @@
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:file_selector/file_selector.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:pagashell/presentation/components/app_text_form_field.dart';
 import 'package:pagashell/presentation/ssh/private_key_fields.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
@@ -83,13 +82,27 @@ void main() {
     await tester.pumpAndSettle();
     expect(privateKey.text, 'test-private-key');
     expect(find.text('已导入：id_test'), findsOneWidget);
-    final field = tester.widget<shadcn.TextField>(
-      find.descendant(
-        of: find.widgetWithText(AppTextFormField, '私钥内容'),
-        matching: find.byType(shadcn.TextField),
-      ),
+    expect(find.textContaining('test-private-key'), findsNothing);
+    expect(form.currentState!.validate(), isTrue);
+  });
+
+  testWidgets('粘贴私钥时保留 CRLF 和 LF，界面不展示密钥内容', (tester) async {
+    const fixture =
+        '-----BEGIN OPENSSH PRIVATE KEY-----\r\n'
+        'fixture-only\n-----END OPENSSH PRIVATE KEY-----\r\n';
+    final messenger = tester.binding.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+      return call.method == 'Clipboard.getData' ? {'text': fixture} : null;
+    });
+    addTearDown(
+      () => messenger.setMockMethodCallHandler(SystemChannels.platform, null),
     );
-    expect(field.obscureText, isTrue);
+    await mount(tester);
+    await tester.tap(find.text('粘贴私钥'));
+    await tester.pumpAndSettle();
+    expect(privateKey.text, fixture);
+    expect(find.textContaining('fixture-only'), findsNothing);
+    expect(find.text('已载入私钥，内容已隐藏'), findsOneWidget);
     expect(form.currentState!.validate(), isTrue);
   });
 

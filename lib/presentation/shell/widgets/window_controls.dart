@@ -111,7 +111,7 @@ class WindowDragArea extends StatelessWidget {
   }
 }
 
-/// Tab Pane 的空白区域支持拖窗与 macOS 双击缩放，交互控件在手势竞争前被排除。
+/// Tab Pane 的空白区域支持拖窗及双击缩放，交互控件在手势竞争前被排除。
 class WindowDragRegion extends StatelessWidget {
   const WindowDragRegion({
     required this.height,
@@ -154,17 +154,16 @@ class WindowDragRegion extends StatelessWidget {
               recognizer.onStart = (_) => unawaited(_startWindowDrag(context));
             },
           ),
-      if (shadcn.Theme.of(context).platform == TargetPlatform.macOS)
-        _WindowDoubleTapGestureRecognizer:
-            GestureRecognizerFactoryWithHandlers<
-              _WindowDoubleTapGestureRecognizer
-            >(() => _WindowDoubleTapGestureRecognizer(debugOwner: this), (
-              recognizer,
-            ) {
-              recognizer.acceptsPointer = (event) =>
-                  _acceptsPointer(context, event);
-              recognizer.onDoubleTap = _toggleWindowMaximize;
-            }),
+      _WindowDoubleTapGestureRecognizer:
+          GestureRecognizerFactoryWithHandlers<
+            _WindowDoubleTapGestureRecognizer
+          >(() => _WindowDoubleTapGestureRecognizer(debugOwner: this), (
+            recognizer,
+          ) {
+            recognizer.acceptsPointer = (event) =>
+                _acceptsPointer(context, event);
+            recognizer.onDoubleTap = _toggleWindowMaximize;
+          }),
     },
     child: child,
   );
@@ -273,6 +272,7 @@ class _CaptionButton extends StatelessWidget {
     button: true,
     child: AppSurfaceAction(
       hoverColor: hoverColor,
+      hoverIconColor: hoverColor == null ? null : const Color(0xFFFFFFFF),
       onTap: onPressed,
       child: SizedBox(
         width: AppTheme.windowButtonWidth,

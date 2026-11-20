@@ -1,7 +1,8 @@
+import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:file_selector/file_selector.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
@@ -13,7 +14,7 @@ import '../components/export_file.dart';
 import '../navigation/app_notice.dart';
 import '../theme/app_theme.dart';
 
-/// 新私钥仅保留在表单控制器中；导入时不复制文件、不显示内容。
+/// 从文件或剪贴板原样载入私钥；只在表单控制器中保存内容。
 class PrivateKeyFields extends StatefulWidget {
   const PrivateKeyFields({
     required this.privateKey,
@@ -42,14 +43,53 @@ class PrivateKeyFields extends StatefulWidget {
 
 class _PrivateKeyFieldsState extends State<PrivateKeyFields> {
   static const _maxBytes = 1024 * 1024;
+  final _keyField = GlobalKey<FormFieldState<void>>();
   bool _importing = false;
+  bool _pasting = false;
   bool _exporting = false;
   bool _obscurePassphrase = true;
   String? _filename;
   String? _error;
 
+  bool get _enabled =>
+      widget.enabled && !_importing && !_pasting && !_exporting;
+
+  void _replaceKey(String contents, {String? filename}) {
+    widget.privateKey.text = contents;
+    setState(() {
+      _filename = filename;
+      _error = null;
+    });
+    if (_keyField.currentState?.hasError ?? false) {
+      _keyField.currentState!.validate();
+    }
+  }
+
+  Future<void> _paste() async {
+    if (!_enabled) return;
+    setState(() {
+      _pasting = true;
+      _error = null;
+    });
+    try {
+      final contents = (await Clipboard.getData(Clipboard.kTextPlain))?.text;
+      if (!mounted) return;
+      if (contents == null || contents.trim().isEmpty) {
+        setState(() => _error = '剪贴板中没有可粘贴的私钥文本');
+      } else if (utf8.encode(contents).length > _maxBytes) {
+        setState(() => _error = '私钥内容不能超过 1 MiB');
+      } else {
+        _replaceKey(contents);
+      }
+    } on Object {
+      if (mounted) setState(() => _error = '无法读取剪贴板文本');
+    } finally {
+      if (mounted) setState(() => _pasting = false);
+    }
+  }
+
   Future<void> _import() async {
-    if (_importing) return;
+    if (!_enabled) return;
     setState(() {
       _importing = true;
       _error = null;
@@ -67,8 +107,7 @@ class _PrivateKeyFieldsState extends State<PrivateKeyFields> {
         setState(() => _error = '私钥文件不能超过 1 MiB');
         return;
       }
-      widget.privateKey.text = contents;
-      setState(() => _filename = file.name);
+      _replaceKey(contents, filename: file.name);
     } on Object {
       if (mounted) setState(() => _error = '无法读取私钥，请选择 OpenSSH、PEM 或 PPK 文本文件');
     } finally {
@@ -77,7 +116,7 @@ class _PrivateKeyFieldsState extends State<PrivateKeyFields> {
   }
 
   Future<void> _export() async {
-    if (_exporting || _importing) return;
+    if (!_enabled) return;
     setState(() {
       _exporting = true;
       _error = null;
@@ -115,65 +154,113 @@ class _PrivateKeyFieldsState extends State<PrivateKeyFields> {
 
   @override
   Widget build(BuildContext context) {
-    final enabled = widget.enabled && !_importing && !_exporting;
+    final enabled = _enabled;
+    final colors = shadcn.Theme.of(context).colorScheme;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        ListenableBuilder(
-          listenable: widget.privateKey,
-          builder: (context, _) => Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              shadcn.OutlineButton(
-                onPressed: enabled ? _import : null,
-                leading: const AppIcon(AppIcons.fileImport, size: 16),
-                child: Text(_importing ? '读取中…'.tr : '导入私钥文件'.tr),
-              ),
-              shadcn.OutlineButton(
-                key: const ValueKey('export-private-key'),
-                onPressed:
-                    enabled &&
-                        (widget.loadPrivateKey != null ||
-                            widget.privateKey.text.trim().isNotEmpty)
-                    ? _export
-                    : null,
-                leading: const AppIcon(AppIcons.fileExport, size: 16),
-                child: Text(_exporting ? '导出中…'.tr : '导出私钥文件'.tr),
-              ),
-            ],
-          ),
-        ),
-        if (_filename != null)
-          Text(
-            '已导入：@filename'.trParams({'filename': _filename!}),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-        const SizedBox(height: 8),
-        AppTextFormField(
-          controller: widget.privateKey,
-          enabled: enabled,
-          obscureText: true,
-          enableSuggestions: false,
-          autocorrect: false,
-          decoration: AppInputDecoration(
-            labelText: '私钥内容'.tr,
-            hintText: widget.preserveExisting
-                ? '已保存；留空保持原私钥与口令'.tr
-                : '导入文件或粘贴私钥'.tr,
-            helperText: 'OpenSSH / PEM / PPK，最多 1 MiB'.tr,
-          ),
-          validator: (value) {
-            if ((value == null || value.trim().isEmpty) &&
-                !widget.preserveExisting) {
+        FormField<void>(
+          key: _keyField,
+          validator: (_) {
+            final value = widget.privateKey.text;
+            if (value.trim().isEmpty && !widget.preserveExisting) {
               return '请导入或粘贴私钥'.tr;
             }
-            if (utf8.encode(value ?? '').length > _maxBytes) {
+            if (utf8.encode(value).length > _maxBytes) {
               return '私钥内容不能超过 1 MiB'.tr;
             }
             return null;
           },
+          builder: (field) => ListenableBuilder(
+            listenable: widget.privateKey,
+            builder: (context, _) {
+              final hasKey = widget.privateKey.text.trim().isNotEmpty;
+              final filename = _filename;
+              final description = filename != null
+                  ? '已导入：@filename'.trParams({'filename': filename})
+                  : hasKey
+                  ? '已载入私钥，内容已隐藏'.tr
+                  : widget.preserveExisting
+                  ? '已保存；留空保持原私钥与口令'.tr
+                  : '导入文件或粘贴私钥'.tr;
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '私钥内容'.tr,
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    description,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 8),
+                  CallbackShortcuts(
+                    bindings: {
+                      const SingleActivator(
+                        LogicalKeyboardKey.keyV,
+                        meta: true,
+                        includeRepeats: false,
+                      ): () =>
+                          unawaited(_paste()),
+                      const SingleActivator(
+                        LogicalKeyboardKey.keyV,
+                        control: true,
+                        includeRepeats: false,
+                      ): () =>
+                          unawaited(_paste()),
+                    },
+                    child: Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        shadcn.OutlineButton(
+                          onPressed: enabled ? _import : null,
+                          leading: const AppIcon(AppIcons.fileImport, size: 16),
+                          child: Text(_importing ? '读取中…'.tr : '导入私钥文件'.tr),
+                        ),
+                        shadcn.OutlineButton(
+                          key: const ValueKey('paste-private-key'),
+                          onPressed: enabled ? _paste : null,
+                          child: Text('粘贴私钥'.tr),
+                        ),
+                        shadcn.OutlineButton(
+                          key: const ValueKey('export-private-key'),
+                          onPressed:
+                              enabled &&
+                                  (widget.loadPrivateKey != null || hasKey)
+                              ? _export
+                              : null,
+                          leading: const AppIcon(AppIcons.fileExport, size: 16),
+                          child: Text(_exporting ? '导出中…'.tr : '导出私钥文件'.tr),
+                        ),
+                        if (hasKey)
+                          shadcn.GhostButton(
+                            onPressed: enabled ? () => _replaceKey('') : null,
+                            child: Text('清空私钥'.tr),
+                          ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    field.errorText ?? 'OpenSSH / PEM / PPK，最多 1 MiB'.tr,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: field.hasError
+                          ? colors.destructive
+                          : colors.mutedForeground,
+                    ),
+                  ),
+                ],
+              );
+            },
+          ),
         ),
         const SizedBox(height: 12),
         AppTextFormField(
@@ -182,6 +269,7 @@ class _PrivateKeyFieldsState extends State<PrivateKeyFields> {
           obscureText: _obscurePassphrase,
           enableSuggestions: false,
           autocorrect: false,
+          smartPunctuation: false,
           decoration: AppInputDecoration(
             labelText: '私钥口令（可选）'.tr,
             hintText: '导入加密私钥时填写，未加密则留空'.tr,

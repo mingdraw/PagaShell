@@ -1,22 +1,34 @@
 part of 'agent_controller.dart';
 
+typedef _AgentSessionReferences = ({
+  List<Session> targets,
+  Map<String, String> labels,
+});
+
 class _AgentQueuedRequest {
   _AgentQueuedRequest({
     required this.entry,
-    required this.targets,
-    required this.labels,
     required this.model,
     required this.reasoningEffort,
     required this.accessMode,
   });
 
   final AgentEntry entry;
-  final List<Session> targets;
-  final Map<String, String> labels;
+  List<Session> get targets => entry._references!.targets;
+  Map<String, String> get labels => entry._references!.labels;
   final AiModelConfig? model;
   final AiReasoningEffort? reasoningEffort;
   final AgentAccessMode? accessMode;
   final done = Completer<void>();
+  _AgentTurnPreview? preview;
+  AgentEntry? lastAnswer;
+
+  void interrupt(AgentRequestState state) {
+    final current = preview;
+    preview = null;
+    final answer = current?.interrupt(state) ?? lastAnswer;
+    answer?.requestState.value = state;
+  }
 }
 
 class _AgentQueueState {
@@ -37,20 +49,26 @@ extension _AgentQueueOperations on AgentController {
       return Future<void>.value();
     }
     if (modesLoaded) _syncModes();
+    // Copy before any asynchronous work. An explicit reference that becomes
+    // stale is checked by _runRequest, never silently replaced by the draft.
+    final targets = List<Session>.unmodifiable(
+      {
+        for (final session in referencedSessions ?? selectedSessions)
+          session.id: session,
+      }.values,
+    );
     final request = _AgentQueuedRequest(
-      entry: AgentEntry(
-        AgentEntryKind.user,
-        text,
-        requestState: AgentRequestState.queued,
-      ),
-      // 在任何异步操作前复制，后续草稿、活动页签和模式变化不改变已发送消息。
-      targets: List.unmodifiable(
-        {
-          for (final session in referencedSessions ?? selectedSessions)
-            if (_boundSession(session) != null) session.id: session,
-        }.values,
-      ),
-      labels: Map.unmodifiable(referenceLabels),
+      entry:
+          AgentEntry(
+              AgentEntryKind.user,
+              text,
+              requestState: AgentRequestState.queued,
+              hadSessionReferences: targets.isNotEmpty,
+            )
+            .._references = (
+              targets: targets,
+              labels: Map.unmodifiable(referenceLabels),
+            ),
       model: currentModel,
       reasoningEffort: modesLoaded ? reasoningEffort.value : null,
       accessMode: modesLoaded ? accessMode.value : null,
@@ -94,6 +112,7 @@ extension _AgentQueueOperations on AgentController {
     if (!_live(generation)) return;
     request.entry.requestError.value = committed ? null : error.value;
     if (!_live(generation)) return;
+    if (committed) request.entry._references = null;
     request.entry.requestState.value = committed
         ? AgentRequestState.completed
         : AgentRequestState.failed;

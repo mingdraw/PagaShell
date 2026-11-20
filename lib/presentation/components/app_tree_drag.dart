@@ -7,7 +7,11 @@ import '../theme/app_theme.dart';
 
 /// DragTargetDetails.offset 是预览左上角，加上抓取偏移后才是鼠标位置。
 class TreeDragAnchor {
+  TreeDragAnchor({this.onPointer});
+
+  final void Function(TreeDragAnchor anchor, Offset? position)? onPointer;
   Offset offset = Offset.zero;
+  bool scrolledSinceMove = false;
 }
 
 enum TreeDropPosition { before, inside, after }
@@ -33,6 +37,7 @@ class AppTreeDraggable<T extends Object> extends StatelessWidget {
       data: item,
       maxSimultaneousDrags: 1,
       dragAnchorStrategy: (draggable, context, position) {
+        dragAnchor.scrolledSinceMove = false;
         dragAnchor.offset = childDragAnchorStrategy(
           draggable,
           context,
@@ -40,6 +45,13 @@ class AppTreeDraggable<T extends Object> extends StatelessWidget {
         );
         return dragAnchor.offset;
       },
+      onDragUpdate: (details) {
+        dragAnchor.scrolledSinceMove = false;
+        dragAnchor.onPointer?.call(dragAnchor, details.globalPosition);
+      },
+      onDragCompleted: () => dragAnchor.onPointer?.call(dragAnchor, null),
+      onDraggableCanceled: (_, _) =>
+          dragAnchor.onPointer?.call(dragAnchor, null),
       feedback: Opacity(
         opacity: AppTheme.treeDragFeedbackOpacity,
         child: SizedBox(
@@ -70,6 +82,7 @@ class AppTreeDropTarget<T extends Object> extends StatefulWidget {
     required this.canDrop,
     required this.onDrop,
     required this.child,
+    this.onHoverInside,
     super.key,
   });
 
@@ -79,6 +92,7 @@ class AppTreeDropTarget<T extends Object> extends StatefulWidget {
   final bool Function(T item, TreeDropPosition position) canDrop;
   final Future<void> Function(T item, TreeDropPosition position) onDrop;
   final Widget child;
+  final VoidCallback? onHoverInside;
 
   @override
   State<AppTreeDropTarget<T>> createState() => _AppTreeDropTargetState<T>();
@@ -87,6 +101,7 @@ class AppTreeDropTarget<T extends Object> extends StatefulWidget {
 class _AppTreeDropTargetState<T extends Object>
     extends State<AppTreeDropTarget<T>> {
   TreeDropPosition? _highlight;
+  Timer? _expandTimer;
 
   TreeDropPosition _position(DragTargetDetails<T> details) {
     final box = context.findRenderObject()! as RenderBox;
@@ -106,6 +121,29 @@ class _AppTreeDropTargetState<T extends Object>
     final position = _position(details);
     final highlight = widget.canDrop(details.data, position) ? position : null;
     if (_highlight != highlight) setState(() => _highlight = highlight);
+    if (highlight == TreeDropPosition.inside && widget.onHoverInside != null) {
+      _expandTimer ??= Timer(const Duration(milliseconds: 450), () {
+        _expandTimer = null;
+        if (mounted &&
+            _highlight == TreeDropPosition.inside &&
+            !widget.dragAnchor.scrolledSinceMove) {
+          widget.onHoverInside?.call();
+        }
+      });
+    } else {
+      _cancelExpand();
+    }
+  }
+
+  void _cancelExpand() {
+    _expandTimer?.cancel();
+    _expandTimer = null;
+  }
+
+  @override
+  void dispose() {
+    _cancelExpand();
+    super.dispose();
   }
 
   @override
@@ -124,11 +162,14 @@ class _AppTreeDropTargetState<T extends Object>
       },
       onMove: _update,
       onLeave: (_) {
+        _cancelExpand();
         if (_highlight != null) setState(() => _highlight = null);
       },
       onAcceptWithDetails: (details) {
+        _cancelExpand();
         final position = _position(details);
-        if (widget.canDrop(details.data, position)) {
+        if (!widget.dragAnchor.scrolledSinceMove &&
+            widget.canDrop(details.data, position)) {
           unawaited(widget.onDrop(details.data, position));
         }
         setState(() => _highlight = null);

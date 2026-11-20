@@ -116,12 +116,72 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await dragTo(tester, find.text('db-01'), find.text('生产环境'));
+    final mouse = await tester.startGesture(
+      tester.getCenter(find.text('db-01')),
+      kind: PointerDeviceKind.mouse,
+    );
+    await mouse.moveTo(tester.getCenter(find.text('生产环境')));
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(folderController.isExpanded(folder.id), isFalse);
+    expect(hostController.hosts.single.folderId, isNull);
+    await tester.pump(const Duration(milliseconds: 320));
+    expect(folderController.isExpanded(folder.id), isTrue);
+    expect(hostController.hosts.single.folderId, isNull);
+    await mouse.up();
+    await tester.pumpAndSettle();
 
     expect(hostController.hosts.single.folderId, folder.id);
     expect(folderController.isExpanded(folder.id), isTrue);
     // 主机仍显示在树里（此时位于展开的文件夹下）。
     expect(find.text('db-01'), findsOneWidget);
+  });
+
+  testWidgets('拖到侧边栏底部时自动滚动，离开边缘后可放入新显示的文件夹', (tester) async {
+    await pumpApp(tester);
+    final folders = Get.find<FolderController>();
+    final hosts = Get.find<HostController>();
+    const origin = Host(
+      id: 'origin',
+      name: 'Move me',
+      hostname: 'fixture.test',
+    );
+    await hosts.save(origin);
+    for (var i = 0; i < 28; i++) {
+      await hosts.save(
+        Host(id: 'row-$i', name: 'Row $i', hostname: 'fixture.test'),
+      );
+    }
+    final folder = await folders.create(name: 'End folder');
+    await tester.pumpAndSettle();
+    final list = find.ancestor(
+      of: find.text(origin.name),
+      matching: find.byType(ListView),
+    );
+    final position = tester.widget<ListView>(list).controller!.position;
+    expect(position.maxScrollExtent, greaterThan(0));
+    final bounds = tester.getRect(list);
+    final mouse = await tester.startGesture(
+      tester.getCenter(find.text(origin.name)),
+      kind: PointerDeviceKind.mouse,
+    );
+    await mouse.moveBy(const Offset(0, 24));
+    await tester.pump();
+    await mouse.moveTo(bounds.bottomCenter - const Offset(0, 2));
+    for (var i = 0; i < 5; i++) {
+      await tester.pump(const Duration(milliseconds: 600));
+    }
+    expect(position.pixels, position.maxScrollExtent);
+    await mouse.moveTo(tester.getCenter(find.text('End folder')));
+    await tester.pump(const Duration(milliseconds: 550));
+    await mouse.up();
+    await tester.pumpAndSettle();
+    expect(
+      hosts.hosts.singleWhere((host) => host.id == origin.id).folderId,
+      folder.id,
+    );
+    final offset = position.pixels;
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(position.pixels, offset);
   });
 
   testWidgets('目标文件夹内已有同名服务时拒绝拖入', (tester) async {

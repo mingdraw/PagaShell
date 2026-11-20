@@ -78,9 +78,10 @@ List<_SidebarSearchHit> _searchSidebar(List<String> terms) {
         if (host.tags.isNotEmpty) host.tags.join(', '),
         if (host.note.isNotEmpty) host.note,
       ].join(' · ');
-      if (matches(
-        '${host.searchText} ${host.port} $detail ${host.serviceType.label} ${host.gatewayType.label}',
-      )) {
+      final typeLabel = section == SidebarSection.gateways
+          ? host.gatewayType.label
+          : host.serviceType.label;
+      if (matches('${host.searchText} ${host.port} $detail $typeLabel')) {
         add(section, detail, host: host);
       }
     }

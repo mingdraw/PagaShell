@@ -92,6 +92,12 @@ class InMemoryBinding extends Bindings {
       hosts: gatewayRepository,
     );
     final transfers = Get.put(TransferController());
+    final settings = Get.put(
+      SettingsController(
+        repository: settingsRepository,
+        secretStore: secretStore,
+      ),
+    );
     final sessions = Get.put(
       SessionController(
         engine: sshEngine,
@@ -100,6 +106,8 @@ class InMemoryBinding extends Bindings {
         vncEngine: vncEngine,
         knownHosts: knownHosts,
         systemProxy: systemProxy,
+        shouldCloseTerminalOnDisconnect: () =>
+            settings.closeTerminalOnDisconnect.value,
       ),
     );
     final gateways = Get.put(
@@ -156,12 +164,6 @@ class InMemoryBinding extends Bindings {
     Get.put<AppWindow>(appWindow);
     Get.put<LocalFileRepository>(localFiles);
     Get.put<SettingsRepository>(settingsRepository);
-    final settings = Get.put(
-      SettingsController(
-        repository: settingsRepository,
-        secretStore: secretStore,
-      ),
-    );
     final aiSettings = Get.put(
       AiSettingsController(
         repository: InMemoryAiSettingsRepository(),

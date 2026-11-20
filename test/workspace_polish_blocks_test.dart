@@ -65,7 +65,7 @@ class _PendingEngine implements SshEngine {
 void main() {
   tearDown(Get.reset);
 
-  testWidgets('通用设置终端字号持久化并实时应用到终端视图', (tester) async {
+  testWidgets('终端标签设置字号和断开行为，保存后实时生效', (tester) async {
     tester.view.physicalSize = const Size(1280, 800);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -97,6 +97,9 @@ void main() {
 
     unawaited(showSettingsDialog());
     await tester.pumpAndSettle();
+    expect(find.text('终端字号'), findsNothing);
+    await tester.tap(find.widgetWithText(shadcn.TabItem, '终端'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('13 px'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('16 px').last);
@@ -104,6 +107,14 @@ void main() {
 
     expect(Get.find<SettingsController>().terminalFontSize.value, 16);
     expect(settingsRepo.sidebarState.terminalFontSize, 16);
+    final closeOnDisconnect = find.byKey(
+      const ValueKey('close-terminal-on-disconnect'),
+    );
+    expect(tester.widget<shadcn.Switch>(closeOnDisconnect).value, isFalse);
+    await tester.tap(closeOnDisconnect);
+    await tester.pumpAndSettle();
+    expect(tester.widget<shadcn.Switch>(closeOnDisconnect).value, isTrue);
+    expect(settingsRepo.closeTerminalOnDisconnect, isTrue);
 
     await tester.tap(find.text('关闭'));
     await tester.pumpAndSettle();
@@ -112,6 +123,15 @@ void main() {
       tester.widget<TerminalPane>(find.byType(TerminalPane)).textStyle.fontSize,
       16,
     );
+
+    final connection =
+        sessions.activeSession!.engineSession! as FakeSftpSession;
+    await connection.endShell();
+    await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+    await tester.pumpAndSettle();
+    expect(sessions.tabs, isEmpty);
+    expect(connection.closes, 1);
+    expect(find.text('连接已断开，已保留历史输出'), findsNothing);
   });
 
   testWidgets('TerminalSearchField 支持一键清除和 Esc 清空', (tester) async {
@@ -153,7 +173,7 @@ void main() {
     expect(controller.text, isEmpty);
   });
 
-  testWidgets('AppNotice 按成功和错误类型应用语义颜色', (tester) async {
+  testWidgets('提示按类型显示颜色、根据内容调整宽度并合并重复消息', (tester) async {
     await tester.pumpWidget(
       PagaShellApp(
         binding: InMemoryBinding(sshEngine: _FakeEngine()),
@@ -163,13 +183,15 @@ void main() {
     await tester.pumpAndSettle();
 
     AppNotice.error('连接失败');
-    await tester.pump();
-    final errCard = tester.widget<shadcn.SurfaceCard>(
-      find.ancestor(
-        of: find.text('连接失败'),
-        matching: find.byType(shadcn.SurfaceCard),
-      ),
+    AppNotice.error('连接失败');
+    await tester.pumpAndSettle();
+    final shortNotice = find.ancestor(
+      of: find.text('连接失败'),
+      matching: find.byType(shadcn.SurfaceCard),
     );
+    expect(find.text('连接失败'), findsOneWidget);
+    expect(tester.getSize(shortNotice).width, lessThan(320));
+    final errCard = tester.widget<shadcn.SurfaceCard>(shortNotice);
     expect(errCard.borderColor, StatusColors.failed.withValues(alpha: 0.45));
     expect(
       tester.widget<AppIcon>(findAppIcon(AppIcons.circleAlert)).color,
@@ -179,15 +201,18 @@ void main() {
     await tester.pump(const Duration(seconds: 6));
     await tester.pumpAndSettle();
 
-    AppNotice.success('保存成功');
+    final message = 'This notification contains additional detail. ' * 4;
+    AppNotice.success(message);
     await tester.pump();
     final okCard = tester.widget<shadcn.SurfaceCard>(
       find.ancestor(
-        of: find.text('保存成功'),
+        of: find.text(message),
         matching: find.byType(shadcn.SurfaceCard),
       ),
     );
     expect(okCard.borderColor, StatusColors.ready.withValues(alpha: 0.45));
+    expect(tester.getSize(find.byWidget(okCard)).width, greaterThan(320));
+    expect(tester.getSize(find.byWidget(okCard)).width, lessThanOrEqualTo(400));
     expect(
       tester.widget<AppIcon>(findAppIcon(AppIcons.check)).color,
       StatusColors.ready,

@@ -23,6 +23,8 @@ class SettingsController extends GetxController {
   final SettingsRepository _repository;
   final SecretStore? _secretStore;
   final themeMode = AppThemeMode.system.obs;
+  final languageCode = RxnString();
+  final savingLanguage = false.obs;
   final sidebarState = SidebarState().obs;
 
   /// 侧边栏是否显示，从 [sidebarState] 派生。标题栏、标签栏、AI 工作区等
@@ -30,6 +32,8 @@ class SettingsController extends GetxController {
   final sidebarVisible = true.obs;
   final sidebarWidth = SidebarState.defaultWidth.obs;
   final terminalFontSize = SidebarState.defaultTerminalFontSize.obs;
+  final closeTerminalOnDisconnect = false.obs;
+  final savingCloseTerminalOnDisconnect = false.obs;
   final isLoaded = false.obs;
   final automaticUpdates = true.obs;
   final savingAutomaticUpdates = false.obs;
@@ -62,6 +66,9 @@ class SettingsController extends GetxController {
         // 偏好读取失败时使用自动模式，仍允许打开应用和重新选择。
         onError: (Object _) {},
       ),
+      _repository.readLanguageCode().then<void>((saved) {
+        if (!isClosed) languageCode.value = saved;
+      }, onError: (Object _) {}),
       _repository.readSidebarState().then<void>(
         (saved) {
           if (!isClosed) {
@@ -74,6 +81,9 @@ class SettingsController extends GetxController {
         // 显示偏好不可读时保留默认布局，不影响主题和启动。
         onError: (Object _) {},
       ),
+      _repository.readCloseTerminalOnDisconnect().then<void>((saved) {
+        if (!isClosed) closeTerminalOnDisconnect.value = saved;
+      }, onError: (Object _) {}),
       _repository.readAutomaticUpdates().then<void>(
         (saved) {
           if (!isClosed) automaticUpdates.value = saved;
@@ -192,6 +202,19 @@ class SettingsController extends GetxController {
     super.onClose();
   }
 
+  Future<void> setCloseTerminalOnDisconnect(bool enabled) async {
+    if (isClosed || savingCloseTerminalOnDisconnect.value) return;
+    savingCloseTerminalOnDisconnect.value = true;
+    try {
+      await ready;
+      if (isClosed || closeTerminalOnDisconnect.value == enabled) return;
+      await _repository.saveCloseTerminalOnDisconnect(enabled);
+      if (!isClosed) closeTerminalOnDisconnect.value = enabled;
+    } finally {
+      if (!isClosed) savingCloseTerminalOnDisconnect.value = false;
+    }
+  }
+
   /// 保存成功后再应用开关；写入期间禁用重复操作。
   Future<void> setAutomaticUpdates(bool enabled) async {
     if (savingAutomaticUpdates.value) return;
@@ -218,6 +241,19 @@ class SettingsController extends GetxController {
       onError: (Object error, StackTrace stackTrace) {},
     );
     return save;
+  }
+
+  Future<void> setLanguageCode(String code) async {
+    if (isClosed || savingLanguage.value) return;
+    savingLanguage.value = true;
+    try {
+      if (!isLoaded.value) await ready;
+      if (isClosed || languageCode.value == code) return;
+      await _repository.saveLanguageCode(code);
+      if (!isClosed) languageCode.value = code;
+    } finally {
+      if (!isClosed) savingLanguage.value = false;
+    }
   }
 
   Future<String?> readProxyPassword() async {

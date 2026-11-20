@@ -74,6 +74,12 @@ class _TrackingDeleteSession extends FakeSftpSession {
   }
 }
 
+class _DeniedMkdirSession extends FakeSftpSession {
+  @override
+  Future<void> createDir(String path) async =>
+      throw const SshEngineException('远程目录不可写');
+}
+
 void main() {
   setUpAll(DesktopDrop.instance.init);
   tearDown(Get.reset);
@@ -2406,6 +2412,28 @@ void main() {
     expect(find.text('deploy'), findsOneWidget);
   });
 
+  testWidgets('单次新建远程目录失败只弹提示，文件面板仍可操作', (tester) async {
+    await pumpPanel(tester, sshEngine: _DeniedMkdirSession());
+    final mkdir = mkdirButton('remote');
+    await tester.tap(mkdir);
+    await tester.pumpAndSettle();
+    await tester.enterText(find.widgetWithText(AppTextFormField, '名称'), 'new');
+    await tester.tap(find.text('确定'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('远程目录不可写'), findsOneWidget);
+    final pane = tester
+        .widgetList<FileBrowserPane>(find.byType(FileBrowserPane))
+        .singleWhere((pane) => pane.side == FileBrowserSide.remote);
+    expect(pane.error, isNull);
+    await tester.tap(mkdir);
+    await tester.pumpAndSettle();
+    expect(find.widgetWithText(AppTextFormField, '名称'), findsOneWidget);
+    await tester.pump(const Duration(seconds: 6));
+    await tester.pumpAndSettle();
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('两侧新建目录图标位于同一工具栏行，本地可创建或改名重试', (tester) async {
     final files = InMemoryLocalFileRepository()
       ..putFile('/local/downloads/existing.txt', 20);
@@ -2652,7 +2680,7 @@ void main() {
     expect(dyOf('mid.txt'), lessThan(dyOf('big.txt')));
   });
 
-  testWidgets('支持路径直达输入、键盘 Enter/Backspace 导航与多选操作条批量删除/取消选择', (tester) async {
+  testWidgets('支持路径直达、键盘导航、取消多选与键盘批量删除', (tester) async {
     final files = InMemoryLocalFileRepository()
       ..putFile('/local/a.txt', 120)
       ..putFile('/local/b.txt', 240);
@@ -2692,7 +2720,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('sftp-path-/local')), findsOneWidget);
 
-    // 多选显示操作条并支持取消选择与批量删除
+    // 底部显示多选摘要并支持取消选择；Delete 可批量删除。
     await selectFile(tester, 'local', 'a.txt');
     await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
     await selectFile(tester, 'local', 'b.txt');
@@ -2714,7 +2742,7 @@ void main() {
     await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
     await selectFile(tester, 'local', 'b.txt');
     await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
-    await tester.tap(find.byKey(const ValueKey('sftp-local-selection-delete')));
+    await tester.sendKeyEvent(LogicalKeyboardKey.delete);
     await tester.pumpAndSettle();
     await tester.tap(find.text('删除'));
     await tester.pumpAndSettle();

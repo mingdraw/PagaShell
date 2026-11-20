@@ -8,6 +8,13 @@ import '../components/app_dialog.dart';
 import '../components/app_text_form_field.dart';
 import '../navigation/app_navigation.dart';
 
+String proxyRuleTypeLabel(ProxyRuleType type) => switch (type) {
+  ProxyRuleType.ip => 'IP / CIDR',
+  ProxyRuleType.domainExact => '域名全匹配',
+  ProxyRuleType.domainPrefix => '域名前缀',
+  ProxyRuleType.domainSuffix => '域名后缀',
+};
+
 class ProxyRulePreviewDialog extends StatefulWidget {
   const ProxyRulePreviewDialog({required this.config, super.key});
 
@@ -105,7 +112,10 @@ class _ProxyRulePreviewDialogState extends State<ProxyRulePreviewDialog> {
               ProxyPreviewRoute.gateway =>
                 result.rule == null
                     ? '通过网关（全局模式）'.tr
-                    : '通过网关 · 命中 @rule'.trParams({'rule': result.rule!.value}),
+                    : '通过网关 · 命中 @rule'.trParams({
+                        'rule':
+                            '${proxyRuleTypeLabel(result.rule!.type).tr} · ${result.rule!.value}',
+                      }),
               ProxyPreviewRoute.direct => '直接连接（未命中规则）'.tr,
               ProxyPreviewRoute.needsDns =>
                 '没有命中域名规则。请填写 DNS 解析 IP，以判断是否命中 IP 规则。'.tr,

@@ -72,8 +72,8 @@ void main() {
     final original = controller.entries.singleWhere(
       (entry) => entry.name == 'upload.txt',
     );
-    await controller.rename(original, 'other.txt');
-    expect(controller.error.value, '目标位置已存在同名文件或目录');
+    expect(await controller.rename(original, 'other.txt'), '目标位置已存在同名文件或目录');
+    expect(controller.error.value, isNull);
     expect(files.fs['/local']!.where((entry) => !entry.isDir), hasLength(2));
     await controller.rename(original, 'renamed.txt');
     expect(controller.error.value, isNull);
@@ -100,7 +100,7 @@ void main() {
         .where((entry) => ['a.txt', 'b.txt', 'c.txt'].contains(entry.name))
         .toList();
     final revision = controller.navigationRevision;
-    await controller.removeMany(selected);
+    final error = await controller.removeMany(selected);
     expect(files.attempts, ['/local/a.txt', '/local/b.txt', '/local/c.txt']);
     expect(controller.entries.map((entry) => entry.name), contains('b.txt'));
     expect(
@@ -112,7 +112,8 @@ void main() {
       isNot(contains('c.txt')),
     );
     expect(controller.navigationRevision, revision + 1);
-    expect(controller.error.value, '部分文件删除失败，请重试');
+    expect(error, '部分文件删除失败，请重试');
+    expect(controller.error.value, isNull);
     controller.onClose();
   });
 

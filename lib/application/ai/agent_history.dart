@@ -200,6 +200,7 @@ extension _AgentHistoryOperations on AgentController {
           requestState: message.requestState,
           requestError: message.requestError,
           toolSummary: message.toolSummary,
+          hadSessionReferences: message.hadSessionReferences,
         ),
     ]);
     _history = turns;

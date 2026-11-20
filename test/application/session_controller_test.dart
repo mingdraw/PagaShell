@@ -1341,9 +1341,10 @@ void main() {
       await controller.close(id);
     });
 
-    test('failed 会话可以用原凭据 retry 成功', () async {
+    test('启用断开自动关闭时，初次认证失败仍可用原凭据重试', () async {
       final controller = SessionController(
         engine: _FakeEngine(failuresBeforeSuccess: 1),
+        shouldCloseTerminalOnDisconnect: () => true,
       );
       final id = await controller.open(_host, _credentials);
       expect(controller.sessions.single.phase, SessionPhase.failed);
@@ -1351,6 +1352,7 @@ void main() {
       await controller.retry(id);
 
       expect(controller.sessions.single.phase, SessionPhase.ready);
+      await controller.close(id);
     });
 
     test('ready 会话只响应显式重连，保留同一个标签', () async {
@@ -1409,6 +1411,43 @@ void main() {
       await controller.close(second);
       expect(controller.sessions.single.id, first);
       expect(controller.activeSessionId.value, first);
+    });
+
+    test('自动关闭处理 SSH 流错误和正常退出，最后一个窗格断开后才关闭标签', () async {
+      final engine = _FakeEngine();
+      final controller = SessionController(
+        engine: engine,
+        shouldCloseTerminalOnDisconnect: () => true,
+      );
+      addTearDown(controller.closeAll);
+      final neighbor = await controller.open(_host, _credentials);
+      final first = await controller.open(_host, _credentials);
+      final split = (await controller.splitTerminal(
+        first,
+        SessionSplitAxis.horizontal,
+      ))!;
+      final splitTerminal = controller.activeSession!.terminal!;
+      final splitConnection = engine.created[2];
+      expect(controller.activeSessionId.value, split);
+      controller.toggleInputSync(first);
+      expect(controller.isInputSyncEnabled(first), isTrue);
+
+      splitConnection._output.addError(const SshEngineException('连接已断开'));
+      await Future<void>.delayed(Duration.zero);
+      expect(controller.tabById(first)!.sessionIds, [first]);
+      expect(controller.activeSessionId.value, first);
+      expect(controller.isInputSyncEnabled(first), isFalse);
+      expect(splitTerminal.isDisposed, isTrue);
+      expect(splitConnection.closes, 1);
+
+      final lastConnection = engine.created[1];
+      await lastConnection._output.close();
+      await Future<void>.delayed(Duration.zero);
+      expect(controller.tabById(first), isNull);
+      expect(controller.sessions.single.id, neighbor);
+      expect(controller.activeSessionId.value, neighbor);
+      expect(lastConnection.closes, 1);
+      expect(engine.created.first.closes, 0);
     });
 
     test('关闭当前激活标签时激活邻位标签，并释放引擎会话', () async {

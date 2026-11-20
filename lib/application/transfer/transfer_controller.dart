@@ -666,13 +666,15 @@ class TransferController extends GetxController {
     _closingSessions.remove(sessionId);
   }
 
-  /// 清掉已结束（完成/失败/取消）的任务。
+  /// 清掉已结束的任务，保留仍可重试的失败项（包括等待重连的任务）。
   void clearFinished({String? sessionId}) {
     final finished = tasks
         .where(
           (task) =>
               !task.status.value.active &&
               !task.retrying.value &&
+              (task.status.value != TransferStatus.failed ||
+                  !_requests.containsKey(task.id)) &&
               (sessionId == null || task.sessionId == sessionId),
         )
         .toList();

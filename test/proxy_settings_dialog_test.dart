@@ -57,7 +57,7 @@ void main() {
     await tester.tap(
       find.descendant(
         of: find.byKey(const ValueKey('proxy-settings')),
-        matching: find.text('关闭'),
+        matching: find.text('关闭代理'),
       ),
     );
     await tester.pumpAndSettle();
@@ -191,5 +191,38 @@ void main() {
 
     AppNavigation.closeDialog<void>();
     await tester.pumpAndSettle();
+  });
+
+  testWidgets('短窗口滚动设置内容时页签保持可见，可直接切换到终端', (tester) async {
+    tester.view.physicalSize = const Size(960, 540);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(
+      PagaShellApp(binding: InMemoryBinding(), platform: TargetPlatform.macOS),
+    );
+    await tester.pumpAndSettle();
+    unawaited(showSettingsDialog(proxy: true));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('手动设置'));
+    await tester.pumpAndSettle();
+
+    final tabs = find.byKey(const ValueKey('settings-tabs'));
+    final terminal = find.descendant(of: tabs, matching: find.text('终端'));
+    final before = tester.getTopLeft(tabs);
+    final content = find.ancestor(
+      of: find.byKey(const ValueKey('proxy-address')),
+      matching: find.byType(Scrollable),
+    );
+    final position = tester.state<ScrollableState>(content).position;
+    expect(position.maxScrollExtent, greaterThan(0));
+    position.jumpTo(position.maxScrollExtent);
+    await tester.pumpAndSettle();
+    expect(tester.getTopLeft(tabs), before);
+    await tester.tap(terminal);
+    await tester.pumpAndSettle();
+    expect(find.byType(SettingsDialog), findsOneWidget);
+    expect(find.byKey(const ValueKey('proxy-address')), findsNothing);
+    expect(tester.takeException(), isNull);
   });
 }

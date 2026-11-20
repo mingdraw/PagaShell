@@ -7,9 +7,12 @@ import '../../application/folders/tree_folder_controller.dart';
 import '../../application/gateways/gateway_controller.dart';
 import '../../application/hosts/host_controller.dart';
 import '../../application/identities/identity_controller.dart';
+import '../../domain/ssh/ssh_engine.dart';
+import '../../domain/vault/secret_store.dart';
 import '../components/app_dialog.dart';
 import '../components/app_text_form_field.dart';
 import '../navigation/app_navigation.dart';
+import '../navigation/app_notice.dart';
 import '../theme/app_theme.dart';
 
 /// 新建 / 重命名文件夹对话框。
@@ -151,16 +154,26 @@ Future<void> confirmDeleteFolder(
     ),
   );
   if (deleteContents == null) return;
-  if (!deleteContents) {
-    await controller.remove(folderId);
-    return;
+  try {
+    if (!deleteContents) {
+      await controller.remove(folderId);
+      return;
+    }
+    final removeItems = containsIdentities
+        ? Get.find<IdentityController>().removeInFolders
+        : containsGateways
+        ? Get.find<GatewayController>().removeInFolders
+        : Get.find<HostController>().removeInFolders;
+    await controller.removeWithContents(folderId, removeItems: removeItems);
+  } on Object catch (error) {
+    if (!context.mounted) return;
+    AppNotice.error(switch (error) {
+      SecretStoreException(:final message) ||
+      SshEngineException(:final message) ||
+      StateError(:final message) => message,
+      _ => '无法删除文件夹，请重试',
+    });
   }
-  final removeItems = containsIdentities
-      ? Get.find<IdentityController>().removeInFolders
-      : containsGateways
-      ? Get.find<GatewayController>().removeInFolders
-      : Get.find<HostController>().removeInFolders;
-  await controller.removeWithContents(folderId, removeItems: removeItems);
 }
 
 class _DeleteFolderDialog extends StatefulWidget {

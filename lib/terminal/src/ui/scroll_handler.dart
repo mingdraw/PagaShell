@@ -45,6 +45,7 @@ class _TerminalScrollGestureHandlerState
   /// The variable that tracks the line offset in last scroll event. Used to
   /// determine how many the scroll events should be sent to the terminal.
   var lastLineOffset = 0;
+  int _scrollGeneration = 0;
 
   /// This variable tracks the last offset where the scroll gesture started.
   /// Used to calculate the cell offset of the terminal mouse event.
@@ -69,6 +70,7 @@ class _TerminalScrollGestureHandlerState
       oldWidget.terminal.removeListener(_onTerminalUpdated);
       widget.terminal.addListener(_onTerminalUpdated);
       isAltBuffer = widget.terminal.isUsingAltBuffer;
+      _resetScroll();
     }
     super.didUpdateWidget(oldWidget);
   }
@@ -76,8 +78,14 @@ class _TerminalScrollGestureHandlerState
   void _onTerminalUpdated() {
     if (isAltBuffer != widget.terminal.isUsingAltBuffer) {
       isAltBuffer = widget.terminal.isUsingAltBuffer;
+      _resetScroll();
       setState(() {});
     }
+  }
+
+  void _resetScroll() {
+    lastLineOffset = 0;
+    _scrollGeneration++;
   }
 
   /// Send a single scroll event to the terminal. If [simulateScroll] is true,
@@ -100,7 +108,9 @@ class _TerminalScrollGestureHandlerState
   }
 
   void _onScroll(double offset) {
-    final currentLineOffset = offset ~/ widget.getLineHeight();
+    final lineHeight = widget.getLineHeight();
+    if (lineHeight <= 0) return;
+    final currentLineOffset = offset ~/ lineHeight;
 
     final delta = currentLineOffset - lastLineOffset;
 
@@ -117,6 +127,7 @@ class _TerminalScrollGestureHandlerState
       return widget.child;
     }
 
+    final generation = _scrollGeneration;
     return Listener(
       onPointerSignal: (event) {
         lastPointerPosition = event.localPosition;
@@ -124,7 +135,13 @@ class _TerminalScrollGestureHandlerState
       onPointerDown: (event) {
         lastPointerPosition = event.localPosition;
       },
-      child: InfiniteScrollView(onScroll: _onScroll, child: widget.child),
+      child: InfiniteScrollView(
+        key: ValueKey(generation),
+        onScroll: (offset) {
+          if (generation == _scrollGeneration) _onScroll(offset);
+        },
+        child: widget.child,
+      ),
     );
   }
 }

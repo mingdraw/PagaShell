@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:pagashell/terminal/src/core/buffer/cell_offset.dart';
 import 'package:pagashell/terminal/src/core/buffer/range.dart';
 import 'package:pagashell/terminal/src/core/buffer/segment.dart';
@@ -13,9 +15,11 @@ class BufferRangeLine extends BufferRange {
   }
 
   @override
-  Iterable<BufferSegment> toSegments() sync* {
+  Iterable<BufferSegment> toSegments({int? firstLine, int? lastLine}) sync* {
     final self = normalized;
-    for (var i = self.begin.y; i <= self.end.y; i++) {
+    final first = math.max(self.begin.y, firstLine ?? self.begin.y);
+    final last = math.min(self.end.y, lastLine ?? self.end.y);
+    for (var i = first; i <= last; i++) {
       final startX = i == self.begin.y ? self.begin.x : null;
       final endX = i == self.end.y ? self.end.x : null;
       yield BufferSegment(this, i, startX, endX);

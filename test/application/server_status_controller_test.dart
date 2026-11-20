@@ -96,11 +96,12 @@ void main() {
     final manual = controller.refreshStatus();
     expect(source.requests, hasLength(3));
     source.requests[2].complete(
-      statusSample(uptime: 1033, cpu: 2000, idle: 1300),
+      statusSample(uptime: 1033, cpu: 2000, idle: 1300, read: 7396),
     );
     await manual;
     expect(controller.status.value?.sample.uptimeSeconds, 1033);
-    expect(controller.status.value?.cpuFraction, isNull);
+    expect(controller.status.value?.cpuFraction, closeTo(.5, .001));
+    expect(controller.status.value?.network['eth0']?.readPerSecond, 100);
     await tester.pump(const Duration(seconds: 3));
     expect(source.requests, hasLength(3));
 

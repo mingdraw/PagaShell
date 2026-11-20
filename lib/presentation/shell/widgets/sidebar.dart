@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -44,10 +45,10 @@ class Sidebar extends StatefulWidget {
   const Sidebar({super.key});
 
   @override
-  State<Sidebar> createState() => _SidebarState();
+  SidebarStateView createState() => SidebarStateView();
 }
 
-class _SidebarState extends State<Sidebar> {
+class SidebarStateView extends State<Sidebar> {
   late final _settings = Get.find<SettingsController>();
   late final _hostController = Get.find<HostController>();
   late final TextEditingController _searchController = TextEditingController(
@@ -55,6 +56,8 @@ class _SidebarState extends State<Sidebar> {
   );
   final _searchFocus = FocusNode();
   final _searchScroll = ScrollController();
+  final _treeScroll = ScrollController();
+  final _treeViewport = GlobalKey();
   final _searchIndex = 0.obs;
   bool get _hostsExpanded =>
       _settings.sidebarState.value.isSectionExpanded(SidebarSection.services);
@@ -62,15 +65,20 @@ class _SidebarState extends State<Sidebar> {
       _settings.sidebarState.value.isSectionExpanded(SidebarSection.identities);
   bool get _gatewaysExpanded =>
       _settings.sidebarState.value.isSectionExpanded(SidebarSection.gateways);
-  final _dragAnchor = TreeDragAnchor();
-  final _identityDragAnchor = TreeDragAnchor();
-  final _gatewayDragAnchor = TreeDragAnchor();
+  late final _dragAnchor = TreeDragAnchor(onPointer: _treeDragMoved);
+  late final _identityDragAnchor = TreeDragAnchor(onPointer: _treeDragMoved);
+  late final _gatewayDragAnchor = TreeDragAnchor(onPointer: _treeDragMoved);
+  Timer? _dragScrollTimer;
+  Offset? _dragPoint;
+  TreeDragAnchor? _activeDrag;
 
   @override
   void dispose() {
     _searchController.dispose();
     _searchFocus.dispose();
     _searchScroll.dispose();
+    _dragScrollTimer?.cancel();
+    _treeScroll.dispose();
     super.dispose();
   }
 
@@ -78,6 +86,58 @@ class _SidebarState extends State<Sidebar> {
     _searchController.clear();
     _updateSearch('');
     _searchFocus.requestFocus();
+  }
+
+  void focusSearch() => _searchFocus.requestFocus();
+
+  double get _searchResultHeight {
+    final scale = MediaQuery.textScalerOf(context);
+    return AppTheme.sidebarSearchResultHeight +
+        math.max(0.0, scale.scale(13) - 13) +
+        math.max(0.0, scale.scale(11) - 11);
+  }
+
+  void _treeDragMoved(TreeDragAnchor anchor, Offset? point) {
+    if (!mounted) return;
+    if (point != null) {
+      _activeDrag = anchor;
+      _dragPoint = point;
+      _dragScrollTimer ??= Timer.periodic(const Duration(milliseconds: 30), (
+        _,
+      ) {
+        final viewport = _treeViewport.currentContext?.findRenderObject();
+        final dragPoint = _dragPoint;
+        if (viewport is! RenderBox ||
+            !viewport.hasSize ||
+            dragPoint == null ||
+            !_treeScroll.hasClients) {
+          return;
+        }
+        final local = viewport.globalToLocal(dragPoint);
+        if (!(Offset.zero & viewport.size).contains(local)) return;
+        const edge = 28.0;
+        final direction = local.dy < edge
+            ? -1
+            : local.dy > viewport.size.height - edge
+            ? 1
+            : 0;
+        if (direction == 0) return;
+        final position = _treeScroll.position;
+        final next = (position.pixels + direction * 10).clamp(
+          position.minScrollExtent,
+          position.maxScrollExtent,
+        );
+        if (position.pixels != next) {
+          _activeDrag?.scrolledSinceMove = true;
+          position.jumpTo(next);
+        }
+      });
+    } else if (identical(_activeDrag, anchor)) {
+      _activeDrag = null;
+      _dragPoint = null;
+      _dragScrollTimer?.cancel();
+      _dragScrollTimer = null;
+    }
   }
 
   void _updateSearch(String value) {
@@ -95,8 +155,8 @@ class _SidebarState extends State<Sidebar> {
     _searchIndex.value = index;
     if (!_searchScroll.hasClients) return;
     final position = _searchScroll.position;
-    final top = hits[index].slot * AppTheme.sidebarSearchResultHeight;
-    final bottom = top + AppTheme.sidebarSearchResultHeight;
+    final top = hits[index].slot * _searchResultHeight;
+    final bottom = top + _searchResultHeight;
     final visibleBottom = position.pixels + position.viewportDimension;
     final offset = top < position.pixels
         ? top
@@ -141,7 +201,7 @@ class _SidebarState extends State<Sidebar> {
       controller: _searchScroll,
       padding: EdgeInsets.zero,
       itemCount: hits.last.slot + 1,
-      itemExtent: AppTheme.sidebarSearchResultHeight,
+      itemExtent: _searchResultHeight,
       itemBuilder: (_, slot) {
         final heading = headingBySlot[slot];
         if (heading != null) {
@@ -323,6 +383,8 @@ class _SidebarState extends State<Sidebar> {
                 if (terms.isNotEmpty) return _searchResults(terms);
                 // 服务、凭证、网关使用独立目录空间。
                 return ListView(
+                  key: _treeViewport,
+                  controller: _treeScroll,
                   padding: const EdgeInsets.symmetric(vertical: 4),
                   children: [
                     // 组头兼作放置目标：把文件夹或服务移到根级末尾。
@@ -332,6 +394,7 @@ class _SidebarState extends State<Sidebar> {
                         const HostTreePlacement(parentId: null),
                       ),
                       onAcceptWithDetails: (d) {
+                        if (_dragAnchor.scrolledSinceMove) return;
                         _setGroupExpanded(SidebarSection.services, true);
                         unawaited(
                           moveHostTreeItem(
@@ -382,6 +445,7 @@ class _SidebarState extends State<Sidebar> {
                         const IdentityTreePlacement(parentId: null),
                       ),
                       onAcceptWithDetails: (d) {
+                        if (_identityDragAnchor.scrolledSinceMove) return;
                         _setGroupExpanded(SidebarSection.identities, true);
                         unawaited(
                           moveIdentityTreeItem(
@@ -479,6 +543,7 @@ class _SidebarState extends State<Sidebar> {
       onWillAcceptWithDetails: (d) =>
           tree.canMove(d.data, const HostTreePlacement(parentId: null)),
       onAcceptWithDetails: (d) {
+        if (_gatewayDragAnchor.scrolledSinceMove) return;
         _setGroupExpanded(SidebarSection.gateways, true);
         unawaited(
           moveHostTreeItem(
@@ -750,6 +815,14 @@ class _FolderTile extends StatelessWidget {
         ? Get.find<GatewayFolderController>()
         : Get.find<FolderController>();
     if (!context.mounted) return;
+    int children() => containsIdentities
+        ? Get.find<IdentityTreeController>().snapshot.childCount(folder.id)
+        : (containsGateways
+                  ? Get.find<GatewayTreeController>()
+                  : Get.find<HostTreeController>())
+              .snapshot
+              .childCount(folder.id);
+    final before = children();
     switch (action) {
       case 'new-host':
       case 'new-gateway':
@@ -783,7 +856,13 @@ class _FolderTile extends StatelessWidget {
           );
         }
     }
-    if (action != 'delete') controller.expanded.add(folder.id);
+    if ((action == 'new-host' ||
+            action == 'new-gateway' ||
+            action == 'new-identity') &&
+        context.mounted &&
+        children() > before) {
+      controller.expanded.add(folder.id);
+    }
   }
 
   @override
@@ -852,6 +931,9 @@ class _FolderTile extends StatelessWidget {
         parentId: folder.parentId,
         depth: depth,
         tree: Get.find<IdentityTreeController>(),
+        onHoverInside: expanded
+            ? null
+            : () => controller.expanded.add(folder.id),
         dragAnchor: dragAnchor,
         child: IdentityTreeDraggable(
           item: identityItem,
@@ -868,6 +950,7 @@ class _FolderTile extends StatelessWidget {
       tree: containsGateways
           ? Get.find<GatewayTreeController>()
           : Get.find<HostTreeController>(),
+      onHoverInside: expanded ? null : () => controller.expanded.add(folder.id),
       dragAnchor: dragAnchor,
       child: HostTreeDraggable(
         item: item,

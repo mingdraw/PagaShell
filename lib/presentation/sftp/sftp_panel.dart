@@ -818,7 +818,7 @@ class _SftpPanelState extends State<SftpPanel> {
         directory != browser.cwd.value) {
       return;
     }
-    await browser.createDir(name);
+    _showFileOperationError(await browser.createDir(name));
   }
 
   Future<void> _rename(FileBrowserEntry entry, {bool local = false}) async {
@@ -835,11 +835,15 @@ class _SftpPanelState extends State<SftpPanel> {
         directory != (local ? localBrowser.cwd.value : browser.cwd.value)) {
       return;
     }
-    if (local) {
-      await localBrowser.rename(_localEntry(entry), name);
-    } else {
-      await browser.rename(entry.name, name);
-    }
+    _showFileOperationError(
+      local
+          ? await localBrowser.rename(_localEntry(entry), name)
+          : await browser.rename(entry.name, name),
+    );
+  }
+
+  void _showFileOperationError(String? error) {
+    if (mounted && widget.active && error != null) AppNotice.error(error);
   }
 
   LocalFileEntry _localEntry(FileBrowserEntry entry) => LocalFileEntry(
@@ -907,12 +911,12 @@ class _SftpPanelState extends State<SftpPanel> {
           (!local && !identical(engine, browser.engine))) {
         return;
       }
+      final String? error;
       if (local) {
-        if (single) {
-          await localBrowser.remove(_localEntry(selected.single));
-        } else {
-          await localBrowser.removeMany(selected.map(_localEntry).toList());
-        }
+        final items = selected.map(_localEntry).toList();
+        error = single
+            ? await localBrowser.remove(items.single)
+            : await localBrowser.removeMany(items);
       } else {
         final remote = [
           for (final entry in selected)
@@ -922,12 +926,11 @@ class _SftpPanelState extends State<SftpPanel> {
               size: entry.size,
             ),
         ];
-        if (single) {
-          await browser.remove(remote.single);
-        } else {
-          await browser.removeMany(remote);
-        }
+        error = single
+            ? await browser.remove(remote.single)
+            : await browser.removeMany(remote);
       }
+      _showFileOperationError(error);
     } finally {
       if (local) {
         _deletingLocal = false;
@@ -1005,6 +1008,11 @@ class _SftpPanelState extends State<SftpPanel> {
                             : _local.cwd.value,
                         loading: _local.loading.value,
                         error: _local.error.value,
+                        onDismissError:
+                            _local.cwd.value.isNotEmpty &&
+                                _local.permissionDeniedPath.value == null
+                            ? () => _local.error.value = null
+                            : null,
                         entries: [
                           for (final entry in _local.visibleEntries)
                             FileBrowserEntry(
@@ -1064,9 +1072,15 @@ class _SftpPanelState extends State<SftpPanel> {
                         sessionId: widget.session.id,
                         side: FileBrowserSide.remote,
                         active: widget.active,
+                        focusOnActivate: true,
                         cwd: _browser.cwd.value,
                         loading: _browser.loading.value,
                         error: _browser.error.value,
+                        onDismissError:
+                            _browser.cwd.value.isNotEmpty &&
+                                !_browser.needsReconnect.value
+                            ? () => _browser.error.value = null
+                            : null,
                         entries: [
                           for (final entry in _browser.entries)
                             if (_showRemoteHidden.value ||

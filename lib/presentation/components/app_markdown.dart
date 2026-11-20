@@ -1,3 +1,4 @@
+import 'package:flutter/rendering.dart' show SelectedContent;
 import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
 import 'package:markdown/markdown.dart' as md;
@@ -7,6 +8,69 @@ import '../theme/app_theme.dart';
 import 'app_copy_button.dart';
 import 'app_icon.dart';
 import 'app_icon_button.dart';
+
+const _codeFallback = [
+  'PingFang SC',
+  'Microsoft YaHei',
+  'Noto Sans CJK SC',
+  'monospace',
+];
+
+class _SelectableMarkdown extends StatefulWidget {
+  const _SelectableMarkdown(this.child);
+
+  final Widget child;
+
+  @override
+  State<_SelectableMarkdown> createState() => _SelectableMarkdownState();
+}
+
+class _SelectableMarkdownState extends State<_SelectableMarkdown> {
+  final _selection = _MarkdownSelectionDelegate();
+
+  @override
+  Widget build(BuildContext context) => SelectableRegion(
+    selectionControls: shadcn.shadcnTextSelectionHandleControls,
+    contextMenuBuilder: (context, state) => shadcn.ContextMenuPopup(
+      anchorContext: state.context,
+      position: state.contextMenuAnchors.primaryAnchor + const Offset(8, -8),
+      children: [
+        for (final item in state.contextMenuButtonItems)
+          if (item.type == ContextMenuButtonType.copy ||
+              item.type == ContextMenuButtonType.selectAll)
+            shadcn.MenuButton(
+              onPressed: (_) => item.onPressed?.call(),
+              child: Text(
+                (item.type == ContextMenuButtonType.copy ? '复制' : '全选').tr,
+              ),
+            ),
+      ],
+    ),
+    child: SelectionContainer(delegate: _selection, child: widget.child),
+  );
+
+  @override
+  void dispose() {
+    _selection.dispose();
+    super.dispose();
+  }
+}
+
+class _MarkdownSelectionDelegate extends StaticSelectionContainerDelegate {
+  @override
+  SelectedContent? getSelectedContent() {
+    // Flutter's default joins separate text widgets with no separator.
+    final blocks = [
+      for (final selectable in selectables)
+        if (selectable.getSelectedContent() case final content?
+            when content.plainText.isNotEmpty)
+          content.plainText,
+    ];
+    return blocks.isEmpty
+        ? null
+        : SelectedContent(plainText: blocks.join('\n'));
+  }
+}
 
 /// 将 Markdown 语法树映射为原生组件；链接与图片保留可复制的文本。
 class AppMarkdown extends StatefulWidget {
@@ -47,11 +111,13 @@ class _AppMarkdownState extends State<AppMarkdown> {
   }
 
   @override
-  Widget build(BuildContext context) => _MarkdownRenderer(
-    context,
-    onInsertToTerminal: widget.onInsertToTerminal,
-    defaultCodeLabel: widget.defaultCodeLabel,
-  ).blocks(_nodes);
+  Widget build(BuildContext context) => _SelectableMarkdown(
+    _MarkdownRenderer(
+      context,
+      onInsertToTerminal: widget.onInsertToTerminal,
+      defaultCodeLabel: widget.defaultCodeLabel,
+    ).blocks(_nodes),
+  );
 }
 
 class _MarkdownRenderer {
@@ -286,7 +352,7 @@ class _MarkdownRenderer {
     TextAlign textAlign = TextAlign.start,
   }) => Padding(
     padding: const EdgeInsets.symmetric(vertical: 4),
-    child: shadcn.SelectableText.rich(
+    child: Text.rich(
       TextSpan(children: [for (final node in nodes) _inline(node)]),
       style: _bodyStyle.merge(style),
       textAlign: textAlign,
@@ -330,6 +396,7 @@ class _MarkdownRenderer {
             'del' => const TextStyle(decoration: TextDecoration.lineThrough),
             'code' => TextStyle(
               fontFamily: 'FiraCode Nerd Font Mono',
+              fontFamilyFallback: _codeFallback,
               fontSize: 12,
               backgroundColor: AppTheme.surface(context),
             ),
@@ -354,53 +421,58 @@ class AppMarkdownCodeBlock extends StatelessWidget {
   final ValueChanged<String>? onInsertToTerminal;
 
   @override
-  Widget build(BuildContext context) => Container(
-    margin: const EdgeInsets.symmetric(vertical: 6),
-    decoration: BoxDecoration(
-      color: AppTheme.surface(context),
-      border: Border.all(color: AppTheme.border(context)),
-      borderRadius: BorderRadius.circular(8),
-    ),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(10, 4, 4, 0),
-          child: Row(
-            children: [
-              Expanded(
-                child: Text(
-                  language.isEmpty ? defaultLabel.tr : language,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 11),
+  Widget build(BuildContext context) {
+    final selection = SelectionContainer.maybeOf(context);
+    final content = Text(
+      code,
+      style: const TextStyle(
+        fontFamily: 'FiraCode Nerd Font Mono',
+        fontFamilyFallback: _codeFallback,
+        fontSize: 12,
+        height: 1.6,
+      ),
+    );
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 6),
+      decoration: BoxDecoration(
+        color: AppTheme.surface(context),
+        border: Border.all(color: AppTheme.border(context)),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(10, 4, 4, 0),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    language.isEmpty ? defaultLabel.tr : language,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 11),
+                  ),
                 ),
-              ),
-              if (onInsertToTerminal != null && code.trim().isNotEmpty)
-                AppIconButton(
-                  key: const ValueKey('code-insert-terminal'),
-                  semanticLabel: '填入终端'.tr,
-                  tooltip: '填入终端'.tr,
-                  icon: const AppIcon(AppIcons.terminal, size: 13),
-                  onPressed: () => onInsertToTerminal!(code),
-                ),
-              AppCopyButton(text: code),
-            ],
-          ),
-        ),
-        SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          padding: const EdgeInsets.all(10),
-          child: shadcn.SelectableText(
-            code,
-            style: const TextStyle(
-              fontFamily: 'FiraCode Nerd Font Mono',
-              fontSize: 12,
-              height: 1.6,
+                if (onInsertToTerminal != null && code.trim().isNotEmpty)
+                  AppIconButton(
+                    key: const ValueKey('code-insert-terminal'),
+                    semanticLabel: '填入终端'.tr,
+                    tooltip: '填入终端'.tr,
+                    icon: const AppIcon(AppIcons.terminal, size: 13),
+                    onPressed: () => onInsertToTerminal!(code),
+                  ),
+                AppCopyButton(text: code),
+              ],
             ),
           ),
-        ),
-      ],
-    ),
-  );
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.all(10),
+            child: selection == null ? _SelectableMarkdown(content) : content,
+          ),
+        ],
+      ),
+    );
+  }
 }

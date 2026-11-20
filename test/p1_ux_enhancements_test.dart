@@ -485,8 +485,15 @@ void main() {
     ]);
     await tester.pumpAndSettle();
 
-    // 底部不重复展示与最后一条用户消息相同的错误，且显示重试按钮。
-    expect(find.byKey(const ValueKey('agent-error')), findsNothing);
+    // 最新错误固定在输入区上方，历史消息保留自己的重试入口。
+    expect(
+      find.byKey(const ValueKey('agent-error')).hitTestable(),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('agent-error-retry')).hitTestable(),
+      findsOneWidget,
+    );
     expect(find.byKey(const ValueKey('agent-entry-retry')), findsOneWidget);
 
     // 高风险命令卡片展示目标主机+地址和高风险徽章。
@@ -580,6 +587,9 @@ void main() {
 
     await wheel(-12);
     await wheel(12);
+    expect(returnButton, findsNothing);
+    position.jumpTo(position.maxScrollExtent - 0.5);
+    await tester.pumpAndSettle();
     expect(returnButton, findsNothing);
     agent.entries.add(AgentEntry(AgentEntryKind.assistant, '继续跟随这条回复'));
     await tester.pumpAndSettle();
@@ -691,9 +701,10 @@ void main() {
     );
   });
 
-  testWidgets('SFTP 文件列表默认按名称升序，支持目录内筛选、快捷键、选中条传输与路径空白点击编辑', (tester) async {
+  testWidgets('SFTP 文件列表默认按名称升序，支持目录内筛选、快捷键、工具栏传输与路径空白点击编辑', (tester) async {
     final clipboard = _MockClipboard()..install(tester);
     var refreshed = 0;
+    var renameCount = 0;
     FileBrowserEntry? renamed;
     List<FileBrowserEntry>? transferred;
     List<FileBrowserEntry>? deleted;
@@ -730,7 +741,10 @@ void main() {
             onOpen: (_) {},
             onTransfer: (items) => transferred = items,
             onDrop: (_, _) {},
-            onRename: (entry) => renamed = entry,
+            onRename: (entry) {
+              renamed = entry;
+              renameCount++;
+            },
             onDelete: (items) => deleted = items,
           ),
         ),
@@ -760,26 +774,32 @@ void main() {
     expect(find.text('alpha.txt'), findsNothing);
     expect(find.text('zebra.log'), findsOneWidget);
 
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    expect(transferred?.single.name, 'zebra.log');
     await tester.sendKeyEvent(LogicalKeyboardKey.escape);
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('sftp-local-filter')), findsNothing);
     expect(find.text('alpha.txt'), findsOneWidget);
 
-    // 选中 alpha.txt，支持 F2 重命名、选中条传输按钮、F5 刷新、Delete 删除。
+    // 选中 alpha.txt，支持 F2 重命名、工具栏传输、F5 刷新和 Delete 删除。
     await tester.tap(
       find.byKey(const ValueKey('sftp-local-row-/work/alpha.txt')),
     );
     await tester.pumpAndSettle();
-    await tester.sendKeyEvent(LogicalKeyboardKey.f2);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.f2);
+    await tester.sendKeyRepeatEvent(LogicalKeyboardKey.f2);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.f2);
     await tester.pumpAndSettle();
     expect(renamed?.name, 'alpha.txt');
+    expect(renameCount, 1);
 
     await tester.sendKeyEvent(LogicalKeyboardKey.f5);
     await tester.pumpAndSettle();
     expect(refreshed, 1);
 
     await tester.tap(
-      find.byKey(const ValueKey('sftp-local-selection-transfer')),
+      find.byKey(const ValueKey('sftp-local-transfer-selected')),
     );
     await tester.pumpAndSettle();
     expect(transferred?.single.name, 'alpha.txt');
@@ -800,6 +820,11 @@ void main() {
 
     // 点击面包屑空白区进入路径编辑模式。
     await tester.tap(find.byKey(const ValueKey('sftp-path-empty-local')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('sftp-local-path-input')), findsOneWidget);
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('sftp-path-current-local')));
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('sftp-local-path-input')), findsOneWidget);
 
@@ -929,7 +954,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 600));
     expect(
       clipboard.text,
-      'export http_proxy=http://127.0.0.1:18080 https_proxy=http://127.0.0.1:18080 all_proxy=socks5://127.0.0.1:1080',
+      'export http_proxy=http://127.0.0.1:18080 https_proxy=http://127.0.0.1:18080 all_proxy=socks5h://127.0.0.1:1080',
     );
     await tester.pump(const Duration(seconds: 6));
 

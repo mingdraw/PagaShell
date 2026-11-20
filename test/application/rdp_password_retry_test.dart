@@ -14,11 +14,13 @@ const _host = Host(
   hostname: 'windows.test',
   port: 3389,
   username: 'configured-user',
+  rdpDomain: 'HOST-DOMAIN',
   serviceType: ServiceType.rdp,
 );
 const _credentials = SshCredentials.password(
   'wrong',
   username: 'selected-user',
+  rdpDomain: 'IDENTITY-DOMAIN',
 );
 const _failure = RdpAuthenticationException(
   'RDP NLA 认证失败：Windows 拒绝了登录（STATUS_LOGON_FAILURE / 0xC000006D）',
@@ -52,7 +54,10 @@ void main() {
   test('密码被拒绝后等待输入，使用正确密码连接且后续重试复用本次凭据', () async {
     final engine = FakeRdpEngine(
       authenticationError: (credentials, _) =>
-          credentials.password == ' correct ' ? null : _failure,
+          credentials.password == ' correct ' &&
+              credentials.rdpDomain == 'IDENTITY-DOMAIN'
+          ? null
+          : _failure,
     );
     final controller = SessionController(engine: _NoSsh(), rdpEngine: engine);
     addTearDown(controller.closeAll);
@@ -61,6 +66,7 @@ void main() {
     final id = controller.sessions.single.id;
     expect(request.host, same(_host));
     expect(request.username, 'selected-user');
+    expect(request.domain, 'IDENTITY-DOMAIN');
     expect(
       controller.sessions.single.address,
       'selected-user@windows.test:3389',

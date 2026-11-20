@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
@@ -28,12 +30,14 @@ class AppTerminalView extends StatefulWidget {
     required this.focusNode,
     required this.active,
     this.canInput = true,
+    this.hasPaneControls = false,
     this.onSplitHorizontal,
     this.onSplitVertical,
     this.onOpenFileTransfer,
     this.onReconnect,
     this.onQuoteSelection,
     this.onUserInput,
+    this.inputSyncPanes,
     super.key,
   });
 
@@ -41,12 +45,14 @@ class AppTerminalView extends StatefulWidget {
   final FocusNode focusNode;
   final bool active;
   final bool canInput;
+  final bool hasPaneControls;
   final VoidCallback? onSplitHorizontal;
   final VoidCallback? onSplitVertical;
   final VoidCallback? onOpenFileTransfer;
   final VoidCallback? onReconnect;
   final ValueChanged<String>? onQuoteSelection;
   final ValueChanged<void Function(Terminal)>? onUserInput;
+  final List<String> Function()? inputSyncPanes;
 
   @override
   State<AppTerminalView> createState() => _AppTerminalViewState();
@@ -58,6 +64,11 @@ class _AppTerminalViewState extends State<AppTerminalView> {
   bool _pasteConfirming = false;
   final _query = TextEditingController();
   final _findFocus = FocusNode();
+  final _textSearch = TerminalTextSearch();
+  TextEditingValue _previousQuery = TextEditingValue.empty;
+  final _handledKeys = <PhysicalKeyboardKey>{};
+  Timer? _fontSizeHintTimer;
+  double? _fontSizeHint;
   Timer? _findTimer;
   bool _finding = false;
   bool _caseSensitive = false;
@@ -72,12 +83,15 @@ class _AppTerminalViewState extends State<AppTerminalView> {
   bool _wasAtBottom = true;
   bool _newOutput = false;
   late int _outputRevision;
+  late bool _usingAltBuffer;
 
   @override
   void initState() {
     super.initState();
     _outputRevision = widget.terminal.outputRevision;
+    _usingAltBuffer = widget.terminal.isUsingAltBuffer;
     widget.terminal.addListener(_onTerminalFrame);
+    _query.addListener(_onQueryChanged);
   }
 
   @override
@@ -88,14 +102,14 @@ class _AppTerminalViewState extends State<AppTerminalView> {
       oldWidget.terminal.removeListener(_onTerminalFrame);
       widget.terminal.addListener(_onTerminalFrame);
       _outputRevision = widget.terminal.outputRevision;
-      _findTimer?.cancel();
-      _findTimer = null;
-      _searchRevision++;
-      _matches = const [];
-      _matchIndex = -1;
+      _usingAltBuffer = widget.terminal.isUsingAltBuffer;
+      _textSearch.cancel();
+      _clearFindResults();
       _wasAtBottom = true;
       _newOutput = false;
-      if (_finding) _scheduleSearch();
+      _scheduleSearch();
+    } else if (widget.active && !oldWidget.active) {
+      _scheduleSearch();
     }
   }
 
@@ -103,6 +117,8 @@ class _AppTerminalViewState extends State<AppTerminalView> {
   void dispose() {
     _searchRevision++;
     _findTimer?.cancel();
+    _fontSizeHintTimer?.cancel();
+    _textSearch.dispose();
     _query.dispose();
     _findFocus.dispose();
     widget.terminal.removeListener(_onTerminalFrame);
@@ -110,11 +126,17 @@ class _AppTerminalViewState extends State<AppTerminalView> {
   }
 
   void _onTerminalFrame() {
+    if (_usingAltBuffer != widget.terminal.isUsingAltBuffer) {
+      _usingAltBuffer = widget.terminal.isUsingAltBuffer;
+      setState(_clearFindResults);
+      _textSearch.cancel();
+      _scheduleSearch();
+    }
     final revision = widget.terminal.outputRevision;
     if (revision == _outputRevision) return;
     _outputRevision = revision;
     if (!_wasAtBottom && !_newOutput) setState(() => _newOutput = true);
-    if (_finding && _query.text.isNotEmpty) _scheduleSearch();
+    _scheduleSearch();
   }
 
   void _onScrollChanged(bool atBottom) {
@@ -130,33 +152,62 @@ class _AppTerminalViewState extends State<AppTerminalView> {
       setState(() => _finding = true);
       _scheduleSearch(reveal: true);
     }
+    _query.selection = TextSelection(
+      baseOffset: 0,
+      extentOffset: _query.text.length,
+    );
     _findFocus.requestFocus();
   }
 
   void _hideFind() {
+    _textSearch.cancel();
+    setState(() {
+      _finding = false;
+      _clearFindResults();
+    });
+    widget.focusNode.requestFocus();
+  }
+
+  void _clearFindResults() {
     _findTimer?.cancel();
     _findTimer = null;
     _searchRevision++;
     _findAgain = false;
     _revealNext = false;
-    setState(() {
-      _finding = false;
-      _matches = const [];
-      _matchIndex = -1;
-      _findError = null;
-    });
+    _matches = const [];
+    _matchIndex = -1;
+    _findError = null;
     _paintMatches();
-    widget.focusNode.requestFocus();
+  }
+
+  void _onQueryChanged() {
+    final value = _query.value;
+    final previous = _previousQuery;
+    _previousQuery = value;
+    if (!_finding ||
+        (value.text == previous.text &&
+            value.composing == previous.composing)) {
+      return;
+    }
+    setState(_clearFindResults);
+    _scheduleSearch(reveal: true);
   }
 
   void _scheduleSearch({bool reveal = false}) {
+    if (!_finding ||
+        !widget.active ||
+        _query.text.isEmpty ||
+        !_query.value.composing.isCollapsed ||
+        (_findError != null && !reveal)) {
+      return;
+    }
     if (reveal) {
       _searchRevision++;
       _revealNext = true;
       _findTimer?.cancel();
       _findTimer = null;
     }
-    _findTimer ??= Timer(const Duration(milliseconds: 160), () {
+    _findTimer ??= Timer(Duration(milliseconds: _revealNext ? 120 : 450), () {
       _findTimer = null;
       if (_findBusy) {
         _findAgain = true;
@@ -178,14 +229,13 @@ class _AppTerminalViewState extends State<AppTerminalView> {
   }
 
   Future<void> _find({required bool reveal}) async {
-    if (!mounted || !_finding) return;
+    if (!mounted || !_finding || !widget.active) return;
     final revision = _searchRevision;
-    final previous = _matchIndex < 0 ? null : _matches[_matchIndex];
     final buffer = widget.terminal.buffer;
     List<TerminalTextMatch> results = const [];
     String? error;
     try {
-      results = await searchTerminalText(
+      results = await _textSearch.find(
         buffer,
         _query.text,
         regex: _regex,
@@ -195,13 +245,17 @@ class _AppTerminalViewState extends State<AppTerminalView> {
       error = '正则表达式无效';
     } on TimeoutException {
       error = '搜索超时，请简化正则表达式';
+    } on Object {
+      error = '终端查找失败，请重试';
     }
     if (!mounted ||
         !_finding ||
+        !widget.active ||
         revision != _searchRevision ||
         !identical(buffer, widget.terminal.buffer)) {
       return;
     }
+    final previous = _matchIndex < 0 ? null : _matches[_matchIndex];
     final index = reveal || previous == null
         ? -1
         : results.indexWhere(
@@ -225,42 +279,138 @@ class _AppTerminalViewState extends State<AppTerminalView> {
       matchColor: AppTheme.terminalSearchMatch,
       selectedColor: AppTheme.terminalSearchSelected,
     );
-    if (reveal && _matchIndex >= 0) {
-      pane?.revealMatch(_matches[_matchIndex], topInset: 78);
-    }
+    if (reveal) _revealMatch();
+  }
+
+  void _revealMatch() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_finding || _matchIndex < 0) return;
+      _paneKey.currentState?.revealMatch(_matches[_matchIndex]);
+    });
   }
 
   void _stepMatch(int direction) {
     if (_matches.isEmpty) return;
     setState(() => _matchIndex = (_matchIndex + direction) % _matches.length);
-    _paintMatches(reveal: true);
+    _paneKey.currentState?.selectSearchMatch(_matchIndex);
+    _revealMatch();
   }
 
-  KeyEventResult _terminalKey(FocusNode node, KeyEvent event) {
-    final isMac = shadcn.Theme.of(context).platform == TargetPlatform.macOS;
-    final zoom = SingleActivator(
-      LogicalKeyboardKey.enter,
-      meta: isMac,
-      control: !isMac,
-      shift: true,
-      includeRepeats: false,
-    );
-    if (widget.active &&
-        zoom.accepts(event, HardwareKeyboard.instance) &&
-        Actions.maybeInvoke(context, const TerminalPaneZoomIntent()) == true) {
+  KeyEventResult _paneShortcut(KeyEvent event) {
+    if (event is KeyDownEvent) {
+      _handledKeys.remove(event.physicalKey);
+    } else if (_handledKeys.contains(event.physicalKey)) {
+      if (event is KeyUpEvent) _handledKeys.remove(event.physicalKey);
       return KeyEventResult.handled;
     }
-    final find = SingleActivator(
-      LogicalKeyboardKey.keyF,
+    if (!widget.active) return KeyEventResult.ignored;
+    final isMac = shadcn.Theme.of(context).platform == TargetPlatform.macOS;
+    final key = event.logicalKey;
+    bool accepts({bool shift = false, bool alt = false}) => SingleActivator(
+      key,
       meta: isMac,
       control: !isMac,
-      shift: !isMac,
-      includeRepeats: false,
-    );
-    if (!find.accepts(event, HardwareKeyboard.instance)) {
+      shift: shift,
+      alt: alt,
+    ).accepts(event, HardwareKeyboard.instance);
+    if (_isEnter(key) && accepts(shift: true)) {
+      // 单窗格和按键连发都必须拦截，不能把回车交给远端。
+      if (event is KeyDownEvent) {
+        Actions.maybeInvoke(context, const TerminalPaneZoomIntent());
+      }
+    } else if ((key == LogicalKeyboardKey.bracketLeft ||
+            key == LogicalKeyboardKey.bracketRight) &&
+        accepts(alt: true)) {
+      if (event is KeyDownEvent) {
+        Actions.maybeInvoke(
+          context,
+          TerminalPaneCycleIntent(
+            key == LogicalKeyboardKey.bracketLeft ? -1 : 1,
+          ),
+        );
+      }
+    } else if (key == LogicalKeyboardKey.keyF && accepts(shift: !isMac)) {
+      if (event is KeyDownEvent) _showFind();
+    } else {
       return KeyEventResult.ignored;
     }
-    _showFind();
+    if (event is KeyDownEvent) _handledKeys.add(event.physicalKey);
+    return KeyEventResult.handled;
+  }
+
+  bool _isEnter(LogicalKeyboardKey key) =>
+      key == LogicalKeyboardKey.enter || key == LogicalKeyboardKey.numpadEnter;
+
+  KeyEventResult _terminalKey(FocusNode node, KeyEvent event) {
+    final command = _paneShortcut(event);
+    if (command != KeyEventResult.ignored) return command;
+    if (!widget.active ||
+        !node.hasFocus ||
+        !Get.isRegistered<SettingsController>()) {
+      return KeyEventResult.ignored;
+    }
+    final isMac = shadcn.Theme.of(context).platform == TargetPlatform.macOS;
+    final keyboard = HardwareKeyboard.instance;
+    if (keyboard.isAltPressed ||
+        keyboard.isMetaPressed != isMac ||
+        keyboard.isControlPressed == isMac) {
+      return KeyEventResult.ignored;
+    }
+    final shift = keyboard.isShiftPressed;
+    final delta = switch (event.logicalKey) {
+      LogicalKeyboardKey.equal ||
+      LogicalKeyboardKey.add ||
+      LogicalKeyboardKey.numpadAdd => 1.0,
+      LogicalKeyboardKey.minus ||
+      LogicalKeyboardKey.numpadSubtract when shift != isMac => -1.0,
+      LogicalKeyboardKey.underscore when shift && !isMac => -1.0,
+      LogicalKeyboardKey.digit0 ||
+      LogicalKeyboardKey.numpad0 when !shift => 0.0,
+      _ => null,
+    };
+    if (delta == null || event is KeyUpEvent) return KeyEventResult.ignored;
+    if (event is KeyDownEvent) {
+      _handledKeys.add(event.physicalKey);
+      _adjustFontSize(delta);
+    }
+    return KeyEventResult.handled;
+  }
+
+  void _adjustFontSize(double delta) {
+    final settings = Get.find<SettingsController>();
+    final next = delta == 0
+        ? SidebarState.defaultTerminalFontSize
+        : (settings.terminalFontSize.value + delta).clamp(
+            SidebarState.minTerminalFontSize,
+            SidebarState.maxTerminalFontSize,
+          );
+    unawaited(settings.setTerminalFontSize(next).catchError((Object _) {}));
+    _fontSizeHintTimer?.cancel();
+    setState(() => _fontSizeHint = next);
+    _fontSizeHintTimer = Timer(const Duration(milliseconds: 900), () {
+      if (mounted) setState(() => _fontSizeHint = null);
+    });
+  }
+
+  KeyEventResult _findKey(FocusNode node, KeyEvent event) {
+    final command = _paneShortcut(event);
+    if (command != KeyEventResult.ignored) return command;
+    final key = event.logicalKey;
+    if (!_isEnter(key) && key != LogicalKeyboardKey.escape) {
+      return KeyEventResult.ignored;
+    }
+    if (_isEnter(key) && !_findFocus.hasFocus) return KeyEventResult.ignored;
+    if (!_query.value.composing.isCollapsed) {
+      return KeyEventResult.skipRemainingHandlers;
+    }
+    if (event is KeyUpEvent) return KeyEventResult.ignored;
+    if (event is KeyDownEvent) {
+      if (key == LogicalKeyboardKey.escape) {
+        _hideFind();
+      } else {
+        _stepMatch(HardwareKeyboard.instance.isShiftPressed ? -1 : 1);
+      }
+    }
     return KeyEventResult.handled;
   }
 
@@ -275,10 +425,15 @@ class _AppTerminalViewState extends State<AppTerminalView> {
 
   Future<bool> _handlePaste(Terminal terminal, String text) async {
     bool canPaste() =>
-        mounted && widget.canInput && identical(widget.terminal, terminal);
+        mounted &&
+        widget.active &&
+        widget.canInput &&
+        identical(widget.terminal, terminal);
     if (!canPaste() || text.isEmpty) return false;
     final hasNewline = text.contains('\n') || text.contains('\r');
-    if (!hasNewline || _skipMultilinePastePrompt) {
+    List<String> syncPanes() => widget.inputSyncPanes?.call() ?? const [];
+    final recipients = syncPanes();
+    if (!hasNewline || (_skipMultilinePastePrompt && recipients.isEmpty)) {
       _paste(terminal, text);
       return true;
     }
@@ -286,10 +441,15 @@ class _AppTerminalViewState extends State<AppTerminalView> {
     _pasteConfirming = true;
     try {
       final decision = await AppNavigation.dialog<_MultilinePasteDecision>(
-        _MultilinePasteDialog(text: text),
+        _MultilinePasteDialog(text: text, syncPanes: recipients),
       );
       if (!canPaste()) return false;
       if (decision == null) {
+        widget.focusNode.requestFocus();
+        return false;
+      }
+      if (!listEquals(recipients, syncPanes())) {
+        AppNotice.error('同步输入目标已变化，请重新粘贴');
         widget.focusNode.requestFocus();
         return false;
       }
@@ -310,8 +470,13 @@ class _AppTerminalViewState extends State<AppTerminalView> {
   }
 
   void _paste(Terminal terminal, String text) {
-    terminal.paste(text);
-    if (widget.active) widget.onUserInput?.call((target) => target.paste(text));
+    _sendInput(terminal, (target) => target.paste(text));
+  }
+
+  void _sendInput(Terminal terminal, void Function(Terminal) send) {
+    send(terminal);
+    if (widget.active) widget.onUserInput?.call(send);
+    _paneKey.currentState?.scrollToBottom();
   }
 
   Future<void> _pasteFromClipboard(Terminal terminal) async {
@@ -374,7 +539,7 @@ class _AppTerminalViewState extends State<AppTerminalView> {
           _showFind();
         case 'clear':
           if (widget.canInput) {
-            widget.terminal.textInput('\x0c');
+            _sendInput(terminal, (target) => target.textInput('\x0c'));
           }
           widget.focusNode.requestFocus();
         case 'split-horizontal':
@@ -451,23 +616,10 @@ class _AppTerminalViewState extends State<AppTerminalView> {
         ],
       ),
     );
-    return Stack(
+    final body = Stack(
       fit: StackFit.expand,
       children: [
         pane,
-        if (_finding)
-          Positioned(
-            top: 8,
-            left: 12,
-            right: 12,
-            child: Align(
-              alignment: Alignment.topRight,
-              child: shadcn.Theme(
-                data: AppTheme.terminalTheme(context),
-                child: _findBar(),
-              ),
-            ),
-          ),
         if (!_wasAtBottom && widget.active)
           Positioned(
             bottom: widget.canInput ? 10 : 60,
@@ -476,14 +628,77 @@ class _AppTerminalViewState extends State<AppTerminalView> {
               data: AppTheme.terminalTheme(context),
               child: shadcn.OutlineButton(
                 key: const ValueKey('terminal-scroll-bottom'),
-                onPressed: () => _paneKey.currentState?.scrollToBottom(),
+                onPressed: () {
+                  _paneKey.currentState?.scrollToBottom();
+                  widget.focusNode.requestFocus();
+                },
                 size: shadcn.ButtonSize.small,
                 leading: const AppIcon(AppIcons.arrowDown, size: 13),
                 child: Text((_newOutput ? '回到底部 · 有新输出' : '回到底部').tr),
               ),
             ),
           ),
+        if (_fontSizeHint case final size?)
+          Positioned(
+            bottom: 10,
+            left: 10,
+            child: IgnorePointer(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: AppTheme.terminalControlBackground,
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 4,
+                  ),
+                  child: Text(
+                    '终端字号：@size'.trParams({'size': size.toStringAsFixed(0)}),
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: AppTheme.terminalForeground,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
       ],
+    );
+    return LayoutBuilder(
+      builder: (context, constraints) => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (_finding)
+            Padding(
+              padding: EdgeInsets.fromLTRB(
+                8,
+                4,
+                widget.hasPaneControls
+                    ? 8 +
+                          AppTheme.terminalPaneControlsInset +
+                          AppTheme.terminalPaneControlsWidth
+                    : 8,
+                4,
+              ),
+              child: Align(
+                alignment: Alignment.centerRight,
+                child: shadcn.Theme(
+                  data: AppTheme.terminalTheme(context),
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxHeight: math.max(0, constraints.maxHeight - 8) * .65,
+                      maxWidth: 440,
+                    ),
+                    child: SingleChildScrollView(child: _findBar()),
+                  ),
+                ),
+              ),
+            ),
+          Expanded(child: body),
+        ],
+      ),
     );
   }
 
@@ -525,17 +740,9 @@ class _AppTerminalViewState extends State<AppTerminalView> {
         ),
         child: Padding(
           padding: const EdgeInsets.all(6),
-          child: CallbackShortcuts(
-            bindings: {
-              const SingleActivator(LogicalKeyboardKey.escape): _hideFind,
-              const SingleActivator(LogicalKeyboardKey.enter): () =>
-                  _stepMatch(1),
-              const SingleActivator(
-                LogicalKeyboardKey.enter,
-                shift: true,
-              ): () =>
-                  _stepMatch(-1),
-            },
+          child: Focus(
+            canRequestFocus: false,
+            onKeyEvent: _findKey,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               mainAxisSize: MainAxisSize.min,
@@ -551,7 +758,7 @@ class _AppTerminalViewState extends State<AppTerminalView> {
                     vertical: 5,
                   ),
                   placeholder: Text('查找终端输出'.tr),
-                  onChanged: (_) => _scheduleSearch(reveal: true),
+                  onEditingComplete: () {},
                 ),
                 Wrap(
                   crossAxisAlignment: WrapCrossAlignment.center,
@@ -565,15 +772,16 @@ class _AppTerminalViewState extends State<AppTerminalView> {
                       setState(() => _regex = !_regex);
                       _scheduleSearch(reveal: true);
                     }),
-                    Text(
-                      _findError?.tr ??
-                          '${_matchIndex + 1}/${_matches.length}${_matches.length == terminalSearchLimit ? '+' : ''}',
-                      key: const ValueKey('terminal-find-count'),
-                      style: const TextStyle(
-                        fontSize: 11,
-                        color: AppTheme.terminalForeground,
+                    if (_query.text.isNotEmpty)
+                      Text(
+                        _findError?.tr ??
+                            '${_matchIndex + 1}/${_matches.length}${_matches.length == terminalSearchLimit ? '+' : ''}',
+                        key: const ValueKey('terminal-find-count'),
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: AppTheme.terminalForeground,
+                        ),
                       ),
-                    ),
                     button(
                       '上一个匹配',
                       AppIcons.chevronUp,
@@ -606,9 +814,10 @@ class _AppTerminalViewState extends State<AppTerminalView> {
 }
 
 class _MultilinePasteDialog extends StatefulWidget {
-  const _MultilinePasteDialog({required this.text});
+  const _MultilinePasteDialog({required this.text, required this.syncPanes});
 
   final String text;
+  final List<String> syncPanes;
 
   @override
   State<_MultilinePasteDialog> createState() => _MultilinePasteDialogState();
@@ -649,6 +858,7 @@ class _MultilinePasteDialogState extends State<_MultilinePasteDialog> {
         : '剪贴板内容末尾包含换行符，粘贴到终端可能立即执行命令。'.tr;
     return AppDialog(
       maxWidth: 520,
+      scrollable: true,
       title: Text('确认粘贴多行内容'.tr),
       content: Column(
         mainAxisSize: MainAxisSize.min,
@@ -658,6 +868,15 @@ class _MultilinePasteDialogState extends State<_MultilinePasteDialog> {
             message,
             style: TextStyle(fontSize: 13, color: colors.mutedForeground),
           ),
+          if (widget.syncPanes.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Text(
+              '将粘贴到 @count 个窗格：@targets'.trParams({
+                'count': '${widget.syncPanes.length}',
+                'targets': widget.syncPanes.join(' · '),
+              }),
+            ),
+          ],
           const SizedBox(height: 12),
           Container(
             constraints: const BoxConstraints(maxHeight: 180),
@@ -679,18 +898,23 @@ class _MultilinePasteDialogState extends State<_MultilinePasteDialog> {
               ),
             ),
           ),
-          const SizedBox(height: 12),
-          shadcn.Checkbox(
-            key: const ValueKey('terminal-paste-skip-session'),
-            theme: const shadcn.CheckboxTheme(size: 14, gap: 8),
-            state: _skipFuture
-                ? shadcn.CheckboxState.checked
-                : shadcn.CheckboxState.unchecked,
-            onChanged: (state) => setState(
-              () => _skipFuture = state == shadcn.CheckboxState.checked,
+          if (widget.syncPanes.isEmpty) ...[
+            const SizedBox(height: 12),
+            shadcn.Checkbox(
+              key: const ValueKey('terminal-paste-skip-session'),
+              theme: const shadcn.CheckboxTheme(size: 14, gap: 8),
+              state: _skipFuture
+                  ? shadcn.CheckboxState.checked
+                  : shadcn.CheckboxState.unchecked,
+              onChanged: (state) => setState(
+                () => _skipFuture = state == shadcn.CheckboxState.checked,
+              ),
+              trailing: Text(
+                '本次会话不再提示'.tr,
+                style: const TextStyle(fontSize: 12),
+              ),
             ),
-            trailing: Text('本次会话不再提示'.tr, style: const TextStyle(fontSize: 12)),
-          ),
+          ],
         ],
       ),
       actions: [

@@ -118,6 +118,7 @@ class _AppMenuItem extends StatelessWidget implements shadcn.MenuItem {
           );
         },
         child: shadcn.MenuButton(
+          enabled: enabled,
           leading: icon == null ? null : AppIcon(icon!),
           onPressed: enabled ? (_) => onPressed() : null,
           child: Text(label),

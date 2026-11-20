@@ -42,6 +42,7 @@ class HostTreeDropTarget extends StatelessWidget {
     required this.tree,
     required this.dragAnchor,
     required this.child,
+    this.onHoverInside,
     super.key,
   });
 
@@ -51,6 +52,7 @@ class HostTreeDropTarget extends StatelessWidget {
   final HostTreeController tree;
   final TreeDragAnchor dragAnchor;
   final Widget child;
+  final VoidCallback? onHoverInside;
 
   HostTreePlacement _placement(TreeDropPosition position) =>
       position == TreeDropPosition.inside
@@ -69,6 +71,7 @@ class HostTreeDropTarget extends StatelessWidget {
     canDrop: (item, position) => tree.canMove(item, _placement(position)),
     onDrop: (item, position) =>
         moveHostTreeItem(tree, item, _placement(position)),
+    onHoverInside: onHoverInside,
     child: child,
   );
 }

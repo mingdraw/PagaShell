@@ -33,7 +33,7 @@
                                 </connections>
                             </menuItem>
                             <menuItem isSeparatorItem="YES" id="VOq-y0-SEH"/>
-                            <menuItem title="Preferences…" keyEquivalent="," id="BOF-NM-1cW">
+                            <menuItem title="Preferences…" id="BOF-NM-1cW">
                                 <connections>
                                     <action selector="showSettings:" target="QvC-M9-y7g" id="Ygi-8y-VfS"/>
                                 </connections>
@@ -74,12 +74,12 @@
                     <modifierMask key="keyEquivalentModifierMask"/>
                     <menu key="submenu" title="File" id="PgS-Fi-le1">
                         <items>
-                            <menuItem title="Quick Connect…" keyEquivalent="k" id="PgS-Qc-md0">
+                            <menuItem title="Quick Connect…" id="PgS-Qc-md0">
                                 <connections>
                                     <action selector="showQuickConnect:" target="QvC-M9-y7g" id="PgS-Qc-md1"/>
                                 </connections>
                             </menuItem>
-                            <menuItem title="New Service…" keyEquivalent="n" id="PgS-Ns-md0">
+                            <menuItem title="New Service…" id="PgS-Ns-md0">
                                 <connections>
                                     <action selector="newService:" target="QvC-M9-y7g" id="PgS-Ns-md1"/>
                                 </connections>

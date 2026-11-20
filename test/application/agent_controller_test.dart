@@ -1353,12 +1353,23 @@ void main() {
     app.agent.selectAccessMode(AgentAccessMode.fullAccess);
     final run = app.agent.send('Wait');
     await sent.future;
+    final toolEntry = app.agent.entries.singleWhere(
+      (entry) => entry.kind == AgentEntryKind.tool,
+    );
+    expect(toolEntry.toolSummary?.elapsedMs, isNull);
     app.agent.stop();
     await run;
     target.terminal!.writeText('late-output');
     expect(connect.requests, hasLength(1));
     expect(app.agent.busy.value, isFalse);
     expect(target.terminal!.listeners, isEmpty);
+    expect(toolEntry.toolSummary?.cancelled, isTrue);
+    expect(toolEntry.toolSummary?.outputLength, isNull);
+    await app.agent.historySaved;
+    final archived = AgentConversation.fromJson(
+      app.history.items.values.single.toJson(),
+    ).messages.singleWhere((entry) => entry.kind == AgentEntryKind.tool);
+    expect(archived.toolSummary?.cancelled, isTrue);
   });
 
   testWidgets('终端无新输出时观察有超时，返回未知完成状态且不重复发送', (tester) async {

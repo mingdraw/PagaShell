@@ -10,6 +10,7 @@ import 'package:pagashell/application/hosts/host_controller.dart';
 import 'package:pagashell/application/identities/identity_controller.dart';
 import 'package:pagashell/application/session/session.dart';
 import 'package:pagashell/application/session/session_controller.dart';
+import 'package:pagashell/application/session/session_layout.dart';
 import 'package:pagashell/application/settings/settings_controller.dart';
 import 'package:pagashell/domain/entities/host.dart';
 import 'package:pagashell/domain/entities/sidebar_state.dart';
@@ -393,6 +394,117 @@ void main() {
     await tester.pumpAndSettle();
   });
 
+  testWidgets('命令面板在组词及无结果时保持打开，小键盘回车可聚焦匹配的副窗格', (tester) async {
+    tester.view.physicalSize = const Size(1280, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(
+      PagaShellApp(
+        binding: InMemoryBinding(sshEngine: _FakeEngine()),
+        platform: TargetPlatform.macOS,
+      ),
+    );
+    await tester.pumpAndSettle();
+    final sessions = Get.find<SessionController>();
+    const credentials = SshCredentials.password('fixture');
+    final primary = await sessions.open(
+      const Host(id: 'root', name: 'Primary', hostname: 'primary.test'),
+      credentials,
+    );
+    final secondary = await sessions.splitToHost(
+      primary,
+      const Host(id: 'side', name: 'Secondary', hostname: 'secondary.test'),
+      credentials,
+      edge: SessionSplitEdge.right,
+      temporary: true,
+    );
+    expect(secondary, isNotNull);
+    sessions.activate(primary);
+    await tester.pumpAndSettle();
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyK);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+    await tester.pumpAndSettle();
+
+    final input = find.byKey(const ValueKey('command-palette-input'));
+    await tester.enterText(input, 'no results fixture');
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+    expect(input, findsOneWidget);
+    expect(find.text('没有匹配的服务'), findsOneWidget);
+
+    await tester.enterText(input, 'ssh');
+    await tester.pumpAndSettle();
+    expect(find.text('Primary · 窗格 1/2'), findsOneWidget);
+    expect(find.text('Secondary · 窗格 2/2'), findsOneWidget);
+
+    const query = 'secondary ssh';
+    tester.testTextInput.updateEditingValue(
+      const TextEditingValue(
+        text: query,
+        selection: TextSelection.collapsed(offset: query.length),
+        composing: TextRange(start: 0, end: query.length),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('回车聚焦窗格'), findsOneWidget);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.enter);
+    await tester.sendKeyRepeatEvent(LogicalKeyboardKey.enter);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+    expect(input, findsOneWidget);
+    expect(sessions.activeSessionId.value, primary);
+
+    tester.testTextInput.updateEditingValue(
+      const TextEditingValue(
+        text: query,
+        selection: TextSelection.collapsed(offset: query.length),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.numpadEnter);
+    await tester.sendKeyRepeatEvent(LogicalKeyboardKey.numpadEnter);
+    await tester.pump();
+    expect(input, findsOneWidget);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.numpadEnter);
+    await tester.pumpAndSettle();
+    expect(input, findsNothing);
+    expect(sessions.activeSessionId.value, secondary);
+    expect(sessions.activeTabId, sessions.tabForSession(primary)!.id);
+  });
+
+  testWidgets('在窄窗中从命令面板恢复被 Agent 临时遮起的侧栏', (tester) async {
+    tester.view.physicalSize = const Size(860, 540);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(
+      PagaShellApp(binding: InMemoryBinding(), platform: TargetPlatform.macOS),
+    );
+    await tester.pumpAndSettle();
+    final sidebar = find.byKey(const ValueKey('sidebar-viewport'));
+    await tester.tap(find.byKey(const ValueKey('agent-toggle')));
+    await tester.pumpAndSettle();
+    expect(tester.getSize(sidebar).width, 0);
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyK);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const ValueKey('command-palette-input')),
+      '切换侧边栏',
+    );
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+    expect(tester.getSize(sidebar).width, greaterThan(0));
+    expect(
+      find.byKey(const ValueKey('agent-panel')).hitTestable(),
+      findsNothing,
+    );
+  });
+
   testWidgets('侧栏宽度可保存，目录内新建服务保留归属，页签可中键关闭', (tester) async {
     tester.view.physicalSize = const Size(1280, 800);
     tester.view.devicePixelRatio = 1;
@@ -491,13 +603,21 @@ void main() {
       1.0,
     );
 
-    await tester.tap(
-      find.descendant(
-        of: find.byType(shadcn.TabPane<String>),
-        matching: find.text('clustered-node'),
-      ),
+    final tabLabel = find.descendant(
+      of: find.byType(shadcn.TabPane<String>),
+      matching: find.text('clustered-node'),
+    );
+    final mouse = await tester.startGesture(
+      tester.getCenter(tabLabel),
+      kind: PointerDeviceKind.mouse,
       buttons: kMiddleMouseButton,
     );
+    await mouse.moveBy(const Offset(0, 45));
+    await mouse.up();
+    await tester.pumpAndSettle();
+    expect(sessions.tabs.map((t) => t.id), [s1, s2]);
+
+    await tester.tap(tabLabel, buttons: kMiddleMouseButton);
     await tester.pumpAndSettle();
     expect(sessions.tabs.map((t) => t.id), [s2]);
   });

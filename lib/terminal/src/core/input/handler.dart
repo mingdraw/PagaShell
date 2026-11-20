@@ -175,6 +175,9 @@ class CtrlInputHandler implements TerminalInputHandler {
     }
 
     final key = event.key;
+    if (key == TerminalKey.minus || key == TerminalKey.numpadSubtract) {
+      return '\x1f'; // Ctrl+_ (readline undo).
+    }
 
     if (key.index >= TerminalKey.keyA.index &&
         key.index <= TerminalKey.keyZ.index) {

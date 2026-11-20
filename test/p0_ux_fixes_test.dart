@@ -219,7 +219,7 @@ void main() {
       await gate.future;
     });
     for (var i = 0; i < 600; i++) {
-      queue.add(() async => sent.add('wheel-$i'), wheel: true);
+      queue.addWheel(1, 2, (dx, dy) async => sent.add('wheel-$dx/$dy'));
     }
     queue.add(() async => sent.add('key'));
 
@@ -227,7 +227,7 @@ void main() {
     await Future<void>.delayed(Duration.zero);
 
     expect(errors, isEmpty);
-    expect(sent, ['first', 'wheel-599', 'key']);
+    expect(sent, ['first', 'wheel-600/1200', 'key']);
   });
 
   testWidgets('RdpDesktopPanel 合并高频滚轮并在 16ms 后批量发送，不触发超时错误', (tester) async {
@@ -256,7 +256,7 @@ void main() {
     );
     for (var i = 0; i < 20; i++) {
       tester.binding.handlePointerEvent(
-        PointerScrollEvent(position: center, scrollDelta: const Offset(0, 10)),
+        PointerScrollEvent(position: center, scrollDelta: const Offset(3, 20)),
       );
     }
     await tester.pump(const Duration(milliseconds: 20));
@@ -266,8 +266,11 @@ void main() {
     final wheelEvents = session.pointers
         .where((event) => event.$4 != 0)
         .toList();
-    expect(wheelEvents, hasLength(1));
-    expect(wheelEvents.single.$4, 200);
+    expect(wheelEvents.map((event) => (event.$3, event.$4)), [
+      (0x0300, 255),
+      (0x0300, 145),
+      (0x0500, 60),
+    ]);
   });
 
   testWidgets('AI 设置页异步同步已保存协议并保持取消在左、保存在右的按钮顺序', (tester) async {

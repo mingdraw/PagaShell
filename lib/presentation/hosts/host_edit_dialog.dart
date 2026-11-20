@@ -5,6 +5,7 @@ import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import '../../application/gateways/gateway_controller.dart';
 import '../../application/hosts/host_controller.dart';
+import '../../application/session/session.dart';
 import '../../domain/entities/host.dart';
 import '../../domain/entities/proxy_config.dart';
 import '../../domain/ssh/ssh_endpoint.dart';
@@ -34,6 +35,7 @@ Future<void> showHostEditDialog(
   Host? copyFrom,
   String? initialFolderId,
   bool gateway = false,
+  Future<void> Function(Host)? onConnect,
 }) async {
   final hostToConnect = await AppNavigation.dialog<Host>(
     HostEditDialog(
@@ -41,10 +43,40 @@ Future<void> showHostEditDialog(
       copyFrom: copyFrom,
       initialFolderId: initialFolderId,
       gateway: gateway,
+      allowConnectOnEdit: onConnect != null,
     ),
   );
   if (hostToConnect != null && context.mounted) {
-    await connectToHost(context, hostToConnect);
+    await (onConnect?.call(hostToConnect) ??
+        connectToHost(context, hostToConnect));
+  }
+}
+
+Future<void> showSessionHostEditDialog(
+  BuildContext context,
+  Session session, {
+  bool retryOnSave = false,
+}) async {
+  final controller = savedHostControllerForSession(session);
+  if (controller == null) return;
+  final gateway = session.kind.usesGatewayEndpoint;
+  try {
+    final host = await controller.findSaved(session.host.id);
+    if (!context.mounted) return;
+    if (host == null) {
+      AppNotice.error(gateway ? '所选网关已不存在' : '所选服务已不存在');
+      return;
+    }
+    await showHostEditDialog(
+      context,
+      host: host,
+      gateway: gateway,
+      onConnect: retryOnSave
+          ? (_) => retryFailedSession(context, session)
+          : null,
+    );
+  } on Object {
+    if (context.mounted) AppNotice.error('无法读取连接配置，请重试');
   }
 }
 
@@ -106,12 +138,14 @@ class HostEditDialog extends StatefulWidget {
     this.copyFrom,
     this.initialFolderId,
     this.gateway = false,
+    this.allowConnectOnEdit = false,
   }) : assert(host == null || copyFrom == null);
 
   final Host? host;
   final Host? copyFrom;
   final String? initialFolderId;
   final bool gateway;
+  final bool allowConnectOnEdit;
 
   @override
   State<HostEditDialog> createState() => _HostEditDialogState();
@@ -199,7 +233,8 @@ class _HostEditDialogState extends State<HostEditDialog> {
     _identityId = h?.identityId;
     _folderId = h?.folderId ?? widget.initialFolderId;
     _gatewayId = h?.gatewayId;
-    _advancedExpanded = _gatewayId != null;
+    _advancedExpanded =
+        _gatewayId != null || _tags.text.isNotEmpty || (_colorValue ?? 0) != 0;
     _mode = h?.identityId != null ? _AuthMode.identity : _AuthMode.password;
     if (widget.copyFrom != null && h?.identityId == null) {
       _loadCopyPassword();
@@ -254,8 +289,6 @@ class _HostEditDialogState extends State<HostEditDialog> {
 
   Future<void> _save({bool connect = false}) async {
     if (_saving || !_copyReady) return;
-    _applyTypedAddress();
-    if (!_formKey.currentState!.validate()) return;
     setState(() {
       _saving = true;
       _error = null;
@@ -263,46 +296,62 @@ class _HostEditDialogState extends State<HostEditDialog> {
     });
     final controller = _controller;
     final id = _hostId;
-    final name = _name.text.trim();
-    final username = _username.text.trim();
-    final latest = widget.host == null
-        ? widget.copyFrom
-        : controller.hosts.firstWhereOrNull((h) => h.id == id) ?? widget.host;
-    final host = Host(
-      id: id,
-      name: name.isEmpty ? _hostname.text.trim() : name,
-      hostname: _hostname.text.trim(),
-      port: int.parse(_port.text.trim()),
-      username: _isVnc
-          ? ''
-          : username.isEmpty
-          ? _serviceType.defaultUsername
-          : username,
-      note: _note.text.trim(),
-      tags: widget.gateway
-          ? latest?.tags ?? const []
-          : _tags.text
-                .split(RegExp(r'[,，\n]'))
-                .map((tag) => tag.trim())
-                .where((tag) => tag.isNotEmpty)
-                .toSet()
-                .toList(growable: false),
-      folderId: _folderId,
-      identityId: !_isPage && _mode == _AuthMode.identity ? _identityId : null,
-      gatewayId: widget.gateway ? null : _gatewayId,
-      gatewayType: _gatewayType,
-      serviceType: _serviceType,
-      rdpDomain: _isRdp ? _rdpDomain.text.trim() : '',
-      pageClientId: _isPage ? _pageClientId.text.trim() : '',
-      pageServerFingerprint: _isPage ? _pageFingerprint.text.trim() : '',
-      colorValue: _colorValue,
-      sortOrder: widget.host?.sortOrder ?? 0,
-      forwardPorts: latest?.forwardPorts ?? const [],
-      proxyConfig: latest?.proxyConfig ?? const ProxyConfig(),
-    );
-    final password = _password.text;
-    final mode = _mode;
     try {
+      final latest = _isEdit ? await controller.findSaved(id) : widget.copyFrom;
+      if (!mounted) return;
+      if (_isEdit && latest == null) {
+        throw StateError(widget.gateway ? '所选网关已不存在' : '所选服务已不存在');
+      }
+      _applyTypedAddress();
+      if (_gatewayId case final gatewayId? when !widget.gateway) {
+        final gateway = Get.isRegistered<GatewayController>()
+            ? await Get.find<GatewayController>().findSaved(gatewayId)
+            : null;
+        if (!mounted) return;
+        if (gateway == null) {
+          setState(() => _advancedExpanded = true);
+          throw StateError('所选网关已不存在');
+        }
+      }
+      if (!_formKey.currentState!.validate()) return;
+      final name = _name.text.trim();
+      final username = _username.text.trim();
+      final password = _password.text;
+      final mode = _mode;
+      final host = Host(
+        id: id,
+        name: name.isEmpty ? _hostname.text.trim() : name,
+        hostname: _hostname.text.trim(),
+        port: int.parse(_port.text.trim()),
+        username: _isVnc
+            ? ''
+            : username.isEmpty
+            ? _serviceType.defaultUsername
+            : username,
+        note: _note.text.trim(),
+        tags: widget.gateway
+            ? latest?.tags ?? const []
+            : _tags.text
+                  .split(RegExp(r'[,，\n]'))
+                  .map((tag) => tag.trim())
+                  .where((tag) => tag.isNotEmpty)
+                  .toSet()
+                  .toList(growable: false),
+        folderId: _folderId,
+        identityId: !_isPage && _mode == _AuthMode.identity
+            ? _identityId
+            : null,
+        gatewayId: widget.gateway ? null : _gatewayId,
+        gatewayType: _gatewayType,
+        serviceType: _serviceType,
+        rdpDomain: _isRdp ? _rdpDomain.text.trim() : '',
+        pageClientId: _isPage ? _pageClientId.text.trim() : '',
+        pageServerFingerprint: _isPage ? _pageFingerprint.text.trim() : '',
+        colorValue: _colorValue,
+        sortOrder: widget.host?.sortOrder ?? 0,
+        forwardPorts: latest?.forwardPorts ?? const [],
+        proxyConfig: latest?.proxyConfig ?? const ProxyConfig(),
+      );
       await controller.save(host);
       if (_isPage || mode == _AuthMode.password) {
         // 留空：编辑时保持已存密码不变；新建时不保存（连接时询问）。
@@ -549,6 +598,7 @@ class _HostEditDialogState extends State<HostEditDialog> {
                   AppTextFormField(
                     key: const ValueKey('page-client-id'),
                     controller: _pageClientId,
+                    smartPunctuation: false,
                     decoration: AppInputDecoration(labelText: 'Client ID'.tr),
                     validator: (v) => _clientIdPattern.hasMatch(v?.trim() ?? '')
                         ? null
@@ -558,6 +608,7 @@ class _HostEditDialogState extends State<HostEditDialog> {
                   AppTextFormField(
                     key: const ValueKey('page-fingerprint'),
                     controller: _pageFingerprint,
+                    smartPunctuation: false,
                     decoration: AppInputDecoration(
                       labelText: 'Server 证书 SHA-256 指纹（可选）'.tr,
                       helperText: '留空使用无证书 TCP；填写指纹使用 TLS'.tr,
@@ -601,6 +652,7 @@ class _HostEditDialogState extends State<HostEditDialog> {
                   AppTextFormField(
                     key: const ValueKey('rdp-domain'),
                     controller: _rdpDomain,
+                    smartPunctuation: false,
                     decoration: AppInputDecoration(
                       labelText: 'Windows 域（可选）'.tr,
                     ),
@@ -734,13 +786,7 @@ class _HostEditDialogState extends State<HostEditDialog> {
             onPressed: _saving ? null : () => AppNavigation.closeDialog<void>(),
             child: Text('取消'.tr),
           ),
-          shadcn.PrimaryButton(
-            onPressed: _saving || !_copyReady ? null : _save,
-            child: Text(
-              _loadingCopy ? '读取中…'.tr : (_saving ? '保存中…'.tr : '保存'.tr),
-            ),
-          ),
-          if (!_isEdit && !widget.gateway)
+          if (!widget.gateway && (!_isEdit || widget.allowConnectOnEdit))
             shadcn.OutlineButton(
               key: const ValueKey('host-save-connect'),
               onPressed: _saving || !_copyReady
@@ -748,6 +794,12 @@ class _HostEditDialogState extends State<HostEditDialog> {
                   : () => _save(connect: true),
               child: Text('保存并连接'.tr),
             ),
+          shadcn.PrimaryButton(
+            onPressed: _saving || !_copyReady ? null : _save,
+            child: Text(
+              _loadingCopy ? '读取中…'.tr : (_saving ? '保存中…'.tr : '保存'.tr),
+            ),
+          ),
         ],
       ),
     );

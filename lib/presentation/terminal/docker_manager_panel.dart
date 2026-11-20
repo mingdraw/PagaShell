@@ -49,6 +49,7 @@ class _DockerManagerPanelState extends State<DockerManagerPanel> {
   };
   bool _showingDetails = false;
   bool _showingAction = false;
+  bool _showingLogs = false;
   final _opening = <String>{};
 
   @override
@@ -269,6 +270,8 @@ class _DockerManagerPanelState extends State<DockerManagerPanel> {
                             ? '正在获取 Docker 列表…'
                             : error != null && !hasData
                             ? '可点击刷新重试'
+                            : !hasData && controller.autoRefreshPaused.value
+                            ? '此分类尚未加载，可手动刷新'
                             : state.query.value.trim().isNotEmpty
                             ? '没有匹配的 Docker 资源'
                             : '暂无 Docker 资源')
@@ -290,9 +293,17 @@ class _DockerManagerPanelState extends State<DockerManagerPanel> {
 
   Widget _tabs(DockerManagerController controller) => LayoutBuilder(
     builder: (_, constraints) {
-      final showLabels =
-          constraints.maxWidth >=
-          (Get.locale?.languageCode == 'en' ? 480 : 300);
+      final compact =
+          Get.locale?.languageCode == 'en' && constraints.maxWidth < 400;
+      String tabLabel(DockerResourceKind kind) => !compact
+          ? kind.label
+          : switch (kind) {
+              DockerResourceKind.container => 'Ctrs',
+              DockerResourceKind.image => 'Imgs',
+              DockerResourceKind.volume => 'Vols',
+              DockerResourceKind.network => 'Nets',
+              DockerResourceKind.compose => 'Stacks',
+            };
       return shadcn.TabList(
         key: const ValueKey('docker-manager-tabs'),
         index: controller.selected.value.index,
@@ -316,11 +327,11 @@ class _DockerManagerPanelState extends State<DockerManagerPanel> {
                       label: kind.label,
                       selected: controller.selected.value == kind,
                       excludeSemantics: true,
-                      child: showLabels
+                      child: constraints.maxWidth >= 200
                           ? FittedBox(
                               fit: BoxFit.scaleDown,
                               child: Text(
-                                kind.label,
+                                tabLabel(kind),
                                 style: const TextStyle(fontSize: 11),
                               ),
                             )
@@ -531,17 +542,7 @@ class _DockerManagerPanelState extends State<DockerManagerPanel> {
                         if (action == 'container-terminal') {
                           unawaited(_requestTerminal(resource));
                         } else if (action == 'container-logs') {
-                          if (widget.source case final DockerLogsSource source
-                              when widget.active) {
-                            unawaited(
-                              AppNavigation.dialog<void>(
-                                DockerLogsDialog(
-                                  container: resource,
-                                  source: source,
-                                ),
-                              ),
-                            );
-                          }
+                          unawaited(_showLogs(resource));
                         } else {
                           unawaited(
                             _requestAction(
@@ -635,6 +636,22 @@ class _DockerManagerPanelState extends State<DockerManagerPanel> {
         ),
       ),
     );
+  }
+
+  Future<void> _showLogs(DockerResource resource) async {
+    final source = widget.source;
+    if (_showingLogs || !widget.active || source is! DockerLogsSource) return;
+    _showingLogs = true;
+    try {
+      await AppNavigation.dialog<void>(
+        DockerLogsDialog(
+          container: resource,
+          source: source as DockerLogsSource,
+        ),
+      );
+    } finally {
+      _showingLogs = false;
+    }
   }
 
   Widget _cardButton(

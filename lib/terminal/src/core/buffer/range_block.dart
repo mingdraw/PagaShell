@@ -29,19 +29,12 @@ class BufferRangeBlock extends BufferRange {
   }
 
   @override
-  Iterable<BufferSegment> toSegments() sync* {
-    var begin = this.begin;
-    var end = this.end;
-
-    if (!isNormalized) {
-      end = this.begin;
-      begin = this.end;
-    }
-
-    final startX = min(begin.x, end.x);
-    final endX = max(begin.x, end.x);
-    for (var i = begin.y; i <= end.y; i++) {
-      yield BufferSegment(this, i, startX, endX);
+  Iterable<BufferSegment> toSegments({int? firstLine, int? lastLine}) sync* {
+    final self = normalized;
+    final first = max(self.begin.y, firstLine ?? self.begin.y);
+    final last = min(self.end.y, lastLine ?? self.end.y);
+    for (var i = first; i <= last; i++) {
+      yield BufferSegment(this, i, self.begin.x, self.end.x);
     }
   }
 

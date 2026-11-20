@@ -10,7 +10,7 @@ class AppTranslations extends Translations {
     r'^Docker 执行容器终端失败（退出码 (\d+)）$',
   );
 
-  /// Rust 桥接错误携带动态地址/句柄；只识别已知前缀，其他诊断保持原文。
+  /// 翻译原生错误的已知文案，同时保留动态地址、句柄与底层诊断。
   static String error(String message) {
     final dockerExit = _dockerTerminalExitCode.firstMatch(message);
     if (dockerExit != null) {
@@ -55,11 +55,21 @@ class AppTranslations extends Translations {
         });
       }
     }
+    // anyhow 的错误链以英文冒号分隔，仅翻译词表中已知的上下文。
+    final separator = message.indexOf(': ');
+    if (separator > 0) {
+      final label = message.substring(0, separator);
+      if (_english.containsKey(label)) {
+        return '${label.tr}: ${error(message.substring(separator + 2))}';
+      }
+    }
     return message.tr;
   }
 
   static const _errorPrefixes = [
     'RDP 服务连接失败：',
+    'RDP 会话运行失败：',
+    'RDP 服务器结束了会话：',
     '连接超时: ',
     '无法连接 ',
     '会话不存在: ',
@@ -178,6 +188,7 @@ class AppTranslations extends Translations {
     '代理配置无效': 'Invalid proxy configuration.',
     '代理配置过大': 'Proxy configuration is too large.',
     '代理规则过多': 'Too many proxy rules.',
+    '无法解析代理目标地址': 'Unable to resolve the proxy target address',
     '代理目标连接超时': 'Proxy target connection timed out.',
     '展开 Agent': 'Expand Agent',
     '较早的对话已移出模型上下文，聊天内容仍可查看': 'Earlier turns are no longer sent to the model. You can still read them here.',
@@ -269,9 +280,11 @@ class AppTranslations extends Translations {
         'AI API connection failed. Check the network and service.',
     '消息过长，请缩短后发送': 'Message is too long. Shorten it and try again.',
     '排队消息引用的会话已关闭或重连，请重新选择会话后发送': 'A queued message references a closed or reconnected session. Select it again and resend.',
+    '原消息引用的会话不可用，请重新选择会话后发送': 'The original session reference is unavailable. Select the session again and resend.',
     '@count 条消息排队中': '@count messages queued',
     '排队中': 'Queued',
     '请求失败': 'Request failed',
+    '已中断': 'Interrupted',
     '请先在设置中配置 AI API': 'Configure an AI API in settings first',
     'API Key 不可用，请在设置中重新保存':
         'API key is unavailable. Save it again in settings.',
@@ -307,6 +320,9 @@ class AppTranslations extends Translations {
     'PagaShell 使用': 'Using PagaShell',
     'SSH 运维': 'SSH operations',
     'RDP 运维': 'RDP operations',
+    '服务、凭证、网关、终端、文件传输和端口转发': 'Services, credentials, gateways, terminals, file transfer and port forwarding',
+    'Linux/macOS 排障、资源、网络、服务与安全命令建议': 'Linux and macOS troubleshooting for resources, networking and services, with safe command suggestions',
+    'Windows 远程桌面、NLA、证书、连通性与分辨率排障': 'Troubleshoot Windows Remote Desktop, NLA, certificates, connectivity and resolution',
     '如何使用 PagaShell 的文件传输和端口转发？':
         'How do I use file transfer and port forwarding in PagaShell?',
     '帮我排查 SSH 连接失败': 'Help me troubleshoot an SSH connection failure',
@@ -325,6 +341,15 @@ class AppTranslations extends Translations {
     '已拒绝': 'Rejected',
     '拒绝': 'Reject',
     'RDP 服务连接失败：@value': 'RDP service connection failed: @value',
+    'RDP 会话运行失败：@value': 'RDP session failed: @value',
+    'RDP 服务器结束了会话：@value': 'The RDP server ended the session: @value',
+    'RDP 会话处理异常，请重新连接':
+        'The RDP session encountered an error. Reconnect to continue.',
+    'RDP TCP 连接失败': 'The RDP TCP connection failed',
+    'RDP TLS 握手失败': 'The RDP TLS handshake failed',
+    'RDP 服务器未提供证书': 'The RDP server did not provide a certificate',
+    'RDP 证书解析失败': 'Unable to parse the RDP certificate',
+    'RDP 证书公钥无效': 'The RDP certificate public key is invalid',
     'RDP 服务连接超时': 'RDP service connection timed out.',
     '无法验证 RDP 服务器身份': 'Cannot verify the RDP server identity',
     '确认 RDP 服务器身份': 'Confirm the RDP server identity',
@@ -427,6 +452,13 @@ class AppTranslations extends Translations {
     'RDP 会话已关闭': 'The RDP session is closed',
     'RDP 会话已经认证或已关闭': 'The RDP session has already authenticated or is closed',
     'RDP 输入队列超时': 'RDP input queue timed out',
+    '无效的 RDP 按键': 'Invalid RDP key',
+    '无效的 RDP 鼠标事件': 'Invalid RDP mouse event',
+    '无效的 RDP 输入': 'Invalid RDP input',
+    'RDP 数据接收失败': 'Unable to receive RDP data',
+    'RDP 响应发送超时': 'Sending the RDP response timed out',
+    'RDP 响应发送失败': 'Unable to send the RDP response',
+    'RDP 通道重新激活失败': 'Unable to reactivate the RDP channel',
     'RDP 文本过长': 'The RDP text is too long',
     '端口转发': 'Port forwarding',
     '未启用': 'Not enabled',
@@ -567,6 +599,9 @@ class AppTranslations extends Translations {
     '还没有网关，可在侧边栏「网关」组新建':
         'No gateways yet. Create one in the Gateways section.',
     '所选网关已不存在': 'The selected gateway no longer exists',
+    '所选网关不可用': 'The selected gateway is unavailable',
+    '网关配置无效': 'Invalid gateway configuration',
+    '服务与网关不能使用相同标识': 'A service and a gateway cannot share the same ID',
     '取消网关绑定（直接连接）': 'Remove gateway (direct connection)',
     '所选网关不可用，请检查服务的网关配置': 'The selected gateway is unavailable. Check the gateway settings for this service.',
     '网关正在被服务使用，请先修改服务的网关配置':
@@ -578,6 +613,7 @@ class AppTranslations extends Translations {
         'The password is encrypted on this device for this gateway.',
     '@error。网关信息已保存，密码操作未完成': '@error. Gateway details were saved, but the password operation did not finish.',
     '网关连接不存在或已关闭': 'The gateway connection no longer exists or is closed',
+    '网关隧道连接超时': 'The gateway tunnel connection timed out',
     '无法通过网关建立隧道，请检查网关转发权限和目标地址': 'Unable to open the gateway tunnel. Check forwarding permissions and the target address.',
     '搜索服务': 'Search services',
     '本地工作区': 'Local workspace',
@@ -590,6 +626,7 @@ class AppTranslations extends Translations {
     '浅色': 'Light',
     '深色': 'Dark',
     '主题模式保存失败，请重试': 'Unable to save the theme mode. Please try again.',
+    '语言设置保存失败，请重试': 'Unable to save the language. Please try again.',
     '取消': 'Cancel',
     '确定': 'OK',
     '保存': 'Save',
@@ -597,6 +634,10 @@ class AppTranslations extends Translations {
     '删除': 'Delete',
     '编辑': 'Edit',
     '关闭': 'Close',
+    '关闭代理': 'Off',
+    '停止': 'Stop',
+    '测试': 'Test',
+    '@kind（@phase）': '@kind (@phase)',
     '重试': 'Retry',
     '打开': 'Open',
     '下载': 'Download',
@@ -832,6 +873,7 @@ class AppTranslations extends Translations {
     '正在获取 Docker 列表…': 'Fetching Docker resources…',
     '没有匹配的 Docker 资源': 'No matching Docker resources',
     '暂无 Docker 资源': 'No Docker resources',
+    '此分类尚未加载，可手动刷新': 'This category has not been loaded. Refresh to load it.',
     '可点击刷新重试': 'Click refresh to try again',
     '查看 Docker 详情': 'View Docker details',
     '编排': 'Compose',
@@ -1080,7 +1122,8 @@ class AppTranslations extends Translations {
     '网络 I/O': 'Network I/O',
     '磁盘 I/O': 'Disk I/O',
     '接收': 'Received',
-    '发送': 'Sent',
+    '发送': 'Send',
+    '已发送': 'Sent',
     '读取': 'Read',
     '写入': 'Write',
     '暂无可用数据': 'No data available',
@@ -1126,6 +1169,7 @@ class AppTranslations extends Translations {
     '其中的子文件夹与凭证会移动到上一级，不会被删除。':
         'Child folders and credentials will be moved up one level and kept.',
     '删除文件夹「@name」？': 'Delete folder “@name”?',
+    '无法删除文件夹，请重试': 'Unable to delete the folder. Try again.',
     '同时删除文件夹下的全部内容': 'Also delete everything inside this folder',
     '其中的全部子文件夹与服务都会被删除，此操作无法撤销。': 'All nested folders and services will be deleted. This cannot be undone.',
     '其中的全部子文件夹与凭证都会被删除，此操作无法撤销。': 'All nested folders and credentials will be deleted. This cannot be undone.',
@@ -1166,17 +1210,30 @@ class AppTranslations extends Translations {
     'AI 回复流意外中断，请重试': 'The AI response stream stopped unexpectedly. Try again.',
     '思考与工具调用': 'Reasoning and tool activity',
     '等待工具结果': 'Waiting for the tool result',
+    '工具调用已取消': 'Tool call cancelled',
     '耗时 @ms ms · 输出 @count 字符': '@ms ms · @count output characters',
     '提交 SSH 命令建议': 'Propose an SSH command',
     '查看实时日志': 'View live logs',
     '最大化窗格': 'Maximize pane',
     '还原分屏': 'Restore split layout',
+    '还原分屏后可同步输入': 'Restore the split layout to sync input',
+    '同步输入中': 'Input sync is on',
+    '运维目标：@name': 'Monitoring: @name',
+    '将粘贴到 @count 个窗格：@targets': 'Paste to @count panes: @targets',
+    '同步输入目标已变化，请重新粘贴': 'The panes receiving input changed. Paste again.',
     '同步输入到此页签的所有窗格': 'Sync input to all panes in this tab',
     '同步输入中（点击关闭）': 'Input sync is on (click to turn off)',
     '容器日志 · @name': 'Container logs · @name',
     '正在打开容器日志…': 'Opening container logs…',
     '暂无日志输出': 'No log output yet',
     '日志流已结束': 'Log stream ended',
+    '容器日志连接超时，请重试': 'The container log connection timed out. Try again.',
+    '暂停跟随': 'Pause following',
+    '继续跟随': 'Resume following',
+    '筛选日志': 'Filter logs',
+    '复制日志': 'Copy logs',
+    '无法复制日志': 'Could not copy the logs',
+    '没有匹配的日志': 'No matching logs',
     '仅显示最近的日志内容': 'Showing the most recent logs',
     '此连接不支持查看容器日志': 'This connection does not support container logs',
     '打开容器日志超时': 'Opening container logs timed out',
@@ -1226,6 +1283,10 @@ class AppTranslations extends Translations {
     '服务 @services · 凭证 @identities · 网关 @gateways · 文件夹 @folders': 'Services @services · Credentials @identities · Gateways @gateways · Folders @folders',
     '已导入：@filename': 'Imported: @filename',
     '私钥内容': 'Private key contents',
+    '粘贴私钥': 'Paste private key',
+    '清空私钥': 'Clear private key',
+    '已载入私钥，内容已隐藏': 'Private key loaded. Its contents are hidden.',
+    '剪贴板中没有可粘贴的私钥文本': 'There is no private key text on the clipboard.',
     '已保存；留空保持原私钥与口令': 'Saved; leave blank to keep the key and passphrase',
     '导入文件或粘贴私钥': 'Import a file or paste a private key',
     'OpenSSH / PEM / PPK，最多 1 MiB': 'OpenSSH / PEM / PPK, up to 1 MiB',
@@ -1315,6 +1376,7 @@ class AppTranslations extends Translations {
     '信任并连接': 'Trust and connect',
     '保存失败，请重试': 'Unable to save. Please try again.',
     '无法准备连接，请重试': 'Unable to prepare the connection. Please try again.',
+    '无法读取连接配置，请重试': 'Unable to read the connection settings. Try again.',
     '@error。服务信息已保存，密码操作未完成': '@error. Service details were saved, but the password operation did not finish.',
     '所选凭证的密文不存在，请重新编辑凭证':
         'The selected credential has no stored secret. Edit it again.',
@@ -1338,6 +1400,8 @@ class AppTranslations extends Translations {
     '已保存的私钥凭证无法读取，请重新编辑并导入私钥': 'Unable to read the saved private key. Edit the credential and import the key again.',
     '私钥格式无效或口令错误，请检查私钥与口令':
         'Invalid private key or passphrase. Check both and try again.',
+    '私钥格式无效或口令错误，请检查 OpenSSH、PEM 或 PPK 私钥与口令': 'Invalid private key format or passphrase. Check the OpenSSH, PEM or PPK key and its passphrase.',
+    '私钥解析失败': 'Unable to parse the private key',
     '未配置主机密钥校验，已拒绝连接':
         'Host key verification is not configured. Connection refused.',
     '连接已取消': 'Connection cancelled',
@@ -1360,6 +1424,9 @@ class AppTranslations extends Translations {
         'The file changed during resume. Start a new transfer.',
     '无法确认续传文件大小，请重新发起传输':
         'Cannot verify the partial file size. Start a new transfer.',
+    '读取续传源文件失败': 'Unable to read the source file while resuming the transfer',
+    '读取续传目标文件失败':
+        'Unable to read the destination file while resuming the transfer',
     '本地文件已变化，上传未完成': 'The local file changed before the upload completed.',
     '远程文件已变化，下载未完成': 'The remote file changed before the download completed.',
     'SSH连接已断开，请刷新重新连接': 'SSH disconnected. Refresh to reconnect.',
@@ -1391,6 +1458,7 @@ class AppTranslations extends Translations {
     '打开远程文件失败': 'Unable to open the remote file',
     '创建本地文件失败': 'Unable to create the local file',
     '传输已取消': 'Transfer cancelled',
+    '传输失败：远程服务无响应，已达到重试上限（2 次，30 秒）': 'Transfer failed: the remote service did not respond. The retry limit was reached (2 retries, 30 seconds).',
     '读取远程文件失败': 'Unable to read the remote file',
     '写入本地文件失败': 'Unable to write the local file',
     '读取本地文件信息失败': 'Unable to read local file metadata',
@@ -1400,6 +1468,8 @@ class AppTranslations extends Translations {
     '写入远程文件失败': 'Unable to write the remote file',
     '关闭远程文件失败': 'Unable to close the remote file',
     '连接超时: @value': 'Connection timed out: @value',
+    '请填写有效的目标地址和端口（1-65535）': 'Enter a valid target address and port (1–65535)',
+    '目标端口连接超时': 'The target port connection timed out',
     '无法连接 @value': 'Unable to connect to @value',
     '会话不存在: @value': 'Session does not exist: @value',
     '终端未启动或会话不存在: @value':
@@ -1410,12 +1480,24 @@ class AppTranslations extends Translations {
     '查看全部': 'View all',
     '打开设置': 'Open settings',
     '窗格 @index/@total': 'Pane @index/@total',
+    '切换窗格': 'Switch pane',
+    '移到新标签': 'Move to new tab',
     '切换标签': 'Switch tab',
     '最近': 'Recent',
     '已连接': 'Connected',
     '内置能力': 'Capabilities',
     '常见提问': 'Suggested prompts',
     '回车连接 · ⌘↵ 文件传输 · ⇧↵ 新建会话': '↵ Connect · ⌘↵ File transfer · ⇧↵ New session',
+    '回车连接 · ⇧↵ 新建会话': '↵ Connect · ⇧↵ New session',
+    '回车连接': '↵ Connect',
+    '回车切换标签': '↵ Switch tab',
+    '回车聚焦窗格': '↵ Focus pane',
+    '聚焦窗格': 'Focus pane',
+    '回车执行': '↵ Run action',
+    '正在处理…': 'Processing…',
+    '正在认证': 'Authenticating',
+    '等待输入密码': 'Waiting for password',
+    '正在重新连接': 'Reconnecting',
     '回车连接 · Ctrl+↵ 文件传输 · ⇧↵ 新建会话':
         '↵ Connect · Ctrl+↵ File transfer · ⇧↵ New session',
     '输入路径': 'Enter path',
@@ -1428,6 +1510,9 @@ class AppTranslations extends Translations {
     '删除所选': 'Delete selected',
     '取消选择': 'Clear selection',
     '终端字号': 'Terminal font size',
+    '断开后自动关闭窗格': 'Close pane on disconnect',
+    '开启后关闭断开的 SSH 窗格；最后一个窗格断开时关闭标签。未开启时保留历史输出并提示重连。': 'When enabled, a disconnected SSH pane closes, and the tab closes with its last pane. Otherwise, scrollback is kept and you can reconnect.',
+    '终端字号：@size': 'Terminal font size: @size',
     '搜索凭证': 'Search credentials',
     '搜索名称、用户名或协议': 'Search name, username or protocol',
     '无匹配凭证': 'No matching credentials',
@@ -1551,6 +1636,7 @@ class AppTranslations extends Translations {
     '正则表达式': 'Regular expression',
     '正则表达式无效': 'Invalid regular expression',
     '搜索超时，请简化正则表达式': 'Search timed out. Try a simpler expression.',
+    '终端查找失败，请重试': 'Terminal search failed. Try again.',
     '上一个匹配': 'Previous match',
     '下一个匹配': 'Next match',
     '关闭查找': 'Close find',
@@ -1559,6 +1645,7 @@ class AppTranslations extends Translations {
     '暂停自动刷新': 'Pause auto refresh',
     '恢复自动刷新': 'Resume auto refresh',
     '最近 @count 次采样趋势': 'Trend over the last @count samples',
+    '峰值 @rate': 'Peak @rate',
     '此连接不支持查看进程': 'This connection cannot show process details',
     '复制进程 ID': 'Copy process ID',
     '复制主机端口': 'Copy host and port',
@@ -1574,6 +1661,10 @@ class AppTranslations extends Translations {
     '无法确认文件修改时间，不能保存': 'Saving is unavailable because the modification time cannot be verified',
     '无法读取文本，请重试': 'Unable to read text. Try again.',
     '无法保存文本，请重试': 'Unable to save text. Try again.',
+    '放弃未保存的修改？': 'Discard unsaved changes?',
+    '未保存的修改将丢失。': 'Your unsaved changes will be lost.',
+    '放弃修改': 'Discard changes',
+    '重新加载': 'Reload',
     '文件连接已变更，请重新打开': 'The file connection changed. Reopen the file.',
     '文件正在传输，请稍后再保存': 'This file is being transferred. Wait before saving.',
     '部分文件未能移动，请检查重名、目录权限或进行中的传输': 'Some items were not moved. Check for name conflicts, permissions, or active transfers.',

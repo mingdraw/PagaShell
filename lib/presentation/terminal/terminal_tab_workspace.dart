@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
@@ -13,6 +14,7 @@ import '../../domain/entities/host.dart';
 import '../../domain/entities/host_tree_item.dart';
 import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
+import '../components/app_menu.dart';
 import '../shell/connect_flow.dart';
 import '../shell/widgets/host_tree_drag.dart';
 import '../theme/app_theme.dart';
@@ -36,7 +38,8 @@ class TerminalTabWorkspace extends StatefulWidget {
   final SessionTab tab;
   final List<Session> sessions;
   final bool active;
-  final Widget Function(Session session, bool selected) paneBuilder;
+  final Widget Function(Session session, bool selected, bool zoomed)
+  paneBuilder;
 
   @override
   State<TerminalTabWorkspace> createState() => _TerminalTabWorkspaceState();
@@ -69,9 +72,20 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
 
   bool _toggleZoom(String id) {
     if (!widget.active || widget.sessions.length < 2) return false;
-    Get.find<SessionController>().activate(id);
+    final controller = Get.find<SessionController>();
+    if (_zoomed != id) controller.stopInputSync(widget.tab.id);
+    controller.activate(id);
     setState(() => _zoomed = _zoomed == id ? null : id);
     return true;
+  }
+
+  void _cyclePane(int direction) {
+    final ids = widget.tab.sessionIds.toList();
+    if (!widget.active || ids.length < 2) return;
+    final index = ids.indexOf(widget.tab.selectedSessionId);
+    Get.find<SessionController>().activate(
+      ids[(index + direction) % ids.length],
+    );
   }
 
   Widget _panes(Map<String, Session> sessions, bool synced) => Stack(
@@ -79,10 +93,7 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
     children: [
       Offstage(
         offstage: _zoomed != null,
-        child: ExcludeFocus(
-          excluding: _zoomed != null,
-          child: _layout(widget.tab.layout, sessions, synced),
-        ),
+        child: _layout(widget.tab.layout, sessions, synced),
       ),
       if (_zoomed case final id?)
         _pane(sessions[id]!, split: true, synced: synced),
@@ -106,13 +117,16 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
     // Keep the resize controllers and hidden siblings mounted while the
     // selected terminal moves to the full-size layer using its existing key.
     if (id == _zoomed) return const SizedBox.expand();
-    return _pane(sessions[id]!, split: sessions.length > 1, synced: synced);
+    return ExcludeFocus(
+      excluding: _zoomed != null,
+      child: _pane(sessions[id]!, split: sessions.length > 1, synced: synced),
+    );
   }
 
   Widget _pane(Session session, {required bool split, required bool synced}) {
     final id = session.id;
     final selected = widget.tab.selectedSessionId == id;
-    final child = widget.paneBuilder(session, selected);
+    final child = widget.paneBuilder(session, selected, _zoomed == id);
     if (!split) return _dropZones(session, child);
     return Listener(
       onPointerDown: (_) => Get.find<SessionController>().activate(id),
@@ -134,52 +148,64 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
             children: [
               child,
               Positioned(
-                top: 4,
-                right: 4,
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: AppTheme.terminalBackground.withValues(alpha: .9),
-                    borderRadius: BorderRadius.circular(5),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      SizedBox.square(
-                        dimension: AppTheme.terminalPaneCloseSize,
-                        child: AppIconButton(
-                          key: ValueKey('terminal-pane-zoom-$id'),
-                          semanticLabel: (_zoomed == id ? '还原分屏' : '最大化窗格').tr,
-                          tooltip: (_zoomed == id ? '还原分屏' : '最大化窗格').tr,
-                          density: shadcn.ButtonDensity.compact,
-                          onPressed: () => _toggleZoom(id),
-                          icon: AppIcon(
-                            _zoomed == id
-                                ? AppIcons.minimize
-                                : AppIcons.maximize,
-                            size: 13,
-                          ),
-                        ),
-                      ),
-                      SizedBox.square(
-                        dimension: AppTheme.terminalPaneCloseSize,
-                        child: AppIconButton(
-                          key: ValueKey('terminal-pane-close-$id'),
-                          semanticLabel: '关闭窗格'.tr,
-                          tooltip: '关闭窗格'.tr,
-                          density: shadcn.ButtonDensity.compact,
-                          onPressed: () => unawaited(
-                            Get.find<SessionController>().close(id),
-                          ),
-                          icon: const AppIcon(AppIcons.x, size: 14),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
+                top: AppTheme.terminalPaneControlsInset,
+                right: AppTheme.terminalPaneControlsInset,
+                child: _paneControls(id),
               ),
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _paneControls(String id) {
+    final controller = Get.find<SessionController>();
+    final zoomed = _zoomed == id;
+    Widget button(
+      String action,
+      String label,
+      AppIcons icon,
+      VoidCallback run,
+    ) => SizedBox.square(
+      dimension: AppTheme.terminalPaneControlSize,
+      child: AppIconButton(
+        key: ValueKey('terminal-pane-$action-$id'),
+        semanticLabel: label.tr,
+        tooltip: label.tr,
+        density: shadcn.ButtonDensity.compact,
+        onPressed: run,
+        icon: AppIcon(icon, size: 14),
+      ),
+    );
+
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: AppTheme.terminalControlBackground.withValues(alpha: .9),
+        borderRadius: BorderRadius.circular(5),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          button(
+            'detach',
+            '移到新标签',
+            AppIcons.externalLink,
+            () => controller.movePaneToNewTab(id),
+          ),
+          button(
+            'zoom',
+            zoomed ? '还原分屏' : '最大化窗格',
+            zoomed ? AppIcons.minimize : AppIcons.maximize,
+            () => _toggleZoom(id),
+          ),
+          button(
+            'close',
+            '关闭窗格',
+            AppIcons.x,
+            () => unawaited(controller.close(id)),
+          ),
+        ],
       ),
     );
   }
@@ -277,6 +303,9 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
       TerminalPaneZoomIntent: CallbackAction<TerminalPaneZoomIntent>(
         onInvoke: (_) => _toggleZoom(widget.tab.selectedSessionId),
       ),
+      TerminalPaneCycleIntent: CallbackAction<TerminalPaneCycleIntent>(
+        onInvoke: (intent) => _cyclePane(intent.direction),
+      ),
     },
     child: shadcn.Theme(
       data: AppTheme.terminalTheme(context),
@@ -322,53 +351,8 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
           0,
           constraints.maxHeight - AppTheme.terminalToolbarHeight,
         ),
-        panelBuilder: (context, panel, visible) => IndexedStack(
-          index: panel.index,
-          sizing: StackFit.expand,
-          children: [
-            ServerStatusPanel(
-              source: statusSource,
-              sourceUnavailableMessage: selected.phase == SessionPhase.ready
-                  ? null
-                  : (selected.phase.isBusy ? '连接建立后将显示服务状态' : '连接未就绪，暂无服务状态')
-                        .tr,
-              active:
-                  widget.active &&
-                  visible &&
-                  panel == TerminalSidePanelKind.status,
-            ),
-            ProcessManagerPanel(
-              source: processSource,
-              active:
-                  widget.active &&
-                  visible &&
-                  panel == TerminalSidePanelKind.processes,
-            ),
-            DockerManagerPanel(
-              source: dockerSource,
-              onOpenTerminal: controller.canOpenDockerTerminal(selected.id)
-                  ? (resource) async {
-                      await controller.openDockerTerminal(
-                        selected.id,
-                        resource,
-                      );
-                    }
-                  : null,
-              active:
-                  widget.active &&
-                  visible &&
-                  panel == TerminalSidePanelKind.docker,
-            ),
-            NetworkPortsPanel(
-              source: portsSource,
-              hostname: selected.host.hostname,
-              active:
-                  widget.active &&
-                  visible &&
-                  panel == TerminalSidePanelKind.networkPorts,
-            ),
-          ],
-        ),
+        panelBuilder: (context, panel, visible) =>
+            _monitoringPanels(controller, selected, panel, visible),
         toolbarBuilder: (context, panel, canExpand, toggle) => _toolbar(
           selected,
           [
@@ -459,15 +443,113 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
     );
   }
 
+  Widget _monitoringPanels(
+    SessionController controller,
+    Session selected,
+    TerminalSidePanelKind panel,
+    bool visible,
+  ) {
+    final byHost = <String, Session>{
+      for (final session in widget.sessions) session.host.id: session,
+    }..[selected.host.id] = selected;
+    return IndexedStack(
+      index: byHost.keys.toList().indexOf(selected.host.id),
+      sizing: StackFit.expand,
+      children: [
+        for (final host in byHost.values)
+          _hostPanel(
+            controller,
+            host,
+            panel,
+            visible: visible && host.id == selected.id,
+            showTarget: byHost.length > 1,
+          ),
+      ],
+    );
+  }
+
+  Widget _hostPanel(
+    SessionController controller,
+    Session session,
+    TerminalSidePanelKind panel, {
+    required bool visible,
+    required bool showTarget,
+  }) {
+    final tabId = widget.tab.id;
+    final hostId = session.host.id;
+    final active = widget.active && visible;
+    return ExcludeFocus(
+      key: ValueKey(hostId),
+      excluding: !active,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (showTarget)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 7, 12, 0),
+              child: shadcn.Tooltip(
+                tooltip: (_) =>
+                    shadcn.TooltipContainer(child: Text(session.address)),
+                child: Text(
+                  '运维目标：@name'.trParams({'name': session.host.name}),
+                  key: const ValueKey('terminal-monitoring-target'),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 11,
+                    color: AppTheme.terminalMutedForeground,
+                  ),
+                ),
+              ),
+            ),
+          Expanded(
+            child: IndexedStack(
+              index: panel.index,
+              sizing: StackFit.expand,
+              children: [
+                ServerStatusPanel(
+                  source: controller.serverStatusSource(tabId, hostId: hostId),
+                  sourceUnavailableMessage: session.phase == SessionPhase.ready
+                      ? null
+                      : (session.phase.isBusy ? '连接建立后将显示服务状态' : '连接未就绪，暂无服务状态')
+                            .tr,
+                  active: active && panel == TerminalSidePanelKind.status,
+                ),
+                ProcessManagerPanel(
+                  source: controller.processManagerSource(
+                    tabId,
+                    hostId: hostId,
+                  ),
+                  active: active && panel == TerminalSidePanelKind.processes,
+                ),
+                DockerManagerPanel(
+                  source: controller.dockerManagerSource(tabId, hostId: hostId),
+                  onOpenTerminal:
+                      active && controller.canOpenDockerTerminal(session.id)
+                      ? (resource) async {
+                          await controller.openDockerTerminal(
+                            session.id,
+                            resource,
+                          );
+                        }
+                      : null,
+                  active: active && panel == TerminalSidePanelKind.docker,
+                ),
+                NetworkPortsPanel(
+                  source: controller.networkPortsSource(tabId, hostId: hostId),
+                  hostname: session.host.hostname,
+                  active: active && panel == TerminalSidePanelKind.networkPorts,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _toolbar(Session selected, List<Widget> actions) {
-    final paneIndex =
-        widget.sessions.indexWhere((item) => item.id == selected.id) + 1;
-    final statusColor = switch (selected.phase) {
-      SessionPhase.ready => StatusColors.ready,
-      SessionPhase.failed => StatusColors.failed,
-      SessionPhase.closed => StatusColors.closed,
-      _ => StatusColors.connecting,
-    };
+    final split = widget.sessions.length > 1;
     return Container(
       key: const ValueKey('terminal-toolbar'),
       height: AppTheme.terminalToolbarHeight,
@@ -478,108 +560,153 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
       ),
       child: LayoutBuilder(
         builder: (context, constraints) {
-          if (constraints.maxWidth < (widget.sessions.length > 1 ? 292 : 260)) {
-            return Align(
-              alignment: Alignment.centerRight,
-              child: SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                reverse: true,
-                child: Row(mainAxisSize: MainAxisSize.min, children: actions),
-              ),
-            );
+          final actionBar = SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            reverse: true,
+            child: Row(mainAxisSize: MainAxisSize.min, children: actions),
+          );
+          if (!split && constraints.maxWidth < 260) {
+            return Align(alignment: Alignment.centerRight, child: actionBar);
           }
+          final contextWidth = split
+              ? math.min(200.0, constraints.maxWidth * .7)
+              : 0.0;
           return Row(
             children: [
-              Expanded(
-                child: LayoutBuilder(
-                  builder: (context, contextConstraints) {
-                    if (contextConstraints.maxWidth < 40) {
-                      return const SizedBox.shrink();
-                    }
-                    final showAddress =
-                        contextConstraints.maxWidth >= 180 &&
-                        selected.kind != SessionKind.containerTerminal &&
-                        selected.address.isNotEmpty;
-                    final showPaneBadge =
-                        contextConstraints.maxWidth >= 140 &&
-                        widget.sessions.length > 1 &&
-                        paneIndex > 0;
-                    return Padding(
-                      padding: const EdgeInsets.only(left: 6, right: 8),
-                      child: Row(
-                        key: const ValueKey('terminal-toolbar-context'),
-                        children: [
-                          Container(
-                            width: 7,
-                            height: 7,
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              color: statusColor,
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Flexible(
-                            child: Text(
-                              selected.title,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w500,
-                                color: AppTheme.terminalForeground,
-                              ),
-                            ),
-                          ),
-                          if (showAddress) ...[
-                            const SizedBox(width: 8),
-                            Flexible(
-                              child: Text(
-                                selected.address,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  fontSize: 11,
-                                  color: AppTheme.terminalMutedForeground,
-                                ),
-                              ),
-                            ),
-                          ],
-                          if (showPaneBadge) ...[
-                            const SizedBox(width: 8),
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 6,
-                                vertical: 2,
-                              ),
-                              decoration: BoxDecoration(
-                                color: AppTheme.terminalControlBackground,
-                                border: Border.all(
-                                  color: AppTheme.terminalBorder,
-                                ),
-                                borderRadius: BorderRadius.circular(4),
-                              ),
-                              child: Text(
-                                '窗格 @index/@total'.trParams({
-                                  'index': '$paneIndex',
-                                  'total': '${widget.sessions.length}',
-                                }),
-                                style: const TextStyle(
-                                  fontSize: 10,
-                                  color: AppTheme.terminalMutedForeground,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ],
-                      ),
-                    );
-                  },
+              Expanded(child: _toolbarContext(selected, split: split)),
+              ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxWidth: constraints.maxWidth - contextWidth,
                 ),
+                child: actionBar,
               ),
-              ...actions,
             ],
           );
         },
+      ),
+    );
+  }
+
+  Widget _toolbarContext(Session selected, {required bool split}) {
+    final statusColor = switch (selected.phase) {
+      SessionPhase.ready => StatusColors.ready,
+      SessionPhase.failed => StatusColors.failed,
+      SessionPhase.closed => StatusColors.closed,
+      _ => StatusColors.connecting,
+    };
+    final otherServices = {
+      for (final pane in widget.sessions)
+        if (pane.host.id != selected.host.id) pane.host.id: pane.host.name,
+    };
+    final mixed = otherServices.isNotEmpty;
+    final title = [selected.title, ...otherServices.values].join(' / ');
+    final address = selected.address;
+    final titleText = Text(
+      title,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: const TextStyle(
+        fontSize: 12,
+        fontWeight: FontWeight.w500,
+        color: AppTheme.terminalForeground,
+      ),
+    );
+    const secondary = TextStyle(
+      fontSize: 11,
+      color: AppTheme.terminalMutedForeground,
+    );
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width = constraints.maxWidth;
+        if (width < 72) return const SizedBox.shrink();
+        return Padding(
+          padding: const EdgeInsets.only(left: 6, right: 8),
+          child: Row(
+            key: const ValueKey('terminal-toolbar-context'),
+            children: [
+              Container(
+                width: 7,
+                height: 7,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: statusColor,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Flexible(
+                child: mixed
+                    ? shadcn.Tooltip(
+                        tooltip: (_) =>
+                            shadcn.TooltipContainer(child: Text(title)),
+                        child: titleText,
+                      )
+                    : titleText,
+              ),
+              if (split) ...[
+                if (width >= 180) ...[
+                  const SizedBox(width: 8),
+                  Flexible(
+                    child: shadcn.Tooltip(
+                      tooltip: (_) =>
+                          shadcn.TooltipContainer(child: Text(address)),
+                      child: Text(
+                        address,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: secondary,
+                      ),
+                    ),
+                  ),
+                ],
+                const SizedBox(width: 8),
+                _panePicker(selected, compact: width < 140),
+              ],
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _panePicker(Session selected, {required bool compact}) {
+    final panes = widget.sessions;
+    final index = panes.indexWhere((pane) => pane.id == selected.id) + 1;
+    final label = '窗格 @index/@total'.trParams({
+      'index': '$index',
+      'total': '${panes.length}',
+    });
+    final description = '${'切换窗格'.tr} · ${selected.address}';
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: AppTheme.terminalControlBackground,
+        border: Border.all(color: AppTheme.terminalBorder),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: AppMenuButton<String>(
+        key: const ValueKey('terminal-pane-picker'),
+        density: shadcn.ButtonDensity.compact,
+        tooltip: description,
+        semanticLabel: '$description · $label',
+        selectedValue: selected.id,
+        items: [
+          for (final (i, pane) in panes.indexed)
+            (pane.id, '${i + 1}. ${pane.title}'),
+        ],
+        onSelected: Get.find<SessionController>().activate,
+        icon: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              compact ? '$index/${panes.length}' : label,
+              style: const TextStyle(
+                fontSize: 10,
+                color: AppTheme.terminalForeground,
+              ),
+            ),
+            const SizedBox(width: 3),
+            const AppIcon(AppIcons.chevronDown, size: 12),
+          ],
+        ),
       ),
     );
   }
@@ -629,8 +756,16 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
         const SizedBox(width: 4),
         _toolbarButton(
           name: 'input-sync',
-          label: (synced ? '同步输入中（点击关闭）' : '同步输入到此页签的所有窗格').tr,
-          onPressed: synced || controller.canSyncInput(widget.tab.id)
+          label:
+              (_zoomed != null
+                      ? '还原分屏后可同步输入'
+                      : synced
+                      ? '同步输入中（点击关闭）'
+                      : '同步输入到此页签的所有窗格')
+                  .tr,
+          onPressed:
+              _zoomed == null &&
+                  (synced || controller.canSyncInput(widget.tab.id))
               ? () => controller.toggleInputSync(widget.tab.id)
               : null,
           icon: AppIcons.arrowLeftRight,
@@ -692,48 +827,93 @@ class _ResizableTerminalSplit extends StatefulWidget {
 }
 
 class _ResizableTerminalSplitState extends State<_ResizableTerminalSplit> {
-  final _first = shadcn.FlexibleResizablePaneController(1);
-  final _second = shadcn.FlexibleResizablePaneController(1);
-
-  @override
-  void dispose() {
-    _first.dispose();
-    _second.dispose();
-    super.dispose();
-  }
+  double _firstShare = .5;
 
   @override
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (context, constraints) {
       final horizontal = widget.axis == SessionSplitAxis.horizontal;
       final extent = horizontal ? constraints.maxWidth : constraints.maxHeight;
+      final scaling = shadcn.Theme.of(context).scaling;
+      final divider = math.min(
+        extent,
+        AppTheme.terminalPaneDividerSize * scaling,
+      );
+      final available = extent - divider;
       final minimum = math.min(
         horizontal
             ? AppTheme.terminalPaneMinWidth
             : AppTheme.terminalPaneMinHeight,
-        math.max(0.0, (extent - 8) / 2),
+        available / 2,
       );
-      return shadcn.ResizablePanel(
-        direction: horizontal ? Axis.horizontal : Axis.vertical,
-        draggerBuilder: (context) {
-          const theme = shadcn.ResizableDraggerTheme(
-            color: AppTheme.terminalSelectedBorder,
-            iconColor: AppTheme.terminalForeground,
-          );
-          return horizontal
-              ? const shadcn.HorizontalResizableDragger(theme: theme)
-              : const shadcn.VerticalResizableDragger(theme: theme);
-        },
+      final maximum = available - minimum;
+      double firstExtent() => (available * _firstShare).clamp(minimum, maximum);
+      final first = firstExtent();
+      final hitSize = math.min(
+        extent,
+        AppTheme.terminalPaneDividerHitSize * scaling,
+      );
+      final hitStart = (first + (divider - hitSize) / 2).clamp(
+        0.0,
+        extent - hitSize,
+      );
+
+      void resize(DragUpdateDetails details) {
+        if (available <= 0) return;
+        final next = (firstExtent() + details.primaryDelta!).clamp(
+          minimum,
+          maximum,
+        );
+        setState(() => _firstShare = next / available);
+      }
+
+      const theme = shadcn.ResizableDraggerTheme(
+        color: AppTheme.terminalSelectedBorder,
+        iconColor: AppTheme.terminalForeground,
+      );
+      return Stack(
+        fit: StackFit.expand,
         children: [
-          shadcn.ResizablePane.controlled(
-            controller: _first,
-            minSize: minimum,
-            child: widget.first,
+          Flex(
+            direction: horizontal ? Axis.horizontal : Axis.vertical,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              SizedBox(
+                width: horizontal ? first : null,
+                height: horizontal ? null : first,
+                child: widget.first,
+              ),
+              SizedBox.square(
+                dimension: divider,
+                child: const ColoredBox(color: AppTheme.terminalBorder),
+              ),
+              Expanded(child: widget.second),
+            ],
           ),
-          shadcn.ResizablePane.controlled(
-            controller: _second,
-            minSize: minimum,
-            child: widget.second,
+          // Share one hit target so a double-click does not cancel a separate
+          // resize widget's drag before it has started.
+          Positioned(
+            left: horizontal ? hitStart : 0,
+            width: horizontal ? hitSize : null,
+            right: horizontal ? null : 0,
+            top: horizontal ? 0 : hitStart,
+            height: horizontal ? null : hitSize,
+            bottom: horizontal ? 0 : null,
+            child: MouseRegion(
+              cursor: horizontal
+                  ? SystemMouseCursors.resizeColumn
+                  : SystemMouseCursors.resizeRow,
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                dragStartBehavior: DragStartBehavior.down,
+                onHorizontalDragUpdate: horizontal ? resize : null,
+                onVerticalDragUpdate: horizontal ? null : resize,
+                onDoubleTap: () => setState(() => _firstShare = .5),
+                child: horizontal
+                    ? const shadcn.HorizontalResizableDragger(theme: theme)
+                    : const shadcn.VerticalResizableDragger(theme: theme),
+              ),
+            ),
           ),
         ],
       );

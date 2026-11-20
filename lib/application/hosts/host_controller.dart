@@ -75,6 +75,14 @@ class HostController extends GetxController {
     );
   }
 
+  /// 读仓库中的最新配置，不等待侧边栏列表订阅刷新。
+  Future<Host?> findSaved(String id) async {
+    for (final host in await _repository.getAll()) {
+      if (host.id == id) return host;
+    }
+    return null;
+  }
+
   /// 保存主机；同级（同文件夹）下主机名必须唯一。
   ///
   /// 兜底校验读仓库权威状态，避免依赖流投递时机；表单层应先用

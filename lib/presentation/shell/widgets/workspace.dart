@@ -43,6 +43,8 @@ class Workspace extends StatefulWidget {
   State<Workspace> createState() => _WorkspaceState();
 }
 
+typedef _TerminalPlacement = ({String tabId, bool split, bool zoomed});
+
 class _WorkspaceState extends State<Workspace> {
   // Move the same content subtree out of TabPane in full screen. Native
   // sessions, frame subscriptions and decoded surfaces keep their lifetime.
@@ -51,7 +53,16 @@ class _WorkspaceState extends State<Workspace> {
   // 按会话缓存视图实例。外层 Obx 订阅整个会话列表，任一标签变化都会重跑；
   // 会话快照与激活状态都没变时返回同一个 widget 实例，Flutter 会跳过该子树，
   // 避免后台终端、SFTP 目录与代理面板随别的标签一起重建。
-  final Map<String, ({Session session, bool visible, bool active, Widget view})>
+  final Map<
+    String,
+    ({
+      Session session,
+      bool visible,
+      bool active,
+      _TerminalPlacement? placement,
+      Widget view,
+    })
+  >
   _views = {};
   final _paneKeys = <String, GlobalKey>{};
   final _tabViews =
@@ -64,12 +75,14 @@ class _WorkspaceState extends State<Workspace> {
     Session session, {
     required bool visible,
     required bool active,
+    _TerminalPlacement? placement,
   }) {
     final cached = _views[session.id];
     if (cached != null &&
         identical(cached.session, session) &&
         cached.visible == visible &&
-        cached.active == active) {
+        cached.active == active &&
+        cached.placement == placement) {
       return cached.view;
     }
     final view = TickerMode(
@@ -78,13 +91,18 @@ class _WorkspaceState extends State<Workspace> {
       enabled: visible,
       child: ExcludeFocus(
         excluding: !active,
-        child: _SessionView(session: session, active: active),
+        child: _SessionView(
+          session: session,
+          active: active,
+          placement: placement,
+        ),
       ),
     );
     _views[session.id] = (
       session: session,
       visible: visible,
       active: active,
+      placement: placement,
       view: view,
     );
     return view;
@@ -106,8 +124,16 @@ class _WorkspaceState extends State<Workspace> {
             tab: tab,
             sessions: sessions,
             active: active,
-            paneBuilder: (session, selected) =>
-                _viewFor(session, visible: active, active: active && selected),
+            paneBuilder: (session, selected, zoomed) => _viewFor(
+              session,
+              visible: active,
+              active: active && selected,
+              placement: (
+                tabId: tab.id,
+                split: sessions.length > 1,
+                zoomed: zoomed,
+              ),
+            ),
           )
         : _viewFor(sessions.single, visible: active, active: active);
     _tabViews[tab.id] = (
@@ -469,10 +495,15 @@ class _ShortcutHint extends StatelessWidget {
 }
 
 class _SessionView extends StatelessWidget {
-  const _SessionView({required this.session, required this.active});
+  const _SessionView({
+    required this.session,
+    required this.active,
+    required this.placement,
+  });
 
   final Session session;
   final bool active;
+  final _TerminalPlacement? placement;
 
   @override
   Widget build(BuildContext context) {
@@ -548,7 +579,7 @@ class _SessionView extends StatelessWidget {
               Get.find<SessionController>().desktopFailed(session.id, message),
         ),
       SessionPhase.ready || SessionPhase.closed when session.terminal != null =>
-        _TerminalHost(session: session, active: active),
+        _TerminalHost(session: session, active: active, placement: placement),
       _ => _ConnectingView(session: session),
     };
   }
@@ -594,10 +625,15 @@ class _ConnectingView extends StatelessWidget {
 
 /// 终端宿主：常驻于工作区中，成为激活标签时把焦点交还终端。
 class _TerminalHost extends StatefulWidget {
-  const _TerminalHost({required this.session, required this.active});
+  const _TerminalHost({
+    required this.session,
+    required this.active,
+    required this.placement,
+  });
 
   final Session session;
   final bool active;
+  final _TerminalPlacement? placement;
 
   @override
   State<_TerminalHost> createState() => _TerminalHostState();
@@ -615,7 +651,10 @@ class _TerminalHostState extends State<_TerminalHost> {
   @override
   void didUpdateWidget(_TerminalHost oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.active && !oldWidget.active) {
+    if (widget.active &&
+        (!oldWidget.active ||
+            widget.placement?.zoomed != oldWidget.placement?.zoomed ||
+            widget.placement?.tabId != oldWidget.placement?.tabId)) {
       _focusWhenActive();
     }
   }
@@ -641,12 +680,19 @@ class _TerminalHostState extends State<_TerminalHost> {
     final canSplit = controller.canSplitTerminal(session.id);
     final canTransfer = controller.canOpenFileTransfer(session.id);
     final canReconnect = controller.canReconnect(session.id);
+    final zoomed = widget.placement?.zoomed == true;
     final terminalView = AppTerminalView(
       session.terminal!,
       focusNode: _focusNode,
       active: widget.active,
       canInput: session.phase == SessionPhase.ready,
-      onUserInput: (send) => controller.syncUserInput(session.id, send),
+      hasPaneControls: widget.placement?.split == true,
+      onUserInput: zoomed
+          ? null
+          : (send) => controller.syncUserInput(session.id, send),
+      inputSyncPanes: zoomed
+          ? null
+          : () => controller.inputSyncPaneNames(session.id),
       onSplitHorizontal: canSplit
           ? () => unawaited(
               controller.splitTerminal(session.id, SessionSplitAxis.horizontal),
@@ -803,9 +849,7 @@ class _FailedView extends StatelessWidget {
     final controller = Get.find<SessionController>();
     final colors = shadcn.Theme.of(context).colorScheme;
     final errorMessage = AppTranslations.error(session.error ?? '未知错误');
-    final canEditHost =
-        session.kind != SessionKind.containerTerminal &&
-        Get.isRegistered<HostController>();
+    final hosts = savedHostControllerForSession(session);
 
     return Center(
       child: SingleChildScrollView(
@@ -860,20 +904,20 @@ class _FailedView extends StatelessWidget {
                       : requestSessionTabClose(controller, [session.id]),
                   child: Text('关闭'.tr),
                 ),
-                if (canEditHost)
-                  shadcn.OutlineButton(
-                    key: const ValueKey('failed-edit-host'),
-                    onPressed: () {
-                      final hosts = Get.find<HostController>();
-                      final liveHost =
-                          hosts.hosts.firstWhereOrNull(
-                            (host) => host.id == session.host.id,
-                          ) ??
-                          session.host;
-                      unawaited(showHostEditDialog(context, host: liveHost));
-                    },
-                    leading: const AppIcon(AppIcons.pencil, size: 15),
-                    child: Text('编辑服务'.tr),
+                if (hosts != null)
+                  Obx(
+                    () => hosts.hosts.any((h) => h.id == session.host.id)
+                        ? shadcn.OutlineButton(
+                            key: const ValueKey('failed-edit-host'),
+                            onPressed: () => showSessionHostEditDialog(
+                              context,
+                              session,
+                              retryOnSave: true,
+                            ),
+                            leading: const AppIcon(AppIcons.pencil, size: 15),
+                            child: Text('编辑服务'.tr),
+                          )
+                        : const SizedBox.shrink(),
                   ),
                 if (session.hostKeyFailure?.hasChanged == true)
                   shadcn.OutlineButton(
@@ -884,7 +928,7 @@ class _FailedView extends StatelessWidget {
                     child: Text('清除指纹并重试'.tr),
                   ),
                 shadcn.PrimaryButton(
-                  onPressed: () => controller.retry(session.id),
+                  onPressed: () => retryFailedSession(context, session),
                   leading: const AppIcon(AppIcons.rotateCw, size: 16),
                   child: Text('重试'.tr),
                 ),

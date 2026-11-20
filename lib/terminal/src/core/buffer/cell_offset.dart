@@ -7,6 +7,9 @@ class CellOffset {
 
   const CellOffset(this.x, this.y);
 
+  /// Exclusive boundary after this cell, without wrapping to the next row.
+  CellOffset get trailingEdge => CellOffset(x + 1, y);
+
   bool isEqual(CellOffset other) {
     return other.x == x && other.y == y;
   }

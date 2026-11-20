@@ -137,10 +137,14 @@ class DockerResource {
     'unused' => false,
     _ => null,
   };
-  String get shortId =>
-      kind == DockerResourceKind.volume || kind == DockerResourceKind.compose
-      ? id
-      : id.replaceFirst('sha256:', '').substring(0, 12);
+  String get shortId {
+    if (kind == DockerResourceKind.volume ||
+        kind == DockerResourceKind.compose) {
+      return id;
+    }
+    final hex = id.startsWith('sha256:') ? id.substring(7) : id;
+    return hex.length <= 12 ? hex : hex.substring(0, 12);
+  }
 
   bool matches(String query) {
     final term = query.trim().toLowerCase();

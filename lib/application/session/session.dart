@@ -48,6 +48,8 @@ enum SessionKind {
 
   bool get isInteractiveTerminal =>
       this == terminal || this == containerTerminal;
+
+  bool get usesGatewayEndpoint => this == portForward || this == dynamicProxy;
 }
 
 /// 一个终端、文件传输或端口转发标签对应的会话快照（不可变）。
@@ -78,9 +80,12 @@ class Session {
 
   String get address {
     final username = loginUsername ?? host.username;
-    return host.port == 22
-        ? '$username@${host.hostname}'
-        : '$username@${host.hostname}:${host.port}';
+    final user = username.isEmpty ? '' : '$username@';
+    final showPort = host.serviceType != ServiceType.ssh || host.port != 22;
+    final address = showPort && host.hostname.contains(':')
+        ? '[${host.hostname}]'
+        : host.hostname;
+    return showPort ? '$user$address:${host.port}' : '$user$address';
   }
 
   final SessionKind kind;
@@ -181,10 +186,12 @@ class RdpPasswordRequest {
   const RdpPasswordRequest({
     required this.host,
     required this.username,
+    required this.domain,
     required this.error,
   });
 
   final Host host;
   final String username;
+  final String domain;
   final String error;
 }

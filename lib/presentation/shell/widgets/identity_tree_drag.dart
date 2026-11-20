@@ -36,6 +36,7 @@ class IdentityTreeDropTarget extends StatelessWidget {
     required this.tree,
     required this.dragAnchor,
     required this.child,
+    this.onHoverInside,
     super.key,
   });
 
@@ -45,6 +46,7 @@ class IdentityTreeDropTarget extends StatelessWidget {
   final IdentityTreeController tree;
   final TreeDragAnchor dragAnchor;
   final Widget child;
+  final VoidCallback? onHoverInside;
 
   IdentityTreePlacement _placement(TreeDropPosition position) =>
       position == TreeDropPosition.inside
@@ -63,6 +65,7 @@ class IdentityTreeDropTarget extends StatelessWidget {
     canDrop: (item, position) => tree.canMove(item, _placement(position)),
     onDrop: (item, position) =>
         moveIdentityTreeItem(tree, item, _placement(position)),
+    onHoverInside: onHoverInside,
     child: child,
   );
 }

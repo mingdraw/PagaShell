@@ -25,12 +25,14 @@ class AppCopyButton extends StatefulWidget {
     required this.text,
     this.size = 13,
     this.semanticLabel,
+    this.resetOnTextChange = true,
     super.key,
   });
 
   final String text;
   final double size;
   final String? semanticLabel;
+  final bool resetOnTextChange;
 
   @override
   State<AppCopyButton> createState() => _AppCopyButtonState();
@@ -45,7 +47,7 @@ class _AppCopyButtonState extends State<AppCopyButton> {
   @override
   void didUpdateWidget(covariant AppCopyButton oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.text != widget.text && _copied) {
+    if (widget.resetOnTextChange && oldWidget.text != widget.text && _copied) {
       _resetTimer?.cancel();
       _resetTimer = null;
       _copied = false;
@@ -61,7 +63,7 @@ class _AppCopyButtonState extends State<AppCopyButton> {
   Future<void> _copy() async {
     final text = widget.text;
     final copied = await copyAppText(text);
-    if (!mounted || widget.text != text) return;
+    if (!mounted || (widget.resetOnTextChange && widget.text != text)) return;
     _resetTimer?.cancel();
     _resetTimer = null;
     setState(() => _copied = copied);

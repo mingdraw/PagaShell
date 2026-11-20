@@ -209,9 +209,10 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
   }
 
   var _stickToBottom = true;
+  static const scrollBottomTolerance = 1.0;
 
   void _onScroll() {
-    _stickToBottom = _scrollOffset >= _maxScrollExtent;
+    _stickToBottom = _maxScrollExtent - _scrollOffset <= scrollBottomTolerance;
     markNeedsLayout();
     _scheduleEditableRect();
   }
@@ -305,13 +306,15 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
 
   /// Get the [CellOffset] of the cell that [offset] is in.
   CellOffset getCellOffset(Offset offset) {
+    final lineCount = _terminal.buffer.lines.length;
+    if (lineCount == 0) return const CellOffset(0, 0);
     final x = offset.dx - _padding.left;
     final y = offset.dy - _padding.top + _scrollOffset;
     final row = y ~/ _painter.cellSize.height;
     final col = x ~/ _painter.cellSize.width;
     return CellOffset(
       col.clamp(0, _terminal.viewWidth - 1),
-      row.clamp(0, _terminal.buffer.lines.length - 1),
+      row.clamp(0, lineCount - 1),
     );
   }
 
@@ -342,6 +345,7 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
   /// Selects characters in the terminal that starts from [from] to [to]. At
   /// least one cell is selected even if [from] and [to] are same.
   void selectCharacters(Offset from, [Offset? to]) {
+    if (_terminal.buffer.lines.length == 0) return;
     final fromPosition = getCellOffset(from);
     if (to == null) {
       _controller.setSelection(
@@ -349,13 +353,17 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
         _terminal.buffer.createAnchorFromOffset(fromPosition),
       );
     } else {
-      var toPosition = getCellOffset(to);
-      if (toPosition.x >= fromPosition.x) {
-        toPosition = CellOffset(toPosition.x + 1, toPosition.y);
-      }
+      final toPosition = getCellOffset(to);
+      final reverse = _controller.selectionMode == SelectionMode.block
+          ? toPosition.x < fromPosition.x
+          : toPosition.isBefore(fromPosition);
       _controller.setSelection(
-        _terminal.buffer.createAnchorFromOffset(fromPosition),
-        _terminal.buffer.createAnchorFromOffset(toPosition),
+        _terminal.buffer.createAnchorFromOffset(
+          reverse ? fromPosition.trailingEdge : fromPosition,
+        ),
+        _terminal.buffer.createAnchorFromOffset(
+          reverse ? toPosition : toPosition.trailingEdge,
+        ),
       );
     }
   }
@@ -519,6 +527,10 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
 
     final lines = _terminal.buffer.lines;
     final charHeight = _painter.cellSize.height;
+    if (lines.length == 0 || charHeight <= 0) {
+      _disposeLinePictures();
+      return;
+    }
 
     final firstLineOffset = _scrollOffset - _padding.top;
     final lastLineOffset = _scrollOffset + size.height + _padding.bottom;
@@ -570,6 +582,29 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
       effectLastLine,
     );
 
+    for (var row = effectFirstLine; row <= effectLastLine; row++) {
+      final line = lines[row];
+      for (final highlight in _controller.searchHighlightsFor(line)) {
+        if (highlight.version != line.version || !highlight.match.attached) {
+          continue;
+        }
+        final selected = _controller.isSelectedSearchMatch(highlight.index);
+        final color = _controller.searchHighlightColor(highlight.index);
+        final start = highlight.start ?? 0;
+        final end = highlight.end ?? line.length;
+        _paintCells(
+          canvas,
+          row,
+          start,
+          end,
+          selected ? color.withValues(alpha: .18) : color,
+        );
+        if (selected) {
+          _paintCells(canvas, row, start, end, color, underline: true);
+        }
+      }
+    }
+
     if (_controller.selection != null) {
       _paintSelection(
         canvas,
@@ -616,19 +651,10 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
     int firstLine,
     int lastLine,
   ) {
-    for (final segment in selection.toSegments()) {
-      if (segment.line >= _terminal.buffer.lines.length) {
-        break;
-      }
-
-      if (segment.line < firstLine) {
-        continue;
-      }
-
-      if (segment.line > lastLine) {
-        break;
-      }
-
+    for (final segment in selection.toSegments(
+      firstLine: firstLine,
+      lastLine: lastLine,
+    )) {
       _paintSegment(canvas, segment, _painter.theme.selection);
     }
   }
@@ -639,7 +665,7 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
     int firstLine,
     int lastLine,
   ) {
-    for (var highlight in _controller.highlights) {
+    for (final highlight in highlights) {
       final range = highlight.range?.normalized;
 
       if (range == null ||
@@ -648,15 +674,10 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
         continue;
       }
 
-      for (var segment in range.toSegments()) {
-        if (segment.line < firstLine) {
-          continue;
-        }
-
-        if (segment.line > lastLine) {
-          break;
-        }
-
+      for (final segment in range.toSegments(
+        firstLine: firstLine,
+        lastLine: lastLine,
+      )) {
         _paintSegment(
           canvas,
           segment,
@@ -673,13 +694,27 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
     BufferSegment segment,
     Color color, {
     bool underline = false,
-  }) {
-    final start = segment.start ?? 0;
-    final end = segment.end ?? _terminal.viewWidth;
+  }) => _paintCells(
+    canvas,
+    segment.line,
+    segment.start ?? 0,
+    segment.end ?? _terminal.viewWidth,
+    color,
+    underline: underline,
+  );
 
+  void _paintCells(
+    Canvas canvas,
+    int row,
+    int start,
+    int end,
+    Color color, {
+    bool underline = false,
+  }) {
+    if (start >= end) return;
     final startOffset = Offset(
       start * _painter.cellSize.width,
-      segment.line * _painter.cellSize.height + _lineOffset,
+      row * _painter.cellSize.height + _lineOffset,
     );
 
     if (underline) {
