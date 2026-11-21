@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
@@ -69,8 +70,8 @@ class UpdaterHelperTests(unittest.TestCase):
         return ["/bin/sh", str(self.script), mode.lower(), platform, str(self.source),
                 str(self.target), str(self.work), str(self.parent.pid), "false"]
 
-    def run_helper(self, mode, *, success=True, platform="linux"):
-        result = subprocess.run(self.command(mode, platform), capture_output=True, timeout=20)
+    def run_helper(self, mode, *, success=True, platform="linux", env=None):
+        result = subprocess.run(self.command(mode, platform), capture_output=True, timeout=20, env=env)
         if success:
             if result.returncode != 0:
                 self.fail(
@@ -109,6 +110,14 @@ class UpdaterHelperTests(unittest.TestCase):
     @property
     def marker(self):
         return Path(str(self.backup) + ".marker")
+
+    @property
+    def macos_backup(self):
+        return self.target.with_name(f".{self.target.name}.pagashell-backup.noindex")
+
+    @property
+    def macos_marker(self):
+        return Path(str(self.macos_backup) + ".marker")
 
     def test_complete_directory_replacement_and_rollback(self):
         (self.target / "old-only").touch()
@@ -195,26 +204,66 @@ class UpdaterHelperTests(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == "darwin", "macOS copy operation")
     def test_macos_bundle_copy_and_rollback(self):
-        self.run_helper("Apply", platform="macos")
+        applications = self.root / "Applications"
+        applications.mkdir()
+        self.target = self.target.rename(applications / "PagaShell.app")
+        for bundle in [self.source, self.target]:
+            (bundle / "Contents").mkdir()
+            (bundle / "Contents/Info.plist").touch()
+
+        # Observe the installation directory immediately before each rename,
+        # when a visible application scanner could discover either copy.
+        visible_apps = self.work / "visible-apps"
+        mv = self.work / "mv"
+        mv.write_text(
+            '#!/bin/sh\nset -eu\n'
+            'find "$PAGASHELL_TEST_APPLICATIONS" -name \'.*\' -prune -o -type f '
+            '-path \'*/Contents/Info.plist\' '
+            '! -path "$PAGASHELL_TEST_APPLICATIONS/PagaShell.app/Contents/Info.plist" '
+            '-print >> "$PAGASHELL_TEST_VISIBLE_APPS"\n'
+            'exec /bin/mv "$@"\n',
+            encoding="utf-8",
+        )
+        mv.chmod(0o755)
+        env = {
+            **os.environ,
+            "PATH": str(self.work) + os.pathsep + os.environ.get("PATH", os.defpath),
+            "PAGASHELL_TEST_APPLICATIONS": str(applications),
+            "PAGASHELL_TEST_VISIBLE_APPS": str(visible_apps),
+        }
+        self.run_helper("Apply", platform="macos", env=env)
         self.assertEqual((self.target / "version").read_text(), "new")
-        self.run_helper("Rollback", platform="macos")
+        self.run_helper("Rollback", platform="macos", env=env)
         self.assertEqual((self.target / "version").read_text(), "old")
+        self.assertEqual(visible_apps.read_text(), "")
+        self.assertEqual(list(applications.iterdir()), [self.target])
 
     @unittest.skipIf(WINDOWS, "POSIX backup cleanup")
     def test_cleanup_preserves_unmanaged_backup(self):
-        self.backup.mkdir()
-        (self.backup / "keep").touch()
+        self.macos_backup.mkdir()
+        (self.macos_backup / "keep").touch()
         self.run_helper("Cleanup", success=False, platform="macos")
-        self.assertTrue((self.backup / "keep").exists())
+        self.assertTrue((self.macos_backup / "keep").exists())
         self.assertEqual((self.target / "version").read_text(), "old")
 
     @unittest.skipIf(WINDOWS, "POSIX backup cleanup")
     def test_cleanup_requires_current_installation(self):
-        self.run_helper("Apply")
-        shutil.rmtree(self.target)
+        self.target.rename(self.macos_backup)
+        self.macos_marker.touch()
         self.run_helper("Cleanup", success=False, platform="macos")
-        self.assertEqual((self.backup / "version").read_text(), "old")
-        self.assertTrue(self.marker.exists())
+        self.assertEqual((self.macos_backup / "version").read_text(), "old")
+        self.assertTrue(self.macos_marker.exists())
+
+    @unittest.skipIf(WINDOWS, "POSIX backup cleanup")
+    def test_macos_cleanup_preserves_unmanaged_legacy_backup(self):
+        self.backup.mkdir()
+        (self.backup / "keep").touch()
+        self.macos_backup.mkdir()
+        self.macos_marker.touch()
+        self.run_helper("Cleanup", platform="macos")
+        self.assertFalse(self.macos_backup.exists())
+        self.assertFalse(self.macos_marker.exists())
+        self.assertTrue((self.backup / "keep").exists())
 
     def stub_macos_launch(self, body):
         # Exercise the macOS watcher without depending on a GUI session. Only
@@ -235,9 +284,11 @@ class UpdaterHelperTests(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == "darwin", "macOS watcher cleanup")
     def test_macos_success_removes_backup_after_launch(self):
+        self.backup.mkdir()
+        self.marker.touch()
         self.stub_macos_launch(
-            '[ -f "$target.pagashell-backup.marker" ]\n'
-            '[ "$(cat "$target.pagashell-backup/version")" = old ]\n'
+            f'[ -f {shlex.quote(str(self.macos_marker))} ]\n'
+            f'[ "$(cat {shlex.quote(str(self.macos_backup / "version"))})" = old ]\n'
             ': > "$target/launched"\n')
         child = self.start_watcher(platform="macos")
         self.assertEqual(self.commit_and_exit(child), 0, self.watcher_log())
@@ -246,6 +297,8 @@ class UpdaterHelperTests(unittest.TestCase):
         self.assertEqual((self.target / "version").read_text(), "new")
         self.assertFalse(self.backup.exists())
         self.assertFalse(self.marker.exists())
+        self.assertFalse(self.macos_backup.exists())
+        self.assertFalse(self.macos_marker.exists())
         self.assertFalse(self.stage.exists())
 
     @unittest.skipUnless(sys.platform == "darwin", "macOS watcher rollback")
@@ -259,8 +312,8 @@ class UpdaterHelperTests(unittest.TestCase):
         self.assertTrue((self.target / "restarted").exists())
         self.assertEqual((self.work / "error").read_text().strip(), "launch-failed")
         self.assertFalse((self.work / "complete").exists())
-        self.assertFalse(self.backup.exists())
-        self.assertFalse(self.marker.exists())
+        self.assertFalse(self.macos_backup.exists())
+        self.assertFalse(self.macos_marker.exists())
 
     @unittest.skipUnless(sys.platform == "darwin", "macOS watcher cleanup failure")
     def test_macos_cleanup_failure_keeps_running_update(self):
@@ -274,8 +327,8 @@ class UpdaterHelperTests(unittest.TestCase):
         self.assertTrue((self.work / "complete").exists())
         self.assertEqual((self.work / "error").read_text().strip(), "backup-cleanup-failed")
         self.assertEqual((self.target / "version").read_text(), "new")
-        self.assertEqual((self.backup / "version").read_text(), "old")
-        self.assertTrue(self.marker.exists())
+        self.assertEqual((self.macos_backup / "version").read_text(), "old")
+        self.assertTrue(self.macos_marker.exists())
 
     @unittest.skipUnless(WINDOWS, "Windows ZIP extraction")
     def test_windows_extract_rejects_traversal(self):

@@ -122,14 +122,24 @@ class DesktopUpdateInstaller implements UpdateInstaller {
       flush: true,
     );
     var requiresAdmin = false;
-    final backup = Directory('${target.path}.pagashell-backup');
+    final backups = [
+      Directory('${target.path}.pagashell-backup'),
+      if (release.platform == UpdatePlatform.macos)
+        Directory(
+          path.join(
+            target.parent.path,
+            '.${path.basename(target.path)}.pagashell-backup.noindex',
+          ),
+        ),
+    ];
     // A writable parent can still contain a root-owned app or older backup.
     // Removing either bundle requires access inside that directory as well.
     for (final directory in [
       target.parent,
       target,
-      if (backup.existsSync() && File('${backup.path}.marker').existsSync())
-        backup,
+      for (final backup in backups)
+        if (backup.existsSync() && File('${backup.path}.marker').existsSync())
+          backup,
     ]) {
       final probe = File(
         path.join(

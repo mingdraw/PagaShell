@@ -10,18 +10,29 @@ parent_process=$6
 authorize=$7
 self=$0
 backup="$target.pagashell-backup"
-marker="$backup.marker"
-incoming="$target.pagashell-new-$(basename "$work")"
 lock="$target.pagashell-update-lock"
+if [ "$platform" = macos ]; then
+  # Keep both copies on the install volume, out of application search.
+  legacy_backup=$backup
+  backup="$(dirname "$target")/.$(basename "$target").pagashell-backup.noindex"
+  incoming="$lock/.incoming.noindex"
+else
+  incoming="$target.pagashell-new-$(basename "$work")"
+fi
+marker="$backup.marker"
 
 transaction() {
-  mkdir "$lock" || return 1
+  mkdir -m 700 "$lock" || return 1
   moved=0
   trap 'status=$?; if [ "$status" -ne 0 ] && [ "$moved" -eq 1 ] && [ ! -e "$target" ] && [ -d "$backup" ]; then mv "$backup" "$target"; rm -f "$marker"; fi; rm -rf "$incoming"; rmdir "$lock"; exit "$status"' EXIT
   if [ "$mode" = cleanup ]; then
     [ -d "$target" ] && [ -f "$marker" ] || return 1
     rm -rf "$backup"
     rm -f "$marker"
+    if [ "$platform" = macos ] && [ -f "$legacy_backup.marker" ]; then
+      rm -rf "$legacy_backup"
+      rm -f "$legacy_backup.marker"
+    fi
     return
   fi
   if [ "$mode" = rollback ]; then
