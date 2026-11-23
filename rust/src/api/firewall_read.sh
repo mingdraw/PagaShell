@@ -1,0 +1,357 @@
+LC_ALL=C
+export LC_ALL
+
+fw_system=$(uname -s)
+[ "$fw_system" = Linux ] || exit 64
+
+fw_preferred=${1:-}
+case "$fw_preferred" in
+  ''|firewalld|ufw|nftables|iptables) ;;
+  *) exit 72 ;;
+esac
+
+fw_find_bin() {
+  fw_found=$(command -v "$1" 2>/dev/null || true)
+  if [ -n "$fw_found" ] && [ -x "$fw_found" ]; then
+    printf '%s\n' "$fw_found"
+    return 0
+  fi
+  for fw_dir in /usr/sbin /sbin /usr/bin /bin; do
+    if [ -x "$fw_dir/$1" ]; then
+      printf '%s\n' "$fw_dir/$1"
+      return 0
+    fi
+  done
+  return 1
+}
+
+umask 077
+fw_temp=$(mktemp -d "${TMPDIR:-/tmp}/paga-fw.XXXXXXXX") || exit 75
+trap 'rm -f "$fw_temp/out" "$fw_temp/err" "$fw_temp/rules" "$fw_temp/listeners" "$fw_temp/part"; rmdir "$fw_temp"' 0
+trap 'exit 75' HUP INT TERM
+
+fw_sudo_bin=
+if [ "$(id -u)" != 0 ]; then
+  fw_sudo_bin=$(fw_find_bin sudo || true)
+  [ -n "$fw_sudo_bin" ] || exit 77
+fi
+
+fw_is_perm_err() {
+  fw_err_lower=$(tr '[:upper:]' '[:lower:]' <"$fw_temp/err" 2>/dev/null || true)
+  case "$fw_err_lower" in
+    *'permission denied'*|*'operation not permitted'*|*'must be root'*|*'you need to be root'*|*'authorization failed'*|*'sudo:'*|*'a password is required'*|*'not allowed to execute'*|*'sorry, you must have a tty'*|*'authentication is required'*)
+      return 0 ;;
+  esac
+  return 1
+}
+
+fw_run() {
+  if [ -n "$fw_sudo_bin" ]; then
+    "$fw_sudo_bin" -n -- "$@" >"$fw_temp/out" 2>"$fw_temp/err" </dev/null
+  else
+    "$@" >"$fw_temp/out" 2>"$fw_temp/err" </dev/null
+  fi
+}
+
+fw_bin_firewalld=$(fw_find_bin firewall-cmd || true)
+fw_bin_ufw=$(fw_find_bin ufw || true)
+fw_bin_nft=$(fw_find_bin nft || true)
+fw_bin_iptables=$(fw_find_bin iptables || true)
+fw_bin_ip6tables=$(fw_find_bin ip6tables || true)
+fw_bin_systemctl=$(fw_find_bin systemctl || true)
+fw_bin_service=$(fw_find_bin service || true)
+fw_bin_rc_service=$(fw_find_bin rc-service || true)
+fw_bin_ss=$(fw_find_bin ss || true)
+
+fw_available=
+for fw_name in firewalld ufw nftables iptables; do
+  fw_has=0
+  case "$fw_name" in
+    firewalld) [ -n "$fw_bin_firewalld" ] && fw_has=1 ;;
+    ufw) [ -n "$fw_bin_ufw" ] && fw_has=1 ;;
+    nftables) [ -n "$fw_bin_nft" ] && fw_has=1 ;;
+    iptables) [ -n "$fw_bin_iptables" ] && fw_has=1 ;;
+  esac
+  if [ "$fw_has" = 1 ]; then
+    if [ -n "$fw_available" ]; then
+      fw_available="$fw_available,$fw_name"
+    else
+      fw_available="$fw_name"
+    fi
+  fi
+done
+
+[ -n "$fw_available" ] || exit 69
+
+fw_firewalld_running() {
+  [ -n "$fw_bin_firewalld" ] || return 1
+  if fw_run "$fw_bin_firewalld" --state; then
+    case "$(tr -d '\r\n' <"$fw_temp/out")" in
+      running) return 0 ;;
+    esac
+    return 1
+  fi
+  if fw_is_perm_err; then
+    exit 77
+  fi
+  return 1
+}
+
+fw_ufw_active() {
+  [ -n "$fw_bin_ufw" ] || return 1
+  if fw_run "$fw_bin_ufw" status; then
+    if grep -q '^Status:[[:space:]]*active' "$fw_temp/out" 2>/dev/null; then
+      return 0
+    fi
+    return 1
+  fi
+  if fw_is_perm_err; then
+    exit 77
+  fi
+  return 1
+}
+
+fw_nft_service_exists() {
+  if [ -n "$fw_bin_systemctl" ]; then
+    fw_load=$("$fw_bin_systemctl" show -p LoadState --value nftables.service 2>/dev/null || true)
+    if [ "$fw_load" = loaded ]; then
+      return 0
+    fi
+  fi
+  if [ -n "$fw_bin_rc_service" ] && [ -x /etc/init.d/nftables ]; then
+    return 0
+  fi
+  return 1
+}
+
+fw_nft_service_active() {
+  if [ -n "$fw_bin_systemctl" ]; then
+    "$fw_bin_systemctl" is-active --quiet nftables.service 2>/dev/null && return 0
+  fi
+  if [ -n "$fw_bin_rc_service" ]; then
+    "$fw_bin_rc_service" nftables status >/dev/null 2>&1 && return 0
+  fi
+  return 1
+}
+
+fw_nft_has_native_tables() {
+  [ -n "$fw_bin_nft" ] || return 1
+  if ! fw_run "$fw_bin_nft" list tables; then
+    if fw_is_perm_err; then
+      exit 77
+    fi
+    return 1
+  fi
+  if grep -q '^table[[:space:]][[:space:]]*inet[[:space:]]' "$fw_temp/out" 2>/dev/null; then
+    return 0
+  fi
+  if [ -z "$fw_bin_iptables" ] && [ -s "$fw_temp/out" ]; then
+    return 0
+  fi
+  return 1
+}
+
+fw_iptables_has_rules() {
+  [ -n "$fw_bin_iptables" ] || return 1
+  if ! fw_run "$fw_bin_iptables" -w 5 -S INPUT; then
+    if fw_is_perm_err; then
+      exit 77
+    fi
+    return 1
+  fi
+  if grep -q '^-A INPUT ' "$fw_temp/out" 2>/dev/null; then
+    return 0
+  fi
+  if [ -n "$fw_bin_ip6tables" ] && fw_run "$fw_bin_ip6tables" -w 5 -S INPUT; then
+    if grep -q '^-A INPUT ' "$fw_temp/out" 2>/dev/null; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
+fw_backend=
+fw_state=inactive
+fw_version=
+fw_zone=
+fw_policy=
+fw_service_actions=none
+
+if [ -n "$fw_preferred" ]; then
+  case "$fw_preferred" in
+    firewalld) [ -n "$fw_bin_firewalld" ] || exit 69 ;;
+    ufw) [ -n "$fw_bin_ufw" ] || exit 69 ;;
+    nftables) [ -n "$fw_bin_nft" ] || exit 69 ;;
+    iptables) [ -n "$fw_bin_iptables" ] || exit 69 ;;
+  esac
+  fw_backend=$fw_preferred
+else
+  if fw_firewalld_running; then
+    fw_backend=firewalld
+    fw_state=active
+  elif fw_ufw_active; then
+    fw_backend=ufw
+    fw_state=active
+  elif [ -n "$fw_bin_nft" ] && { fw_nft_service_active || fw_nft_has_native_tables; }; then
+    fw_backend=nftables
+    fw_state=active
+  elif [ -z "$fw_bin_firewalld" ] && [ -z "$fw_bin_ufw" ] && fw_iptables_has_rules; then
+    fw_backend=iptables
+    fw_state=active
+  elif [ -n "$fw_bin_firewalld" ]; then
+    fw_backend=firewalld
+    fw_state=inactive
+  elif [ -n "$fw_bin_ufw" ]; then
+    fw_backend=ufw
+    fw_state=inactive
+  elif [ -n "$fw_bin_nft" ] && { [ -z "$fw_bin_iptables" ] || [ -f /etc/nftables.conf ]; }; then
+    fw_backend=nftables
+  elif [ -n "$fw_bin_iptables" ]; then
+    fw_backend=iptables
+    fw_state=active
+  elif [ -n "$fw_bin_nft" ]; then
+    fw_backend=nftables
+  else
+    exit 69
+  fi
+fi
+
+: >"$fw_temp/rules"
+
+case "$fw_backend" in
+  firewalld)
+    fw_version=$("$fw_bin_firewalld" --version 2>/dev/null | head -n 1 | tr -d '\r' || true)
+    if fw_firewalld_running; then
+      fw_state=active
+      fw_service_actions=disable,reload
+      if fw_run "$fw_bin_firewalld" --get-default-zone; then
+        fw_zone=$(head -n 1 "$fw_temp/out" | tr -d '\r')
+      else
+        fw_is_perm_err && exit 77
+        exit 75
+      fi
+      {
+        printf 'FIREWALLD_PORTS\n'
+        if fw_run "$fw_bin_firewalld" --zone="$fw_zone" --list-ports; then
+          cat "$fw_temp/out"
+          printf '\n'
+        else
+          fw_is_perm_err && exit 77
+          exit 75
+        fi
+        printf 'FIREWALLD_RICH_RULES\n'
+        if fw_run "$fw_bin_firewalld" --zone="$fw_zone" --list-rich-rules; then
+          cat "$fw_temp/out"
+          printf '\n'
+        else
+          fw_is_perm_err && exit 77
+          exit 75
+        fi
+      } >"$fw_temp/rules"
+    else
+      fw_state=inactive
+      fw_service_actions=enable
+    fi
+    ;;
+  ufw)
+    fw_version=$("$fw_bin_ufw" version 2>/dev/null | head -n 1 | sed 's/^ufw[[:space:]]*//' | tr -d '\r' || true)
+    if fw_run "$fw_bin_ufw" status numbered; then
+      if grep -q '^Status:[[:space:]]*active' "$fw_temp/out" 2>/dev/null; then
+        fw_state=active
+        fw_service_actions=disable,reload
+        {
+          printf 'UFW_STATUS\n'
+          cat "$fw_temp/out"
+          printf '\n'
+        } >"$fw_temp/rules"
+      else
+        fw_state=inactive
+        fw_service_actions=enable
+      fi
+    else
+      fw_is_perm_err && exit 77
+      exit 75
+    fi
+    ;;
+  nftables)
+    fw_version=$("$fw_bin_nft" --version 2>/dev/null | head -n 1 | sed 's/^nftables[[:space:]]*//; s/^v//' | awk '{print $1}' | tr -d '\r' || true)
+    if fw_run "$fw_bin_nft" -a list ruleset; then
+      if fw_nft_service_active || [ -s "$fw_temp/out" ]; then
+        fw_state=active
+      else
+        fw_state=inactive
+      fi
+      if fw_nft_service_exists; then
+        if [ "$fw_state" = active ]; then
+          fw_service_actions=disable,reload
+        else
+          fw_service_actions=enable
+        fi
+      elif [ -f /etc/nftables.conf ]; then
+        fw_service_actions=reload
+      else
+        fw_service_actions=none
+      fi
+      {
+        printf 'NFT_RULESET\n'
+        cat "$fw_temp/out"
+        printf '\n'
+      } >"$fw_temp/rules"
+    else
+      fw_is_perm_err && exit 77
+      exit 75
+    fi
+    ;;
+  iptables)
+    fw_version=$("$fw_bin_iptables" --version 2>/dev/null | head -n 1 | sed 's/^iptables[[:space:]]*//; s/^v//' | tr -d '\r' || true)
+    fw_state=active
+    fw_service_actions=none
+    if ! fw_run "$fw_bin_iptables" -w 5 -S INPUT; then
+      fw_is_perm_err && exit 77
+      exit 75
+    fi
+    fw_policy=$(awk '$1 == "-P" && $2 == "INPUT" { print $3; exit }' "$fw_temp/out" | tr -d '\r')
+    {
+      printf 'IPTABLES_V4\n'
+      cat "$fw_temp/out"
+      printf '\n'
+      if [ -n "$fw_bin_ip6tables" ] && fw_run "$fw_bin_ip6tables" -w 5 -S INPUT; then
+        printf 'IPTABLES_V6\n'
+        cat "$fw_temp/out"
+        printf '\n'
+      fi
+    } >"$fw_temp/rules"
+    ;;
+esac
+
+: >"$fw_temp/listeners"
+if [ -n "$fw_bin_ss" ]; then
+  if fw_run "$fw_bin_ss" -H -4 -l -n -t -u -p; then
+    {
+      printf 'SS4\n'
+      cat "$fw_temp/out"
+      printf '\n'
+    } >>"$fw_temp/listeners"
+  fi
+  if fw_run "$fw_bin_ss" -H -6 -l -n -t -u -p; then
+    {
+      printf 'SS6\n'
+      cat "$fw_temp/out"
+      printf '\n'
+    } >>"$fw_temp/listeners"
+  fi
+fi
+
+printf 'PAGA_FIREWALL_V1\n'
+printf 'BACKEND %s\n' "$fw_backend"
+printf 'AVAILABLE %s\n' "$fw_available"
+printf 'STATE %s\n' "$fw_state"
+printf 'VERSION %s\n' "$fw_version"
+printf 'ZONE %s\n' "$fw_zone"
+printf 'POLICY %s\n' "$fw_policy"
+printf 'SERVICE_ACTIONS %s\n' "$fw_service_actions"
+printf -- '---RULES---\n'
+cat "$fw_temp/rules"
+printf -- '---LISTENERS---\n'
+cat "$fw_temp/listeners"
+printf 'END_FIREWALL\n'

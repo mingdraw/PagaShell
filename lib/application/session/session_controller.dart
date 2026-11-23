@@ -10,6 +10,7 @@ import '../../domain/proxy/system_proxy.dart';
 import '../../domain/rdp/rdp_engine.dart';
 import '../../domain/repositories/known_host_repository.dart';
 import '../../domain/ssh/docker_manager.dart';
+import '../../domain/ssh/firewall.dart';
 import '../../domain/ssh/host_key.dart';
 import '../../domain/ssh/network_ports.dart';
 import '../../domain/ssh/process_manager.dart';
@@ -113,6 +114,13 @@ class SessionController extends GetxController {
         tabId,
         hostId,
         (session) => session is NetworkPortsSource,
+      );
+
+  FirewallSource? firewallSource(String tabId, {String? hostId}) =>
+      _monitoringConnection(
+        tabId,
+        hostId,
+        (session) => session is FirewallSource,
       );
 
   ServerStatusConnection? _monitoringConnection(

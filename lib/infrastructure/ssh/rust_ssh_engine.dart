@@ -17,6 +17,7 @@ import '../../domain/rdp/rdp_clipboard.dart';
 import '../../domain/rdp/rdp_engine.dart';
 import '../../domain/ssh/agent_ops.dart';
 import '../../domain/ssh/docker_manager.dart';
+import '../../domain/ssh/firewall.dart';
 import '../../domain/ssh/host_key.dart';
 import '../../domain/ssh/network_ports.dart';
 import '../../domain/ssh/process_manager.dart';
@@ -27,6 +28,7 @@ import '../../domain/vnc/vnc_engine.dart';
 import '../../src/rust/api/agent_ops.dart' as agent;
 import '../../src/rust/api/desktop.dart' as desktop;
 import '../../src/rust/api/docker.dart' as docker;
+import '../../src/rust/api/firewall.dart' as firewall;
 import '../../src/rust/api/network_ports.dart' as network_ports;
 import '../../src/rust/api/page.dart' as page;
 import '../../src/rust/api/proxy.dart' as proxy;
@@ -34,6 +36,7 @@ import '../../src/rust/api/ssh.dart' as rust;
 import '../../src/rust/api/terminal.dart' as native_terminal;
 import '../../src/rust/api/vnc.dart' as vnc;
 import 'docker_parser.dart';
+import 'firewall_parser.dart';
 import 'network_ports_parser.dart';
 import 'process_parser.dart';
 import 'rdp_connection_error.dart';
@@ -767,6 +770,7 @@ class _RustEngineSession
         RemoteFileOpsSource,
         ProcessManagerSource,
         NetworkPortsSource,
+        FirewallSource,
         DockerManagerSource,
         DockerLogsSource,
         DockerContainerActions,
@@ -966,6 +970,88 @@ class _RustEngineSession
       await network_ports.sshReadNetworkPorts(sessionId: _sessionId),
     );
   });
+
+  @override
+  Future<FirewallSnapshot> readFirewall({FirewallBackend? backend}) => _guard(
+    () async {
+      if (_closed) throw const SshEngineException('防火墙管理连接已关闭');
+      return parseFirewallSnapshot(
+        await firewall.sshReadFirewall(
+          sessionId: _sessionId,
+          preferredBackend: backend == null ? null : _firewallBackend(backend),
+        ),
+      );
+    },
+  );
+
+  @override
+  Future<void> addFirewallRules(
+    FirewallBackend backend,
+    List<FirewallRuleInput> rules,
+  ) => _guard(() async {
+    if (_closed) throw const SshEngineException('防火墙管理连接已关闭');
+    await firewall.sshAddFirewallRules(
+      sessionId: _sessionId,
+      backend: _firewallBackend(backend),
+      rules: [for (final rule in rules) _firewallRuleSpec(rule)],
+    );
+  });
+
+  @override
+  Future<void> deleteFirewallRule(FirewallRule rule) => _guard(() async {
+    if (_closed) throw const SshEngineException('防火墙管理连接已关闭');
+    await firewall.sshDeleteFirewallRule(
+      sessionId: _sessionId,
+      backend: _firewallBackend(rule.backend),
+      existingRaw: rule.rawRule,
+    );
+  });
+
+  @override
+  Future<void> runFirewallServiceAction(
+    FirewallBackend backend,
+    FirewallServiceAction action,
+  ) => _guard(() async {
+    if (_closed) throw const SshEngineException('防火墙管理连接已关闭');
+    await firewall.sshRunFirewallServiceAction(
+      sessionId: _sessionId,
+      backend: _firewallBackend(backend),
+      action: switch (action) {
+        FirewallServiceAction.enable =>
+          firewall.FirewallServiceActionKind.enable,
+        FirewallServiceAction.disable =>
+          firewall.FirewallServiceActionKind.disable,
+        FirewallServiceAction.reload =>
+          firewall.FirewallServiceActionKind.reload,
+      },
+    );
+  });
+
+  static firewall.FirewallBackendKind _firewallBackend(
+    FirewallBackend backend,
+  ) => switch (backend) {
+    FirewallBackend.firewalld => firewall.FirewallBackendKind.firewalld,
+    FirewallBackend.ufw => firewall.FirewallBackendKind.ufw,
+    FirewallBackend.nftables => firewall.FirewallBackendKind.nftables,
+    FirewallBackend.iptables => firewall.FirewallBackendKind.iptables,
+  };
+
+  static firewall.FirewallRuleSpec _firewallRuleSpec(FirewallRuleInput rule) =>
+      firewall.FirewallRuleSpec(
+        action: switch (rule.action) {
+          FirewallAction.allow => firewall.FirewallActionKind.allow,
+          FirewallAction.deny => firewall.FirewallActionKind.deny,
+        },
+        protocol: switch (rule.protocol) {
+          FirewallProtocol.tcp => firewall.FirewallProtocolKind.tcp,
+          FirewallProtocol.udp => firewall.FirewallProtocolKind.udp,
+          FirewallProtocol.tcpUdp => firewall.FirewallProtocolKind.tcpUdp,
+        },
+        port: rule.port,
+        source: rule.source,
+        priority: rule.priority,
+        comment: rule.comment,
+      );
 
   @override
   Future<List<DockerResource>> readDockerResources(DockerResourceKind kind) =>

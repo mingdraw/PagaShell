@@ -6,6 +6,7 @@
 import 'api/agent_ops.dart';
 import 'api/desktop.dart';
 import 'api/docker.dart';
+import 'api/firewall.dart';
 import 'api/network_ports.dart';
 import 'api/page.dart';
 import 'api/proxy.dart';
@@ -70,6 +71,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DesktopFrame dco_decode_box_autoadd_desktop_frame(dynamic raw);
 
   @protected
+  FirewallBackendKind dco_decode_box_autoadd_firewall_backend_kind(dynamic raw);
+
+  @protected
+  int dco_decode_box_autoadd_i_16(dynamic raw);
+
+  @protected
   int dco_decode_box_autoadd_i_32(dynamic raw);
 
   @protected
@@ -118,7 +125,27 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DockerResourceKind dco_decode_docker_resource_kind(dynamic raw);
 
   @protected
+  FirewallActionKind dco_decode_firewall_action_kind(dynamic raw);
+
+  @protected
+  FirewallBackendKind dco_decode_firewall_backend_kind(dynamic raw);
+
+  @protected
+  FirewallProtocolKind dco_decode_firewall_protocol_kind(dynamic raw);
+
+  @protected
+  FirewallRuleSpec dco_decode_firewall_rule_spec(dynamic raw);
+
+  @protected
+  FirewallServiceActionKind dco_decode_firewall_service_action_kind(
+    dynamic raw,
+  );
+
+  @protected
   ForwardPortSpec dco_decode_forward_port_spec(dynamic raw);
+
+  @protected
+  int dco_decode_i_16(dynamic raw);
 
   @protected
   int dco_decode_i_32(dynamic raw);
@@ -128,6 +155,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<DesktopTile> dco_decode_list_desktop_tile(dynamic raw);
+
+  @protected
+  List<FirewallRuleSpec> dco_decode_list_firewall_rule_spec(dynamic raw);
 
   @protected
   List<ForwardPortSpec> dco_decode_list_forward_port_spec(dynamic raw);
@@ -163,6 +193,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DesktopFrame? dco_decode_opt_box_autoadd_desktop_frame(dynamic raw);
+
+  @protected
+  FirewallBackendKind? dco_decode_opt_box_autoadd_firewall_backend_kind(
+    dynamic raw,
+  );
+
+  @protected
+  int? dco_decode_opt_box_autoadd_i_16(dynamic raw);
 
   @protected
   int? dco_decode_opt_box_autoadd_i_32(dynamic raw);
@@ -284,6 +322,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  FirewallBackendKind sse_decode_box_autoadd_firewall_backend_kind(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  int sse_decode_box_autoadd_i_16(SseDeserializer deserializer);
+
+  @protected
   int sse_decode_box_autoadd_i_32(SseDeserializer deserializer);
 
   @protected
@@ -348,7 +394,33 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  FirewallActionKind sse_decode_firewall_action_kind(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  FirewallBackendKind sse_decode_firewall_backend_kind(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  FirewallProtocolKind sse_decode_firewall_protocol_kind(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  FirewallRuleSpec sse_decode_firewall_rule_spec(SseDeserializer deserializer);
+
+  @protected
+  FirewallServiceActionKind sse_decode_firewall_service_action_kind(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   ForwardPortSpec sse_decode_forward_port_spec(SseDeserializer deserializer);
+
+  @protected
+  int sse_decode_i_16(SseDeserializer deserializer);
 
   @protected
   int sse_decode_i_32(SseDeserializer deserializer);
@@ -358,6 +430,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<DesktopTile> sse_decode_list_desktop_tile(SseDeserializer deserializer);
+
+  @protected
+  List<FirewallRuleSpec> sse_decode_list_firewall_rule_spec(
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<ForwardPortSpec> sse_decode_list_forward_port_spec(
@@ -403,6 +480,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DesktopFrame? sse_decode_opt_box_autoadd_desktop_frame(
     SseDeserializer deserializer,
   );
+
+  @protected
+  FirewallBackendKind? sse_decode_opt_box_autoadd_firewall_backend_kind(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  int? sse_decode_opt_box_autoadd_i_16(SseDeserializer deserializer);
 
   @protected
   int? sse_decode_opt_box_autoadd_i_32(SseDeserializer deserializer);
@@ -542,6 +627,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_firewall_backend_kind(
+    FirewallBackendKind self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_i_16(int self, SseSerializer serializer);
+
+  @protected
   void sse_encode_box_autoadd_i_32(int self, SseSerializer serializer);
 
   @protected
@@ -620,10 +714,43 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_firewall_action_kind(
+    FirewallActionKind self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_firewall_backend_kind(
+    FirewallBackendKind self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_firewall_protocol_kind(
+    FirewallProtocolKind self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_firewall_rule_spec(
+    FirewallRuleSpec self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_firewall_service_action_kind(
+    FirewallServiceActionKind self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_forward_port_spec(
     ForwardPortSpec self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_i_16(int self, SseSerializer serializer);
 
   @protected
   void sse_encode_i_32(int self, SseSerializer serializer);
@@ -634,6 +761,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_desktop_tile(
     List<DesktopTile> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_firewall_rule_spec(
+    List<FirewallRuleSpec> self,
     SseSerializer serializer,
   );
 
@@ -696,6 +829,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     DesktopFrame? self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_opt_box_autoadd_firewall_backend_kind(
+    FirewallBackendKind? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_i_16(int? self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_box_autoadd_i_32(int? self, SseSerializer serializer);

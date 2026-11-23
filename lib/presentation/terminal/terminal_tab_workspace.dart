@@ -19,6 +19,7 @@ import '../shell/connect_flow.dart';
 import '../shell/widgets/host_tree_drag.dart';
 import '../theme/app_theme.dart';
 import 'docker_manager_panel.dart';
+import 'firewall_panel.dart';
 import 'network_ports_panel.dart';
 import 'process_manager_panel.dart';
 import 'server_status_panel.dart';
@@ -344,6 +345,7 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
     final processSource = controller.processManagerSource(widget.tab.id);
     final dockerSource = controller.dockerManagerSource(widget.tab.id);
     final portsSource = controller.networkPortsSource(widget.tab.id);
+    final firewallSource = controller.firewallSource(widget.tab.id);
     return LayoutBuilder(
       builder: (context, constraints) => TerminalSidePanel(
         availableWidth: constraints.maxWidth,
@@ -419,6 +421,22 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
                   ? () => toggle(TerminalSidePanelKind.networkPorts)
                   : null,
               icon: AppIcons.networkPorts,
+            ),
+            const SizedBox(width: 4),
+            _toolbarButton(
+              name: 'toolbar-firewall',
+              label:
+                  (panel == TerminalSidePanelKind.firewall ? '折叠防火墙' : '展开防火墙')
+                      .tr,
+              tooltip: '防火墙'.tr,
+              selected: panel == TerminalSidePanelKind.firewall,
+              onPressed:
+                  canExpand &&
+                      (firewallSource != null ||
+                          panel == TerminalSidePanelKind.firewall)
+                  ? () => toggle(TerminalSidePanelKind.firewall)
+                  : null,
+              icon: AppIcons.firewall,
             ),
             const SizedBox(width: 4),
             _toolbarButton(
@@ -539,6 +557,10 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
                   source: controller.networkPortsSource(tabId, hostId: hostId),
                   hostname: session.host.hostname,
                   active: active && panel == TerminalSidePanelKind.networkPorts,
+                ),
+                FirewallPanel(
+                  source: controller.firewallSource(tabId, hostId: hostId),
+                  active: active && panel == TerminalSidePanelKind.firewall,
                 ),
               ],
             ),

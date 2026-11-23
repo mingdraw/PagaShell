@@ -39,7 +39,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.13.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -3557662;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1693592562;
 
 // Section: executor
 
@@ -1240,6 +1240,51 @@ fn wire__crate__api__ssh__sftp_upload_impl(
         },
     )
 }
+fn wire__crate__api__firewall__ssh_add_firewall_rules_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "ssh_add_firewall_rules",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_session_id = <u32>::sse_decode(&mut deserializer);
+            let api_backend =
+                <crate::api::firewall::FirewallBackendKind>::sse_decode(&mut deserializer);
+            let api_rules =
+                <Vec<crate::api::firewall::FirewallRuleSpec>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || async move {
+                        let output_ok = crate::api::firewall::ssh_add_firewall_rules(
+                            api_session_id,
+                            api_backend,
+                            api_rules,
+                        )
+                        .await?;
+                        std::result::Result::Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__ssh__ssh_authenticate_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -1362,6 +1407,50 @@ fn wire__crate__api__docker__ssh_close_docker_logs_impl(
                         let output_ok = Ok::<_, ()>({
                             crate::api::docker::ssh_close_docker_logs(api_log_id).await;
                         })?;
+                        std::result::Result::Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__firewall__ssh_delete_firewall_rule_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "ssh_delete_firewall_rule",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_session_id = <u32>::sse_decode(&mut deserializer);
+            let api_backend =
+                <crate::api::firewall::FirewallBackendKind>::sse_decode(&mut deserializer);
+            let api_existing_raw = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || async move {
+                        let output_ok = crate::api::firewall::ssh_delete_firewall_rule(
+                            api_session_id,
+                            api_backend,
+                            api_existing_raw,
+                        )
+                        .await?;
                         std::result::Result::Ok(output_ok)
                     })()
                     .await,
@@ -1773,6 +1862,48 @@ fn wire__crate__api__docker__ssh_read_docker_resources_impl(
                         let output_ok =
                             crate::api::docker::ssh_read_docker_resources(api_session_id, api_kind)
                                 .await?;
+                        std::result::Result::Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__firewall__ssh_read_firewall_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "ssh_read_firewall",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_session_id = <u32>::sse_decode(&mut deserializer);
+            let api_preferred_backend =
+                <Option<crate::api::firewall::FirewallBackendKind>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || async move {
+                        let output_ok = crate::api::firewall::ssh_read_firewall(
+                            api_session_id,
+                            api_preferred_backend,
+                        )
+                        .await?;
                         std::result::Result::Ok(output_ok)
                     })()
                     .await,
@@ -2228,6 +2359,51 @@ fn wire__crate__api__docker__ssh_run_docker_image_action_impl(
                             api_session_id,
                             api_action,
                             api_image_id,
+                        )
+                        .await?;
+                        std::result::Result::Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__firewall__ssh_run_firewall_service_action_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "ssh_run_firewall_service_action",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_session_id = <u32>::sse_decode(&mut deserializer);
+            let api_backend =
+                <crate::api::firewall::FirewallBackendKind>::sse_decode(&mut deserializer);
+            let api_action =
+                <crate::api::firewall::FirewallServiceActionKind>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || async move {
+                        let output_ok = crate::api::firewall::ssh_run_firewall_service_action(
+                            api_session_id,
+                            api_backend,
+                            api_action,
                         )
                         .await?;
                         std::result::Result::Ok(output_ok)
@@ -2991,6 +3167,79 @@ impl SseDecode for crate::api::docker::DockerResourceKind {
     }
 }
 
+impl SseDecode for crate::api::firewall::FirewallActionKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::firewall::FirewallActionKind::Allow,
+            1 => crate::api::firewall::FirewallActionKind::Deny,
+            _ => unreachable!("Invalid variant for FirewallActionKind: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::firewall::FirewallBackendKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::firewall::FirewallBackendKind::Firewalld,
+            1 => crate::api::firewall::FirewallBackendKind::Ufw,
+            2 => crate::api::firewall::FirewallBackendKind::Nftables,
+            3 => crate::api::firewall::FirewallBackendKind::Iptables,
+            _ => unreachable!("Invalid variant for FirewallBackendKind: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::firewall::FirewallProtocolKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::firewall::FirewallProtocolKind::Tcp,
+            1 => crate::api::firewall::FirewallProtocolKind::Udp,
+            2 => crate::api::firewall::FirewallProtocolKind::TcpUdp,
+            _ => unreachable!("Invalid variant for FirewallProtocolKind: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::firewall::FirewallRuleSpec {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_action = <crate::api::firewall::FirewallActionKind>::sse_decode(deserializer);
+        let mut var_protocol =
+            <crate::api::firewall::FirewallProtocolKind>::sse_decode(deserializer);
+        let mut var_port = <String>::sse_decode(deserializer);
+        let mut var_source = <String>::sse_decode(deserializer);
+        let mut var_priority = <Option<i16>>::sse_decode(deserializer);
+        let mut var_comment = <String>::sse_decode(deserializer);
+        return crate::api::firewall::FirewallRuleSpec {
+            action: var_action,
+            protocol: var_protocol,
+            port: var_port,
+            source: var_source,
+            priority: var_priority,
+            comment: var_comment,
+        };
+    }
+}
+
+impl SseDecode for crate::api::firewall::FirewallServiceActionKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::firewall::FirewallServiceActionKind::Enable,
+            1 => crate::api::firewall::FirewallServiceActionKind::Disable,
+            2 => crate::api::firewall::FirewallServiceActionKind::Reload,
+            _ => unreachable!("Invalid variant for FirewallServiceActionKind: {}", inner),
+        };
+    }
+}
+
 impl SseDecode for crate::api::ssh::ForwardPortSpec {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -3002,6 +3251,13 @@ impl SseDecode for crate::api::ssh::ForwardPortSpec {
             target_host: var_targetHost,
             target_port: var_targetPort,
         };
+    }
+}
+
+impl SseDecode for i16 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        deserializer.cursor.read_i16::<NativeEndian>().unwrap()
     }
 }
 
@@ -3031,6 +3287,20 @@ impl SseDecode for Vec<crate::api::desktop::DesktopTile> {
         let mut ans_ = Vec::with_capacity(len_ as usize);
         for idx_ in 0..len_ {
             ans_.push(<crate::api::desktop::DesktopTile>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::firewall::FirewallRuleSpec> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::firewall::FirewallRuleSpec>::sse_decode(
+                deserializer,
+            ));
         }
         return ans_;
     }
@@ -3156,6 +3426,30 @@ impl SseDecode for Option<crate::api::desktop::DesktopFrame> {
             return Some(<crate::api::desktop::DesktopFrame>::sse_decode(
                 deserializer,
             ));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::firewall::FirewallBackendKind> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::firewall::FirewallBackendKind>::sse_decode(
+                deserializer,
+            ));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<i16> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<i16>::sse_decode(deserializer));
         } else {
             return None;
         }
@@ -3574,113 +3868,132 @@ fn pde_ffi_dispatcher_primary_impl(
         27 => wire__crate__api__ssh__sftp_rename_impl(port, ptr, rust_vec_len, data_len),
         28 => wire__crate__api__ssh__sftp_save_text_impl(port, ptr, rust_vec_len, data_len),
         29 => wire__crate__api__ssh__sftp_upload_impl(port, ptr, rust_vec_len, data_len),
-        30 => wire__crate__api__ssh__ssh_authenticate_impl(port, ptr, rust_vec_len, data_len),
-        31 => wire__crate__api__ssh__ssh_authenticate_private_key_impl(
+        30 => wire__crate__api__firewall__ssh_add_firewall_rules_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        32 => {
+        31 => wire__crate__api__ssh__ssh_authenticate_impl(port, ptr, rust_vec_len, data_len),
+        32 => wire__crate__api__ssh__ssh_authenticate_private_key_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        33 => {
             wire__crate__api__docker__ssh_close_docker_logs_impl(port, ptr, rust_vec_len, data_len)
         }
-        33 => wire__crate__api__ssh__ssh_disconnect_impl(port, ptr, rust_vec_len, data_len),
-        34 => wire__crate__api__agent_ops__ssh_exec_cancel_impl(port, ptr, rust_vec_len, data_len),
-        35 => wire__crate__api__agent_ops__ssh_exec_stream_impl(port, ptr, rust_vec_len, data_len),
-        36 => wire__crate__api__ssh__ssh_handshake_impl(port, ptr, rust_vec_len, data_len),
-        37 => {
+        34 => wire__crate__api__firewall__ssh_delete_firewall_rule_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        35 => wire__crate__api__ssh__ssh_disconnect_impl(port, ptr, rust_vec_len, data_len),
+        36 => wire__crate__api__agent_ops__ssh_exec_cancel_impl(port, ptr, rust_vec_len, data_len),
+        37 => wire__crate__api__agent_ops__ssh_exec_stream_impl(port, ptr, rust_vec_len, data_len),
+        38 => wire__crate__api__ssh__ssh_handshake_impl(port, ptr, rust_vec_len, data_len),
+        39 => {
             wire__crate__api__ssh__ssh_handshake_via_gateway_impl(port, ptr, rust_vec_len, data_len)
         }
-        38 => wire__crate__api__ssh__ssh_handshake_via_page_impl(port, ptr, rust_vec_len, data_len),
-        39 => {
+        40 => wire__crate__api__ssh__ssh_handshake_via_page_impl(port, ptr, rust_vec_len, data_len),
+        41 => {
             wire__crate__api__docker__ssh_next_docker_logs_impl(port, ptr, rust_vec_len, data_len)
         }
-        40 => {
+        42 => {
             wire__crate__api__docker__ssh_open_docker_logs_impl(port, ptr, rust_vec_len, data_len)
         }
-        41 => wire__crate__api__docker__ssh_read_docker_details_impl(
+        43 => wire__crate__api__docker__ssh_read_docker_details_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        42 => wire__crate__api__docker__ssh_read_docker_resources_impl(
+        44 => wire__crate__api__docker__ssh_read_docker_resources_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        43 => wire__crate__api__network_ports__ssh_read_network_ports_impl(
+        45 => wire__crate__api__firewall__ssh_read_firewall_impl(port, ptr, rust_vec_len, data_len),
+        46 => wire__crate__api__network_ports__ssh_read_network_ports_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        44 => {
+        47 => {
             wire__crate__api__ssh__ssh_read_process_details_impl(port, ptr, rust_vec_len, data_len)
         }
-        45 => wire__crate__api__ssh__ssh_read_processes_impl(port, ptr, rust_vec_len, data_len),
-        46 => wire__crate__api__agent_ops__ssh_read_remote_text_impl(
+        48 => wire__crate__api__ssh__ssh_read_processes_impl(port, ptr, rust_vec_len, data_len),
+        49 => wire__crate__api__agent_ops__ssh_read_remote_text_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        47 => wire__crate__api__agent_ops__ssh_read_server_profile_impl(
+        50 => wire__crate__api__agent_ops__ssh_read_server_profile_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        48 => wire__crate__api__ssh__ssh_read_server_status_impl(port, ptr, rust_vec_len, data_len),
-        49 => wire__crate__api__ssh__ssh_resize_impl(port, ptr, rust_vec_len, data_len),
-        50 => wire__crate__api__agent_ops__ssh_restore_remote_backup_impl(
+        51 => wire__crate__api__ssh__ssh_read_server_status_impl(port, ptr, rust_vec_len, data_len),
+        52 => wire__crate__api__ssh__ssh_resize_impl(port, ptr, rust_vec_len, data_len),
+        53 => wire__crate__api__agent_ops__ssh_restore_remote_backup_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        51 => wire__crate__api__docker__ssh_run_docker_compose_action_impl(
+        54 => wire__crate__api__docker__ssh_run_docker_compose_action_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        52 => wire__crate__api__docker__ssh_run_docker_container_action_impl(
+        55 => wire__crate__api__docker__ssh_run_docker_container_action_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        53 => wire__crate__api__docker__ssh_run_docker_image_action_impl(
+        56 => wire__crate__api__docker__ssh_run_docker_image_action_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        54 => {
+        57 => wire__crate__api__firewall__ssh_run_firewall_service_action_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        58 => {
             wire__crate__api__ssh__ssh_start_docker_terminal_impl(port, ptr, rust_vec_len, data_len)
         }
-        55 => {
+        59 => {
             wire__crate__api__ssh__ssh_start_port_forwards_impl(port, ptr, rust_vec_len, data_len)
         }
-        56 => wire__crate__api__ssh__ssh_start_terminal_impl(port, ptr, rust_vec_len, data_len),
-        57 => wire__crate__api__ssh__ssh_terminal_ack_impl(port, ptr, rust_vec_len, data_len),
-        58 => wire__crate__api__ssh__ssh_terminate_process_impl(port, ptr, rust_vec_len, data_len),
-        59 => {
+        60 => wire__crate__api__ssh__ssh_start_terminal_impl(port, ptr, rust_vec_len, data_len),
+        61 => wire__crate__api__ssh__ssh_terminal_ack_impl(port, ptr, rust_vec_len, data_len),
+        62 => wire__crate__api__ssh__ssh_terminate_process_impl(port, ptr, rust_vec_len, data_len),
+        63 => {
             wire__crate__api__ssh__ssh_validate_private_key_impl(port, ptr, rust_vec_len, data_len)
         }
-        60 => wire__crate__api__ssh__ssh_write_impl(port, ptr, rust_vec_len, data_len),
-        61 => wire__crate__api__agent_ops__ssh_write_remote_text_impl(
+        64 => wire__crate__api__ssh__ssh_write_impl(port, ptr, rust_vec_len, data_len),
+        65 => wire__crate__api__agent_ops__ssh_write_remote_text_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        62 => wire__crate__api__vnc__vnc_connect_impl(port, ptr, rust_vec_len, data_len),
-        63 => wire__crate__api__vnc__vnc_disconnect_impl(port, ptr, rust_vec_len, data_len),
-        64 => wire__crate__api__vnc__vnc_frame_impl(port, ptr, rust_vec_len, data_len),
-        65 => wire__crate__api__vnc__vnc_input_impl(port, ptr, rust_vec_len, data_len),
+        66 => wire__crate__api__vnc__vnc_connect_impl(port, ptr, rust_vec_len, data_len),
+        67 => wire__crate__api__vnc__vnc_disconnect_impl(port, ptr, rust_vec_len, data_len),
+        68 => wire__crate__api__vnc__vnc_frame_impl(port, ptr, rust_vec_len, data_len),
+        69 => wire__crate__api__vnc__vnc_input_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -3913,6 +4226,119 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::docker::DockerResourceKind>
     for crate::api::docker::DockerResourceKind
 {
     fn into_into_dart(self) -> crate::api::docker::DockerResourceKind {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::firewall::FirewallActionKind {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Allow => 0.into_dart(),
+            Self::Deny => 1.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::firewall::FirewallActionKind
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::firewall::FirewallActionKind>
+    for crate::api::firewall::FirewallActionKind
+{
+    fn into_into_dart(self) -> crate::api::firewall::FirewallActionKind {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::firewall::FirewallBackendKind {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Firewalld => 0.into_dart(),
+            Self::Ufw => 1.into_dart(),
+            Self::Nftables => 2.into_dart(),
+            Self::Iptables => 3.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::firewall::FirewallBackendKind
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::firewall::FirewallBackendKind>
+    for crate::api::firewall::FirewallBackendKind
+{
+    fn into_into_dart(self) -> crate::api::firewall::FirewallBackendKind {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::firewall::FirewallProtocolKind {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Tcp => 0.into_dart(),
+            Self::Udp => 1.into_dart(),
+            Self::TcpUdp => 2.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::firewall::FirewallProtocolKind
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::firewall::FirewallProtocolKind>
+    for crate::api::firewall::FirewallProtocolKind
+{
+    fn into_into_dart(self) -> crate::api::firewall::FirewallProtocolKind {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::firewall::FirewallRuleSpec {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.action.into_into_dart().into_dart(),
+            self.protocol.into_into_dart().into_dart(),
+            self.port.into_into_dart().into_dart(),
+            self.source.into_into_dart().into_dart(),
+            self.priority.into_into_dart().into_dart(),
+            self.comment.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::firewall::FirewallRuleSpec
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::firewall::FirewallRuleSpec>
+    for crate::api::firewall::FirewallRuleSpec
+{
+    fn into_into_dart(self) -> crate::api::firewall::FirewallRuleSpec {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::firewall::FirewallServiceActionKind {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Enable => 0.into_dart(),
+            Self::Disable => 1.into_dart(),
+            Self::Reload => 2.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::firewall::FirewallServiceActionKind
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::firewall::FirewallServiceActionKind>
+    for crate::api::firewall::FirewallServiceActionKind
+{
+    fn into_into_dart(self) -> crate::api::firewall::FirewallServiceActionKind {
         self
     }
 }
@@ -4449,12 +4875,99 @@ impl SseEncode for crate::api::docker::DockerResourceKind {
     }
 }
 
+impl SseEncode for crate::api::firewall::FirewallActionKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::firewall::FirewallActionKind::Allow => 0,
+                crate::api::firewall::FirewallActionKind::Deny => 1,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::firewall::FirewallBackendKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::firewall::FirewallBackendKind::Firewalld => 0,
+                crate::api::firewall::FirewallBackendKind::Ufw => 1,
+                crate::api::firewall::FirewallBackendKind::Nftables => 2,
+                crate::api::firewall::FirewallBackendKind::Iptables => 3,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::firewall::FirewallProtocolKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::firewall::FirewallProtocolKind::Tcp => 0,
+                crate::api::firewall::FirewallProtocolKind::Udp => 1,
+                crate::api::firewall::FirewallProtocolKind::TcpUdp => 2,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::firewall::FirewallRuleSpec {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <crate::api::firewall::FirewallActionKind>::sse_encode(self.action, serializer);
+        <crate::api::firewall::FirewallProtocolKind>::sse_encode(self.protocol, serializer);
+        <String>::sse_encode(self.port, serializer);
+        <String>::sse_encode(self.source, serializer);
+        <Option<i16>>::sse_encode(self.priority, serializer);
+        <String>::sse_encode(self.comment, serializer);
+    }
+}
+
+impl SseEncode for crate::api::firewall::FirewallServiceActionKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::firewall::FirewallServiceActionKind::Enable => 0,
+                crate::api::firewall::FirewallServiceActionKind::Disable => 1,
+                crate::api::firewall::FirewallServiceActionKind::Reload => 2,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
 impl SseEncode for crate::api::ssh::ForwardPortSpec {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <u16>::sse_encode(self.local_port, serializer);
         <String>::sse_encode(self.target_host, serializer);
         <u16>::sse_encode(self.target_port, serializer);
+    }
+}
+
+impl SseEncode for i16 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        serializer.cursor.write_i16::<NativeEndian>(self).unwrap();
     }
 }
 
@@ -4481,6 +4994,16 @@ impl SseEncode for Vec<crate::api::desktop::DesktopTile> {
         <i32>::sse_encode(self.len() as _, serializer);
         for item in self {
             <crate::api::desktop::DesktopTile>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::firewall::FirewallRuleSpec> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::firewall::FirewallRuleSpec>::sse_encode(item, serializer);
         }
     }
 }
@@ -4581,6 +5104,26 @@ impl SseEncode for Option<crate::api::desktop::DesktopFrame> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <crate::api::desktop::DesktopFrame>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::firewall::FirewallBackendKind> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::firewall::FirewallBackendKind>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<i16> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <i16>::sse_encode(value, serializer);
         }
     }
 }

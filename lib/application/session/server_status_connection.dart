@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import '../../domain/ssh/docker_manager.dart';
+import '../../domain/ssh/firewall.dart';
 import '../../domain/ssh/network_ports.dart';
 import '../../domain/ssh/process_manager.dart';
 import '../../domain/ssh/server_status.dart';
@@ -12,6 +13,7 @@ class ServerStatusConnection
         ServerStatusSource,
         ProcessManagerSource,
         NetworkPortsSource,
+        FirewallSource,
         DockerManagerSource,
         DockerLogsSource,
         DockerContainerActions,
@@ -22,11 +24,15 @@ class ServerStatusConnection
     this._connect,
     this.dockerTimeout = dockerQueryTimeout,
     this.networkPortsTimeout = networkPortsQueryTimeout,
+    this.firewallTimeout = firewallQueryTimeout,
+    this.firewallMutateTimeoutDuration = firewallMutateTimeout,
   });
 
   Future<SshEngineSession> Function(Future<void> cancelled)? _connect;
   final Duration dockerTimeout;
   final Duration networkPortsTimeout;
+  final Duration firewallTimeout;
+  final Duration firewallMutateTimeoutDuration;
   SshEngineSession? _session;
   Future<SshEngineSession>? _connecting;
   Completer<void>? _cancellation;
@@ -139,6 +145,86 @@ class ServerStatusConnection
       },
     );
   }
+
+  Future<T> _firewallCall<T>(
+    Future<T> Function(FirewallSource) run, {
+    required Duration timeout,
+    required String timeoutMessage,
+  }) {
+    final generation = _generation;
+    final request = () async {
+      try {
+        final session = await _getSession();
+        if (_closed || generation != _generation) {
+          throw const SshEngineException('防火墙管理连接已关闭');
+        }
+        if (session is! FirewallSource) {
+          throw const SshEngineException('此连接不支持防火墙管理');
+        }
+        final result = await run(session as FirewallSource);
+        if (_closed || generation != _generation) {
+          throw const SshEngineException('防火墙管理连接已关闭');
+        }
+        return result;
+      } on TimeoutException {
+        unawaited(_resetConnection(generation));
+        throw SshEngineException(timeoutMessage);
+      } on SshEngineException catch (e) {
+        if (const {
+          '防火墙管理连接已关闭',
+          '无法查询防火墙，请检查连接',
+          '无法执行防火墙操作，请检查连接',
+          '防火墙查询超时，请重试',
+          '防火墙操作超时，请刷新规则列表确认状态',
+        }.contains(e.message)) {
+          unawaited(_resetConnection(generation));
+        }
+        rethrow;
+      }
+    }();
+    return request.timeout(
+      timeout,
+      onTimeout: () {
+        unawaited(_resetConnection(generation));
+        throw SshEngineException(timeoutMessage);
+      },
+    );
+  }
+
+  @override
+  Future<FirewallSnapshot> readFirewall({FirewallBackend? backend}) =>
+      _firewallCall(
+        (source) => source.readFirewall(backend: backend),
+        timeout: firewallTimeout,
+        timeoutMessage: '防火墙查询超时，请重试',
+      );
+
+  @override
+  Future<void> addFirewallRules(
+    FirewallBackend backend,
+    List<FirewallRuleInput> rules,
+  ) => _firewallCall(
+    (source) => source.addFirewallRules(backend, rules),
+    timeout: firewallMutateTimeoutDuration,
+    timeoutMessage: '防火墙操作超时，请刷新规则列表确认状态',
+  );
+
+  @override
+  Future<void> deleteFirewallRule(FirewallRule rule) => _firewallCall(
+    (source) => source.deleteFirewallRule(rule),
+    timeout: firewallMutateTimeoutDuration,
+    timeoutMessage: '防火墙操作超时，请刷新规则列表确认状态',
+  );
+
+  @override
+  Future<void> runFirewallServiceAction(
+    FirewallBackend backend,
+    FirewallServiceAction action,
+  ) => _firewallCall(
+    (source) => source.runFirewallServiceAction(backend, action),
+    timeout: firewallMutateTimeoutDuration,
+    timeoutMessage: '防火墙操作超时，请刷新规则列表确认状态',
+  );
 
   @override
   Future<ProcessDetails> readProcessDetails(RemoteProcess process) async {

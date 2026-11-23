@@ -46,6 +46,7 @@ enum AppIcons {
   fileTerminal(Mdi.console),
   fileText(Mdi.file_document_outline),
   fileUp(Mdi.file_upload_outline),
+  firewall(Mdi.shield_outline),
   folder(Mdi.folder),
   folderKey(Mdi.folder_key),
   folderMarker(Mdi.folder_marker_outline),
