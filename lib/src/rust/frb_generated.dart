@@ -3,6 +3,7 @@
 
 // ignore_for_file: unused_import, unused_element, unnecessary_import, duplicate_ignore, invalid_use_of_internal_member, annotate_overrides, non_constant_identifier_names, curly_braces_in_flow_control_structures, prefer_const_literals_to_create_immutables, unused_field
 
+import 'api/agent_ops.dart';
 import 'api/desktop.dart';
 import 'api/docker.dart';
 import 'api/network_ports.dart';
@@ -74,7 +75,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0';
 
   @override
-  int get rustContentHash => -1466352112;
+  int get rustContentHash => -3557662;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -247,6 +248,18 @@ abstract class RustLibApi extends BaseApi {
 
   Future<void> crateApiSshSshDisconnect({required int sessionId});
 
+  Future<void> crateApiAgentOpsSshExecCancel({
+    required int sessionId,
+    required int execId,
+  });
+
+  Stream<SshExecEvent> crateApiAgentOpsSshExecStream({
+    required int sessionId,
+    required int execId,
+    required String command,
+    required int timeoutSecs,
+  });
+
   Future<SshHandshake> crateApiSshSshHandshake({
     required String host,
     required int port,
@@ -294,12 +307,29 @@ abstract class RustLibApi extends BaseApi {
 
   Future<String> crateApiSshSshReadProcesses({required int sessionId});
 
+  Future<RemoteTextFile> crateApiAgentOpsSshReadRemoteText({
+    required int sessionId,
+    required String path,
+    required bool useSudo,
+  });
+
+  Future<String> crateApiAgentOpsSshReadServerProfile({required int sessionId});
+
   Future<String> crateApiSshSshReadServerStatus({required int sessionId});
 
   Future<void> crateApiSshSshResize({
     required int sessionId,
     required int cols,
     required int rows,
+  });
+
+  Future<void> crateApiAgentOpsSshRestoreRemoteBackup({
+    required int sessionId,
+    required String path,
+    String? backupPath,
+    required String expectedCurrentSha256,
+    String? expectedBackupSha256,
+    required bool useSudo,
   });
 
   Future<String?> crateApiDockerSshRunDockerComposeAction({
@@ -361,6 +391,11 @@ abstract class RustLibApi extends BaseApi {
   Future<void> crateApiSshSshWrite({
     required int sessionId,
     required List<int> data,
+  });
+
+  Future<RemoteWriteOutcome> crateApiAgentOpsSshWriteRemoteText({
+    required int sessionId,
+    required RemoteWriteRequest request,
   });
 
   Future<int> crateApiVncVncConnect({
@@ -1605,6 +1640,85 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "ssh_disconnect", argNames: ["sessionId"]);
 
   @override
+  Future<void> crateApiAgentOpsSshExecCancel({
+    required int sessionId,
+    required int execId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_32(sessionId, serializer);
+          sse_encode_u_32(execId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 34,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiAgentOpsSshExecCancelConstMeta,
+        argValues: [sessionId, execId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiAgentOpsSshExecCancelConstMeta =>
+      const TaskConstMeta(
+        debugName: "ssh_exec_cancel",
+        argNames: ["sessionId", "execId"],
+      );
+
+  @override
+  Stream<SshExecEvent> crateApiAgentOpsSshExecStream({
+    required int sessionId,
+    required int execId,
+    required String command,
+    required int timeoutSecs,
+  }) {
+    final sink = RustStreamSink<SshExecEvent>();
+    unawaited(
+      handler.executeNormal(
+        NormalTask(
+          callFfi: (port_) {
+            final serializer = SseSerializer(generalizedFrbRustBinding);
+            sse_encode_u_32(sessionId, serializer);
+            sse_encode_u_32(execId, serializer);
+            sse_encode_String(command, serializer);
+            sse_encode_u_32(timeoutSecs, serializer);
+            sse_encode_StreamSink_ssh_exec_event_Sse(sink, serializer);
+            pdeCallFfi(
+              generalizedFrbRustBinding,
+              serializer,
+              funcId: 35,
+              port: port_,
+            );
+          },
+          codec: SseCodec(
+            decodeSuccessData: sse_decode_unit,
+            decodeErrorData: null,
+          ),
+          constMeta: kCrateApiAgentOpsSshExecStreamConstMeta,
+          argValues: [sessionId, execId, command, timeoutSecs, sink],
+          apiImpl: this,
+        ),
+      ),
+    );
+    return sink.stream;
+  }
+
+  TaskConstMeta get kCrateApiAgentOpsSshExecStreamConstMeta =>
+      const TaskConstMeta(
+        debugName: "ssh_exec_stream",
+        argNames: ["sessionId", "execId", "command", "timeoutSecs", "sink"],
+      );
+
+  @override
   Future<SshHandshake> crateApiSshSshHandshake({
     required String host,
     required int port,
@@ -1618,7 +1732,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 34,
+            funcId: 36,
             port: port_,
           );
         },
@@ -1654,7 +1768,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 35,
+            funcId: 37,
             port: port_,
           );
         },
@@ -1691,7 +1805,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 36,
+            funcId: 38,
             port: port_,
           );
         },
@@ -1722,7 +1836,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 37,
+            funcId: 39,
             port: port_,
           );
         },
@@ -1757,7 +1871,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 38,
+            funcId: 40,
             port: port_,
           );
         },
@@ -1794,7 +1908,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 39,
+            funcId: 41,
             port: port_,
           );
         },
@@ -1829,7 +1943,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 40,
+            funcId: 42,
             port: port_,
           );
         },
@@ -1862,7 +1976,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 41,
+            funcId: 43,
             port: port_,
           );
         },
@@ -1899,7 +2013,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 42,
+            funcId: 44,
             port: port_,
           );
         },
@@ -1930,7 +2044,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 43,
+            funcId: 45,
             port: port_,
           );
         },
@@ -1952,6 +2066,76 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<RemoteTextFile> crateApiAgentOpsSshReadRemoteText({
+    required int sessionId,
+    required String path,
+    required bool useSudo,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_32(sessionId, serializer);
+          sse_encode_String(path, serializer);
+          sse_encode_bool(useSudo, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 46,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_remote_text_file,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiAgentOpsSshReadRemoteTextConstMeta,
+        argValues: [sessionId, path, useSudo],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiAgentOpsSshReadRemoteTextConstMeta =>
+      const TaskConstMeta(
+        debugName: "ssh_read_remote_text",
+        argNames: ["sessionId", "path", "useSudo"],
+      );
+
+  @override
+  Future<String> crateApiAgentOpsSshReadServerProfile({
+    required int sessionId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_32(sessionId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 47,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiAgentOpsSshReadServerProfileConstMeta,
+        argValues: [sessionId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiAgentOpsSshReadServerProfileConstMeta =>
+      const TaskConstMeta(
+        debugName: "ssh_read_server_profile",
+        argNames: ["sessionId"],
+      );
+
+  @override
   Future<String> crateApiSshSshReadServerStatus({required int sessionId}) {
     return handler.executeNormal(
       NormalTask(
@@ -1961,7 +2145,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 44,
+            funcId: 48,
             port: port_,
           );
         },
@@ -1998,7 +2182,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 45,
+            funcId: 49,
             port: port_,
           );
         },
@@ -2019,6 +2203,63 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   );
 
   @override
+  Future<void> crateApiAgentOpsSshRestoreRemoteBackup({
+    required int sessionId,
+    required String path,
+    String? backupPath,
+    required String expectedCurrentSha256,
+    String? expectedBackupSha256,
+    required bool useSudo,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_32(sessionId, serializer);
+          sse_encode_String(path, serializer);
+          sse_encode_opt_String(backupPath, serializer);
+          sse_encode_String(expectedCurrentSha256, serializer);
+          sse_encode_opt_String(expectedBackupSha256, serializer);
+          sse_encode_bool(useSudo, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 50,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiAgentOpsSshRestoreRemoteBackupConstMeta,
+        argValues: [
+          sessionId,
+          path,
+          backupPath,
+          expectedCurrentSha256,
+          expectedBackupSha256,
+          useSudo,
+        ],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiAgentOpsSshRestoreRemoteBackupConstMeta =>
+      const TaskConstMeta(
+        debugName: "ssh_restore_remote_backup",
+        argNames: [
+          "sessionId",
+          "path",
+          "backupPath",
+          "expectedCurrentSha256",
+          "expectedBackupSha256",
+          "useSudo",
+        ],
+      );
+
+  @override
   Future<String?> crateApiDockerSshRunDockerComposeAction({
     required int sessionId,
     required String projectName,
@@ -2034,7 +2275,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 46,
+            funcId: 51,
             port: port_,
           );
         },
@@ -2075,7 +2316,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 47,
+            funcId: 52,
             port: port_,
           );
         },
@@ -2118,7 +2359,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 48,
+            funcId: 53,
             port: port_,
           );
         },
@@ -2162,7 +2403,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 49,
+              funcId: 54,
               port: port_,
             );
           },
@@ -2209,7 +2450,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 50,
+              funcId: 55,
               port: port_,
             );
           },
@@ -2253,7 +2494,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 51,
+              funcId: 56,
               port: port_,
             );
           },
@@ -2290,7 +2531,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 52,
+            funcId: 57,
             port: port_,
           );
         },
@@ -2326,7 +2567,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 53,
+            funcId: 58,
             port: port_,
           );
         },
@@ -2361,7 +2602,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 54,
+            funcId: 59,
             port: port_,
           );
         },
@@ -2396,7 +2637,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 55,
+            funcId: 60,
             port: port_,
           );
         },
@@ -2415,6 +2656,41 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     debugName: "ssh_write",
     argNames: ["sessionId", "data"],
   );
+
+  @override
+  Future<RemoteWriteOutcome> crateApiAgentOpsSshWriteRemoteText({
+    required int sessionId,
+    required RemoteWriteRequest request,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_32(sessionId, serializer);
+          sse_encode_box_autoadd_remote_write_request(request, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 61,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_remote_write_outcome,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiAgentOpsSshWriteRemoteTextConstMeta,
+        argValues: [sessionId, request],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiAgentOpsSshWriteRemoteTextConstMeta =>
+      const TaskConstMeta(
+        debugName: "ssh_write_remote_text",
+        argNames: ["sessionId", "request"],
+      );
 
   @override
   Future<int> crateApiVncVncConnect({
@@ -2436,7 +2712,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 56,
+            funcId: 62,
             port: port_,
           );
         },
@@ -2466,7 +2742,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 57,
+            funcId: 63,
             port: port_,
           );
         },
@@ -2498,7 +2774,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 58,
+            funcId: 64,
             port: port_,
           );
         },
@@ -2542,7 +2818,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 59,
+            funcId: 65,
             port: port_,
           );
         },
@@ -2570,6 +2846,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   @protected
   RustStreamSink<PortForwardEvent> dco_decode_StreamSink_port_forward_event_Sse(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    throw UnimplementedError();
+  }
+
+  @protected
+  RustStreamSink<SshExecEvent> dco_decode_StreamSink_ssh_exec_event_Sse(
     dynamic raw,
   ) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
@@ -2625,6 +2909,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  int dco_decode_box_autoadd_i_32(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as int;
+  }
+
+  @protected
   PageGateway dco_decode_box_autoadd_page_gateway(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_page_gateway(raw);
@@ -2634,6 +2924,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ProxyTraffic dco_decode_box_autoadd_proxy_traffic(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_proxy_traffic(raw);
+  }
+
+  @protected
+  RemoteWriteRequest dco_decode_box_autoadd_remote_write_request(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_remote_write_request(raw);
   }
 
   @protected
@@ -2860,6 +3156,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  int? dco_decode_opt_box_autoadd_i_32(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_i_32(raw);
+  }
+
+  @protected
   PageGateway? dco_decode_opt_box_autoadd_page_gateway(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_page_gateway(raw);
@@ -2929,6 +3231,52 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  RemoteTextFile dco_decode_remote_text_file(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 5)
+      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    return RemoteTextFile(
+      text: dco_decode_String(arr[0]),
+      sha256: dco_decode_String(arr[1]),
+      modifiedUnix: dco_decode_opt_box_autoadd_u_32(arr[2]),
+      sizeBytes: dco_decode_u_32(arr[3]),
+      usedSudo: dco_decode_bool(arr[4]),
+    );
+  }
+
+  @protected
+  RemoteWriteOutcome dco_decode_remote_write_outcome(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return RemoteWriteOutcome(
+      backupPath: dco_decode_opt_String(arr[0]),
+      newSha256: dco_decode_String(arr[1]),
+      createdNew: dco_decode_bool(arr[2]),
+      usedSudo: dco_decode_bool(arr[3]),
+    );
+  }
+
+  @protected
+  RemoteWriteRequest dco_decode_remote_write_request(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 7)
+      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
+    return RemoteWriteRequest(
+      path: dco_decode_String(arr[0]),
+      content: dco_decode_String(arr[1]),
+      expectedSha256: dco_decode_opt_String(arr[2]),
+      createIfMissing: dco_decode_bool(arr[3]),
+      createParentDirs: dco_decode_bool(arr[4]),
+      backupSuffix: dco_decode_String(arr[5]),
+      useSudo: dco_decode_bool(arr[6]),
+    );
+  }
+
+  @protected
   SftpEntry dco_decode_sftp_entry(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
@@ -2951,6 +3299,22 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     return SftpTextFile(
       text: dco_decode_String(arr[0]),
       modifiedUnix: dco_decode_opt_box_autoadd_u_32(arr[1]),
+    );
+  }
+
+  @protected
+  SshExecEvent dco_decode_ssh_exec_event(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 6)
+      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
+    return SshExecEvent(
+      kind: dco_decode_String(arr[0]),
+      data: dco_decode_String(arr[1]),
+      exitCode: dco_decode_opt_box_autoadd_i_32(arr[2]),
+      timedOut: dco_decode_bool(arr[3]),
+      cancelled: dco_decode_bool(arr[4]),
+      truncated: dco_decode_bool(arr[5]),
     );
   }
 
@@ -3076,6 +3440,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  RustStreamSink<SshExecEvent> sse_decode_StreamSink_ssh_exec_event_Sse(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    throw UnimplementedError('Unreachable ()');
+  }
+
+  @protected
   RustStreamSink<TerminalFrame> sse_decode_StreamSink_terminal_frame_Sse(
     SseDeserializer deserializer,
   ) {
@@ -3129,6 +3501,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  int sse_decode_box_autoadd_i_32(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_i_32(deserializer));
+  }
+
+  @protected
   PageGateway sse_decode_box_autoadd_page_gateway(
     SseDeserializer deserializer,
   ) {
@@ -3142,6 +3520,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_proxy_traffic(deserializer));
+  }
+
+  @protected
+  RemoteWriteRequest sse_decode_box_autoadd_remote_write_request(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_remote_write_request(deserializer));
   }
 
   @protected
@@ -3466,6 +3852,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  int? sse_decode_opt_box_autoadd_i_32(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_i_32(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
   PageGateway? sse_decode_opt_box_autoadd_page_gateway(
     SseDeserializer deserializer,
   ) {
@@ -3558,6 +3955,63 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  RemoteTextFile sse_decode_remote_text_file(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_text = sse_decode_String(deserializer);
+    var var_sha256 = sse_decode_String(deserializer);
+    var var_modifiedUnix = sse_decode_opt_box_autoadd_u_32(deserializer);
+    var var_sizeBytes = sse_decode_u_32(deserializer);
+    var var_usedSudo = sse_decode_bool(deserializer);
+    return RemoteTextFile(
+      text: var_text,
+      sha256: var_sha256,
+      modifiedUnix: var_modifiedUnix,
+      sizeBytes: var_sizeBytes,
+      usedSudo: var_usedSudo,
+    );
+  }
+
+  @protected
+  RemoteWriteOutcome sse_decode_remote_write_outcome(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_backupPath = sse_decode_opt_String(deserializer);
+    var var_newSha256 = sse_decode_String(deserializer);
+    var var_createdNew = sse_decode_bool(deserializer);
+    var var_usedSudo = sse_decode_bool(deserializer);
+    return RemoteWriteOutcome(
+      backupPath: var_backupPath,
+      newSha256: var_newSha256,
+      createdNew: var_createdNew,
+      usedSudo: var_usedSudo,
+    );
+  }
+
+  @protected
+  RemoteWriteRequest sse_decode_remote_write_request(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_path = sse_decode_String(deserializer);
+    var var_content = sse_decode_String(deserializer);
+    var var_expectedSha256 = sse_decode_opt_String(deserializer);
+    var var_createIfMissing = sse_decode_bool(deserializer);
+    var var_createParentDirs = sse_decode_bool(deserializer);
+    var var_backupSuffix = sse_decode_String(deserializer);
+    var var_useSudo = sse_decode_bool(deserializer);
+    return RemoteWriteRequest(
+      path: var_path,
+      content: var_content,
+      expectedSha256: var_expectedSha256,
+      createIfMissing: var_createIfMissing,
+      createParentDirs: var_createParentDirs,
+      backupSuffix: var_backupSuffix,
+      useSudo: var_useSudo,
+    );
+  }
+
+  @protected
   SftpEntry sse_decode_sftp_entry(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_name = sse_decode_String(deserializer);
@@ -3578,6 +4032,25 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_text = sse_decode_String(deserializer);
     var var_modifiedUnix = sse_decode_opt_box_autoadd_u_32(deserializer);
     return SftpTextFile(text: var_text, modifiedUnix: var_modifiedUnix);
+  }
+
+  @protected
+  SshExecEvent sse_decode_ssh_exec_event(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_kind = sse_decode_String(deserializer);
+    var var_data = sse_decode_String(deserializer);
+    var var_exitCode = sse_decode_opt_box_autoadd_i_32(deserializer);
+    var var_timedOut = sse_decode_bool(deserializer);
+    var var_cancelled = sse_decode_bool(deserializer);
+    var var_truncated = sse_decode_bool(deserializer);
+    return SshExecEvent(
+      kind: var_kind,
+      data: var_data,
+      exitCode: var_exitCode,
+      timedOut: var_timedOut,
+      cancelled: var_cancelled,
+      truncated: var_truncated,
+    );
   }
 
   @protected
@@ -3720,6 +4193,23 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_StreamSink_ssh_exec_event_Sse(
+    RustStreamSink<SshExecEvent> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(
+      self.setupAndSerialize(
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_ssh_exec_event,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+      ),
+      serializer,
+    );
+  }
+
+  @protected
   void sse_encode_StreamSink_terminal_frame_Sse(
     RustStreamSink<TerminalFrame> self,
     SseSerializer serializer,
@@ -3793,6 +4283,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_box_autoadd_i_32(int self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self, serializer);
+  }
+
+  @protected
   void sse_encode_box_autoadd_page_gateway(
     PageGateway self,
     SseSerializer serializer,
@@ -3808,6 +4304,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_proxy_traffic(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_remote_write_request(
+    RemoteWriteRequest self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_remote_write_request(self, serializer);
   }
 
   @protected
@@ -4096,6 +4601,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_opt_box_autoadd_i_32(int? self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_i_32(self, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_opt_box_autoadd_page_gateway(
     PageGateway? self,
     SseSerializer serializer,
@@ -4182,6 +4697,46 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_remote_text_file(
+    RemoteTextFile self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.text, serializer);
+    sse_encode_String(self.sha256, serializer);
+    sse_encode_opt_box_autoadd_u_32(self.modifiedUnix, serializer);
+    sse_encode_u_32(self.sizeBytes, serializer);
+    sse_encode_bool(self.usedSudo, serializer);
+  }
+
+  @protected
+  void sse_encode_remote_write_outcome(
+    RemoteWriteOutcome self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_opt_String(self.backupPath, serializer);
+    sse_encode_String(self.newSha256, serializer);
+    sse_encode_bool(self.createdNew, serializer);
+    sse_encode_bool(self.usedSudo, serializer);
+  }
+
+  @protected
+  void sse_encode_remote_write_request(
+    RemoteWriteRequest self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.path, serializer);
+    sse_encode_String(self.content, serializer);
+    sse_encode_opt_String(self.expectedSha256, serializer);
+    sse_encode_bool(self.createIfMissing, serializer);
+    sse_encode_bool(self.createParentDirs, serializer);
+    sse_encode_String(self.backupSuffix, serializer);
+    sse_encode_bool(self.useSudo, serializer);
+  }
+
+  @protected
   void sse_encode_sftp_entry(SftpEntry self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.name, serializer);
@@ -4195,6 +4750,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.text, serializer);
     sse_encode_opt_box_autoadd_u_32(self.modifiedUnix, serializer);
+  }
+
+  @protected
+  void sse_encode_ssh_exec_event(SshExecEvent self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.kind, serializer);
+    sse_encode_String(self.data, serializer);
+    sse_encode_opt_box_autoadd_i_32(self.exitCode, serializer);
+    sse_encode_bool(self.timedOut, serializer);
+    sse_encode_bool(self.cancelled, serializer);
+    sse_encode_bool(self.truncated, serializer);
   }
 
   @protected

@@ -1,3 +1,4 @@
+pub mod agent_ops;
 pub mod desktop;
 pub mod docker;
 pub mod network_ports;

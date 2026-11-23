@@ -385,7 +385,7 @@ void main() {
     final input = tester.widget<AppTextFormField>(
       find.byKey(const ValueKey('agent-input')),
     );
-    expect(input.controller.text, '帮我排查 SSH 连接失败');
+    expect(input.controller.text, '排查 SSH 服务或端口异常');
 
     await tester.tap(find.byKey(const ValueKey('agent-model-trigger')));
     await tester.pumpAndSettle();

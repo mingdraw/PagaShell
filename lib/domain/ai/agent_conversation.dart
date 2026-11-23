@@ -1,14 +1,28 @@
+import 'command_classifier.dart';
+
 enum AgentEntryKind {
   user,
   assistant,
   tool,
   command,
-  reasoning;
+  reasoning,
+  fileChange;
 
   bool get isActivity => this == reasoning || this == tool;
 }
 
 enum AgentCommandState { pending, sent, rejected, unavailable }
+
+enum AgentCommandExecutionMode { exec, terminal }
+
+enum AgentFileChangeState {
+  pending,
+  applied,
+  rejected,
+  rolledBack,
+  failed,
+  unavailable,
+}
 
 enum AgentRequestState { queued, running, completed, failed, cancelled }
 
@@ -19,18 +33,38 @@ class AgentArchivedCommand {
     required this.purpose,
     required this.target,
     required this.state,
+    this.executionMode = AgentCommandExecutionMode.terminal,
+    this.risk,
+    this.exitCode,
+    this.durationMs,
+    this.outputPreview,
+    this.timedOut = false,
+    this.cancelled = false,
   });
 
   final String command;
   final String purpose;
   final String target;
   final AgentCommandState state;
+  final AgentCommandExecutionMode executionMode;
+  final AgentCommandRisk? risk;
+  final int? exitCode, durationMs;
+  final String? outputPreview;
+  final bool timedOut, cancelled;
 
   Map<String, dynamic> toJson() => {
     'command': command,
     'purpose': purpose,
     'target': target,
     'state': state.name,
+    if (executionMode == AgentCommandExecutionMode.exec)
+      'executionMode': executionMode.name,
+    if (risk != null) 'risk': risk!.name,
+    if (exitCode != null) 'exitCode': exitCode,
+    if (durationMs != null) 'durationMs': durationMs,
+    if (outputPreview != null) 'outputPreview': outputPreview,
+    if (timedOut) 'timedOut': true,
+    if (cancelled) 'cancelled': true,
   };
 
   factory AgentArchivedCommand.fromJson(Map<String, dynamic> json) =>
@@ -38,11 +72,87 @@ class AgentArchivedCommand {
         command: json['command'] as String,
         purpose: json['purpose'] as String,
         target: json['target'] as String,
+        executionMode: json['executionMode'] == 'exec'
+            ? AgentCommandExecutionMode.exec
+            : AgentCommandExecutionMode.terminal,
+        risk: AgentCommandRisk.values
+            .where((risk) => risk.name == json['risk'])
+            .firstOrNull,
+        exitCode: json['exitCode'] as int?,
+        durationMs: json['durationMs'] as int?,
+        outputPreview: json['outputPreview'] as String?,
+        timedOut: json['timedOut'] == true,
+        cancelled: json['cancelled'] == true,
         state: switch (json['state']) {
           'sent' => AgentCommandState.sent,
           'rejected' => AgentCommandState.rejected,
           _ => AgentCommandState.unavailable,
         },
+      );
+}
+
+/// Display data only. No file contents, connection or rollback authority.
+class AgentArchivedFileChange {
+  const AgentArchivedFileChange({
+    required this.path,
+    required this.purpose,
+    required this.target,
+    required this.diffText,
+    required this.addedLines,
+    required this.removedLines,
+    required this.state,
+    this.backupPath,
+    this.createdNew = false,
+    this.usedSudo = false,
+    this.validationOutput,
+    this.validationPassed,
+    this.error,
+  });
+
+  final String path, purpose, target, diffText;
+  final int addedLines, removedLines;
+  final AgentFileChangeState state;
+  final String? backupPath, validationOutput, error;
+  final bool createdNew, usedSudo;
+  final bool? validationPassed;
+
+  Map<String, dynamic> toJson() => {
+    'path': path,
+    'purpose': purpose,
+    'target': target,
+    'diffText': diffText,
+    'addedLines': addedLines,
+    'removedLines': removedLines,
+    'state': state.name,
+    'backupPath': backupPath,
+    'createdNew': createdNew,
+    'usedSudo': usedSudo,
+    'validationOutput': validationOutput,
+    'validationPassed': validationPassed,
+    'error': error,
+  };
+
+  factory AgentArchivedFileChange.fromJson(Map<String, dynamic> json) =>
+      AgentArchivedFileChange(
+        path: json['path'] as String,
+        purpose: json['purpose'] as String,
+        target: json['target'] as String,
+        diffText: json['diffText'] as String,
+        addedLines: json['addedLines'] as int,
+        removedLines: json['removedLines'] as int,
+        state: switch (json['state']) {
+          'applied' => AgentFileChangeState.applied,
+          'rejected' => AgentFileChangeState.rejected,
+          'rolledBack' => AgentFileChangeState.rolledBack,
+          'failed' => AgentFileChangeState.failed,
+          _ => AgentFileChangeState.unavailable,
+        },
+        backupPath: json['backupPath'] as String?,
+        createdNew: json['createdNew'] == true,
+        usedSudo: json['usedSudo'] == true,
+        validationOutput: json['validationOutput'] as String?,
+        validationPassed: json['validationPassed'] as bool?,
+        error: json['error'] as String?,
       );
 }
 
@@ -81,6 +191,7 @@ class AgentMessage {
     this.kind,
     this.text, {
     this.command,
+    this.fileChange,
     this.requestState,
     this.requestError,
     this.toolSummary,
@@ -90,6 +201,7 @@ class AgentMessage {
   final AgentEntryKind kind;
   final String text;
   final AgentArchivedCommand? command;
+  final AgentArchivedFileChange? fileChange;
   final AgentRequestState? requestState;
   final String? requestError;
   final AgentToolSummary? toolSummary;
@@ -99,6 +211,7 @@ class AgentMessage {
     'kind': kind.name,
     'text': text,
     if (command != null) 'command': command!.toJson(),
+    if (fileChange != null) 'fileChange': fileChange!.toJson(),
     if (requestState != null) 'requestState': requestState!.name,
     if (requestError != null) 'requestError': requestError,
     if (toolSummary != null) 'toolSummary': toolSummary!.toJson(),
@@ -112,6 +225,11 @@ class AgentMessage {
         ? null
         : AgentArchivedCommand.fromJson(
             json['command'] as Map<String, dynamic>,
+          ),
+    fileChange: json['fileChange'] == null
+        ? null
+        : AgentArchivedFileChange.fromJson(
+            json['fileChange'] as Map<String, dynamic>,
           ),
     // 队列和连接授权只在运行内存中存在，恢复历史不能自动重发消息。
     requestState: switch (json['requestState']) {

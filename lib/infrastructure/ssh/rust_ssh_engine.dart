@@ -15,6 +15,7 @@ import '../../domain/entities/small_text_file.dart';
 import '../../domain/proxy/dynamic_proxy_engine.dart';
 import '../../domain/rdp/rdp_clipboard.dart';
 import '../../domain/rdp/rdp_engine.dart';
+import '../../domain/ssh/agent_ops.dart';
 import '../../domain/ssh/docker_manager.dart';
 import '../../domain/ssh/host_key.dart';
 import '../../domain/ssh/network_ports.dart';
@@ -23,6 +24,7 @@ import '../../domain/ssh/server_status.dart';
 import '../../domain/ssh/ssh_engine.dart';
 import '../../domain/terminal/terminal_frame.dart';
 import '../../domain/vnc/vnc_engine.dart';
+import '../../src/rust/api/agent_ops.dart' as agent;
 import '../../src/rust/api/desktop.dart' as desktop;
 import '../../src/rust/api/docker.dart' as docker;
 import '../../src/rust/api/network_ports.dart' as network_ports;
@@ -36,6 +38,7 @@ import 'network_ports_parser.dart';
 import 'process_parser.dart';
 import 'rdp_connection_error.dart';
 import 'rust_transfer_stream.dart';
+import 'server_profile_parser.dart';
 import 'server_status_parser.dart';
 
 page.PageGateway _pageSettings(SshGateway gateway) => page.PageGateway(
@@ -681,12 +684,87 @@ class _RustDesktopSession implements RdpEngineSession {
   }();
 }
 
+class _RustSshExecHandle implements SshExecHandle {
+  _RustSshExecHandle(
+    this._sessionId,
+    this._id,
+    String command,
+    int timeoutSecs,
+  ) {
+    _events = StreamController<SshExecEvent>(onCancel: cancel);
+    agent
+        .sshExecStream(
+          sessionId: _sessionId,
+          execId: _id,
+          command: command,
+          timeoutSecs: timeoutSecs,
+        )
+        .listen(
+          (event) {
+            if (event.kind == 'started') {
+              _registered.complete(true);
+              return;
+            }
+            final kind = switch (event.kind) {
+              'stdout' => SshExecEventKind.stdout,
+              'stderr' => SshExecEventKind.stderr,
+              'exit' => SshExecEventKind.exit,
+              _ => null,
+            };
+            if (kind != null) {
+              _events.add(
+                SshExecEvent(
+                  kind,
+                  data: event.data,
+                  exitCode: event.exitCode,
+                  timedOut: event.timedOut,
+                  cancelled: event.cancelled,
+                  truncated: event.truncated,
+                ),
+              );
+            }
+          },
+          onError: (Object error, StackTrace stack) {
+            _events.addError(
+              const SshEngineException('SSH 后台命令未完成，请检查连接'),
+              stack,
+            );
+          },
+          onDone: () {
+            if (!_registered.isCompleted) _registered.complete(false);
+            _finished = true;
+            unawaited(_events.close());
+          },
+        );
+  }
+
+  final int _sessionId, _id;
+  final _registered = Completer<bool>();
+  late final StreamController<SshExecEvent> _events;
+  Future<void>? _cancelling;
+  bool _finished = false;
+
+  @override
+  Stream<SshExecEvent> get events => _events.stream;
+
+  @override
+  Future<void> cancel() => _cancelling ??= () async {
+    // Dart may see Stop before the FRB stream has registered on the Rust side.
+    if (await _registered.future && !_finished) {
+      await agent.sshExecCancel(sessionId: _sessionId, execId: _id);
+    }
+  }();
+}
+
 class _RustEngineSession
     implements
         SshEngineSession,
         ResumableSftpSession,
         SmallTextFileAccess,
         ServerStatusSource,
+        ServerProfileSource,
+        SshExecSource,
+        RemoteFileOpsSource,
         ProcessManagerSource,
         NetworkPortsSource,
         DockerManagerSource,
@@ -698,6 +776,111 @@ class _RustEngineSession
         PortForwardSession,
         TerminalScreenSource {
   _RustEngineSession(this._sessionId);
+
+  static int _nextExecId = 0;
+
+  @override
+  SshExecHandle startExec(String command, {required int timeoutSecs}) {
+    if (_closed) throw const SshEngineException('终端已关闭');
+    _nextExecId = (_nextExecId + 1) & 0xffffffff;
+    return _RustSshExecHandle(_sessionId, _nextExecId, command, timeoutSecs);
+  }
+
+  @override
+  Future<ServerProfile> readServerProfile() => _guard(() async {
+    if (_closed) throw const SshEngineException('终端已关闭');
+    return parseServerProfile(
+      await agent.sshReadServerProfile(sessionId: _sessionId),
+    );
+  });
+
+  @override
+  Future<RemoteTextSnapshot> readRemoteText(
+    String path, {
+    required bool useSudo,
+  }) => _remoteFile(() async {
+    final file = await agent.sshReadRemoteText(
+      sessionId: _sessionId,
+      path: path,
+      useSudo: useSudo,
+    );
+    return RemoteTextSnapshot(
+      text: file.text,
+      sha256: file.sha256,
+      sizeBytes: file.sizeBytes,
+      modifiedUnix: file.modifiedUnix,
+      usedSudo: file.usedSudo,
+    );
+  });
+
+  @override
+  Future<RemoteWriteResult> writeRemoteText(
+    String path,
+    String content, {
+    required String? expectedSha256,
+    required bool createIfMissing,
+    required bool createParentDirs,
+    required String backupSuffix,
+    required bool useSudo,
+  }) => _remoteFile(() async {
+    final result = await agent.sshWriteRemoteText(
+      sessionId: _sessionId,
+      request: agent.RemoteWriteRequest(
+        path: path,
+        content: content,
+        expectedSha256: expectedSha256,
+        createIfMissing: createIfMissing,
+        createParentDirs: createParentDirs,
+        backupSuffix: backupSuffix,
+        useSudo: useSudo,
+      ),
+    );
+    return RemoteWriteResult(
+      sha256: result.newSha256,
+      backupPath: result.backupPath,
+      createdNew: result.createdNew,
+      usedSudo: result.usedSudo,
+    );
+  });
+
+  @override
+  Future<void> restoreRemoteBackup(
+    String path, {
+    required String? backupPath,
+    required String currentSha256,
+    required String? backupSha256,
+    required bool useSudo,
+  }) => _remoteFile(
+    () => agent.sshRestoreRemoteBackup(
+      sessionId: _sessionId,
+      path: path,
+      backupPath: backupPath,
+      expectedCurrentSha256: currentSha256,
+      expectedBackupSha256: backupSha256,
+      useSudo: useSudo,
+    ),
+  );
+
+  Future<T> _remoteFile<T>(Future<T> Function() operation) async {
+    if (_closed) throw const RemoteFileOpsException(RemoteFileError.failed);
+    try {
+      return await operation();
+    } on AnyhowException catch (error) {
+      throw RemoteFileOpsException(switch (error.message
+          .split('\n')
+          .first
+          .trim()) {
+        'FILE_NOT_FOUND' => RemoteFileError.notFound,
+        'FILE_CONFLICT' || 'FILE_ALREADY_EXISTS' => RemoteFileError.conflict,
+        'SUDO_PASSWORD_REQUIRED' => RemoteFileError.sudoPasswordRequired,
+        'INVALID_TARGET' => RemoteFileError.invalidTarget,
+        'SENSITIVE_FILE' => RemoteFileError.sensitive,
+        'FILE_TOO_LARGE' || '文本文件不能超过 2 MiB' => RemoteFileError.tooLarge,
+        'REMOTE_FILE_OUTCOME_UNKNOWN' => RemoteFileError.outcomeUnknown,
+        _ => RemoteFileError.failed,
+      });
+    }
+  }
 
   @override
   Future<SmallTextFile> readSmallText(String path) => _guard(() async {

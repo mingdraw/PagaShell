@@ -11,10 +11,12 @@ import 'package:pagashell/application/session/session_controller.dart';
 import 'package:pagashell/domain/ai/agent_conversation.dart';
 import 'package:pagashell/domain/ai/ai_model.dart';
 import 'package:pagashell/domain/entities/host.dart';
+import 'package:pagashell/domain/ssh/agent_ops.dart';
 import 'package:pagashell/domain/ssh/server_status.dart';
 import 'package:pagashell/domain/ssh/ssh_engine.dart';
 import 'package:pagashell/infrastructure/vault/in_memory_secret_store.dart';
 
+import '../support/agent_ssh_fixture.dart';
 import '../support/fake_ai_connect.dart';
 import '../support/fixture_terminal.dart';
 import '../support/in_memory_agent_conversation_repository.dart';
@@ -133,20 +135,23 @@ void main() {
     );
   }
 
-  Session terminal(String id, List<String> written, {_SshSession? engine}) =>
-      Session(
-        id: id,
-        host: Host(
-          id: id,
-          name: 'Host $id',
-          hostname: '$id.internal',
-          username: 'sensitive-user',
-          note: 'secret-note',
-        ),
-        phase: SessionPhase.ready,
-        engineSession: engine ?? _SshSession(),
-        terminal: Terminal(onOutput: written.add),
-      );
+  Session terminal(
+    String id,
+    List<String> written, {
+    SshEngineSession? engine,
+  }) => Session(
+    id: id,
+    host: Host(
+      id: id,
+      name: 'Host $id',
+      hostname: '$id.internal',
+      username: 'sensitive-user',
+      note: 'secret-note',
+    ),
+    phase: SessionPhase.ready,
+    engineSession: engine ?? _SshSession(),
+    terminal: Terminal(onOutput: written.add),
+  );
 
   Map<String, Object> tool(
     String name,
@@ -170,6 +175,21 @@ void main() {
       await Future<void>.delayed(Duration.zero);
     }
     throw StateError('No pending command');
+  }
+
+  Future<AgentFileChangeProposal> pendingFile(AgentController agent) async {
+    for (var attempt = 0; attempt < 100; attempt++) {
+      final proposal = agent.entries
+          .where(
+            (entry) =>
+                entry.fileChange?.state.value == AgentFileChangeState.pending,
+          )
+          .firstOrNull
+          ?.fileChange;
+      if (proposal != null) return proposal;
+      await Future<void>.delayed(Duration.zero);
+    }
+    throw StateError('No pending file change');
   }
 
   test('OpenAI 多轮聊天、正确鉴权且默认不发送会话地址和备注', () async {
@@ -1332,7 +1352,7 @@ void main() {
     expect(app.agent.accessMode.value, AgentAccessMode.fullAccess);
   });
 
-  test('完全访问发送后停止立即结束输出等待，迟到输出不请求模型', () async {
+  test('批准发送后停止立即结束输出等待，迟到输出不请求模型', () async {
     final connect = FakeAiConnect(
       (_) => openAiReply(
         '',
@@ -1350,8 +1370,8 @@ void main() {
     target.terminal!.onOutput = (_) => sent.complete();
     app.sessions.sessions.add(target);
     app.agent.setReferencedSessions([target]);
-    app.agent.selectAccessMode(AgentAccessMode.fullAccess);
     final run = app.agent.send('Wait');
+    expect(app.agent.approveCommand(await pendingCommand(app.agent)), isTrue);
     await sent.future;
     final toolEntry = app.agent.entries.singleWhere(
       (entry) => entry.kind == AgentEntryKind.tool,
@@ -1392,8 +1412,9 @@ void main() {
     final target = terminal('one', written);
     app.sessions.sessions.add(target);
     app.agent.setReferencedSessions([target]);
-    app.agent.selectAccessMode(AgentAccessMode.fullAccess);
     final run = app.agent.send('Wait');
+    await tester.pump();
+    expect(app.agent.approveCommand(await pendingCommand(app.agent)), isTrue);
     await tester.pump();
     expect(written, ['sleep 60\r']);
     await tester.pump(const Duration(seconds: 9));
@@ -1458,8 +1479,9 @@ void main() {
     };
     app.sessions.sessions.add(target);
     app.agent.setReferencedSessions([target]);
-    app.agent.selectAccessMode(AgentAccessMode.fullAccess);
-    await app.agent.send('Close shell');
+    final run = app.agent.send('Close shell');
+    expect(app.agent.approveCommand(await pendingCommand(app.agent)), isTrue);
+    await run;
     expect(written, ['exit\r']);
     expect(connect.requests, hasLength(1));
     expect(app.agent.selectedSessions, isEmpty);
@@ -1534,13 +1556,13 @@ void main() {
           : openAiReply('Reply'),
     );
     final app = await setup(connect);
-    for (var i = 0; i < 16; i++) {
+    for (var i = 0; i < 24; i++) {
       await app.agent.send('Turn $i');
     }
     final messages = connect.requests.last.body['messages'] as List<dynamic>;
     expect(
       messages.where((dynamic m) => (m as Map)['role'] == 'user'),
-      hasLength(12),
+      hasLength(20),
     );
     expect((messages[1] as Map)['role'], 'user');
     for (var i = 1; i < messages.length; i++) {
@@ -1639,15 +1661,356 @@ void main() {
     expect(connect.requests, isEmpty);
   });
 
-  test('工具调用次数有上限，未知工具和无效控制字符不触发执行', () async {
+  test('24 批工具阶段已保存，续跑不重发消息或重跑之前工具', () async {
+    var count = 0;
     final connect = FakeAiConnect(
-      (_) => openAiReply('', calls: [tool('unknown', {})]),
+      (_) => ++count <= AgentController.maxToolSteps
+          ? openAiReply(
+              '',
+              calls: [tool('inspect_server_profile', {}, id: 'profile-$count')],
+            )
+          : openAiReply('Done'),
     );
     final app = await setup(connect);
-    await app.agent.send('Loop');
-    expect(connect.requests, hasLength(6));
-    expect(app.agent.error.value, '已达到本轮工具调用上限，请缩小问题后继续');
+    final ssh = AgentSshFixture();
+    final session = terminal('one', [], engine: ssh);
+    app.sessions.sessions.add(session);
+    await app.agent.send('Loop', referencedSessions: [session]);
+    expect(connect.requests, hasLength(24));
+    expect(app.agent.canContinueTurn.value, isTrue);
     expect(app.agent.busy.value, isFalse);
+    await app.agent.historySaved;
+    final saved = app.history.items.values.single;
+    expect(saved.turns.where((turn) => turn['role'] == 'tool'), hasLength(24));
+    await app.agent.continueLastTurn();
+    final messages = (connect.requests.last.body['messages'] as List<Object?>)
+        .cast<Map<String, Object?>>();
+    expect(
+      messages.where((message) => message['role'] == 'user'),
+      hasLength(1),
+    );
+    expect(
+      messages.where((message) => message['role'] == 'tool'),
+      hasLength(24),
+    );
+    expect(messages.last['tool_call_id'], 'profile-24');
+    expect(ssh.profileReads, 24);
+    expect(app.agent.entries.last.text, 'Done');
+    expect(app.agent.canContinueTurn.value, isFalse);
+  });
+
+  for (final mode in AgentAccessMode.values) {
+    test(
+      '$mode binds background exec and sends only separate, bounded output',
+      () async {
+        var count = 0;
+        final connect = FakeAiConnect(
+          (_) => ++count == 1
+              ? openAiReply(
+                  '',
+                  calls: [
+                    tool('exec_ssh_command', {
+                      'command': 'df -h',
+                      'purpose': 'Disk usage',
+                      'session_id': 'one',
+                      'timeout_secs': 900,
+                    }),
+                  ],
+                )
+              : openAiReply('Done'),
+        );
+        final app = await setup(connect);
+        final ssh = AgentSshFixture()
+          ..onExec = (exec) {
+            exec.emit(
+              const SshExecEvent(SshExecEventKind.stdout, data: 'disk 80%\n'),
+            );
+            exec.emit(
+              const SshExecEvent(
+                SshExecEventKind.stderr,
+                data: 'password=fixture-must-not-appear\n',
+              ),
+            );
+            exec.finish(code: 3);
+          };
+        final terminalWrites = <String>[];
+        final one = terminal('one', terminalWrites, engine: ssh);
+        final two = terminal('two', terminalWrites, engine: AgentSshFixture());
+        app.sessions.sessions.addAll([one, two]);
+        app.sessions.activeSessionId.value = 'two';
+        app.agent.selectAccessMode(mode);
+        final run = app.agent.send('Read disk', referencedSessions: [one, two]);
+        if (mode == AgentAccessMode.requestApproval) {
+          final proposal = await pendingCommand(app.agent);
+          expect(ssh.execs, isEmpty);
+          expect(app.agent.approveCommand(proposal), isTrue);
+        }
+        await run;
+        expect(ssh.execs.single.timeoutSecs, 600);
+        expect(terminalWrites, isEmpty);
+        final proposal = app.agent.entries
+            .firstWhere((entry) => entry.command != null)
+            .command!;
+        expect(proposal.exitCode.value, 3);
+        expect(proposal.stderr.value, contains('[redacted]'));
+        expect(
+          jsonEncode(connect.requests.last.body),
+          isNot(contains('fixture-must-not-appear')),
+        );
+        final messages =
+            (connect.requests.last.body['messages'] as List<Object?>)
+                .cast<Map<String, Object?>>();
+        final result = jsonDecode(
+          messages.last['content'] as String,
+        ) as Map<String, Object?>;
+        expect(result['session_id'], 'one');
+        expect(result['stdout'], 'disk 80%\n');
+        expect(result['exitCode'], 3);
+      },
+    );
+  }
+
+  test('停止后台命令后保留已开始的阶段，不发送剩余工具或请求', () async {
+    final started = Completer<AgentExecFixture>();
+    final connect = FakeAiConnect(
+      (_) => openAiReply(
+        '',
+        calls: [
+          tool('exec_ssh_command', {'command': 'df -h', 'purpose': 'Inspect'}),
+          tool('inspect_server_profile', {}, id: 'not-run'),
+        ],
+      ),
+    );
+    final app = await setup(connect);
+    final ssh = AgentSshFixture()..onExec = started.complete;
+    final session = terminal('one', [], engine: ssh);
+    app.sessions.sessions.add(session);
+    app.agent.selectAccessMode(AgentAccessMode.approveWrites);
+    final run = app.agent.send('Inspect', referencedSessions: [session]);
+    final exec = await started.future;
+    app.agent.stop();
+    await run;
+    expect(exec.cancels, 1);
+    expect(ssh.profileReads, 0);
+    expect(connect.requests, hasLength(1));
+    expect(
+      app.agent.conversations.single.turns.last['text'],
+      startsWith('Not invoked'),
+    );
+  });
+
+  test('提权读先审批；只读自动仍要求审批变更，Sudo 密码和超时状态进入卡片', () async {
+    var count = 0;
+    final connect = FakeAiConnect(
+      (_) => switch (++count) {
+        1 => openAiReply(
+          '',
+          calls: [
+            tool('read_remote_file', {
+              'path': '/etc/demo.conf',
+              'use_sudo': true,
+            }),
+          ],
+        ),
+        2 => openAiReply('Read complete'),
+        3 => openAiReply(
+          '',
+          calls: [
+            tool('exec_ssh_command', {
+              'command': 'sudo -n systemctl reload nginx',
+              'purpose': 'Reload',
+            }, id: 'reload'),
+            tool('exec_ssh_command', {
+              'command': 'uptime',
+              'purpose': 'Check',
+            }, id: 'timeout'),
+          ],
+        ),
+        _ => openAiReply('Execution ended'),
+      },
+    );
+    final app = await setup(connect);
+    final ssh = AgentSshFixture()
+      ..files['/etc/demo.conf'] = 'workers=2\n'
+      ..onExec = (exec) {
+        if (exec.command.startsWith('sudo')) {
+          exec.emit(
+            const SshExecEvent(
+              SshExecEventKind.stderr,
+              data: 'sudo: a password is required\n',
+            ),
+          );
+          exec.finish(code: 1);
+        } else {
+          exec.finish(timedOut: true);
+        }
+      };
+    final session = terminal('one', [], engine: ssh);
+    app.sessions.sessions.add(session);
+    final read = app.agent.send('Read', referencedSessions: [session]);
+    final readApproval = await pendingCommand(app.agent);
+    expect(readApproval.isStructuredRead, isTrue);
+    expect(ssh.reads, isEmpty);
+    expect(app.agent.approveCommand(readApproval), isTrue);
+    await read;
+    expect(ssh.reads, [('/etc/demo.conf', true)]);
+
+    app.agent.selectAccessMode(AgentAccessMode.approveWrites);
+    final run = app.agent.send('Reload', referencedSessions: [session]);
+    final approval = await pendingCommand(app.agent);
+    expect(ssh.execs, isEmpty);
+    expect(app.agent.approveCommand(approval), isTrue);
+    await run;
+    expect(approval.sudoPasswordRequired.value, isTrue);
+    final timeout = app.agent.entries
+        .map((entry) => entry.command)
+        .whereType<AgentCommandProposal>()
+        .last;
+    expect(timeout.timedOut.value, isTrue);
+    expect(timeout.exitCode.value, isNull);
+  });
+
+  test('文件 Diff 经审批，带备份及校验，检测回滚冲突并归档为只读', () async {
+    const path = '/etc/nginx/demo.conf';
+    var count = 0;
+    final connect = FakeAiConnect(
+      (_) => ++count == 1
+          ? openAiReply(
+              '',
+              calls: [
+                tool('edit_remote_file', {
+                  'path': path,
+                  'purpose': 'Tune workers',
+                  'edits': [
+                    {'oldText': 'workers=2', 'newText': 'workers=4'},
+                  ],
+                  'validation_command': 'nginx -t',
+                }),
+              ],
+            )
+          : openAiReply('Check validation'),
+    );
+    final app = await setup(connect);
+    final ssh = AgentSshFixture()
+      ..files[path] = 'workers=2\n'
+      ..onExec = (exec) => exec.finish(code: 1);
+    final session = terminal('one', [], engine: ssh);
+    app.sessions.sessions.add(session);
+    app.agent.selectAccessMode(AgentAccessMode.fullAccess);
+    final run = app.agent.send('Tune', referencedSessions: [session]);
+    final proposal = await pendingFile(app.agent);
+    expect(ssh.writes, isEmpty);
+    expect(proposal.diffPreview, contains('-workers=2\n+workers=4'));
+    expect(app.agent.approveFileChange(proposal), isTrue);
+    await run;
+    expect(ssh.writes, [(path, true)]);
+    expect(ssh.files[path], 'workers=4\n');
+    expect(ssh.backups[proposal.backupPath.value], 'workers=2\n');
+    expect(proposal.validationPassed.value, isFalse);
+    expect(ssh.execs.single.command, 'nginx -t');
+    ssh.files[path] = 'external change\n';
+    expect(await app.agent.rollbackFileChange(proposal), isFalse);
+    expect(ssh.files[path], 'external change\n');
+    ssh.files[path] = 'workers=4\n';
+    expect(await app.agent.rollbackFileChange(proposal), isTrue);
+    expect(ssh.files[path], 'workers=2\n');
+    final id = app.agent.currentConversationId.value!;
+    app.agent.clear();
+    expect(app.agent.openConversation(id), isTrue);
+    final entry = app.agent.entries.singleWhere(
+      (entry) => entry.kind == AgentEntryKind.fileChange,
+    );
+    expect(entry.fileChange, isNull);
+    expect(entry.archivedFileChange?.state, AgentFileChangeState.rolledBack);
+  });
+
+  test('系统文件普通读取失败时，先批准提权预览，再批准变更', () async {
+    const path = '/etc/nginx/protected.conf';
+    var count = 0;
+    final connect = FakeAiConnect(
+      (_) => ++count == 1
+          ? openAiReply(
+              '',
+              calls: [
+                tool('edit_remote_file', {
+                  'path': path,
+                  'purpose': 'Tune workers',
+                  'content': 'workers=4\n',
+                }),
+              ],
+            )
+          : openAiReply('Done'),
+    );
+    final app = await setup(connect);
+    final ssh = AgentSshFixture()
+      ..unprivilegedReadError = RemoteFileError.failed
+      ..files[path] = 'workers=2\n';
+    final session = terminal('one', [], engine: ssh);
+    app.sessions.sessions.add(session);
+    final run = app.agent.send('Tune config', referencedSessions: [session]);
+    final read = await pendingCommand(app.agent);
+    expect(read.isStructuredRead, isTrue);
+    expect(ssh.reads, [(path, false)]);
+    expect(app.agent.approveCommand(read), isTrue);
+    final change = await pendingFile(app.agent);
+    expect(ssh.reads, [(path, false), (path, true)]);
+    expect(ssh.writes, isEmpty);
+    app.agent.rejectFileChange(change);
+    await run;
+    expect(ssh.files[path], 'workers=2\n');
+  });
+
+  test('进程和端口、Docker、SFTP 及文件读取对所选主机有界返回', () async {
+    var count = 0;
+    final connect = FakeAiConnect(
+      (_) => ++count == 1
+          ? openAiReply(
+              '',
+              calls: [
+                tool('get_processes', {'sort': 'memory', 'limit': 1}, id: 'p'),
+                tool('get_network_ports', {}, id: 'n'),
+                tool('get_docker_resources', {
+                  'resource_id': 'nginx-id',
+                }, id: 'd'),
+                tool('list_remote_dir', {'path': '/etc/nginx'}, id: 'f'),
+                tool('read_remote_file', {
+                  'path': '/etc/nginx/nginx.conf',
+                  'start_line': 2,
+                  'max_lines': 1,
+                }, id: 'r'),
+              ],
+            )
+          : openAiReply('Done'),
+    );
+    final app = await setup(connect);
+    final ssh = AgentSshFixture()
+      ..files['/etc/nginx/nginx.conf'] = 'one\ntwo\nthree\n';
+    final session = terminal('one', [], engine: ssh);
+    app.sessions.sessions.add(session);
+    await app.agent.send('Read overview', referencedSessions: [session]);
+    final tools = <String, Map<String, Object?>>{
+      for (final item
+          in (connect.requests.last.body['messages'] as List<Object?>)
+              .cast<Map<String, Object?>>())
+        if (item['role'] == 'tool')
+          item['tool_call_id'] as String:
+              jsonDecode(item['content'] as String) as Map<String, Object?>,
+    };
+    Map<String, Object?> result(String id) =>
+        tools[id]!['result']! as Map<String, Object?>;
+    final processes = (result('p')['processes']! as List<Object?>)
+        .cast<Map<String, Object?>>();
+    final entries = (result('f')['entries']! as List<Object?>)
+        .cast<Map<String, Object?>>();
+    expect(processes.single['name'], 'mysqld');
+    expect(result('n')['limited'], isTrue);
+    expect(
+      (result('d')['fields']! as Map<String, Object?>)['health'],
+      'healthy',
+    );
+    expect(entries.single['name'], 'nginx.conf');
+    expect(tools['r']?['content'], '2: two\n');
+    expect(tools['r']?['nextStartLine'], 3);
   });
 
   test('新建保留旧聊天，恢复后继续完整工具上下文，沿用审核模式并清除目标', () async {

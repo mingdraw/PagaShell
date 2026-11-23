@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import '../../domain/ai/agent_skill.dart';
 import '../../domain/ai/ai_model.dart';
 
 class AgentApiException implements Exception {
@@ -86,17 +87,36 @@ class AgentReply {
 
 /// 公开协议的 JSON 映射；HTTP 由注入 GetConnect 的控制器直接发起。
 abstract final class AgentApiCodec {
-  static const tools = [
+  static Map<String, Object> _sessionTool(
+    String name,
+    String description, {
+    Map<String, Object> properties = const {},
+    List<String> required = const [],
+  }) => {
+    'name': name,
+    'description':
+        '$description Specify session_id from CURRENT_CONTEXT if more than one session is referenced. SSH only.',
+    'parameters': {
+      'type': 'object',
+      'properties': {
+        'session_id': {'type': 'string'},
+        ...properties,
+      },
+      'required': required,
+      'additionalProperties': false,
+    },
+  };
+
+  static final tools = [
     {
       'name': 'read_skill',
-      'description':
-          'Load one built-in skill before related work: pagashell, ssh, rdp.',
+      'description': 'Load an available built-in skill before related work.',
       'parameters': {
         'type': 'object',
         'properties': {
           'id': {
             'type': 'string',
-            'enum': ['pagashell', 'ssh', 'rdp'],
+            'enum': AgentSkill.builtIn.map((skill) => skill.id).toList(),
           },
         },
         'required': ['id'],
@@ -123,6 +143,94 @@ abstract final class AgentApiCodec {
         'additionalProperties': false,
       },
     },
+    _sessionTool(
+      'inspect_server_profile',
+      'Read the OS, CPU/memory/Swap, disk media, package managers, noninteractive sudo availability, file limits, selected sysctl values and installed services. Run once per investigation.',
+    ),
+    _sessionTool(
+      'get_processes',
+      'Read a bounded process snapshot without process arguments or environment.',
+      properties: {
+        'sort': {
+          'type': 'string',
+          'enum': ['cpu', 'memory'],
+        },
+        'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100},
+      },
+    ),
+    _sessionTool(
+      'get_network_ports',
+      'Read listening TCP/UDP ports on the selected server. A limited result may omit process associations.',
+    ),
+    _sessionTool(
+      'get_docker_resources',
+      'Read Docker inventory or inspect a listed resource by exact ID. Does not return container environment or credentials.',
+      properties: {
+        'kind': {
+          'type': 'string',
+          'enum': ['container', 'image', 'network', 'volume', 'compose'],
+        },
+        'resource_id': {'type': 'string'},
+      },
+    ),
+    _sessionTool(
+      'list_remote_dir',
+      'List a bounded remote directory via SFTP.',
+      properties: {
+        'path': {'type': 'string'},
+      },
+      required: ['path'],
+    ),
+    _sessionTool(
+      'read_remote_file',
+      'Read a page of a UTF-8 configuration file and its SHA-256. Use an absolute path. Credential files and private keys are blocked. Set use_sudo only for a justified noninteractive elevated read.',
+      properties: {
+        'path': {'type': 'string'},
+        'start_line': {'type': 'integer', 'minimum': 1},
+        'max_lines': {'type': 'integer', 'minimum': 1, 'maximum': 500},
+        'use_sudo': {'type': 'boolean'},
+      },
+      required: ['path'],
+    ),
+    _sessionTool(
+      'exec_ssh_command',
+      'Run a noninteractive maintenance command on an independent SSH channel. Returns exit code, stdout, stderr and timeout/cancellation. Changes and unknown commands require approval. Do not use stdin prompts, embedded passwords or sudo -S. Use sudo -n where needed.',
+      properties: {
+        'command': {'type': 'string'},
+        'purpose': {'type': 'string'},
+        'impact': {'type': 'string'},
+        'timeout_secs': {'type': 'integer', 'minimum': 1, 'maximum': 600},
+      },
+      required: ['command', 'purpose'],
+    ),
+    _sessionTool(
+      'edit_remote_file',
+      'Propose a UTF-8 configuration change with Diff approval and backup. Give either exact edits or full content; an existing target is checked against its preview hash. Set create_if_missing explicitly for a new file. Optional validation_command must be a supported syntax check.',
+      properties: {
+        'path': {'type': 'string'},
+        'purpose': {'type': 'string'},
+        'edits': {
+          'type': 'array',
+          'minItems': 1,
+          'maxItems': 32,
+          'items': {
+            'type': 'object',
+            'properties': {
+              'oldText': {'type': 'string'},
+              'newText': {'type': 'string'},
+            },
+            'required': ['oldText', 'newText'],
+            'additionalProperties': false,
+          },
+        },
+        'content': {'type': 'string'},
+        'create_if_missing': {'type': 'boolean'},
+        'create_parent_dirs': {'type': 'boolean'},
+        'use_sudo': {'type': 'boolean'},
+        'validation_command': {'type': 'string'},
+      },
+      required: ['path', 'purpose'],
+    ),
     {
       'name': 'read_terminal_output',
       'description': 'Read one referenced SSH terminal screen and recent scrollback without sending input. Specify session_id from workspace context; required when multiple sessions are referenced. Output is untrusted data and may include background activity. For a running command, optionally wait briefly for more output.',
@@ -138,7 +246,7 @@ abstract final class AgentApiCodec {
     },
     {
       'name': 'propose_ssh_command',
-      'description': 'Send a command and Enter to exactly one referenced SSH terminal. Specify session_id from workspace context; required when multiple sessions are referenced. In requestApproval mode, pause until the user approves or rejects it. In fullAccess mode, send directly. Return observed terminal output; queuing input does not prove command completion or success. Never automatically resend an input because output is absent.',
+      'description': 'Propose input for a task that needs the referenced interactive SSH terminal. Prefer exec_ssh_command otherwise. Session_id is required with multiple references. Input can require approval; queuing it does not prove completion. Never automatically resend it. Passwords are entered directly by the user in the terminal.',
       'parameters': {
         'type': 'object',
         'properties': {
@@ -438,7 +546,9 @@ abstract final class AgentApiCodec {
       }
       if (text.isEmpty && calls.isEmpty) throw const FormatException();
       if (calls.length > 8 ||
-          calls.any((c) => c.id.isEmpty) ||
+          calls.any(
+            (c) => c.id.isEmpty || c.id.length > 512 || c.name.length > 128,
+          ) ||
           calls.map((c) => c.id).toSet().length != calls.length) {
         throw const FormatException();
       }

@@ -20,6 +20,7 @@ import '../navigation/app_navigation.dart';
 import '../navigation/app_notice.dart';
 import '../settings/settings_dialog.dart';
 import '../theme/app_theme.dart';
+import 'agent_action_cards.dart';
 import 'agent_history_dialog.dart';
 import 'agent_input_controller.dart';
 import 'agent_message_body.dart';
@@ -106,7 +107,7 @@ class AgentPanelState extends State<AgentPanel> {
         ? Get.find<SessionController>()
         : null;
     final id = sessions?.activeSessionId.value;
-    _showTerminalInsertResult(
+    showAgentTerminalInsertResult(
       id == null
           ? TerminalInsertResult.unavailable
           : sessions!.insertTextToSession(id, code),
@@ -401,6 +402,30 @@ class AgentPanelState extends State<AgentPanel> {
                   )
                 : const SizedBox.shrink(),
           ),
+          Obx(
+            () => !_agent.canContinueTurn.value
+                ? const SizedBox.shrink()
+                : Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 2, 12, 8),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            '已达到单轮工具步数上限（24 步），已保留完成的步骤。'.tr,
+                            style: const TextStyle(fontSize: 11),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        shadcn.OutlineButton(
+                          key: const ValueKey('agent-continue'),
+                          size: shadcn.ButtonSize.small,
+                          onPressed: () => unawaited(_agent.continueLastTurn()),
+                          child: Text('继续执行'.tr),
+                        ),
+                      ],
+                    ),
+                  ),
+          ),
           _AgentRequestNotice(agent: _agent),
           Container(
             decoration: BoxDecoration(
@@ -528,7 +553,7 @@ class AgentPanelState extends State<AgentPanel> {
         final confirmed = await AppNavigation.dialog<bool>(
           AppDialog(
             title: Text('启用完全访问？'.tr),
-            content: Text('Agent 将直接向引用的 SSH 终端发送命令，无需逐条批准。请确认你信任这些会话和模型。'.tr),
+            content: Text('已识别的只读检查可直接发送到引用的 SSH 终端。文件变更和其他命令仍需批准。'.tr),
             actions: [
               shadcn.OutlineButton(
                 onPressed: () => AppNavigation.closeDialog(result: false),
@@ -554,12 +579,17 @@ class AgentPanelState extends State<AgentPanel> {
     builder: (context) => Obx(() {
       final selected = _agent.accessMode.value;
       final isFull = selected == AgentAccessMode.fullAccess;
+      final isReadOnly = selected == AgentAccessMode.approveWrites;
       final label = '${'审核模式'.tr} · ${selected.label.tr}';
       const accent = AppTheme.serverStatusWarningColor;
       return AppIconButton.text(
         key: const ValueKey('agent-access-select'),
         semanticLabel: label,
-        tooltip: isFull ? '完全访问模式：命令将直接发送至引用的 SSH 终端'.tr : label,
+        tooltip: isFull
+            ? '完全访问模式：允许自动在终端运行已识别的只读检查'.tr
+            : isReadOnly
+            ? '只读自动：巡检可自动运行，变更需要批准'.tr
+            : label,
         density: shadcn.ButtonDensity.compact,
         onPressed: !_agent.modesLoaded
             ? null
@@ -601,8 +631,12 @@ class AgentPanelState extends State<AgentPanel> {
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                   fontSize: 11,
-                  color: isFull ? accent : null,
-                  fontWeight: isFull ? FontWeight.w600 : null,
+                  color: isFull
+                      ? accent
+                      : isReadOnly
+                      ? StatusColors.ready
+                      : null,
+                  fontWeight: isFull || isReadOnly ? FontWeight.w600 : null,
                 ),
               ),
             ],
@@ -617,18 +651,23 @@ class AgentPanelState extends State<AgentPanel> {
     const prompts = [
       (
         icon: AppIcons.folderOpen,
-        prompt: '如何使用 PagaShell 的文件传输和端口转发？',
-        subtitle: '服务、凭证、网关、终端、文件传输和端口转发',
+        prompt: '全面巡检服务器状态与资源瓶颈',
+        subtitle: '系统基线、进程、磁盘和监听端口',
       ),
       (
         icon: AppIcons.terminal,
-        prompt: '帮我排查 SSH 连接失败',
+        prompt: '排查 SSH 服务或端口异常',
         subtitle: 'Linux/macOS 排障、资源、网络、服务与安全命令建议',
       ),
       (
-        icon: AppIcons.rdp,
-        prompt: '如何排查 Windows RDP 登录问题？',
-        subtitle: 'Windows 远程桌面、NLA、证书、连通性与分辨率排障',
+        icon: AppIcons.folderOpen,
+        prompt: '分析并优化当前 MySQL 配置',
+        subtitle: '内存预算、运行指标和配置变更',
+      ),
+      (
+        icon: AppIcons.settings2,
+        prompt: '调优系统文件句柄与内核参数',
+        subtitle: '内核、PAM、systemd 与运行态复验',
       ),
     ];
     return SingleChildScrollView(
@@ -663,7 +702,7 @@ class AgentPanelState extends State<AgentPanel> {
           ),
           const SizedBox(height: 10),
           Text(
-            '解答工具使用、分析 SSH/RDP 问题，并生成可确认的命令建议。'.tr,
+            '巡检服务器、后台运行命令，并审阅、应用和回滚配置。'.tr,
             style: TextStyle(
               fontSize: 12,
               height: 1.7,
@@ -785,46 +824,24 @@ class AgentPanelState extends State<AgentPanel> {
   Widget _entry(AgentEntry entry) {
     if (entry.command != null) {
       final proposal = entry.command!;
-      return _CommandCard(
+      return AgentCommandCard(
         key: ObjectKey(proposal),
         proposal: proposal,
         agent: _agent,
       );
     }
     if (entry.archivedCommand != null) {
-      final command = entry.archivedCommand!;
-      return Container(
-        margin: const EdgeInsets.symmetric(vertical: 8),
-        padding: const EdgeInsets.all(10),
-        decoration: BoxDecoration(
-          border: Border.all(color: AppTheme.border(context)),
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text(
-              '目标：@host'.trParams({'host': command.target}),
-              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
-            ),
-            const SizedBox(height: 8),
-            Text(command.purpose, style: const TextStyle(fontSize: 12)),
-            AgentCodeBlock(
-              code: command.command,
-              language: 'shell',
-              onInsertToTerminal: _insertToTerminal,
-            ),
-            Text(
-              '${'历史命令（只读）'.tr} · ${switch (command.state) {
-                AgentCommandState.sent => '已发送到终端'.tr,
-                AgentCommandState.rejected => '已拒绝'.tr,
-                _ => '未发送'.tr,
-              }}',
-              style: const TextStyle(fontSize: 11),
-            ),
-          ],
-        ),
+      return ArchivedCommandCard(command: entry.archivedCommand!);
+    }
+    if (entry.fileChange case final change?) {
+      return AgentFileChangeCard(
+        key: ObjectKey(change),
+        proposal: change,
+        agent: _agent,
       );
+    }
+    if (entry.archivedFileChange case final change?) {
+      return ArchivedFileChangeCard(change: change);
     }
     if (entry.kind != AgentEntryKind.user) {
       return _AgentReply(entry: entry, onInsertToTerminal: _insertToTerminal);
@@ -1044,22 +1061,6 @@ class _AgentReply extends StatelessWidget {
   });
 }
 
-void _showTerminalInsertResult(
-  TerminalInsertResult result, {
-  required String unavailable,
-}) {
-  switch (result) {
-    case TerminalInsertResult.inserted:
-      AppNotice.success('已填入终端');
-    case TerminalInsertResult.unavailable:
-      AppNotice.error(unavailable);
-    case TerminalInsertResult.requiresBracketedPaste:
-      AppNotice.error('当前终端未启用括号粘贴，请复制后分行检查并粘贴');
-    case TerminalInsertResult.invalidText:
-      AppNotice.error('文本为空或包含终端控制字符，无法填入');
-  }
-}
-
 class _AgentActivityTimeline extends StatefulWidget {
   const _AgentActivityTimeline({required this.entries, super.key});
 
@@ -1165,264 +1166,6 @@ class _AgentActivityItem extends StatelessWidget {
                 ],
               ],
             ),
-    );
-  });
-}
-
-class _CommandCard extends StatefulWidget {
-  const _CommandCard({required this.proposal, required this.agent, super.key});
-
-  final AgentCommandProposal proposal;
-  final AgentController agent;
-
-  @override
-  State<_CommandCard> createState() => _CommandCardState();
-}
-
-class _CommandCardState extends State<_CommandCard> {
-  final _editor = TextEditingController();
-  bool _editing = false;
-  bool _confirming = false;
-  AgentCommandProposal get proposal => widget.proposal;
-  AgentController get agent => widget.agent;
-
-  static final _highRiskPattern = RegExp(
-    r'\b(?:rm|mkfs(?:\.[\w-]+)?|dd|wipefs|reboot|shutdown|poweroff|halt|killall|pkill)\b'
-    r'|\b(?:init\s+[06]|kill\s+-(?:9|KILL)|(?:chmod|chown)\s+(?:-[a-z]*R\b|--recursive))'
-    r'|>\s*/dev/(?:sd|nvme|hd|vd)',
-    caseSensitive: false,
-  );
-  static final _lineBreak = RegExp(r'[\r\n]');
-
-  String get _targetLabel =>
-      '${proposal.target.host.name} · ${proposal.target.address}';
-
-  void _insertOnly(String command) {
-    final available =
-        agent.canSendCommand(proposal) && Get.isRegistered<SessionController>();
-    _showTerminalInsertResult(
-      available
-          ? Get.find<SessionController>().insertTextToSession(
-              proposal.target.id,
-              command,
-            )
-          : TerminalInsertResult.unavailable,
-      unavailable: '原 SSH 会话不可用，命令未发送',
-    );
-  }
-
-  void _toggleEditor() {
-    if (!_editing) _editor.text = proposal.command;
-    setState(() => _editing = !_editing);
-  }
-
-  @override
-  void dispose() {
-    _editor.dispose();
-    super.dispose();
-  }
-
-  Future<void> _approve(String command, {required bool confirm}) async {
-    if (_confirming || !AgentCommandProposal.isValidCommand(command)) return;
-    if (confirm) {
-      _confirming = true;
-      try {
-        final confirmed = await AppNavigation.dialog<bool>(
-          AppDialog(
-            title: Text('确认发送命令'.tr),
-            scrollable: true,
-            content: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Text('目标：@host'.trParams({'host': _targetLabel})),
-                const SizedBox(height: 12),
-                Text(proposal.purpose),
-                AgentCodeBlock(code: command, language: 'shell'),
-                const SizedBox(height: 12),
-                Text('确认后将把命令及回车发送到此 SSH 终端，请检查内容与目标。'.tr),
-              ],
-            ),
-            actions: [
-              shadcn.OutlineButton(
-                onPressed: () => AppNavigation.closeDialog(result: false),
-                child: Text('取消'.tr),
-              ),
-              shadcn.DestructiveButton(
-                key: const ValueKey('agent-confirm-command'),
-                onPressed: () => AppNavigation.closeDialog(result: true),
-                child: Text('确认发送'.tr),
-              ),
-            ],
-          ),
-        );
-        if (!mounted || confirmed != true) return;
-      } finally {
-        _confirming = false;
-      }
-    }
-    if (agent.approveCommand(proposal, editedCommand: command)) {
-      AppNotice.success('命令已发送，正在读取会话输出');
-    } else {
-      AppNotice.error('原 SSH 会话不可用，命令未发送');
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) => Obx(() {
-    final colors = shadcn.Theme.of(context).colorScheme;
-    final pending = proposal.state.value == AgentCommandState.pending;
-    final editing = pending && _editing;
-    final command = editing ? _editor.text : proposal.effectiveCommand;
-    final highRisk = _highRiskPattern.hasMatch(command);
-    final requiresConfirmation = highRisk || _lineBreak.hasMatch(command);
-    final canSend =
-        agent.canSendCommand(proposal) &&
-        AgentCommandProposal.isValidCommand(command);
-    return Container(
-      margin: const EdgeInsets.symmetric(vertical: 8),
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        border: Border.all(
-          color: requiresConfirmation
-              ? colors.destructive.withValues(alpha: 0.5)
-              : AppTheme.border(context),
-        ),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            children: [
-              Expanded(
-                child: shadcn.Tooltip(
-                  tooltip: (_) =>
-                      shadcn.TooltipContainer(child: Text(_targetLabel)),
-                  child: Text(
-                    '目标：@host'.trParams({'host': _targetLabel}),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              ),
-              if (requiresConfirmation) ...[
-                const SizedBox(width: 6),
-                Container(
-                  key: const ValueKey('agent-command-risk-badge'),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 6,
-                    vertical: 2,
-                  ),
-                  decoration: BoxDecoration(
-                    color: colors.destructive.withValues(alpha: 0.12),
-                    border: Border.all(
-                      color: colors.destructive.withValues(alpha: 0.4),
-                    ),
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      AppIcon(
-                        AppIcons.triangleAlert,
-                        size: 11,
-                        color: colors.destructive,
-                      ),
-                      const SizedBox(width: 4),
-                      Text(
-                        (highRisk ? '高风险命令' : '多行命令').tr,
-                        style: TextStyle(
-                          fontSize: 10,
-                          fontWeight: FontWeight.w600,
-                          color: colors.destructive,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-              if (pending)
-                AppIconButton(
-                  key: const ValueKey('agent-command-edit'),
-                  semanticLabel: (editing ? '取消编辑' : '编辑命令').tr,
-                  tooltip: (editing ? '取消编辑' : '编辑命令').tr,
-                  icon: AppIcon(
-                    editing ? AppIcons.x : AppIcons.pencil,
-                    size: 13,
-                  ),
-                  onPressed: _toggleEditor,
-                ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Text(proposal.purpose, style: const TextStyle(fontSize: 12)),
-          if (editing)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              child: shadcn.TextField(
-                key: const ValueKey('agent-command-input'),
-                controller: _editor,
-                autofocus: true,
-                minLines: 1,
-                maxLines: 5,
-                smartDashesType: SmartDashesType.disabled,
-                smartQuotesType: SmartQuotesType.disabled,
-                autocorrect: false,
-                style: const TextStyle(
-                  fontFamily: 'FiraCode Nerd Font Mono',
-                  fontFamilyFallback: [
-                    'Menlo',
-                    'PingFang SC',
-                    'Microsoft YaHei',
-                    'monospace',
-                  ],
-                  fontSize: 12,
-                ),
-                onChanged: (_) => setState(() {}),
-              ),
-            )
-          else
-            AgentCodeBlock(code: command, language: 'shell'),
-          if (pending)
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                shadcn.OutlineButton(
-                  size: shadcn.ButtonSize.small,
-                  onPressed: () => agent.rejectCommand(proposal),
-                  child: Text('拒绝'.tr),
-                ),
-                shadcn.OutlineButton(
-                  key: const ValueKey('agent-command-insert'),
-                  size: shadcn.ButtonSize.small,
-                  onPressed: canSend ? () => _insertOnly(command) : null,
-                  child: Text('填入终端'.tr),
-                ),
-                shadcn.PrimaryButton(
-                  key: const ValueKey('agent-command-send'),
-                  size: shadcn.ButtonSize.small,
-                  onPressed: canSend
-                      ? () => unawaited(
-                          _approve(command, confirm: requiresConfirmation),
-                        )
-                      : null,
-                  child: Text('发送到终端'.tr),
-                ),
-              ],
-            )
-          else
-            Text(switch (proposal.state.value) {
-              AgentCommandState.sent => '已发送到终端'.tr,
-              AgentCommandState.rejected => '已拒绝'.tr,
-              _ => '原 SSH 会话不可用，命令未发送'.tr,
-            }, style: const TextStyle(fontSize: 11)),
-        ],
-      ),
     );
   });
 }

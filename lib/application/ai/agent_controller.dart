@@ -6,9 +6,15 @@ import 'package:get/get.dart';
 import 'package:pagashell/terminal/core.dart';
 
 import '../../domain/ai/agent_conversation.dart';
+import '../../domain/ai/agent_diff.dart';
 import '../../domain/ai/agent_skill.dart';
 import '../../domain/ai/ai_model.dart';
+import '../../domain/ai/command_classifier.dart';
 import '../../domain/repositories/agent_conversation_repository.dart';
+import '../../domain/ssh/agent_ops.dart';
+import '../../domain/ssh/docker_manager.dart';
+import '../../domain/ssh/network_ports.dart';
+import '../../domain/ssh/process_manager.dart';
 import '../../domain/ssh/server_status.dart';
 import '../../domain/vault/secret_store.dart';
 import '../network/app_connect.dart';
@@ -19,12 +25,21 @@ import 'agent_sse.dart';
 import 'ai_settings_controller.dart';
 
 export '../../domain/ai/agent_conversation.dart'
-    show AgentEntryKind, AgentCommandState, AgentRequestState;
+    show
+        AgentEntryKind,
+        AgentCommandState,
+        AgentRequestState,
+        AgentCommandExecutionMode,
+        AgentFileChangeState;
 export '../../domain/ai/ai_model.dart' show AgentAccessMode;
+export '../../domain/ai/command_classifier.dart' show AgentCommandRisk;
 
 part 'agent_history.dart';
 part 'agent_api.dart';
 part 'agent_tools.dart';
+part 'agent_exec_tools.dart';
+part 'agent_file_tools.dart';
+part 'agent_inspection_tools.dart';
 part 'agent_queue.dart';
 part 'agent_preview.dart';
 
@@ -34,6 +49,8 @@ class AgentEntry {
     String text, {
     this.command,
     this.archivedCommand,
+    this.fileChange,
+    this.archivedFileChange,
     AgentRequestState? requestState,
     String? requestError,
     AgentToolSummary? toolSummary,
@@ -49,10 +66,13 @@ class AgentEntry {
   AgentToolSummary? get toolSummary => _toolSummary.value;
   final AgentCommandProposal? command;
   final AgentArchivedCommand? archivedCommand;
+  final AgentFileChangeProposal? fileChange;
+  final AgentArchivedFileChange? archivedFileChange;
   final Rxn<AgentRequestState> requestState;
   final RxnString requestError;
   final bool hadSessionReferences;
   _AgentSessionReferences? _references;
+  bool _hasToolCheckpoint = false;
 
   AgentMessage toMessage() => AgentMessage(
     kind,
@@ -69,16 +89,8 @@ class AgentEntry {
       final summary => summary,
     },
     hadSessionReferences: hadSessionReferences,
-    command: command == null
-        ? archivedCommand
-        : AgentArchivedCommand(
-            command: command!.effectiveCommand,
-            purpose: command!.purpose,
-            target: command!.target.title,
-            state: command!.state.value == AgentCommandState.pending
-                ? AgentCommandState.unavailable
-                : command!.state.value,
-          ),
+    command: command?._archive() ?? archivedCommand,
+    fileChange: fileChange?._archive() ?? archivedFileChange,
   );
 }
 
@@ -97,6 +109,8 @@ class AgentController extends GetxController {
   final SessionController _sessions;
   final AgentConversationRepository _conversations;
   final entries = <AgentEntry>[].obs;
+  static const maxToolSteps = 24;
+  final canContinueTurn = false.obs;
   final _storage = _AgentHistoryState();
   final _api = _AgentApiState();
   final _tools = _AgentToolState();
@@ -133,7 +147,11 @@ class AgentController extends GetxController {
     unawaited(loadConversations());
     _settingsWorker = ever(_settings.state, (_) => _syncApi());
     _sessionsWorker = ever(_sessions.sessions, (_) {
-      if (_tools.activeTargets.any((target) => _boundSession(target) == null)) {
+      if (_tools.activeTargets.any((target) => _boundSession(target) == null) ||
+          _queue.continuation?.targets.any(
+                (target) => _boundSession(target) == null,
+              ) ==
+              true) {
         stop();
       }
       // RxList.removeWhere 即使没有删除也会通知，先判断避免二次重建。
@@ -267,6 +285,24 @@ class AgentController extends GetxController {
 
   bool canSendCommand(AgentCommandProposal proposal) =>
       _canSendCommand(proposal);
+  bool canFillCommand(AgentCommandProposal proposal) =>
+      _boundSession(proposal.target) != null &&
+      _sessions.canSendCommandToSession(proposal.target.id);
+  bool canFillFileChange(AgentFileChangeProposal proposal) =>
+      _ownsFileCard(proposal) &&
+      _boundSession(proposal.target) != null &&
+      _sessions.canSendCommandToSession(proposal.target.id);
+
+  bool canApplyFileChange(AgentFileChangeProposal proposal) =>
+      _canApplyFileChange(proposal);
+  bool approveFileChange(AgentFileChangeProposal proposal) =>
+      _approveFileChange(proposal);
+  void rejectFileChange(AgentFileChangeProposal proposal) =>
+      _rejectFileChange(proposal);
+  bool canRollbackFileChange(AgentFileChangeProposal proposal) =>
+      _canRollbackFileChange(proposal);
+  Future<bool> rollbackFileChange(AgentFileChangeProposal proposal) =>
+      _rollbackFileChange(proposal);
 
   Future<List<AiAvailableModel>> fetchModels({
     required AiApiFormat format,
@@ -293,6 +329,8 @@ class AgentController extends GetxController {
     referenceLabels: referenceLabels,
   );
 
+  Future<void> continueLastTurn() => _continueLastTurn();
+
   /// Retry the original text and live connection identities, not the draft.
   Future<void> retry(AgentEntry entry) async {
     final state = entry.requestState.value;
@@ -304,6 +342,10 @@ class AgentController extends GetxController {
       return;
     }
     final references = entry._references;
+    if (entry._hasToolCheckpoint) {
+      error.value = '上一次已执行部分工具，请查看记录后发送新的指令';
+      return;
+    }
     if ((entry.hadSessionReferences && references == null) ||
         references?.targets.any((target) => _boundSession(target) == null) ==
             true) {
@@ -322,6 +364,7 @@ class AgentController extends GetxController {
     final targets = request.targets;
     final labels = request.labels;
     var committed = false;
+    var paused = false;
     try {
       await _settings.ready;
       _syncModes();
@@ -338,6 +381,9 @@ class AgentController extends GetxController {
       final mode = request.accessMode ?? accessMode.value;
       _conversationModel = model.model;
       final effort = request.reasoningEffort ?? reasoningEffort.value;
+      request.resolvedModel = model;
+      request.resolvedMode = mode;
+      request.resolvedEffort = effort;
       final key = await _secretStore.read(model.secretRef);
       if (!_live(generation)) return;
       if (key == null || key.trim().isEmpty) {
@@ -345,14 +391,18 @@ class AgentController extends GetxController {
       }
       final limit = await _anthropicMaxTokens(model, key);
       if (!_live(generation)) return;
-      final turns = [..._history, AgentTurn('user', text)];
+      final turns = [
+        ..._history,
+        if (!request.resuming) AgentTurn('user', text),
+      ];
       _trimHistory(turns);
       if (!_live(generation)) return;
       final capabilities = _api.modelDetails[_capabilityScope(model)];
-      final system = _system(targets, mode, labels);
-      final anthropicScope =
+      final system = request.system ??= _system(targets, mode, labels);
+      final anthropicScope = request.anthropicScope ??=
           '${AgentApiCodec.responsesScope(model)}#$system#${effort.name}#$_historyRevision';
-      for (var step = 0; step < 6; step++) {
+      for (var step = 0; step < maxToolSteps; step++) {
+        if (!_live(generation)) return;
         final preview = _AgentTurnPreview(this, generation, key);
         request.preview = preview;
         final reply = await _request(
@@ -383,16 +433,26 @@ class AgentController extends GetxController {
           if (reply.truncated) error.value = 'AI 回复达到服务商长度上限，请缩小问题或继续提问';
           break;
         }
+        request.inFlightTurns = turns;
+        request.inFlightResults = 0;
         for (final call in turn.calls) {
           if (!_live(generation)) return;
           activity.value = '正在使用工具';
           final result = await _tool(call, targets, generation, mode, labels);
           if (!_live(generation)) return;
-          turns.add(AgentTurn('tool', result, toolCallId: call.id));
+          turns.add(
+            AgentTurn('tool', _limitToolResult(result), toolCallId: call.id),
+          );
+          request.inFlightResults++;
         }
+        request.inFlightTurns = null;
+        _checkpoint(request, turns);
         activity.value = '正在思考';
       }
-      if (!committed) throw const AgentApiException('已达到本轮工具调用上限，请缩小问题后继续');
+      if (!committed && _live(generation)) {
+        _queue.continuation = request;
+        paused = true;
+      }
     } on AgentApiException catch (e) {
       if (_live(generation)) error.value = e.message;
     } on TimeoutException {
@@ -401,10 +461,11 @@ class AgentController extends GetxController {
       // 不展示平台/服务端异常原文，以免其中带入请求头或密钥。
       if (_live(generation)) error.value = 'AI 请求失败，请检查模型配置或凭据存储';
     } finally {
-      if (!committed && _live(generation)) {
+      if (!committed && !paused && _live(generation)) {
+        _preserveInterruptedBatch(request);
         request.interrupt(AgentRequestState.failed);
       }
-      _finishRequest(request, generation, committed: committed);
+      _finishRequest(request, generation, committed: committed, paused: paused);
       if (!request.done.isCompleted) request.done.complete();
     }
   }
@@ -416,11 +477,15 @@ class AgentController extends GetxController {
   void stop() {
     final active = _queue.active;
     final wasBusy = busy.value || active != null;
+    _discardContinuation();
+    _preserveInterruptedBatch(active);
     ++_generation;
     _api.activeStream?.cancel();
     active?.interrupt(AgentRequestState.cancelled);
     _tools.cancelRunningTool?.call();
     _tools.cancelRunningTool = null;
+    _tools.cancelExec?.call();
+    _tools.cancelExec = null;
     _tools.cancelOutputWait?.call();
     _tools.activeTargets = const [];
     waitingForApproval.value = false;

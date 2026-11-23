@@ -6,6 +6,7 @@
 // Static analysis wrongly picks the IO variant, thus ignore this
 // ignore_for_file: argument_type_not_assignable
 
+import 'api/agent_ops.dart';
 import 'api/desktop.dart';
 import 'api/docker.dart';
 import 'api/network_ports.dart';
@@ -39,6 +40,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  RustStreamSink<SshExecEvent> dco_decode_StreamSink_ssh_exec_event_Sse(
+    dynamic raw,
+  );
+
+  @protected
   RustStreamSink<TerminalFrame> dco_decode_StreamSink_terminal_frame_Sse(
     dynamic raw,
   );
@@ -66,10 +72,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DesktopFrame dco_decode_box_autoadd_desktop_frame(dynamic raw);
 
   @protected
+  int dco_decode_box_autoadd_i_32(dynamic raw);
+
+  @protected
   PageGateway dco_decode_box_autoadd_page_gateway(dynamic raw);
 
   @protected
   ProxyTraffic dco_decode_box_autoadd_proxy_traffic(dynamic raw);
+
+  @protected
+  RemoteWriteRequest dco_decode_box_autoadd_remote_write_request(dynamic raw);
 
   @protected
   SftpTextFile dco_decode_box_autoadd_sftp_text_file(dynamic raw);
@@ -155,6 +167,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DesktopFrame? dco_decode_opt_box_autoadd_desktop_frame(dynamic raw);
 
   @protected
+  int? dco_decode_opt_box_autoadd_i_32(dynamic raw);
+
+  @protected
   PageGateway? dco_decode_opt_box_autoadd_page_gateway(dynamic raw);
 
   @protected
@@ -179,10 +194,22 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ProxyTraffic dco_decode_proxy_traffic(dynamic raw);
 
   @protected
+  RemoteTextFile dco_decode_remote_text_file(dynamic raw);
+
+  @protected
+  RemoteWriteOutcome dco_decode_remote_write_outcome(dynamic raw);
+
+  @protected
+  RemoteWriteRequest dco_decode_remote_write_request(dynamic raw);
+
+  @protected
   SftpEntry dco_decode_sftp_entry(dynamic raw);
 
   @protected
   SftpTextFile dco_decode_sftp_text_file(dynamic raw);
+
+  @protected
+  SshExecEvent dco_decode_ssh_exec_event(dynamic raw);
 
   @protected
   SshHandshake dco_decode_ssh_handshake(dynamic raw);
@@ -223,6 +250,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  RustStreamSink<SshExecEvent> sse_decode_StreamSink_ssh_exec_event_Sse(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   RustStreamSink<TerminalFrame> sse_decode_StreamSink_terminal_frame_Sse(
     SseDeserializer deserializer,
   );
@@ -254,10 +286,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  int sse_decode_box_autoadd_i_32(SseDeserializer deserializer);
+
+  @protected
   PageGateway sse_decode_box_autoadd_page_gateway(SseDeserializer deserializer);
 
   @protected
   ProxyTraffic sse_decode_box_autoadd_proxy_traffic(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  RemoteWriteRequest sse_decode_box_autoadd_remote_write_request(
     SseDeserializer deserializer,
   );
 
@@ -367,6 +407,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  int? sse_decode_opt_box_autoadd_i_32(SseDeserializer deserializer);
+
+  @protected
   PageGateway? sse_decode_opt_box_autoadd_page_gateway(
     SseDeserializer deserializer,
   );
@@ -395,10 +438,26 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ProxyTraffic sse_decode_proxy_traffic(SseDeserializer deserializer);
 
   @protected
+  RemoteTextFile sse_decode_remote_text_file(SseDeserializer deserializer);
+
+  @protected
+  RemoteWriteOutcome sse_decode_remote_write_outcome(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  RemoteWriteRequest sse_decode_remote_write_request(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   SftpEntry sse_decode_sftp_entry(SseDeserializer deserializer);
 
   @protected
   SftpTextFile sse_decode_sftp_text_file(SseDeserializer deserializer);
+
+  @protected
+  SshExecEvent sse_decode_ssh_exec_event(SseDeserializer deserializer);
 
   @protected
   SshHandshake sse_decode_ssh_handshake(SseDeserializer deserializer);
@@ -443,6 +502,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_StreamSink_ssh_exec_event_Sse(
+    RustStreamSink<SshExecEvent> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_StreamSink_terminal_frame_Sse(
     RustStreamSink<TerminalFrame> self,
     SseSerializer serializer,
@@ -479,6 +544,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_i_32(int self, SseSerializer serializer);
+
+  @protected
   void sse_encode_box_autoadd_page_gateway(
     PageGateway self,
     SseSerializer serializer,
@@ -487,6 +555,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_proxy_traffic(
     ProxyTraffic self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_remote_write_request(
+    RemoteWriteRequest self,
     SseSerializer serializer,
   );
 
@@ -626,6 +700,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_i_32(int? self, SseSerializer serializer);
+
+  @protected
   void sse_encode_opt_box_autoadd_page_gateway(
     PageGateway? self,
     SseSerializer serializer,
@@ -662,10 +739,31 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_proxy_traffic(ProxyTraffic self, SseSerializer serializer);
 
   @protected
+  void sse_encode_remote_text_file(
+    RemoteTextFile self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_remote_write_outcome(
+    RemoteWriteOutcome self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_remote_write_request(
+    RemoteWriteRequest self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_sftp_entry(SftpEntry self, SseSerializer serializer);
 
   @protected
   void sse_encode_sftp_text_file(SftpTextFile self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_ssh_exec_event(SshExecEvent self, SseSerializer serializer);
 
   @protected
   void sse_encode_ssh_handshake(SshHandshake self, SseSerializer serializer);

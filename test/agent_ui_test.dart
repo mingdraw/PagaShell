@@ -19,7 +19,9 @@ import 'package:pagashell/application/settings/settings_controller.dart';
 import 'package:pagashell/domain/ai/ai_model.dart';
 import 'package:pagashell/domain/entities/app_theme_mode.dart';
 import 'package:pagashell/domain/entities/host.dart';
+import 'package:pagashell/domain/ssh/agent_ops.dart';
 import 'package:pagashell/domain/ssh/ssh_engine.dart';
+import 'package:pagashell/presentation/ai/agent_action_cards.dart';
 import 'package:pagashell/presentation/ai/agent_input_controller.dart';
 import 'package:pagashell/presentation/ai/agent_message_body.dart';
 import 'package:pagashell/presentation/ai/agent_workspace.dart';
@@ -30,6 +32,7 @@ import 'package:pagashell/presentation/terminal/terminal_side_panel.dart';
 import 'package:pagashell/presentation/theme/app_theme.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
+import 'support/agent_ssh_fixture.dart';
 import 'support/fake_ai_connect.dart';
 import 'support/fixture_terminal.dart';
 import 'support/in_memory_binding.dart';
@@ -2068,6 +2071,190 @@ ss -lntp
       contains('nginx LISTEN :80'),
     );
     expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  for (final english in [false, true]) {
+    testWidgets('Agent 后台输出与 Diff 回滚，800×600 ${english ? '英文' : '中文'}', (
+      tester,
+    ) async {
+      const path = '/etc/nginx/example.conf';
+      final next = Completer<Response<dynamic>>();
+      var calls = 0;
+      Map<String, Object> tool(String name, Map<String, Object> arguments) => {
+        'id': name,
+        'type': 'function',
+        'function': {'name': name, 'arguments': jsonEncode(arguments)},
+      };
+      final connect = FakeAiConnect(
+        (_) => switch (++calls) {
+          1 => openAiReply(
+            '',
+            calls: [
+              tool('exec_ssh_command', {
+                'command': 'df -h',
+                'purpose': 'Inspect disk usage',
+              }),
+            ],
+          ),
+          2 => next.future,
+          _ => openAiReply('Verified'),
+        },
+      );
+      final capture = await pump(
+        tester,
+        connect: connect,
+        size: const Size(800, 600),
+      );
+      await configure(tester);
+      if (english) {
+        unawaited(Get.updateLocale(const Locale('en', 'US')));
+        await tester.pumpAndSettle();
+      }
+      final ssh = AgentSshFixture()..files[path] = 'workers=2\n';
+      final writes = <String>[];
+      final session = Session(
+        id: 'ssh',
+        host: const Host(id: 'ssh', name: 'Server', hostname: 'server.test'),
+        phase: SessionPhase.ready,
+        engineSession: ssh,
+        terminal: Terminal(onOutput: writes.add),
+      );
+      Get.find<SessionController>().sessions.add(session);
+      await tester.tap(find.byKey(const ValueKey('agent-toggle')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('agent-access-select')));
+      await pumpModelOptions(tester);
+      await tester.tap(
+        find.text(english ? 'Auto read-only' : '只读自动').hitTestable(),
+      );
+      await tester.pumpAndSettle();
+      final agent = Get.find<AgentController>();
+      expect(agent.accessMode.value, AgentAccessMode.approveWrites);
+      final run = agent.send(
+        'Check disk and review configuration',
+        referencedSessions: [session],
+      );
+      await tester.pump();
+      expect(ssh.execs, hasLength(1));
+      final exec = ssh.execs.single;
+      exec.emit(
+        const SshExecEvent(
+          SshExecEventKind.stdout,
+          data: 'checks in progress\n',
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 200));
+      await tester.pump();
+      expect(
+        find.byKey(const ValueKey('agent-command-cancel')),
+        findsOneWidget,
+      );
+      expect(find.text(english ? 'Live output' : '实时输出'), findsOneWidget);
+      exec.finish(code: 0);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 180));
+      expect(
+        agent.entries
+            .firstWhere((entry) => entry.command != null)
+            .command!
+            .exitCode
+            .value,
+        0,
+      );
+      expect(
+        find.textContaining(english ? 'Exit code 0' : '退出码 0'),
+        findsOneWidget,
+      );
+      expect(writes, isEmpty);
+      next.complete(
+        openAiReply(
+          '',
+          calls: [
+            tool('edit_remote_file', {
+              'path': path,
+              'purpose': 'Review workers',
+              'content': 'workers=4\n',
+            }),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      final apply = find.byKey(const ValueKey('agent-file-apply'));
+      await tester.ensureVisible(apply);
+      await tester.pump();
+      expect(find.byKey(const ValueKey('agent-diff-added-4')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('agent-diff-removed-3')),
+        findsOneWidget,
+      );
+      expect(ssh.files[path], 'workers=2\n');
+      await _capture(
+        tester,
+        capture,
+        'agent-file-diff-${english ? 'en' : 'zh'}',
+      );
+      await tester.tap(apply);
+      await tester.pumpAndSettle();
+      await run;
+      expect(ssh.files[path], 'workers=4\n');
+      final rollback = find.byKey(const ValueKey('agent-file-rollback'));
+      await tester.ensureVisible(rollback);
+      await tester.pump();
+      await tester.tap(rollback);
+      await tester.pumpAndSettle();
+      expect(ssh.restores, isEmpty);
+      await tester.tap(
+        find.byKey(const ValueKey('agent-file-confirm-rollback')),
+      );
+      await tester.pumpAndSettle();
+      expect(ssh.restores, [path]);
+      expect(ssh.files[path], 'workers=2\n');
+      expect(
+        find.descendant(
+          of: find.byType(AgentFileChangeCard),
+          matching: find.text(english ? 'Rolled back' : '已回滚'),
+        ),
+        findsOneWidget,
+      );
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
+  testWidgets('Agent 到达工具上限后可在窄窗点击继续执行', (tester) async {
+    var calls = 0;
+    final connect = FakeAiConnect((_) {
+      if (++calls > AgentController.maxToolSteps) {
+        return openAiReply('Finished');
+      }
+      return openAiReply(
+        '',
+        calls: [
+          {
+            'id': 'context-$calls',
+            'type': 'function',
+            'function': {'name': 'get_workspace_context', 'arguments': '{}'},
+          },
+        ],
+      );
+    });
+    await pump(tester, connect: connect, size: const Size(800, 600));
+    await configure(tester);
+    await tester.tap(find.byKey(const ValueKey('agent-toggle')));
+    await tester.pumpAndSettle();
+    final agent = Get.find<AgentController>();
+    final first = agent.send('Finish staged inspection');
+    await tester.pumpAndSettle();
+    await first;
+    final resume = find.byKey(const ValueKey('agent-continue'));
+    expect(resume.hitTestable(), findsOneWidget);
+    expect(calls, 24);
+    await tester.tap(resume);
+    await tester.pumpAndSettle();
+    expect(calls, 25);
+    expect(find.text('Finished'), findsOneWidget);
+    expect(resume, findsNothing);
     await tester.pumpWidget(const SizedBox.shrink());
   });
 

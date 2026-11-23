@@ -34,6 +34,7 @@ enum AiReasoningEffort {
 
 enum AgentAccessMode {
   requestApproval('请求批准'),
+  approveWrites('只读自动'),
   fullAccess('完全访问');
 
   const AgentAccessMode(this.label);

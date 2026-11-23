@@ -197,6 +197,7 @@ extension _AgentHistoryOperations on AgentController {
           message.kind,
           message.text,
           archivedCommand: message.command,
+          archivedFileChange: message.fileChange,
           requestState: message.requestState,
           requestError: message.requestError,
           toolSummary: message.toolSummary,
@@ -232,27 +233,134 @@ extension _AgentHistoryOperations on AgentController {
     return removed;
   }
 
-  /// 仅移除完整的较早轮次，保留工具调用与结果配对。可见聊天不受影响。
+  /// 移除旧轮次并压缩长工具链。可见对话及审阅卡片不受影响。
   void _trimHistory(List<AgentTurn> turns) {
-    int size() => turns.fold(
-      0,
-      (total, turn) =>
-          total +
-          (turn.anthropicContent.isNotEmpty
-              ? jsonEncode(turn.anthropicContent).length
-              : turn.responsesOutput.isNotEmpty
-              ? jsonEncode(turn.responsesOutput).length
-              : turn.text.length +
-                    turn.calls.fold(
-                      0,
-                      (sum, call) => sum + jsonEncode(call.arguments).length,
-                    )),
-    );
-    while (turns.where((turn) => turn.role == 'user').length > 12 ||
-        size() > 60000) {
+    const budget = 120000;
+    int weight(AgentTurn turn) => switch (turn) {
+      _ when turn.anthropicContent.isNotEmpty => jsonEncode(
+        turn.anthropicContent,
+      ).length,
+      _ when turn.responsesOutput.isNotEmpty => jsonEncode(
+        turn.responsesOutput,
+      ).length,
+      _ =>
+        turn.text.length +
+            (turn.toolCallId?.length ?? 0) +
+            turn.calls.fold(
+              0,
+              (sum, call) =>
+                  sum +
+                  call.id.length +
+                  call.name.length +
+                  jsonEncode(call.arguments).length,
+            ),
+    };
+    final weights = turns.map(weight).toList();
+    var size = weights.fold(0, (sum, value) => sum + value);
+    var userTurns = turns.where((turn) => turn.role == 'user').length;
+    var trimmed = false;
+
+    while (userTurns > 20 || size > budget) {
       final next = turns.indexWhere((turn) => turn.role == 'user', 1);
       if (next < 0) break;
+      for (final value in weights.take(next)) {
+        size -= value;
+      }
+      userTurns--;
       turns.removeRange(0, next);
+      weights.removeRange(0, next);
+      trimmed = true;
+    }
+
+    void compact(int index, AgentTurn turn) {
+      final shrunk = weight(turn);
+      if (shrunk >= weights[index]) return;
+      size -= weights[index] - shrunk;
+      weights[index] = shrunk;
+      turns[index] = turn;
+      trimmed = true;
+    }
+
+    // Preserve complete call/result pairs. A long tool chain usually fits
+    // after cropping result bodies, while signed thinking blocks stay intact.
+    for (final limit in [1200, 260]) {
+      for (var i = 0; i < turns.length && size > budget; i++) {
+        final turn = turns[i];
+        if (turn.role != 'tool' || turn.text.length <= limit) continue;
+        compact(
+          i,
+          AgentTurn(
+            'tool',
+            _truncateToolOutput(turn.text, maxChars: limit),
+            toolCallId: turn.toolCallId,
+          ),
+        );
+      }
+    }
+    // Large model-authored file payloads or reasoning can be bigger than the
+    // entire budget. Rebuild the oldest oversized reply from the portable
+    // fields, keeping tool IDs and the operation's main arguments.
+    for (var i = 0; i < turns.length && size > budget; i++) {
+      final turn = turns[i];
+      if (turn.role != 'assistant') continue;
+      compact(
+        i,
+        AgentTurn(
+          'assistant',
+          _truncateToolOutput(turn.text, maxChars: 1800),
+          calls: [
+            for (final call in turn.calls)
+              AgentToolCall(
+                id: call.id,
+                name: call.name,
+                arguments: {
+                  for (final arg in call.arguments.entries)
+                    if (const {
+                          'session_id',
+                          'id',
+                          'path',
+                          'command',
+                          'purpose',
+                          'kind',
+                        }.contains(arg.key) &&
+                        arg.value is String)
+                      arg.key: _truncateToolOutput(
+                        arg.value as String,
+                        maxChars: 240,
+                      ),
+                },
+              ),
+          ],
+        ),
+      );
+    }
+    // Repeated continuations can make even compact pairs exceed the budget.
+    // Roll up complete early batches while leaving the latest batch intact.
+    var summarized = 0;
+    while (size > budget && turns.length > 2) {
+      final end = turns.indexWhere((turn) => turn.role == 'assistant', 2);
+      if (end < 0) break;
+      summarized += turns
+          .getRange(1, end)
+          .where((turn) => turn.role == 'tool')
+          .length;
+      for (final value in weights.getRange(1, end)) {
+        size -= value;
+      }
+      turns.removeRange(1, end);
+      weights.removeRange(1, end);
+      trimmed = true;
+    }
+    if (summarized > 0) {
+      turns.insert(
+        1,
+        AgentTurn(
+          'assistant',
+          '$summarized earlier tool results were compacted for space. They may include changes. Verify current state before repeating actions.',
+        ),
+      );
+    }
+    if (trimmed) {
       ++_historyRevision;
       historyTrimmed.value = true;
     }

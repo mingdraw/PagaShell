@@ -40,7 +40,7 @@ pub struct SftpTextFile {
 
 const SFTP_TEXT_LIMIT: usize = 2 * 1024 * 1024;
 
-fn check_text_bytes(bytes: &[u8]) -> Result<&str> {
+pub(super) fn check_text_bytes(bytes: &[u8]) -> Result<&str> {
     anyhow::ensure!(bytes.len() <= SFTP_TEXT_LIMIT, "文本文件不能超过 2 MiB");
     anyhow::ensure!(
         !bytes
@@ -1251,6 +1251,20 @@ pub(crate) async fn docker_api_channel(
     Ok(channel)
 }
 
+pub(super) async fn open_agent_channel(
+    session_id: u32,
+) -> Result<russh::Channel<russh::client::Msg>> {
+    let handle = SESSIONS
+        .lock()
+        .await
+        .get(&session_id)
+        .ok_or_else(|| anyhow!("SSH 会话已关闭"))?
+        .handle
+        .clone();
+    let channel = handle.read().await.channel_open_session().await;
+    channel.map_err(|_| anyhow!("无法打开 SSH 后台通道"))
+}
+
 async fn disconnect_handle(handle: &RwLock<Handle<PinningHandler>>) {
     let _ = tokio::time::timeout(SSH_CLEANUP_TIMEOUT, async {
         handle
@@ -1274,6 +1288,7 @@ pub async fn ssh_disconnect(session_id: u32) -> Result<()> {
     }
     let entry = SESSIONS.lock().await.remove(&session_id);
     if let Some(entry) = entry {
+        super::agent_ops::close_session(session_id);
         super::docker::close_logs_for_session(session_id).await;
         if let Some((cancel, mut task)) = entry.forwards {
             let _ = cancel.send(true);
