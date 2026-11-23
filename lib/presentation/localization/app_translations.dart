@@ -1738,6 +1738,7 @@ class AppTranslations extends Translations {
     '暂停自动刷新': 'Pause auto refresh',
     '恢复自动刷新': 'Resume auto refresh',
     '最近 @count 次采样趋势': 'Trend over the last @count samples',
+    '趋势': 'Trend',
     '峰值 @rate': 'Peak @rate',
     '此连接不支持查看进程': 'This connection cannot show process details',
     '复制进程 ID': 'Copy process ID',

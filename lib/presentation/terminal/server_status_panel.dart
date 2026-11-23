@@ -250,14 +250,6 @@ class _ServerStatusPanelState extends State<ServerStatusPanel> {
                     valueLabel: status.cpuFraction == null ? '采样中'.tr : null,
                     detail: status.cpuFraction == null ? '等待下一次采样'.tr : null,
                   ),
-                  ServerStatusTrend(
-                    key: const ValueKey('server-status-cpu-trend'),
-                    series: [
-                      [for (final item in history) item.cpuFraction],
-                    ],
-                    colors: const [AppTheme.serverStatusCpuColor],
-                    upperBound: 1,
-                  ),
                   AppTreeExpansion(
                     expanded: _cpuExpanded,
                     children: [
@@ -266,6 +258,24 @@ class _ServerStatusPanelState extends State<ServerStatusPanel> {
                       for (final core in status.cpuCores.entries)
                         _cpuCore(core.key, core.value),
                     ],
+                  ),
+                  ServerStatusTrend(
+                    key: const ValueKey('server-status-cpu-trend'),
+                    series: [
+                      [for (final item in history) item.cpuFraction],
+                    ],
+                    colors: [
+                      _usageColor(
+                        status.cpuFraction,
+                        AppTheme.serverStatusCpuColor,
+                      ),
+                    ],
+                    upperBound: 1,
+                    peakLabel: (peak) => '峰值 @rate'.trParams({
+                      'rate': '${(peak * 100).toStringAsFixed(1)}%',
+                    }),
+                    valueFormatter: (value) =>
+                        '${(value * 100).toStringAsFixed(1)}%',
                   ),
                 ],
                 trailing: _expandButton(
@@ -287,19 +297,6 @@ class _ServerStatusPanelState extends State<ServerStatusPanel> {
                     detail:
                         '${_bytes(status.sample.memoryUsed)} / ${_bytes(status.sample.memoryTotal)}',
                   ),
-                  ServerStatusTrend(
-                    key: const ValueKey('server-status-memory-trend'),
-                    series: [
-                      [
-                        for (final item in history)
-                          item.sample.memoryTotal > 0
-                              ? item.sample.memoryFraction
-                              : null,
-                      ],
-                    ],
-                    colors: const [AppTheme.serverStatusMemoryColor],
-                    upperBound: 1,
-                  ),
                   AppTreeExpansion(
                     expanded: _memoryExpanded,
                     children: [
@@ -317,6 +314,29 @@ class _ServerStatusPanelState extends State<ServerStatusPanel> {
                             : '${_bytes(status.sample.swapUsed!)} / ${_bytes(status.sample.swapTotal!)}',
                       ),
                     ],
+                  ),
+                  ServerStatusTrend(
+                    key: const ValueKey('server-status-memory-trend'),
+                    series: [
+                      [
+                        for (final item in history)
+                          item.sample.memoryTotal > 0
+                              ? item.sample.memoryFraction
+                              : null,
+                      ],
+                    ],
+                    colors: [
+                      _usageColor(
+                        status.sample.memoryFraction,
+                        AppTheme.serverStatusMemoryColor,
+                      ),
+                    ],
+                    upperBound: 1,
+                    peakLabel: (peak) => '峰值 @rate'.trParams({
+                      'rate': '${(peak * 100).toStringAsFixed(1)}%',
+                    }),
+                    valueFormatter: (value) =>
+                        '${(value * 100).toStringAsFixed(1)}%',
                   ),
                 ],
                 trailing: _expandButton(
@@ -699,16 +719,27 @@ class _ServerStatusPanelState extends State<ServerStatusPanel> {
           else ...[
             Row(
               children: [
-                Expanded(child: _ioValue('↓ $readLabel', rate?.readPerSecond)),
+                Expanded(
+                  child: _ioValue(
+                    '↓ $readLabel',
+                    rate?.readPerSecond,
+                    color: AppTheme.serverStatusCpuColor,
+                  ),
+                ),
                 const SizedBox(width: 8),
                 Expanded(
-                  child: _ioValue('↑ $writeLabel', rate?.writePerSecond),
+                  child: _ioValue(
+                    '↑ $writeLabel',
+                    rate?.writePerSecond,
+                    color: AppTheme.serverStatusMemoryColor,
+                  ),
                 ),
               ],
             ),
             ServerStatusTrend(
               key: ValueKey('server-status-$id-trend'),
               peakLabel: (peak) => '峰值 @rate'.trParams({'rate': _speed(peak)}),
+              valueFormatter: _speed,
               series: [
                 [
                   for (final sample in history)
@@ -800,19 +831,37 @@ class _ServerStatusPanelState extends State<ServerStatusPanel> {
     );
   }
 
-  Widget _ioValue(String label, double? value) => Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      Text(label, style: _secondaryStyle),
-      const SizedBox(height: 6),
-      Text(
-        _speed(value),
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: _secondaryStyle.copyWith(color: AppTheme.terminalForeground),
-      ),
-    ],
-  );
+  Widget _ioValue(String label, double? value, {required Color color}) =>
+      Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 6,
+                height: 6,
+                decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+              ),
+              const SizedBox(width: 5),
+              Expanded(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: _secondaryStyle,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            _speed(value),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: _secondaryStyle.copyWith(color: AppTheme.terminalForeground),
+          ),
+        ],
+      );
 
   Widget _cpuCore(int id, double? fraction) => Padding(
     key: ValueKey('server-status-cpu-core-$id'),

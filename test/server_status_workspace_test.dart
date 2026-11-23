@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:ui' as ui;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -14,6 +15,7 @@ import 'package:pagashell/domain/entities/host.dart';
 import 'package:pagashell/domain/ssh/host_key.dart';
 import 'package:pagashell/domain/ssh/server_status.dart';
 import 'package:pagashell/domain/ssh/ssh_engine.dart';
+import 'package:pagashell/presentation/terminal/server_status_panel.dart';
 import 'package:pagashell/presentation/terminal/server_system_logo.dart';
 import 'package:pagashell/presentation/theme/app_theme.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
@@ -952,4 +954,68 @@ void main() {
       await tester.pumpAndSettle();
     });
   }
+
+  testWidgets('CPU 与内存展开后趋势图位于卡片底部，并支持 I/O 与悬停读数', (tester) async {
+    final source = _Session();
+    await tester.pumpWidget(
+      ShadcnTestApp(
+        home: SizedBox(
+          width: 300,
+          height: 900,
+          child: ServerStatusPanel(source: source, active: true),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    // 采集 3 次以生成 CPU、内存、网络 I/O 和磁盘 I/O 的多点趋势数据。
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pumpAndSettle();
+
+    final cpuToggle = find.byKey(const ValueKey('server-status-cpu-toggle'));
+    await tester.tap(cpuToggle);
+    await tester.pumpAndSettle();
+    final cpuTrend = find.byKey(const ValueKey('server-status-cpu-trend'));
+    final lastCore = find.byKey(const ValueKey('server-status-cpu-core-1'));
+    expect(cpuTrend, findsOneWidget);
+    expect(lastCore, findsOneWidget);
+    expect(
+      tester.getRect(cpuTrend).top,
+      greaterThanOrEqualTo(tester.getRect(lastCore).bottom),
+    );
+
+    final memoryToggle = find.byKey(
+      const ValueKey('server-status-memory-toggle'),
+    );
+    await tester.ensureVisible(memoryToggle);
+    await tester.tap(memoryToggle);
+    await tester.pumpAndSettle();
+    final memoryTrend = find.byKey(
+      const ValueKey('server-status-memory-trend'),
+    );
+    expect(memoryTrend, findsOneWidget);
+    expect(find.text('Swap'), findsOneWidget);
+    expect(
+      tester.getRect(memoryTrend).top,
+      greaterThanOrEqualTo(tester.getRect(find.text('Swap')).bottom),
+    );
+
+    final netTrend = find.byKey(const ValueKey('server-status-network-trend'));
+    await tester.ensureVisible(netTrend);
+    await tester.pumpAndSettle();
+    expect(netTrend, findsOneWidget);
+    final diskTrend = find.byKey(const ValueKey('server-status-disk-io-trend'));
+    await tester.ensureVisible(diskTrend);
+    await tester.pumpAndSettle();
+    expect(diskTrend, findsOneWidget);
+
+    final pointer = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await pointer.addPointer(location: Offset.zero);
+    addTearDown(pointer.removePointer);
+    await pointer.moveTo(tester.getCenter(diskTrend));
+    await tester.pump();
+    await pointer.moveTo(Offset.zero);
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+  });
 }
