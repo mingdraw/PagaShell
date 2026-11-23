@@ -8,7 +8,12 @@ class InMemoryAgentConversationRepository
   bool failDelete = false;
 
   @override
-  Future<List<AgentConversation>> readAll() async => items.values.toList();
+  Future<List<AgentConversationSummary>> readSummaries() async => [
+    for (final item in items.values) item.summary,
+  ];
+
+  @override
+  Future<AgentConversation?> read(String id) async => items[id];
 
   @override
   Future<void> save(AgentConversation conversation) async {

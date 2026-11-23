@@ -1,5 +1,6 @@
 import 'package:drift/drift.dart';
 import 'package:drift_flutter/drift_flutter.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 
 import '../../domain/entities/host.dart';
 import '../../domain/entities/identity.dart';
@@ -114,6 +115,9 @@ class AppSettings extends Table {
 class AppDatabase extends _$AppDatabase {
   AppDatabase() : super(_open());
   AppDatabase.forTesting(super.executor);
+  @visibleForTesting
+  AppDatabase.openAt(String directory)
+    : super(_open(directory: () async => directory, tempDirectory: directory));
 
   @override
   int get schemaVersion => 14;
@@ -214,10 +218,22 @@ class AppDatabase extends _$AppDatabase {
     },
   );
 
-  static QueryExecutor _open() => driftDatabase(
+  static QueryExecutor _open({
+    Future<Object> Function()? directory,
+    String? tempDirectory,
+  }) => driftDatabase(
     name: 'pagashell',
-    native: const DriftNativeOptions(
-      databaseDirectory: ApplicationDirectories.database,
+    native: DriftNativeOptions(
+      databaseDirectory: directory ?? ApplicationDirectories.database,
+      tempDirectoryPath: tempDirectory == null
+          ? null
+          : () async => tempDirectory,
+      setup: (db) {
+        db
+          ..execute('PRAGMA journal_mode = WAL;')
+          ..execute('PRAGMA synchronous = NORMAL;')
+          ..execute('PRAGMA busy_timeout = 5000;');
+      },
     ),
   );
 }

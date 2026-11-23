@@ -45,19 +45,12 @@ impl EventListener for Events {
     }
 }
 
-#[derive(Default)]
-struct DisplayCache {
-    order: Vec<u32>,
-}
-
 pub struct TerminalCore {
     term: Term<Events>,
     parser: Processor,
     events: Events,
-    main: DisplayCache,
-    alternate: DisplayCache,
     identities: Identities,
-    palette: Vec<Option<Rgb>>,
+    palette: [Option<Rgb>; COUNT],
     pending: bool,
     title: Option<String>,
     bell: bool,
@@ -75,10 +68,8 @@ impl TerminalCore {
             term: Term::new(config, &size, events.clone()),
             parser: Processor::new(),
             events,
-            main: DisplayCache::default(),
-            alternate: DisplayCache::default(),
             identities: Identities::new(size.1, (history as usize).min(MAX_HISTORY)),
-            palette: Vec::new(),
+            palette: [None; COUNT],
             pending: true,
             title: None,
             bell: false,
@@ -110,6 +101,31 @@ impl TerminalCore {
 
     pub fn pending(&self) -> bool {
         self.pending || self.parser.sync_bytes_count() != 0
+    }
+
+    pub fn cell_bytes_per_row(&self) -> usize {
+        self.term.columns() * 4 * std::mem::size_of::<u32>()
+    }
+
+    pub fn pending_cell_bytes(&self) -> usize {
+        self.identities
+            .screen(self.term.mode().contains(TermMode::ALT_SCREEN))
+            .pending_rows()
+            * self.cell_bytes_per_row()
+    }
+
+    pub fn synchronizing(&self) -> bool {
+        self.parser.sync_timeout().pending_timeout()
+    }
+
+    #[cfg(test)]
+    fn row_order(&self, alternate: bool) -> Vec<u32> {
+        self.identities
+            .screen(alternate)
+            .rows
+            .iter()
+            .map(|row| row.id)
+            .collect()
     }
 
     /// Timed-out synchronized updates must complete even if the peer goes quiet.
@@ -166,33 +182,31 @@ impl TerminalCore {
             return None;
         }
         let alternate = self.term.mode().contains(TermMode::ALT_SCREEN);
-        let palette: Vec<_> = (0..COUNT).map(|i| self.term.colors()[i]).collect();
+        let palette = std::array::from_fn(|i| self.term.colors()[i]);
         let palette_changed = palette != self.palette;
         if palette_changed {
             // An inactive buffer must repaint too when it next becomes active.
             self.identities.damage_all();
             self.palette = palette;
         }
-        let cache = if alternate {
-            &mut self.alternate
-        } else {
-            &mut self.main
-        };
         let grid = self.term.grid();
         self.identities.ensure(alternate, grid.total_lines());
         let metadata = self.identities.screen_mut(alternate);
-        let history = grid.history_size();
-        let mut order = Vec::with_capacity(grid.total_lines());
+        let history = grid.history_size() as i32;
         let mut lines = Vec::new();
-        let mut wrapped = false;
-        for (meta, index) in metadata
-            .rows
-            .iter_mut()
-            .zip(-(history as i32)..grid.screen_lines() as i32)
-        {
-            let row = &grid[Line(index)];
-            order.push(meta.id);
+        let scan_from = metadata.take_damage_start();
+        // Trimming history can orphan a wrapped first row without changing the
+        // rest of the history. Check it separately from the damaged suffix.
+        let first_unwrapped = scan_from > 0 && metadata.rows.front().is_some_and(|row| row.wrapped);
+        for at in (0..usize::from(first_unwrapped)).chain(scan_from..metadata.rows.len()) {
+            let index = Line(at as i32 - history);
+            let wrapped = at > 0
+                && grid[index - 1i32][Column(grid.columns() - 1)]
+                    .flags
+                    .contains(Flags::WRAPLINE);
+            let meta = &mut metadata.rows[at];
             if meta.dirty || meta.wrapped != wrapped {
+                let row = &grid[index];
                 let mut cells = Vec::with_capacity(grid.columns() * 4);
                 let mut clusters = Vec::new();
                 // Do not export padding as text; retain backgrounds/attributes.
@@ -221,21 +235,8 @@ impl TerminalCore {
                 meta.dirty = false;
                 meta.wrapped = wrapped;
             }
-            wrapped = row[Column(grid.columns() - 1)]
-                .flags
-                .contains(Flags::WRAPLINE);
         }
-        let trim_front = order
-            .first()
-            .and_then(|id| cache.order.iter().position(|old| old == id))
-            .unwrap_or(0);
-        let keep_rows = cache.order[trim_front..]
-            .iter()
-            .zip(&order)
-            .take_while(|(a, b)| a == b)
-            .count();
-        let append_rows = order[keep_rows..].to_vec();
-        cache.order = order;
+        let (trim_front, keep_rows, append_rows) = metadata.take_order_delta();
         self.pending = false;
         let cursor = &grid.cursor.point;
         Some(TerminalFrame {
@@ -353,6 +354,21 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn cursor_motion_does_not_encode_rows_after_scrollback_fills() {
+        let mut core = TerminalCore::new(80, 24, 10000);
+        core.feed(&b"row\r\n".repeat(10_100));
+        let rows = core.frame().unwrap().append_rows.len();
+        assert_eq!(rows, 10_024);
+        core.feed(b"\x1b[H\x1b[7B\x1b[9C\x1b[31m");
+        assert_eq!(core.pending_cell_bytes(), 0);
+        let frame = core.frame().unwrap();
+        assert_eq!((frame.cursor_x, frame.cursor_y), (9, 7));
+        assert_eq!(frame.keep_rows as usize, rows);
+        assert!(frame.append_rows.is_empty());
+        assert!(frame.lines.is_empty());
+    }
+
     /// Shared native-generated frames exercise the real parser on Rust and the
     /// unchanged Flutter renderer/selection/IME on Dart without a remote host.
     #[test]
@@ -452,13 +468,13 @@ mod tests {
             .iter()
             .any(|line| line.id == zero || line.id == one));
         // More than an entire ring of output between frames must not recycle IDs.
-        let old_ids: HashSet<_> = core.main.order.iter().copied().collect();
+        let old_ids: HashSet<_> = core.row_order(false).iter().copied().collect();
         for n in 0..30 {
             core.feed(format!("\r\nline-{n}").as_bytes());
         }
         let third = core.frame().unwrap();
-        assert_eq!(core.main.order.len(), 6);
-        assert!(core.main.order.iter().all(|id| !old_ids.contains(id)));
+        assert_eq!(core.row_order(false).len(), 6);
+        assert!(core.row_order(false).iter().all(|id| !old_ids.contains(id)));
         assert!(third.lines.iter().any(|line| text(line) == "line-29"));
         core.feed(b"!");
         let fourth = core.frame().unwrap();
@@ -472,12 +488,12 @@ mod tests {
         let mut core = TerminalCore::new(8, 3, 5);
         core.feed(b"A\r\nB\r\nC");
         core.frame();
-        let ids = core.main.order.clone();
+        let ids = core.row_order(false);
         core.feed(b"\x1b[H\x1b[T");
         let frame = core.frame().unwrap();
-        assert_eq!(core.main.order[1], ids[0]);
-        assert_eq!(core.main.order[2], ids[1]);
-        assert!(!core.main.order.contains(&ids[2]));
+        assert_eq!(core.row_order(false)[1], ids[0]);
+        assert_eq!(core.row_order(false)[2], ids[1]);
+        assert!(!core.row_order(false).contains(&ids[2]));
         assert_eq!(frame.append_rows[1..], ids[..2]);
         assert_eq!(core.term.grid()[Line(1)][Column(0)].c, 'A');
         assert_eq!(core.term.grid()[Line(2)][Column(0)].c, 'B');
@@ -489,11 +505,11 @@ mod tests {
         core.feed(b"abcdefghijkl");
         let main = core.frame().unwrap();
         assert!(main.lines[1].wrapped);
-        let ids = core.main.order.clone();
+        let ids = core.row_order(false);
         core.feed(b"\x1b[?1049h\x1b[?2004h\x1b[?1h\x1b[?1006h\x1b[?1002h\x1b[2J\x1b[Hvim");
         let alt = core.frame().unwrap();
         assert!(alt.alternate);
-        assert_eq!(core.alternate.order.len(), 3);
+        assert_eq!(core.row_order(true).len(), 3);
         assert_ne!(alt.modes & TermMode::BRACKETED_PASTE.bits(), 0);
         assert_ne!(alt.modes & TermMode::APP_CURSOR.bits(), 0);
         assert_ne!(alt.modes & TermMode::SGR_MOUSE.bits(), 0);
@@ -501,7 +517,7 @@ mod tests {
         core.feed(b"\x1b[?1049l\x1b]2;title\x07\x07");
         let restored = core.frame().unwrap();
         assert!(!restored.alternate);
-        assert_eq!(core.main.order, ids);
+        assert_eq!(core.row_order(false), ids);
         assert_eq!(restored.title.as_deref(), Some("title"));
         assert!(restored.bell);
         core.resize(16, 4);
@@ -545,9 +561,9 @@ mod tests {
         core.feed(b"\x1b]4;1;rgb:12/34/56\x07");
         let palette = core.frame().unwrap();
         assert_eq!(palette.lines[0].cells[0], (3 << 25) | 0x123456);
-        let old_ids: HashSet<_> = core.main.order.iter().copied().collect();
+        let old_ids: HashSet<_> = core.row_order(false).iter().copied().collect();
         core.feed(b"\x1bc");
         core.frame();
-        assert!(core.main.order.iter().all(|id| !old_ids.contains(id)));
+        assert!(core.row_order(false).iter().all(|id| !old_ids.contains(id)));
     }
 }

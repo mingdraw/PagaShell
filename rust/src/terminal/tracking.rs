@@ -8,7 +8,8 @@ use std::collections::VecDeque;
 use std::ops::Range;
 
 use alacritty_terminal::grid::{Dimensions, GridCell};
-use alacritty_terminal::index::Line;
+use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Term, TermMode};
 use alacritty_terminal::vte::ansi::{self, *};
 use unicode_width::UnicodeWidthChar;
@@ -26,6 +27,68 @@ pub(crate) struct ScreenMeta {
     height: usize,
     history: usize,
     cursor: usize,
+    scan_from: usize,
+    order_from: usize,
+    trimmed: usize,
+    published: usize,
+}
+
+impl ScreenMeta {
+    fn new(height: usize, history: usize) -> Self {
+        Self {
+            rows: VecDeque::new(),
+            height,
+            history,
+            cursor: 0,
+            scan_from: 0,
+            order_from: 0,
+            trimmed: 0,
+            published: 0,
+        }
+    }
+
+    fn order_changed(&mut self, at: usize) {
+        self.order_from = self.order_from.min(at);
+        // A new predecessor can change how a retained row wraps.
+        self.scan_from = self.scan_from.min(at);
+    }
+
+    fn trim_start(&mut self, count: usize) {
+        if count == 0 {
+            return;
+        }
+        self.rows.drain(..count);
+        self.scan_from = self.scan_from.saturating_sub(count);
+        self.order_from = self.order_from.saturating_sub(count);
+        self.trimmed = (self.trimmed + count).min(self.published);
+    }
+
+    fn damage(&mut self, at: usize) {
+        if let Some(row) = self.rows.get_mut(at) {
+            row.dirty = true;
+            self.scan_from = self.scan_from.min(at);
+        }
+    }
+
+    pub fn pending_rows(&self) -> usize {
+        self.rows.len().saturating_sub(self.scan_from)
+    }
+
+    pub fn take_damage_start(&mut self) -> usize {
+        std::mem::replace(&mut self.scan_from, self.rows.len()).min(self.rows.len())
+    }
+
+    pub fn take_order_delta(&mut self) -> (usize, usize, Vec<u32>) {
+        let trimmed = std::mem::take(&mut self.trimmed);
+        let keep = self
+            .order_from
+            .min(self.published - trimmed)
+            .min(self.rows.len());
+        let appended = self.rows.range(keep..).map(|row| row.id).collect();
+        self.published = self.rows.len();
+        self.order_from = self.published;
+        (trimmed, keep, appended)
+    }
 }
 
 pub(crate) struct Identities {
@@ -38,18 +101,8 @@ pub(crate) struct Identities {
 impl Identities {
     pub fn new(height: usize, history: usize) -> Self {
         let mut ids = Self {
-            main: ScreenMeta {
-                rows: VecDeque::new(),
-                height,
-                history,
-                cursor: 0,
-            },
-            alt: ScreenMeta {
-                rows: VecDeque::new(),
-                height,
-                history: 0,
-                cursor: 0,
-            },
+            main: ScreenMeta::new(height, history),
+            alt: ScreenMeta::new(height, 0),
             next_id: 1,
             region: 0..height,
         };
@@ -76,12 +129,22 @@ impl Identities {
         }
     }
 
+    pub fn screen(&self, alternate: bool) -> &ScreenMeta {
+        if alternate {
+            &self.alt
+        } else {
+            &self.main
+        }
+    }
+
     pub fn ensure(&mut self, alternate: bool, total: usize) {
         if self.screen_mut(alternate).rows.len() != total {
             // Width reflow is an explicit identity boundary. No content/hash
             // matching: equal text does not imply the same logical line.
             let rows = (0..total).map(|_| self.allocate()).collect();
-            self.screen_mut(alternate).rows = rows;
+            let screen = self.screen_mut(alternate);
+            screen.rows = rows;
+            screen.order_changed(0);
         }
     }
 
@@ -90,6 +153,8 @@ impl Identities {
         self.alt.height = height;
         self.main.rows.clear();
         self.alt.rows.clear();
+        self.main.order_changed(0);
+        self.alt.order_changed(0);
         self.region = 0..height;
     }
 
@@ -107,8 +172,12 @@ impl Identities {
                 let history = screen.rows.len() - old_height;
                 screen.cursor += (height - old_height).min(history);
                 let added = (height - old_height).saturating_sub(history);
-                let rows: Vec<_> = (0..added).map(|_| self.allocate()).collect();
-                self.screen_mut(alternate).rows.extend(rows);
+                for _ in 0..added {
+                    let row = self.allocate();
+                    let screen = self.screen_mut(alternate);
+                    screen.order_changed(screen.rows.len());
+                    screen.rows.push_back(row);
+                }
             } else {
                 let scroll = (screen.cursor + 1).saturating_sub(height);
                 self.scroll(alternate, 0..old_height, scroll, true);
@@ -130,8 +199,11 @@ impl Identities {
     }
 
     pub fn damage_all(&mut self) {
-        for row in self.main.rows.iter_mut().chain(&mut self.alt.rows) {
-            row.dirty = true;
+        for screen in [&mut self.main, &mut self.alt] {
+            screen.scan_from = 0;
+            for row in &mut screen.rows {
+                row.dirty = true;
+            }
         }
     }
 
@@ -139,10 +211,11 @@ impl Identities {
         let height = self.screen_mut(alternate).height;
         let start = range.start.min(height);
         let end = range.end.min(height);
-        let replacements: Vec<_> = (start..end).map(|_| self.allocate()).collect();
-        let screen = self.screen_mut(alternate);
-        let history = screen.rows.len().saturating_sub(height);
-        for (index, row) in (start..end).zip(replacements) {
+        let history = self.screen_mut(alternate).rows.len().saturating_sub(height);
+        for index in start..end {
+            let row = self.allocate();
+            let screen = self.screen_mut(alternate);
+            screen.order_changed(history + index);
             screen.rows[history + index] = row;
         }
     }
@@ -152,33 +225,45 @@ impl Identities {
         if count == 0 {
             return;
         }
-        let replacements: Vec<_> = (0..count).map(|_| self.allocate()).collect();
         let screen = self.screen_mut(alternate);
         let history = screen.rows.len() - screen.height;
         if up && range.start == 0 {
             // Keep old top rows as history, including when a partial region
             // begins at row zero. Rows below the region stay on screen.
-            for (offset, row) in replacements.into_iter().enumerate() {
-                screen.rows.insert(history + range.end + offset, row);
+            let at = history + range.end;
+            screen.order_changed(at);
+            for offset in 0..count {
+                let row = self.allocate();
+                self.screen_mut(alternate).rows.insert(at + offset, row);
             }
-            while screen.rows.len() > screen.height + screen.history {
-                screen.rows.pop_front();
-            }
+            let screen = self.screen_mut(alternate);
+            screen.trim_start(
+                screen
+                    .rows
+                    .len()
+                    .saturating_sub(screen.height + screen.history),
+            );
         } else if up {
+            screen.order_changed(history + range.start);
             for _ in 0..count {
                 screen.rows.remove(history + range.start);
             }
-            for (offset, row) in replacements.into_iter().enumerate() {
-                screen
+            for offset in 0..count {
+                let row = self.allocate();
+                self.screen_mut(alternate)
                     .rows
                     .insert(history + range.end - count + offset, row);
             }
         } else {
+            screen.order_changed(history + range.start);
             for _ in 0..count {
                 screen.rows.remove(history + range.end - count);
             }
-            for (offset, row) in replacements.into_iter().enumerate() {
-                screen.rows.insert(history + range.start + offset, row);
+            for offset in 0..count {
+                let row = self.allocate();
+                self.screen_mut(alternate)
+                    .rows
+                    .insert(history + range.start + offset, row);
             }
         }
     }
@@ -192,9 +277,16 @@ pub(crate) struct TrackingHandler<'a> {
 macro_rules! forward {
     ($($name:ident($($arg:ident: $ty:ty),*);)*) => {$ (
         fn $name(&mut self, $($arg: $ty),*) {
+            self.term.$name($($arg),*);
+        }
+    )*};
+}
+
+macro_rules! forward_cell_edit {
+    ($($name:ident($($arg:ident: $ty:ty),*);)*) => {$ (
+        fn $name(&mut self, $($arg: $ty),*) {
             self.touch_cursor();
             self.term.$name($($arg),*);
-            self.touch_cursor();
         }
     )*};
 }
@@ -211,13 +303,21 @@ impl<'a> TrackingHandler<'a> {
     }
 
     fn touch_cursor(&mut self) {
-        self.ids.record_cursor(self.term);
         let alternate = self.alternate();
-        let line = self.term.grid().cursor.point.line.0.max(0) as usize;
+        let grid = self.term.grid();
+        let point = grid.cursor.point;
         let screen = self.ids.screen_mut(alternate);
         let history = screen.rows.len().saturating_sub(screen.height);
-        if let Some(row) = screen.rows.get_mut(history + line) {
-            row.dirty = true;
+        let index = history + point.line.0.max(0) as usize;
+        screen.damage(index);
+        if index > 0
+            && point.column.0 <= 1
+            && grid[point.line - 1i32][Column(grid.columns() - 1)]
+                .flags
+                .contains(Flags::LEADING_WIDE_CHAR_SPACER)
+        {
+            // Overwriting a wide cell can clear the previous row's spacer.
+            screen.damage(index - 1);
         }
     }
 
@@ -225,6 +325,7 @@ impl<'a> TrackingHandler<'a> {
         let alternate = self.alternate();
         let screen = self.ids.screen_mut(alternate);
         let history = screen.rows.len() - screen.height;
+        screen.scan_from = screen.scan_from.min(history);
         for row in screen.rows.iter_mut().skip(history) {
             row.dirty = true;
         }
@@ -248,7 +349,11 @@ impl Handler for TrackingHandler<'_> {
     fn input(&mut self, c: char) {
         self.touch_cursor();
         let grid = self.term.grid();
-        let width = c.width().unwrap_or(0);
+        let width = if c.is_ascii() {
+            1
+        } else {
+            c.width().unwrap_or(0)
+        };
         let wraps = width > 0
             && self.term.mode().contains(TermMode::LINE_WRAP)
             && (grid.cursor.input_needs_wrap
@@ -257,7 +362,19 @@ impl Handler for TrackingHandler<'_> {
             self.linefeed_identity();
         }
         self.term.input(c);
+        if wraps {
+            self.touch_cursor();
+        }
+    }
+
+    fn put_tab(&mut self, count: u16) {
         self.touch_cursor();
+        if self.term.grid().cursor.input_needs_wrap
+            && self.term.mode().contains(TermMode::LINE_WRAP)
+        {
+            self.linefeed_identity();
+        }
+        self.term.put_tab(count);
     }
 
     fn linefeed(&mut self) {
@@ -327,9 +444,7 @@ impl Handler for TrackingHandler<'_> {
             ClearMode::Below => self.ids.reset_rows(alternate, cursor + 1..height),
             ClearMode::Saved => {
                 let screen = self.ids.screen_mut(alternate);
-                while screen.rows.len() > height {
-                    screen.rows.pop_front();
-                }
+                screen.trim_start(screen.rows.len().saturating_sub(height));
             }
             _ => (),
         }
@@ -389,6 +504,13 @@ impl Handler for TrackingHandler<'_> {
 
     // Explicit forwarding keeps terminal replies, charsets, mouse/keyboard
     // modes and future supported OSC behavior on the official implementation.
+    forward_cell_edit! {
+        insert_blank(count: usize);
+        erase_chars(count: usize);
+        delete_chars(count: usize);
+        clear_line(mode: LineClearMode);
+    }
+
     forward! {
         set_title(title: Option<String>);
         set_cursor_style(style: Option<CursorStyle>);
@@ -396,7 +518,6 @@ impl Handler for TrackingHandler<'_> {
         goto(line: i32, col: usize);
         goto_line(line: i32);
         goto_col(col: usize);
-        insert_blank(count: usize);
         move_up(count: usize);
         move_down(count: usize);
         identify_terminal(intermediate: Option<char>);
@@ -405,19 +526,15 @@ impl Handler for TrackingHandler<'_> {
         move_backward(count: usize);
         move_down_and_cr(count: usize);
         move_up_and_cr(count: usize);
-        put_tab(count: u16);
         backspace();
         carriage_return();
         bell();
         substitute();
         set_horizontal_tabstop();
-        erase_chars(count: usize);
-        delete_chars(count: usize);
         move_backward_tabs(count: u16);
         move_forward_tabs(count: u16);
         save_cursor_position();
         restore_cursor_position();
-        clear_line(mode: LineClearMode);
         clear_tabs(mode: TabulationClearMode);
         set_tabs(interval: u16);
         terminal_attribute(attr: Attr);

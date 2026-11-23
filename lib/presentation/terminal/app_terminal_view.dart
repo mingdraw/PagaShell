@@ -84,6 +84,30 @@ class _AppTerminalViewState extends State<AppTerminalView> {
   bool _newOutput = false;
   late int _outputRevision;
   late bool _usingAltBuffer;
+  double? _cachedFontSize;
+  TerminalStyle? _cachedTextStyle;
+
+  static const _terminalFontFamilyFallback = [
+    'MesloLGS NF',
+    'Menlo',
+    'PingFang SC',
+    'Microsoft YaHei',
+    'Noto Sans Mono CJK SC',
+    'Noto Color Emoji',
+    'monospace',
+  ];
+
+  TerminalStyle _styleFor(double fontSize) {
+    if (_cachedFontSize == fontSize && _cachedTextStyle != null) {
+      return _cachedTextStyle!;
+    }
+    _cachedFontSize = fontSize;
+    return _cachedTextStyle = TerminalStyle(
+      fontSize: fontSize,
+      fontFamily: 'FiraCode Nerd Font Mono',
+      fontFamilyFallback: _terminalFontFamilyFallback,
+    );
+  }
 
   @override
   void initState() {
@@ -602,19 +626,7 @@ class _AppTerminalViewState extends State<AppTerminalView> {
       onUserInput: widget.active && widget.canInput ? widget.onUserInput : null,
       onScrollPositionChanged: _onScrollChanged,
       showScrollbar: true,
-      textStyle: TerminalStyle(
-        fontSize: fontSize,
-        fontFamily: 'FiraCode Nerd Font Mono',
-        fontFamilyFallback: const [
-          'MesloLGS NF',
-          'Menlo',
-          'PingFang SC',
-          'Microsoft YaHei',
-          'Noto Sans Mono CJK SC',
-          'Noto Color Emoji',
-          'monospace',
-        ],
-      ),
+      textStyle: _styleFor(fontSize),
     );
     final body = Stack(
       fit: StackFit.expand,

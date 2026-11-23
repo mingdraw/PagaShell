@@ -17,7 +17,7 @@ class TreeDragAnchor {
 enum TreeDropPosition { before, inside, after }
 
 /// 保留具体数据类型，避免不同业务树之间接受拖拽。
-class AppTreeDraggable<T extends Object> extends StatelessWidget {
+class AppTreeDraggable<T extends Object> extends StatefulWidget {
   const AppTreeDraggable({
     required this.item,
     required this.dragAnchor,
@@ -29,49 +29,73 @@ class AppTreeDraggable<T extends Object> extends StatelessWidget {
   final T item;
   final TreeDragAnchor dragAnchor;
   final Widget child;
-  final Widget preview;
+  final WidgetBuilder preview;
 
   @override
-  Widget build(BuildContext context) => LayoutBuilder(
-    builder: (context, constraints) => Draggable<T>(
-      data: item,
-      maxSimultaneousDrags: 1,
-      dragAnchorStrategy: (draggable, context, position) {
-        dragAnchor.scrolledSinceMove = false;
-        dragAnchor.offset = childDragAnchorStrategy(
-          draggable,
-          context,
-          position,
-        );
-        return dragAnchor.offset;
-      },
-      onDragUpdate: (details) {
-        dragAnchor.scrolledSinceMove = false;
-        dragAnchor.onPointer?.call(dragAnchor, details.globalPosition);
-      },
-      onDragCompleted: () => dragAnchor.onPointer?.call(dragAnchor, null),
-      onDraggableCanceled: (_, _) =>
-          dragAnchor.onPointer?.call(dragAnchor, null),
-      feedback: Opacity(
-        opacity: AppTheme.treeDragFeedbackOpacity,
-        child: SizedBox(
-          width: constraints.maxWidth,
-          height: constraints.hasTightHeight && constraints.hasBoundedHeight
-              ? constraints.maxHeight
-              : null,
-          child: shadcn.SurfaceCard(
-            theme: const shadcn.CardTheme(
-              padding: EdgeInsets.zero,
-              borderWidth: 0,
+  State<AppTreeDraggable<T>> createState() => _AppTreeDraggableState<T>();
+}
+
+class _AppTreeDraggableState<T extends Object>
+    extends State<AppTreeDraggable<T>>
+    with AutomaticKeepAliveClientMixin {
+  bool _dragging = false;
+
+  @override
+  bool get wantKeepAlive => _dragging;
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    final dragAnchor = widget.dragAnchor;
+    return LayoutBuilder(
+      builder: (context, constraints) => Draggable<T>(
+        data: widget.item,
+        maxSimultaneousDrags: 1,
+        onDragStarted: () {
+          _dragging = true;
+          updateKeepAlive();
+        },
+        onDragEnd: (_) {
+          _dragging = false;
+          updateKeepAlive();
+        },
+        dragAnchorStrategy: (draggable, context, position) {
+          dragAnchor.scrolledSinceMove = false;
+          dragAnchor.offset = childDragAnchorStrategy(
+            draggable,
+            context,
+            position,
+          );
+          return dragAnchor.offset;
+        },
+        onDragUpdate: (details) {
+          dragAnchor.scrolledSinceMove = false;
+          dragAnchor.onPointer?.call(dragAnchor, details.globalPosition);
+        },
+        onDragCompleted: () => dragAnchor.onPointer?.call(dragAnchor, null),
+        onDraggableCanceled: (_, _) =>
+            dragAnchor.onPointer?.call(dragAnchor, null),
+        feedback: Opacity(
+          opacity: AppTheme.treeDragFeedbackOpacity,
+          child: SizedBox(
+            width: constraints.maxWidth,
+            height: constraints.hasTightHeight && constraints.hasBoundedHeight
+                ? constraints.maxHeight
+                : null,
+            child: shadcn.SurfaceCard(
+              theme: const shadcn.CardTheme(
+                padding: EdgeInsets.zero,
+                borderWidth: 0,
+              ),
+              child: Builder(builder: widget.preview),
             ),
-            child: preview,
           ),
         ),
+        childWhenDragging: Opacity(opacity: 0.35, child: widget.child),
+        child: widget.child,
       ),
-      childWhenDragging: Opacity(opacity: 0.35, child: child),
-      child: child,
-    ),
-  );
+    );
+  }
 }
 
 class AppTreeDropTarget<T extends Object> extends StatefulWidget {

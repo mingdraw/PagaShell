@@ -147,4 +147,75 @@ void main() {
     expect(inside, everyElement(greaterThan(200)));
     expect(outside, lessThan(100));
   });
+
+  testWidgets('传入等价的非 const TerminalStyle 重建时复用已录制的行缓存', (tester) async {
+    final terminal = Terminal()
+      ..applyFrame(
+        _frame(
+          keepRows: 0,
+          appendRows: [for (var id = 1; id <= _rows; id++) id],
+          lines: [for (var id = 1; id <= _rows; id++) _line(id, 'row-$id')],
+        ),
+      );
+    final focus = FocusNode();
+    addTearDown(focus.dispose);
+    addTearDown(terminal.dispose);
+
+    Widget buildView(double fontSize) => ShadcnTestApp(
+      home: Align(
+        alignment: Alignment.topLeft,
+        child: SizedBox(
+          width: 400,
+          height: 300,
+          child: TerminalView(
+            terminal,
+            focusNode: focus,
+            textStyle: TerminalStyle(
+              fontSize: fontSize,
+              fontFamily: 'FiraCode Nerd Font Mono',
+              fontFamilyFallback: List<String>.of(['Menlo', 'monospace']),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.pumpWidget(buildView(14));
+    await tester.pump();
+    final render = tester
+        .state<TerminalViewState>(find.byType(TerminalView))
+        .renderTerminal;
+    final recorded = render.linePictureRecordCount;
+
+    await tester.pumpWidget(buildView(14));
+    await tester.pump();
+    expect(render.linePictureRecordCount, recorded);
+  });
+
+  test('Buffer.applyFrame 直接复用新帧 cells 且 getText 正确提取宽字符与组合字符', () {
+    final cells = Uint32List(_columns * 4);
+    // "A中🙂é" -> col 0: 'A'(w1), col 1: '中'(w2), col 3: 🙂(w2), col 5: cluster 'e\u0301'(w1)
+    cells[0 * 4 + 3] = 0x41 | (1 << CellContent.widthShift);
+    cells[1 * 4 + 3] = 0x4E2D | (2 << CellContent.widthShift);
+    cells[3 * 4 + 3] = 0x1F642 | (2 << CellContent.widthShift);
+    cells[5 * 4 + 3] = 0x65 | (1 << CellContent.widthShift);
+    final frameLine = TerminalLine(
+      id: 9,
+      wrapped: false,
+      cells: cells,
+      clusters: const {5: 'e\u0301'},
+    );
+    final terminal = Terminal()
+      ..applyFrame(
+        _frame(keepRows: 0, appendRows: const [9], lines: [frameLine]),
+      );
+    addTearDown(terminal.dispose);
+
+    final row = terminal.lines[0];
+    expect(identical(row.data, cells), isTrue);
+    expect(row.version, 1);
+    expect(row.getText(), 'A中🙂e\u0301');
+    expect(row.getText(0, 3), 'A中');
+    expect(row.getText(1, 5), '中🙂');
+  });
 }

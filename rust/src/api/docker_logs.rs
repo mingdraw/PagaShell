@@ -1,22 +1,25 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, ensure, Result};
 use russh::{Channel, ChannelMsg, Sig};
 use tokio::sync::Mutex;
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout, Instant};
 use tokio_util::sync::CancellationToken;
 
 use crate::api::ssh::docker_api_channel;
 
 static NEXT: AtomicU32 = AtomicU32::new(1);
 static READERS: LazyLock<Mutex<HashMap<u32, Arc<Reader>>>> = LazyLock::new(Mutex::default);
+const MAX_BATCH: usize = 64 * 1024;
+const BATCH_INTERVAL: Duration = Duration::from_millis(50);
 
 struct Reader {
     session_id: u32,
     cancellation: CancellationToken,
+    streaming: AtomicBool,
     state: Mutex<ReaderState>,
 }
 
@@ -52,6 +55,7 @@ pub(super) async fn open(session_id: u32, container_id: &str) -> Result<u32> {
     let reader = Arc::new(Reader {
         session_id,
         cancellation: CancellationToken::new(),
+        streaming: AtomicBool::new(false),
         state: Mutex::new(ReaderState {
             channel,
             exit_status: None,
@@ -72,41 +76,61 @@ pub(super) async fn open(session_id: u32, container_id: &str) -> Result<u32> {
     Ok(id)
 }
 
-// A pending read holds at most one chunk in the bridge. SSH flow control
-// slows the remote channel until the reader asks for more.
-pub(super) async fn next(log_id: u32) -> Result<Option<Vec<u8>>> {
+pub(in crate::api) async fn stream(log_id: u32, emit: impl Fn(Vec<u8>) -> bool) -> Result<()> {
     let Some(reader) = READERS.lock().await.get(&log_id).cloned() else {
-        return Ok(None);
+        return Ok(());
     };
-    tokio::select! {
+    ensure!(
+        !reader.streaming.swap(true, Ordering::Relaxed),
+        "容器日志已在读取"
+    );
+    let mut state = tokio::select! {
         biased;
-        _ = reader.cancellation.cancelled() => Ok(None),
-        result = async {
-            let mut state = reader.state.lock().await;
-            while !state.ended {
-                match state.channel.wait().await {
-                    Some(ChannelMsg::Data { data })
-                    | Some(ChannelMsg::ExtendedData { data, ext: 1 }) => {
-                        ensure!(data.len() <= 64 * 1024, "容器日志数据块过大");
-                        if !data.is_empty() {
-                            return Ok(Some(data.to_vec()));
+        _ = reader.cancellation.cancelled() => return Ok(()),
+        state = reader.state.lock() => state,
+    };
+    let mut batch = Vec::new();
+    let tick = sleep(BATCH_INTERVAL);
+    tokio::pin!(tick);
+    let result = 'read: loop {
+        tokio::select! {
+            biased;
+            _ = reader.cancellation.cancelled() => break Ok(()),
+            _ = &mut tick, if !batch.is_empty() => {
+                if !emit(std::mem::take(&mut batch)) { break Ok(()); }
+            }
+            message = state.channel.wait() => match message {
+                Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, ext: 1 }) => {
+                    let mut remaining = &data[..];
+                    while !remaining.is_empty() {
+                        if batch.is_empty() { tick.as_mut().reset(Instant::now() + BATCH_INTERVAL); }
+                        let size = (MAX_BATCH - batch.len()).min(remaining.len());
+                        batch.extend_from_slice(&remaining[..size]);
+                        remaining = &remaining[size..];
+                        if batch.len() == MAX_BATCH && !emit(std::mem::take(&mut batch)) {
+                            break 'read Ok(());
                         }
                     }
-                    Some(ChannelMsg::ExitStatus { exit_status }) => {
-                        state.exit_status = Some(exit_status);
-                    }
-                    Some(ChannelMsg::Close) | None => state.ended = true,
-                    Some(ChannelMsg::Failure) | Some(ChannelMsg::ExitSignal { .. }) => {
-                        state.ended = true;
-                        return Err(anyhow!("无法读取容器日志，请检查容器和权限"));
-                    }
-                    _ => {}
                 }
+                Some(ChannelMsg::ExitStatus { exit_status }) => state.exit_status = Some(exit_status),
+                Some(ChannelMsg::Close) | None => {
+                    state.ended = true;
+                    break if state.exit_status == Some(0) { Ok(()) } else { Err(anyhow!("容器日志流已断开或读取失败")) };
+                }
+                Some(ChannelMsg::Failure) | Some(ChannelMsg::ExitSignal { .. }) => {
+                    state.ended = true;
+                    break Err(anyhow!("无法读取容器日志，请检查容器和权限"));
+                }
+                _ => {}
             }
-            ensure!(state.exit_status == Some(0), "容器日志流已断开或读取失败");
-            Ok(None)
-        } => result
+        }
+    };
+    if !batch.is_empty() && !reader.cancellation.is_cancelled() {
+        let _ = emit(batch);
     }
+    drop(state);
+    close(log_id).await;
+    result
 }
 
 pub(super) async fn close(log_id: u32) {

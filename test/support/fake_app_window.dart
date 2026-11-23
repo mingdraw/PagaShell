@@ -54,6 +54,17 @@ class FakeAppWindow implements AppWindow {
     }
   }
 
+  void emitMinimized(bool minimized) {
+    for (final listener in _listeners.toList()) {
+      if (!_listeners.contains(listener)) continue;
+      if (minimized) {
+        listener.onWindowMinimized();
+      } else {
+        listener.onWindowRestored();
+      }
+    }
+  }
+
   @override
   Future<bool> isFullScreen() async {
     calls.add('isFullScreen');

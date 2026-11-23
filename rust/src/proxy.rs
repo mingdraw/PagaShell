@@ -1,8 +1,8 @@
 //! Explicit HTTP / HTTPS CONNECT / SOCKS5 TCP proxies. Never decrypt website TLS.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::convert::Infallible;
 use std::future::Future;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -18,19 +18,25 @@ use hyper::{Method, Request, Response, StatusCode, Uri};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use ipnet::IpNet;
 use serde::Deserialize;
-use tokio::io::{copy_bidirectional, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio::io::{
+    copy_bidirectional_with_sizes, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf,
+};
 use tokio::net::{lookup_host, TcpListener, TcpStream};
-use tokio::sync::{watch, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{watch, Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
-use tokio::time::timeout;
+use tokio::time::{timeout, Instant};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::api::page::PageGateway;
+use crate::page::PageConnector;
 
 const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
 const HEADER_TIMEOUT: Duration = Duration::from_secs(15);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
+const DNS_TTL: Duration = Duration::from_secs(30);
+const DNS_CACHE_LIMIT: usize = 256;
+const TUNNEL_BUFFER: usize = 64 * 1024;
 const HTTP: u8 = 1;
 const HTTPS: u8 = 2;
 const SOCKS: u8 = 4;
@@ -125,20 +131,88 @@ impl Rule {
         };
         Ok(Self::Domain(spec.kind, value))
     }
+}
 
-    fn domain_matches(&self, host: &str) -> bool {
-        match self {
-            Self::Domain(RuleType::DomainExact, value) => host == value,
-            Self::Domain(RuleType::DomainPrefix, value) => host.starts_with(value),
-            Self::Domain(RuleType::DomainSuffix, value) => {
-                host == value || host.strip_suffix(value).is_some_and(|s| s.ends_with('.'))
+#[derive(Default)]
+struct RuleIndex {
+    exact: HashSet<String>,
+    suffix: HashSet<String>,
+    prefix: HashSet<String>,
+    prefix_lengths: Vec<usize>,
+    networks: HashSet<IpNet>,
+    v4_prefixes: Vec<u8>,
+    v6_prefixes: Vec<u8>,
+}
+
+impl FromIterator<Rule> for RuleIndex {
+    fn from_iter<T: IntoIterator<Item = Rule>>(rules: T) -> Self {
+        let mut index = Self::default();
+        let mut v4 = [false; 33];
+        let mut v6 = [false; 129];
+        for rule in rules {
+            match rule {
+                Rule::Ip(net) => {
+                    index.networks.insert(net.trunc());
+                    match net {
+                        IpNet::V4(_) => v4[usize::from(net.prefix_len())] = true,
+                        IpNet::V6(_) => v6[usize::from(net.prefix_len())] = true,
+                    }
+                }
+                Rule::Domain(RuleType::DomainExact, name) => {
+                    index.exact.insert(name);
+                }
+                Rule::Domain(RuleType::DomainPrefix, name) => {
+                    index.prefix.insert(name);
+                }
+                Rule::Domain(RuleType::DomainSuffix, name) => {
+                    index.suffix.insert(name);
+                }
+                Rule::Domain(RuleType::Ip, _) => unreachable!("IP rules parse as networks"),
             }
-            _ => false,
         }
+        index.prefix_lengths = index.prefix.iter().map(String::len).collect();
+        index.prefix_lengths.sort_unstable();
+        index.prefix_lengths.dedup();
+        index.v4_prefixes = v4
+            .iter()
+            .enumerate()
+            .filter_map(|(n, present)| present.then_some(n as u8))
+            .collect();
+        index.v6_prefixes = v6
+            .iter()
+            .enumerate()
+            .filter_map(|(n, present)| present.then_some(n as u8))
+            .collect();
+        index
+    }
+}
+
+impl RuleIndex {
+    fn domain_matches(&self, host: &str) -> bool {
+        self.exact.contains(host)
+            || self.suffix.contains(host)
+            || (!self.suffix.is_empty()
+                && host
+                    .match_indices('.')
+                    .any(|(at, _)| self.suffix.contains(&host[at + 1..])))
+            || self
+                .prefix_lengths
+                .iter()
+                .take_while(|&&len| len <= host.len())
+                .filter_map(|&len| host.get(..len))
+                .any(|prefix| self.prefix.contains(prefix))
     }
 
     fn ip_matches(&self, ip: IpAddr) -> bool {
-        matches!(self, Self::Ip(net) if net.contains(&ip))
+        let prefixes = if ip.is_ipv4() {
+            &self.v4_prefixes
+        } else {
+            &self.v6_prefixes
+        };
+        prefixes.iter().any(|&len| {
+            self.networks
+                .contains(&IpNet::new(ip, len).expect("same address family").trunc())
+        })
     }
 }
 
@@ -205,56 +279,120 @@ impl AsyncWrite for MeteredStream {
 
 enum Gateway {
     Ssh(u32),
-    Page(PageGateway),
+    Page(PageConnector),
+}
+
+enum Route {
+    Gateway,
+    Direct,
+    Resolved(Arc<[SocketAddr]>),
+}
+
+struct DnsEntry {
+    addresses: Arc<[SocketAddr]>,
+    expires: Instant,
 }
 
 struct Router {
     mode: Mode,
-    rules: Vec<Rule>,
+    rules: RuleIndex,
     gateway: Option<Gateway>,
     traffic: Arc<Traffic>,
+    dns: Mutex<HashMap<(String, u16), DnsEntry>>,
 }
 
 impl Router {
-    async fn use_gateway(&self, host: &str, port: u16) -> Result<bool> {
-        match self.mode {
-            Mode::Global => return Ok(true),
-            Mode::Rule => {}
+    fn new(mode: Mode, rules: impl IntoIterator<Item = Rule>, gateway: Option<Gateway>) -> Self {
+        Self {
+            mode,
+            rules: rules.into_iter().collect(),
+            gateway,
+            traffic: Arc::default(),
+            dns: Mutex::default(),
         }
-        let host = host.trim_end_matches('.').to_ascii_lowercase();
-        if let Ok(ip) = host.parse::<IpAddr>() {
-            return Ok(self.rules.iter().any(|r| r.ip_matches(ip)));
+    }
+
+    async fn resolve(&self, host: &str, port: u16) -> Result<Arc<[SocketAddr]>> {
+        let key = (host.to_ascii_lowercase(), port);
+        if let Some(cached) = self
+            .dns
+            .lock()
+            .await
+            .get(&key)
+            .filter(|entry| entry.expires > Instant::now())
+        {
+            return Ok(cached.addresses.clone());
         }
-        if self.rules.iter().any(|r| r.domain_matches(&host)) {
-            return Ok(true);
+        let addresses: Arc<[SocketAddr]> = lookup_host((host, port))
+            .await
+            .context("无法解析代理目标地址")?
+            .collect();
+        ensure!(!addresses.is_empty(), "无法解析代理目标地址");
+        let now = Instant::now();
+        let mut cache = self.dns.lock().await;
+        cache.retain(|_, entry| entry.expires > now);
+        if cache.len() < DNS_CACHE_LIMIT {
+            cache.insert(
+                key,
+                DnsEntry {
+                    addresses: addresses.clone(),
+                    expires: now + DNS_TTL,
+                },
+            );
         }
-        // Only IP rules need local DNS. Domain matches retain gateway-side DNS.
-        if self.rules.iter().any(|r| matches!(r, Rule::Ip(_))) {
-            let addresses = lookup_host((host.as_str(), port))
-                .await
-                .context("无法解析代理目标地址")?;
-            return Ok(addresses
-                .into_iter()
-                .any(|a| self.rules.iter().any(|r| r.ip_matches(a.ip()))));
+        Ok(addresses)
+    }
+
+    async fn route(&self, host: &str, port: u16) -> Result<Route> {
+        if self.mode == Mode::Global {
+            return Ok(Route::Gateway);
         }
-        Ok(false)
+        let normalized = host.trim_end_matches('.').to_ascii_lowercase();
+        if let Ok(ip) = normalized.parse::<IpAddr>() {
+            return Ok(if self.rules.ip_matches(ip) {
+                Route::Gateway
+            } else {
+                Route::Direct
+            });
+        }
+        if self.rules.domain_matches(&normalized) {
+            return Ok(Route::Gateway);
+        }
+        // Only IP rules need DNS before routing. A domain match retains DNS on
+        // the gateway; direct access reuses the very addresses we evaluated.
+        if self.rules.networks.is_empty() {
+            return Ok(Route::Direct);
+        }
+        let addresses = self.resolve(host, port).await?;
+        if addresses
+            .iter()
+            .any(|address| self.rules.ip_matches(address.ip()))
+        {
+            Ok(Route::Gateway)
+        } else {
+            Ok(Route::Resolved(addresses))
+        }
     }
 
     async fn connect(&self, host: &str, port: u16) -> Result<Stream> {
         let io = timeout(OPEN_TIMEOUT, async {
-            if self.use_gateway(host, port).await? {
-                // A selected gateway failure is never retried using direct access.
-                match self.gateway.as_ref().context("所选网关不可用")? {
-                    Gateway::Ssh(id) => Ok(Box::new(
-                        crate::api::ssh::desktop_tunnel(*id, host.to_owned(), port).await?,
-                    ) as Stream),
-                    Gateway::Page(gateway) => Ok(Box::new(
-                        crate::page::connect(gateway.clone(), host, port).await?,
-                    ) as Stream),
+            let direct = match self.route(host, port).await? {
+                Route::Gateway => {
+                    // A selected gateway failure is never retried using direct access.
+                    return match self.gateway.as_ref().context("所选网关不可用")? {
+                        Gateway::Ssh(id) => Ok(Box::new(
+                            crate::api::ssh::desktop_tunnel(*id, host.to_owned(), port).await?,
+                        ) as Stream),
+                        Gateway::Page(gateway) => {
+                            Ok(Box::new(gateway.connect(host, port).await?) as Stream)
+                        }
+                    };
                 }
-            } else {
-                Ok::<_, anyhow::Error>(Box::new(TcpStream::connect((host, port)).await?) as Stream)
-            }
+                Route::Direct => TcpStream::connect((host, port)).await?,
+                Route::Resolved(addresses) => TcpStream::connect(addresses.as_ref()).await?,
+            };
+            direct.set_nodelay(true)?;
+            Ok::<_, anyhow::Error>(Box::new(direct) as Stream)
         })
         .await
         .context("代理目标连接超时")??;
@@ -299,19 +437,20 @@ pub(crate) async fn start(
     );
     ensure!(config.rules.len() <= 10000, "代理规则过多");
     ensure!(ssh_id.is_none() || page.is_none(), "网关配置无效");
-    let gateway = ssh_id.map(Gateway::Ssh).or_else(|| page.map(Gateway::Page));
+    let gateway = ssh_id
+        .map(Gateway::Ssh)
+        .or(page.map(PageConnector::new).transpose()?.map(Gateway::Page));
     ensure!(gateway.is_some(), "所选网关不可用");
-    let traffic = Arc::new(Traffic::default());
-    let router = Arc::new(Router {
-        mode: config.mode,
-        rules: config
+    let router = Arc::new(Router::new(
+        config.mode,
+        config
             .rules
             .into_iter()
             .map(Rule::parse)
-            .collect::<Result<_>>()?,
+            .collect::<Result<Vec<_>>>()?,
         gateway,
-        traffic: traffic.clone(),
-    });
+    ));
+    let traffic = router.traffic.clone();
     let mut ports = BTreeMap::<u16, u8>::new();
     for (enabled, port, kind) in [
         (config.http_enabled, config.http_port, HTTP),
@@ -400,6 +539,7 @@ async fn serve(
     tracker: TaskTracker,
     lease: Arc<OwnedSemaphorePermit>,
 ) -> Result<()> {
+    socket.set_nodelay(true)?;
     let mut first = [0];
     let count = timeout(HEADER_TIMEOUT, socket.peek(&mut first)).await??;
     if count == 0 {
@@ -541,7 +681,13 @@ async fn http(
         spawn(&tracker, &token, async move {
             let _lease = lease;
             if let Ok(upgraded) = upgrade.await {
-                let _ = copy_bidirectional(&mut TokioIo::new(upgraded), &mut target).await;
+                let _ = copy_bidirectional_with_sizes(
+                    &mut TokioIo::new(upgraded),
+                    &mut target,
+                    TUNNEL_BUFFER,
+                    TUNNEL_BUFFER,
+                )
+                .await;
             }
         });
         return Ok(Response::new(
@@ -655,7 +801,8 @@ async fn socks(mut socket: TcpStream, router: Arc<Router>) -> Result<()> {
     match router.connect(&target.0, target.1).await {
         Ok(mut target) => {
             socket.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
-            copy_bidirectional(&mut socket, &mut target).await?;
+            copy_bidirectional_with_sizes(&mut socket, &mut target, TUNNEL_BUFFER, TUNNEL_BUFFER)
+                .await?;
         }
         Err(_) => {
             socket.write_all(&[5, 5, 0, 1, 0, 0, 0, 0, 0, 0]).await?;

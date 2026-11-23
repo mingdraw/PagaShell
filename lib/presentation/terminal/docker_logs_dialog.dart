@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:collection';
 import 'dart:math' as math;
 
-import 'package:flutter/rendering.dart' show ScrollDirection;
+import 'package:flutter/rendering.dart' show ScrollDirection, ViewportOffset;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
@@ -13,6 +13,7 @@ import '../../domain/ssh/ssh_engine.dart';
 import '../components/app_dialog.dart';
 import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
+import '../components/app_selectable_region.dart';
 import '../localization/app_translations.dart';
 import '../navigation/app_navigation.dart';
 import '../navigation/app_notice.dart';
@@ -45,8 +46,12 @@ class _DockerLogsDialogState extends State<DockerLogsDialog> {
   bool _following = true;
   bool _ended = false;
   String? _error;
-  List<_LogLine> _snapshot = const [];
-  List<_LogLine> _visible = const [];
+  final _snapshot = ListQueue<_LogLine>();
+  final _matches = ListQueue<_LogLine>();
+  int? _publishedPartialId;
+  String _query = '';
+
+  ListQueue<_LogLine> get _visible => _query.isEmpty ? _snapshot : _matches;
 
   @override
   void initState() {
@@ -76,12 +81,16 @@ class _DockerLogsDialogState extends State<DockerLogsDialog> {
         _following = true;
         _buffer = _LogBuffer();
         _ansi = _LogAnsiFilter();
-        _publish();
+        _snapshot.clear();
+        _matches.clear();
+        _publishedPartialId = null;
       });
       _subscription = logs.output.listen(
         (chunk) {
           if (generation != _generation || !mounted) return;
-          _buffer.add(_ansi.sanitize(chunk));
+          final text = _ansi.sanitize(chunk);
+          if (text.isEmpty) return;
+          _buffer.add(text);
           if (_following) {
             _update ??= Timer(const Duration(milliseconds: 100), _flush);
           }
@@ -97,16 +106,41 @@ class _DockerLogsDialogState extends State<DockerLogsDialog> {
 
   void _applyFilter() {
     final query = _filter.text.trim().toLowerCase();
-    _visible = query.isEmpty
-        ? _snapshot
-        : _snapshot
-              .where((line) => line.text.toLowerCase().contains(query))
-              .toList();
+    if (_query == query) return;
+    _query = query;
+    _matches.clear();
+    if (query.isNotEmpty) {
+      _matches.addAll(
+        _snapshot.where((line) => line.text.toLowerCase().contains(query)),
+      );
+    }
   }
 
   void _publish() {
-    _snapshot = _buffer.snapshot();
-    _applyFilter();
+    final firstId = _buffer.firstId;
+    // The last, unfinished line can be extended or replaced by a complete row.
+    for (final rows in [_snapshot, _matches]) {
+      if (rows.isNotEmpty && rows.last.id == _publishedPartialId) {
+        rows.removeLast();
+      }
+      while (rows.isNotEmpty && rows.first.id < firstId) {
+        rows.removeFirst();
+      }
+    }
+    final startId = _snapshot.isEmpty ? firstId : _snapshot.last.id + 1;
+    for (final line in _buffer.completeLinesFrom(startId)) {
+      _appendPublished(line);
+    }
+    final partial = _buffer.partial;
+    _publishedPartialId = partial?.id;
+    if (partial != null) _appendPublished(partial);
+  }
+
+  void _appendPublished(_LogLine line) {
+    _snapshot.addLast(line);
+    if (_query.isNotEmpty && line.text.toLowerCase().contains(_query)) {
+      _matches.addLast(line);
+    }
   }
 
   void _flush() {
@@ -225,28 +259,29 @@ class _DockerLogsDialogState extends State<DockerLogsDialog> {
             },
             child: Listener(
               onPointerDown: (_) => _pauseFollow(),
-              child: ListView.builder(
-                controller: _scroll,
-                padding: const EdgeInsets.all(12),
-                itemCount: _visible.length,
-                itemBuilder: (context, index) {
-                  final line = _visible[index];
-                  return shadcn.SelectableText(
-                    line.text.isEmpty ? ' ' : line.text,
-                    key: ValueKey(line.id),
-                    style: const TextStyle(
-                      fontFamily: 'FiraCode Nerd Font Mono',
-                      fontFamilyFallback: [
-                        'Menlo',
-                        'PingFang SC',
-                        'Microsoft YaHei',
-                        'monospace',
-                      ],
-                      fontSize: 12,
-                      color: AppTheme.terminalForeground,
-                    ),
-                  );
-                },
+              child: AppSelectableRegion(
+                child: _LogList(
+                  controller: _scroll,
+                  itemCount: _visible.length,
+                  itemBuilder: (context, index) {
+                    final line = _visible.elementAt(index);
+                    return Text(
+                      line.text.isEmpty ? ' ' : line.text,
+                      key: ValueKey(line.id),
+                      style: const TextStyle(
+                        fontFamily: 'FiraCode Nerd Font Mono',
+                        fontFamilyFallback: [
+                          'Menlo',
+                          'PingFang SC',
+                          'Microsoft YaHei',
+                          'monospace',
+                        ],
+                        fontSize: 12,
+                        color: AppTheme.terminalForeground,
+                      ),
+                    );
+                  },
+                ),
               ),
             ),
           ),
@@ -336,6 +371,30 @@ class _DockerLogsDialogState extends State<DockerLogsDialog> {
   }
 }
 
+class _LogList extends ListView {
+  _LogList({
+    required super.controller,
+    required int itemCount,
+    required Widget Function(BuildContext, int) itemBuilder,
+  }) : super.builder(
+         padding: const EdgeInsets.all(12),
+         itemCount: itemCount,
+         itemBuilder: itemBuilder,
+       );
+
+  @override
+  Widget buildViewport(
+    BuildContext context,
+    ViewportOffset offset,
+    AxisDirection direction,
+    List<Widget> slivers,
+  ) =>
+      // The scrollable owns selection autoscroll. Join the actual lines inside it.
+      AppBlockSelection(
+        child: super.buildViewport(context, offset, direction, slivers),
+      );
+}
+
 typedef _LogLine = ({int id, String text});
 
 /// Keep a bounded tail and evict complete rows. While paused, the view keeps its
@@ -344,7 +403,7 @@ class _LogBuffer {
   static const _maxUnits = 96 * 1024;
   static const _maxRows = 4096;
   static const _maxLine = 16 * 1024;
-  final _lines = Queue<_LogLine>();
+  final _lines = ListQueue<_LogLine>();
   String _partial = '';
   bool _partialTruncated = false;
   int _units = 0;
@@ -393,11 +452,17 @@ class _LogBuffer {
     }
   }
 
-  List<_LogLine> snapshot() => [
-    ..._lines,
-    if (_partial.isNotEmpty)
-      (id: _nextId, text: _partialTruncated ? '…$_partial' : _partial),
-  ];
+  int get firstId => _nextId - _lines.length;
+
+  Iterable<_LogLine> completeLinesFrom(int id) sync* {
+    for (var i = id - firstId; i < _lines.length; i++) {
+      yield _lines.elementAt(i);
+    }
+  }
+
+  _LogLine? get partial => _partial.isEmpty
+      ? null
+      : (id: _nextId, text: _partialTruncated ? '…$_partial' : _partial);
 }
 
 enum _EscapeState { text, escape, csi, controlString, stringEscape }
@@ -408,19 +473,21 @@ class _LogAnsiFilter {
 
   String sanitize(String chunk) {
     final result = StringBuffer();
-    for (final unit in chunk.codeUnits) {
+    for (var i = 0; i < chunk.length; i++) {
+      final unit = chunk.codeUnitAt(i);
       switch (_state) {
         case _EscapeState.text:
-          if (unit == 0x1b) {
+          if ((unit >= 32 && unit < 0x7f) ||
+              unit > 0x9f ||
+              unit == 9 ||
+              unit == 10) {
+            result.writeCharCode(unit);
+          } else if (unit == 0x1b) {
             _state = _EscapeState.escape;
           } else if (unit == 0x9b) {
             _state = _EscapeState.csi;
           } else if (const {0x90, 0x98, 0x9d, 0x9e, 0x9f}.contains(unit)) {
             _state = _EscapeState.controlString;
-          } else if (unit == 9 ||
-              unit == 10 ||
-              (unit >= 32 && (unit < 0x7f || unit > 0x9f))) {
-            result.writeCharCode(unit);
           }
         case _EscapeState.escape:
           if (unit == 0x5b) {

@@ -32,6 +32,15 @@ class SettingsController extends GetxController {
   final sidebarVisible = true.obs;
   final sidebarWidth = SidebarState.defaultWidth.obs;
   final terminalFontSize = SidebarState.defaultTerminalFontSize.obs;
+  final _sidebarSections = {
+    for (final section in SidebarSection.values) section: true.obs,
+  };
+  final _sidebarRecent = Rx<List<String>>(const []);
+
+  bool isSidebarSectionExpanded(SidebarSection section) =>
+      _sidebarSections[section]!.value;
+  List<String> get sidebarRecentHostIds => _sidebarRecent.value;
+
   final closeTerminalOnDisconnect = false.obs;
   final savingCloseTerminalOnDisconnect = false.obs;
   final isLoaded = false.obs;
@@ -76,6 +85,12 @@ class SettingsController extends GetxController {
             sidebarVisible.value = saved.visible;
             sidebarWidth.value = saved.width;
             terminalFontSize.value = saved.terminalFontSize;
+            for (final section in SidebarSection.values) {
+              _sidebarSections[section]!.value = saved.isSectionExpanded(
+                section,
+              );
+            }
+            _sidebarRecent.value = saved.recentHostIds;
           }
         },
         // 显示偏好不可读时保留默认布局，不影响主题和启动。
@@ -159,6 +174,7 @@ class SettingsController extends GetxController {
     if (sidebarState.value.isSectionExpanded(section) == expanded) {
       return _pendingSidebarSave;
     }
+    _sidebarSections[section]!.value = expanded;
     return _saveSidebarState(sidebarState.value.withSection(section, expanded));
   }
 
@@ -167,7 +183,9 @@ class SettingsController extends GetxController {
     if (current.isNotEmpty && current.first == hostId) {
       return _pendingSidebarSave;
     }
-    return _saveSidebarState(sidebarState.value.withRecentHost(hostId));
+    final next = sidebarState.value.withRecentHost(hostId);
+    _sidebarRecent.value = next.recentHostIds;
+    return _saveSidebarState(next);
   }
 
   Future<void> _saveSidebarState(SidebarState state) {

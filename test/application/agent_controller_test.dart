@@ -25,12 +25,21 @@ import '../support/in_memory_ai_settings_repository.dart';
 class _Engine extends Fake implements SshEngine {}
 
 class _ControlledHistory extends InMemoryAgentConversationRepository {
-  Future<List<AgentConversation>>? pendingRead;
+  Future<List<AgentConversationSummary>>? pendingRead;
+  final pendingBodies = <String, Future<AgentConversation?>>{};
+  final bodyReads = <String>[];
   Future<void>? pendingSave;
   Future<void>? pendingDelete;
 
   @override
-  Future<List<AgentConversation>> readAll() => pendingRead ?? super.readAll();
+  Future<List<AgentConversationSummary>> readSummaries() =>
+      pendingRead ?? super.readSummaries();
+
+  @override
+  Future<AgentConversation?> read(String id) {
+    bodyReads.add(id);
+    return pendingBodies[id] ?? super.read(id);
+  }
 
   @override
   Future<void> save(AgentConversation conversation) async {
@@ -1793,8 +1802,9 @@ void main() {
     expect(exec.cancels, 1);
     expect(ssh.profileReads, 0);
     expect(connect.requests, hasLength(1));
+    await app.agent.historySaved;
     expect(
-      app.agent.conversations.single.turns.last['text'],
+      app.history.items.values.single.turns.last['text'],
       startsWith('Not invoked'),
     );
   });
@@ -1916,7 +1926,7 @@ void main() {
     expect(ssh.files[path], 'workers=2\n');
     final id = app.agent.currentConversationId.value!;
     app.agent.clear();
-    expect(app.agent.openConversation(id), isTrue);
+    expect(await app.agent.openConversation(id), isTrue);
     final entry = app.agent.entries.singleWhere(
       (entry) => entry.kind == AgentEntryKind.fileChange,
     );
@@ -2038,7 +2048,7 @@ void main() {
     await app.agent.send('Second chat');
     final second = app.agent.currentConversationId.value!;
     expect(second, isNot(first));
-    expect(app.agent.openConversation(first), isTrue);
+    expect(await app.agent.openConversation(first), isTrue);
     expect(app.agent.selectedSessions, isEmpty);
     expect(app.agent.accessMode.value, AgentAccessMode.fullAccess);
     expect(app.agent.entries.first.text, 'First chat');
@@ -2061,7 +2071,7 @@ void main() {
     );
     await restarted.agent.loadConversations();
     expect(restarted.agent.conversations, hasLength(2));
-    expect(restarted.agent.openConversation(first), isTrue);
+    expect(await restarted.agent.openConversation(first), isTrue);
     expect(restarted.agent.entries.last.text, 'Done');
     expect(await restarted.agent.deleteConversation(second), isTrue);
     expect(await restarted.agent.deleteConversation(first), isTrue);
@@ -2083,7 +2093,9 @@ void main() {
     expect(app.agent.entries.single.text, 'Failed request');
     expect(app.agent.historyError.value, isNotNull);
     app.agent.clear();
-    expect(app.agent.conversations.single.error, 'AI API 认证失败，请检查 API Key');
+    final id = app.agent.conversations.single.id;
+    expect(await app.agent.openConversation(id), isTrue);
+    expect(app.agent.error.value, 'AI API 认证失败，请检查 API Key');
     app.history.failSave = false;
     await app.agent.retryHistory();
     expect(app.agent.historyError.value, isNull);
@@ -2145,7 +2157,7 @@ void main() {
     app.agent.clear();
     await sending;
     expect(pending.state.value, AgentCommandState.rejected);
-    expect(app.agent.openConversation(id), isTrue);
+    expect(await app.agent.openConversation(id), isTrue);
     final entry = app.agent.entries.firstWhere(
       (entry) => entry.archivedCommand != null,
     );
@@ -2165,17 +2177,72 @@ void main() {
     await app.agent.send('Delete while reading');
     await app.agent.historySaved;
     final id = app.agent.currentConversationId.value!;
-    final old = history.items.values.toList();
+    final old = await history.readSummaries();
     app.agent.clear();
-    final read = Completer<List<AgentConversation>>();
+    final read = Completer<List<AgentConversationSummary>>();
     history.pendingRead = read.future;
     final loading = app.agent.loadConversations(retry: true);
     expect(await app.agent.deleteConversation(id), isTrue);
     read.complete(old);
     await loading;
     expect(app.agent.conversations, isEmpty);
-    expect(app.agent.openConversation(id), isFalse);
+    expect(await app.agent.openConversation(id), isFalse);
     expect(history.items, isEmpty);
+  });
+
+  test('历史列表只取摘要，迟到的正文不会覆盖切换后的对话', () async {
+    final history = _ControlledHistory();
+    final app = await setup(
+      FakeAiConnect((_) => openAiReply('Saved')),
+      history: history,
+    );
+    await app.agent.send('First chat');
+    app.agent.clear();
+    await app.agent.send('Second chat');
+    app.agent.clear();
+    await app.agent.historySaved;
+    final first = history.items.values.first;
+    final second = history.items.values.last;
+    final restarted = await setup(
+      FakeAiConnect((_) => openAiReply('Unused')),
+      history: history,
+    );
+    await restarted.agent.loadConversations();
+    expect(restarted.agent.conversations.map((item) => item.title), [
+      'Second chat',
+      'First chat',
+    ]);
+    expect(history.bodyReads, isEmpty);
+
+    final slow = Completer<AgentConversation?>();
+    history.pendingBodies[first.id] = slow.future;
+    final opening = restarted.agent.openConversation(first.id);
+    expect(await restarted.agent.openConversation(second.id), isTrue);
+    slow.complete(first);
+    expect(await opening, isFalse);
+    expect(history.bodyReads, [first.id, second.id]);
+    expect(restarted.agent.entries.first.text, 'Second chat');
+
+    final closed = Completer<AgentConversation?>();
+    history.pendingBodies[first.id] = closed.future;
+    var dialogCurrent = true;
+    final closing = restarted.agent.openConversation(
+      first.id,
+      canApply: () => dialogCurrent,
+    );
+    dialogCurrent = false;
+    closed.complete(first);
+    expect(await closing, isFalse);
+    expect(restarted.agent.entries.first.text, 'Second chat');
+
+    final removed = Completer<AgentConversation?>();
+    history.pendingBodies[first.id] = removed.future;
+    final deleting = restarted.agent.openConversation(first.id);
+    expect(await restarted.agent.deleteConversation(first.id), isTrue);
+    removed.complete(first);
+    expect(await deleting, isFalse);
+    expect(restarted.agent.conversations.single.id, second.id);
+    expect(restarted.agent.entries.first.text, 'Second chat');
   });
 
   test('退出等待保存队列，保存失败保留数据并返回失败，删除失败可重试', () async {
@@ -2281,7 +2348,7 @@ void main() {
     app.agent.clear();
     expect(app.agent.reasoningEffort.value, AiReasoningEffort.high);
     expect(app.agent.accessMode.value, AgentAccessMode.fullAccess);
-    expect(app.agent.openConversation(id), isTrue);
+    expect(await app.agent.openConversation(id), isTrue);
     expect(app.agent.selectedSessions, isEmpty);
     await app.agent.historySaved;
     final restoredSettings = AiSettingsController(
@@ -2303,7 +2370,7 @@ void main() {
     await Future<void>.delayed(Duration.zero);
     expect(restored.reasoningEffort.value, AiReasoningEffort.high);
     expect(restored.accessMode.value, AgentAccessMode.fullAccess);
-    expect(restored.openConversation(id), isTrue);
+    expect(await restored.openConversation(id), isTrue);
     expect(restored.selectedSessions, isEmpty);
     restored.clear();
     expect(restored.accessMode.value, AgentAccessMode.fullAccess);
@@ -2334,5 +2401,65 @@ void main() {
     expect(await app.agent.prepareForExit(), isTrue);
     expect(app.agent.modesError.value, isNull);
     expect(preferences.value.accessMode, AgentAccessMode.requestApproval);
+  });
+
+  test('敏感赋值脱敏覆盖带前缀与横线格式，且超长点分输出不发生正则回溯卡顿', () async {
+    final connect = FakeAiConnect(
+      (request) =>
+          request.body['messages'] is List &&
+              (request.body['messages'] as List).length == 2
+          ? openAiReply(
+              '',
+              calls: [
+                tool('exec_ssh_command', {
+                  'command': 'df -h',
+                  'purpose': 'Inspect config',
+                  'session_id': 'one',
+                }),
+              ],
+            )
+          : openAiReply('Done'),
+    );
+    final app = await setup(connect);
+    final longDotted = List.filled(4000, 'segment').join('.');
+    final ssh = AgentSshFixture()
+      ..onExec = (exec) {
+        exec.emit(
+          SshExecEvent(
+            SshExecEventKind.stdout,
+            data:
+                '$longDotted\n'
+                'spring.datasource.password=db-secret-1\n'
+                '--password=cli-secret-2\n'
+                'my-api-key: key-secret-3\n'
+                'postgres+psycopg2://admin:url-secret-4@db.internal:5432/app\n'
+                'sudo: a password is required\n',
+          ),
+        );
+        exec.finish(code: 0);
+      };
+    final one = terminal('one', <String>[], engine: ssh);
+    app.sessions.sessions.add(one);
+    app.sessions.activeSessionId.value = 'one';
+    app.agent.selectAccessMode(AgentAccessMode.approveWrites);
+
+    final watch = Stopwatch()..start();
+    await app.agent.send('Inspect config', referencedSessions: [one]);
+    watch.stop();
+
+    expect(watch.elapsedMilliseconds, lessThan(2000));
+    final serialized = jsonEncode(connect.requests.last.body);
+    expect(serialized, isNot(contains('db-secret-1')));
+    expect(serialized, isNot(contains('cli-secret-2')));
+    expect(serialized, isNot(contains('key-secret-3')));
+    expect(serialized, isNot(contains('url-secret-4')));
+    expect(serialized, contains('spring.datasource.password=[redacted]'));
+    expect(serialized, contains('--password=[redacted]'));
+    expect(serialized, contains('my-api-key: [redacted]'));
+    expect(
+      serialized,
+      contains('postgres+psycopg2://admin:[redacted]@db.internal:5432/app'),
+    );
+    expect(serialized, contains('sudo: a password is required'));
   });
 }

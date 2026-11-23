@@ -153,11 +153,12 @@ void main() {
     }
     final folder = await folders.create(name: 'End folder');
     await tester.pumpAndSettle();
+    expect(find.text('End folder'), findsNothing);
     final list = find.ancestor(
       of: find.text(origin.name),
-      matching: find.byType(ListView),
+      matching: find.byType(CustomScrollView),
     );
-    final position = tester.widget<ListView>(list).controller!.position;
+    final position = tester.widget<CustomScrollView>(list).controller!.position;
     expect(position.maxScrollExtent, greaterThan(0));
     final bounds = tester.getRect(list);
     final mouse = await tester.startGesture(
@@ -171,6 +172,8 @@ void main() {
       await tester.pump(const Duration(milliseconds: 600));
     }
     expect(position.pixels, position.maxScrollExtent);
+    // The drag source stays alive even after leaving the viewport.
+    expect(find.text(origin.name).hitTestable(), findsNothing);
     await mouse.moveTo(tester.getCenter(find.text('End folder')));
     await tester.pump(const Duration(milliseconds: 550));
     await mouse.up();

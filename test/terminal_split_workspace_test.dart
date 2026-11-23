@@ -691,7 +691,21 @@ void main() {
     final container = controller.activeSession!;
     expect(container.id, isNot(hostId));
     expect(container.kind, SessionKind.containerTerminal);
-    expect(container.title, 'web-api');
+    final title = 'web-api · ${_host.name}';
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('terminal-toolbar-context')),
+        matching: find.text(title),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: find.widgetWithText(shadcn.Label, title),
+        matching: find.byKey(ValueKey('session-tab-close-${container.id}')),
+      ),
+      findsOneWidget,
+    );
     expect(
       container.dockerTarget,
       DockerTerminalTarget(id: resource.id, name: resource.name),
@@ -749,6 +763,10 @@ void main() {
       final failed = controller.activeSession!;
       expect(failed.phase, SessionPhase.failed);
       expect(failed.error, error);
+      expect(
+        find.text('无法打开容器 @name 的终端'.trParams({'name': 'web-api'})),
+        findsOneWidget,
+      );
       final toast = find.ancestor(
         of: find.text(error.tr),
         matching: find.byType(shadcn.SurfaceCard),
@@ -1984,6 +2002,17 @@ void main() {
   });
 
   testWidgets('Docker 实时日志使用独立连接，支持暂停、筛选、重连和释放', (tester) async {
+    String? copied;
+    final messenger = tester.binding.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+      if (call.method == 'Clipboard.setData') {
+        copied = (call.arguments as Map<Object?, Object?>)['text'] as String;
+      }
+      return null;
+    });
+    addTearDown(
+      () => messenger.setMockMethodCallHandler(SystemChannels.platform, null),
+    );
     final (controller, engine, _) = await _mount(tester);
     final id = await controller.open(_host, _credentials);
     await tester.pumpAndSettle();
@@ -2028,6 +2057,15 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('docker-log-follow')));
     await tester.pumpAndSettle();
     expect(find.text('second line'), findsOneWidget);
+    final selectable = tester.state<SelectableRegionState>(
+      find.descendant(of: output, matching: find.byType(SelectableRegion)),
+    );
+    selectable.selectAll(SelectionChangedCause.keyboard);
+    selectable.contextMenuButtonItems
+        .singleWhere((item) => item.type == ContextMenuButtonType.copy)
+        .onPressed!();
+    await tester.pump();
+    expect(copied, 'first line\nsecond line');
     await tester.enterText(
       find.byKey(const ValueKey('docker-log-filter')),
       'second',
@@ -2035,6 +2073,27 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('first line'), findsNothing);
     expect(find.text('second line'), findsOneWidget);
+    logs.chunks.add('prefix sec');
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 110));
+    expect(find.text('prefix sec'), findsNothing);
+    logs.chunks.add('ond');
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 110));
+    expect(find.text('prefix second'), findsOneWidget);
+    logs.chunks.add(' complete\n');
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 110));
+    expect(find.text('prefix second'), findsNothing);
+    expect(find.text('prefix second complete'), findsOneWidget);
+    logs.chunks.add(
+      '${List.filled(4096, 'discard gap').join('\n')}\nsecond tail\n',
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 110));
+    expect(find.text('prefix second complete'), findsNothing);
+    expect(find.text('second line'), findsNothing);
+    expect(find.text('second tail'), findsOneWidget);
     unawaited(logs.chunks.close());
     await tester.pumpAndSettle();
     final retry = find.byKey(const ValueKey('docker-log-retry'));

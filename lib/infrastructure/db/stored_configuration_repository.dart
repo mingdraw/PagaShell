@@ -50,21 +50,32 @@ abstract class StoredConfigurationRepository
   @override
   Future<ConnectionConfiguration> read() => transaction(() async {
     final data = await _metadata();
+    final store = secretStore;
+    final exportHosts = [
+      for (final host in [...data.services, ...data.gateways])
+        if (host.identityId == null || host.gatewayType == GatewayType.page)
+          host,
+    ];
+    final batch = store is BatchSecretStore
+        ? await store.readMany([
+            for (final identity in data.identities) ?identity.secretRef,
+            for (final host in exportHosts) 'sec-host-${host.id}',
+          ])
+        : null;
     final identitySecrets = <String, String>{};
     final hostSecrets = <String, String>{};
     for (final identity in data.identities) {
       if (identity.secretRef == null) continue;
-      final secret = await secretStore.read(identity.secretRef!);
+      final ref = identity.secretRef!;
+      final secret = batch == null ? await store.read(ref) : batch[ref];
       if (secret == null) {
         throw const ConfigurationException('凭证密文不存在，请重新输入');
       }
       identitySecrets[identity.id] = secret;
     }
-    for (final host in [...data.services, ...data.gateways]) {
-      if (host.identityId != null && host.gatewayType != GatewayType.page) {
-        continue;
-      }
-      final secret = await secretStore.read('sec-host-${host.id}');
+    for (final host in exportHosts) {
+      final ref = 'sec-host-${host.id}';
+      final secret = batch == null ? await store.read(ref) : batch[ref];
       if (secret != null) hostSecrets[host.id] = secret;
     }
     return ConnectionConfiguration(
@@ -82,6 +93,8 @@ abstract class StoredConfigurationRepository
   @override
   Future<void> merge(ConnectionConfiguration incoming) async {
     incoming.validate();
+    final store = secretStore;
+    final batch = store is BatchSecretStore ? store : null;
     final previousSecrets = <String, String?>{};
     final written = <String>[];
     try {
@@ -177,12 +190,17 @@ abstract class StoredConfigurationRepository
             'sec-host-${entry.key}': entry.value,
         };
         // 引用键来自本机记录、随机新键或固定服务前缀，不接受文件提供的键名。
-        for (final entry in writes.entries) {
-          previousSecrets[entry.key] = await secretStore.read(entry.key);
-        }
-        for (final entry in writes.entries) {
-          written.add(entry.key);
-          await secretStore.put(entry.key, entry.value);
+        if (batch != null) {
+          previousSecrets.addAll(await batch.replaceMany(writes));
+          written.addAll(writes.keys);
+        } else {
+          for (final ref in writes.keys) {
+            previousSecrets[ref] = await store.read(ref);
+          }
+          for (final entry in writes.entries) {
+            written.add(entry.key);
+            await store.put(entry.key, entry.value);
+          }
         }
         for (final folder in merged.identityFolders) {
           await identityFolders.upsert(folder);
@@ -205,16 +223,24 @@ abstract class StoredConfigurationRepository
       });
     } on Object {
       var restored = true;
-      for (final ref in written.reversed) {
+      if (batch != null && written.isNotEmpty) {
         try {
-          final previous = previousSecrets[ref];
-          if (previous == null) {
-            await secretStore.delete(ref);
-          } else {
-            await secretStore.put(ref, previous);
-          }
+          await batch.replaceMany(previousSecrets);
         } on Object {
           restored = false;
+        }
+      } else {
+        for (final ref in written.reversed) {
+          try {
+            final previous = previousSecrets[ref];
+            if (previous == null) {
+              await store.delete(ref);
+            } else {
+              await store.put(ref, previous);
+            }
+          } on Object {
+            restored = false;
+          }
         }
       }
       if (!restored) {

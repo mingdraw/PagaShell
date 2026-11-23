@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::future::Future;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, ensure, Result};
@@ -162,6 +162,18 @@ struct Client {
     session: u32,
     access: Access,
     deadline: Instant,
+    connection: Arc<tokio::sync::Mutex<Option<ApiConnection>>>,
+}
+
+impl Client {
+    fn new(session: u32, access: Access) -> Self {
+        Self {
+            session,
+            access,
+            deadline: Instant::now() + OPERATION_TIMEOUT,
+            connection: Arc::default(),
+        }
+    }
 }
 
 struct Response {
@@ -200,22 +212,73 @@ impl Drop for Driver {
     }
 }
 
+struct ApiConnection {
+    sender: hyper::client::conn::http1::SendRequest<Full<Bytes>>,
+    _driver: Driver,
+}
+
+impl ApiConnection {
+    async fn handshake(
+        io: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    ) -> Result<Self> {
+        let (sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(io))
+            .await
+            .map_err(|_| anyhow!(CONNECTION))?;
+        let driver = Driver(tokio::spawn(async move {
+            let _ = connection.await;
+        }));
+        Ok(Self {
+            sender,
+            _driver: driver,
+        })
+    }
+}
+
+async fn exchange(
+    connection: &tokio::sync::Mutex<Option<ApiConnection>>,
+    open: impl Future<Output = Result<ApiConnection>>,
+    request: Request<Full<Bytes>>,
+) -> Result<Response> {
+    let mut slot = connection.lock().await;
+    // Until the response is consumed, cancellation or a broken body should drop
+    // the channel. Only reconnect before sending: never replay a mutation.
+    let mut active = if let Some(mut active) = slot.take() {
+        if active.sender.ready().await.is_ok() {
+            active
+        } else {
+            open.await?
+        }
+    } else {
+        open.await?
+    };
+    let response = active
+        .sender
+        .send_request(request)
+        .await
+        .map_err(|_| anyhow!(CONNECTION))?;
+    let status = response.status().as_u16();
+    let mut body = response.into_body();
+    let mut bytes = Vec::new();
+    while let Some(frame) = body.frame().await {
+        if let Some(data) = frame.map_err(|_| anyhow!(CONNECTION))?.data_ref() {
+            ensure!(
+                bytes.len() + data.len() <= RESPONSE_LIMIT,
+                "Docker 操作响应过大"
+            );
+            bytes.extend_from_slice(data);
+        }
+    }
+    *slot = Some(active);
+    Ok(Response {
+        status,
+        body: bytes,
+    })
+}
+
 impl Engine for Client {
     async fn request(&self, method: Method, path: String, body: Option<Value>) -> Result<Response> {
         let deadline = self.deadline.min(Instant::now() + REQUEST_TIMEOUT);
         tokio::time::timeout_at(deadline, async {
-            let channel = docker_api_channel(
-                self.session,
-                format!("{} system dial-stdio", self.access.cli()),
-            )
-            .await?;
-            let (mut sender, connection) =
-                hyper::client::conn::http1::handshake(TokioIo::new(channel.into_stream()))
-                    .await
-                    .map_err(|_| anyhow!(CONNECTION))?;
-            let _driver = Driver(tokio::spawn(async move {
-                let _ = connection.await;
-            }));
             // Env、命令和卷选项只经过 SSH 的 HTTP body；不进入 argv、日志或 Dart。
             let bytes = body
                 .map(|v| serde_json::to_vec(&v))
@@ -230,30 +293,22 @@ impl Engine for Client {
                 .method(method)
                 .uri(format!("/v{}{}", self.access.api, path))
                 .header("Host", "docker")
-                .header("Connection", "close")
                 .header("Content-Type", "application/json")
                 .body(Full::new(Bytes::from(bytes)))
                 .map_err(|_| anyhow!("Docker 请求无效"))?;
-            let response = sender
-                .send_request(request)
-                .await
-                .map_err(|_| anyhow!(CONNECTION))?;
-            let status = response.status().as_u16();
-            let mut body = response.into_body();
-            let mut bytes = Vec::new();
-            while let Some(frame) = body.frame().await {
-                if let Some(data) = frame.map_err(|_| anyhow!(CONNECTION))?.data_ref() {
-                    ensure!(
-                        bytes.len() + data.len() <= RESPONSE_LIMIT,
-                        "Docker 操作响应过大"
-                    );
-                    bytes.extend_from_slice(data);
-                }
-            }
-            Ok(Response {
-                status,
-                body: bytes,
-            })
+            exchange(
+                &self.connection,
+                async {
+                    let channel = docker_api_channel(
+                        self.session,
+                        format!("{} system dial-stdio", self.access.cli()),
+                    )
+                    .await?;
+                    ApiConnection::handshake(channel.into_stream()).await
+                },
+                request,
+            )
+            .await
         })
         .await
         .map_err(|_| anyhow!(TIMEOUT))?
@@ -791,11 +846,7 @@ pub(crate) async fn run(
     } else {
         ensure!(image.is_none() && !force, "Docker 操作参数无效");
     }
-    let client = Client {
-        session,
-        access: Access::prepare(session).await?,
-        deadline: Instant::now() + OPERATION_TIMEOUT,
-    };
+    let client = Client::new(session, Access::prepare(session).await?);
     match action {
         DockerContainerAction::Start => {
             post(
@@ -905,11 +956,10 @@ pub(crate) async fn run_image(
             ensure!(id.is_none(), "Docker 操作参数无效");
         }
     }
-    let client = Client {
+    let client = Client::new(
         session,
-        access: Access::prepare(session).await.map_err(image_action_error)?,
-        deadline: Instant::now() + OPERATION_TIMEOUT,
-    };
+        Access::prepare(session).await.map_err(image_action_error)?,
+    );
     image_action(&client, action, id)
         .await
         .map_err(image_action_error)

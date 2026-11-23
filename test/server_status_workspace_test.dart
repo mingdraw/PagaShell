@@ -13,13 +13,19 @@ import 'package:pagashell/application/session/session_controller.dart';
 import 'package:pagashell/application/settings/settings_controller.dart';
 import 'package:pagashell/domain/entities/host.dart';
 import 'package:pagashell/domain/ssh/host_key.dart';
+import 'package:pagashell/domain/ssh/process_manager.dart';
 import 'package:pagashell/domain/ssh/server_status.dart';
 import 'package:pagashell/domain/ssh/ssh_engine.dart';
+import 'package:pagashell/presentation/terminal/docker_manager_panel.dart';
+import 'package:pagashell/presentation/terminal/firewall_panel.dart';
+import 'package:pagashell/presentation/terminal/network_ports_panel.dart';
+import 'package:pagashell/presentation/terminal/process_manager_panel.dart';
 import 'package:pagashell/presentation/terminal/server_status_panel.dart';
 import 'package:pagashell/presentation/terminal/server_system_logo.dart';
 import 'package:pagashell/presentation/theme/app_theme.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
+import 'support/fake_app_window.dart';
 import 'support/fake_sftp_session.dart';
 import 'support/fixture_terminal.dart';
 import 'support/in_memory_binding.dart';
@@ -72,6 +78,30 @@ class _Session extends FakeSftpSession implements ServerStatusSource {
 
   @override
   void resizeTerminal(int width, int height) => sizes.add((width, height));
+}
+
+class _MultiPanelSession extends _Session implements ProcessManagerSource {
+  @override
+  Future<ProcessSnapshot> readProcesses() async => const ProcessSnapshot(
+    sampledAtSeconds: 1,
+    memoryTotal: 1024 * 1024 * 1024,
+    processes: [],
+  );
+
+  @override
+  Future<ProcessDetails> readProcessDetails(RemoteProcess process) async =>
+      ProcessDetails(
+        process: process,
+        parentPid: 1,
+        state: 'S',
+        nice: 0,
+        elapsed: '00:01',
+        memoryPercent: 0,
+        virtualMemoryBytes: 0,
+      );
+
+  @override
+  Future<void> terminateProcess(RemoteProcess process) async {}
 }
 
 class _Engine implements SshEngine {
@@ -142,6 +172,51 @@ void main() {
     Get.locale = null;
     Get.fallbackLocale = null;
     Get.clearTranslations();
+  });
+
+  testWidgets('窗口隐藏或最小化时停止采样，恢复后只立即刷新一次', (tester) async {
+    tester.view.physicalSize = const Size(1280, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final window = FakeAppWindow();
+    final engine = _Engine();
+    await tester.pumpWidget(
+      PagaShellApp(
+        binding: InMemoryBinding(sshEngine: engine, appWindow: window),
+        platform: TargetPlatform.windows,
+      ),
+    );
+    await tester.pumpAndSettle();
+    await Get.find<SessionController>().open(
+      const Host(id: 'monitoring', name: 'Server', hostname: 'example.test'),
+      const SshCredentials.password('test-only'),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('terminal-toolbar-status')));
+    await tester.pumpAndSettle();
+    final source = engine.sessions.last;
+    expect(source.samples, 1);
+
+    window.emitMinimized(true);
+    await tester.pump(const Duration(seconds: 10));
+    expect(source.samples, 1);
+    window.emitMinimized(false);
+    await tester.pump();
+    expect(source.samples, 2);
+
+    final binding = tester.binding;
+    binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    // The first pump runs expired timers before any widget could rebuild.
+    await tester.pump(const Duration(seconds: 10));
+    expect(source.samples, 2);
+    binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    expect(source.samples, 3);
+    expect(find.byKey(const ValueKey('server-status-details')), findsOneWidget);
   });
 
   testWidgets('服务状态水平拖动调宽，折叠和切换页签保留宽度及终端滚动状态', (tester) async {
@@ -1017,5 +1092,61 @@ void main() {
     await pointer.moveTo(Offset.zero);
     await tester.pump();
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('终端侧面板按需挂载监控视图，未打开的面板不提前创建', (tester) async {
+    final engine = _Engine()..nextSession = _MultiPanelSession();
+    tester.view.physicalSize = const Size(1280, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(
+      PagaShellApp(binding: InMemoryBinding(sshEngine: engine)),
+    );
+    await tester.pumpAndSettle();
+
+    final sessions = Get.find<SessionController>();
+    await sessions.open(
+      const Host(id: 'lazy', name: 'Lazy Host', hostname: 'lazy.test'),
+      const SshCredentials.password('test-only'),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byType(ServerStatusPanel, skipOffstage: false), findsNothing);
+    expect(find.byType(ProcessManagerPanel, skipOffstage: false), findsNothing);
+    expect(find.byType(DockerManagerPanel, skipOffstage: false), findsNothing);
+    expect(find.byType(NetworkPortsPanel, skipOffstage: false), findsNothing);
+    expect(find.byType(FirewallPanel, skipOffstage: false), findsNothing);
+
+    await tester.tap(find.byKey(const ValueKey('terminal-toolbar-status')));
+    await tester.pumpAndSettle();
+    expect(find.byType(ServerStatusPanel), findsOneWidget);
+    expect(find.byType(ProcessManagerPanel, skipOffstage: false), findsNothing);
+    expect(find.byType(DockerManagerPanel, skipOffstage: false), findsNothing);
+    expect(find.byType(NetworkPortsPanel, skipOffstage: false), findsNothing);
+    expect(find.byType(FirewallPanel, skipOffstage: false), findsNothing);
+
+    await tester.tap(find.byKey(const ValueKey('terminal-toolbar-status')));
+    await tester.pumpAndSettle();
+    expect(find.byType(ServerStatusPanel), findsNothing);
+    expect(find.byType(ServerStatusPanel, skipOffstage: false), findsOneWidget);
+    final ticker = tester.widget<TickerMode>(
+      find
+          .ancestor(
+            of: find.byType(ServerStatusPanel, skipOffstage: false),
+            matching: find.byType(TickerMode, skipOffstage: false),
+          )
+          .first,
+    );
+    expect(ticker.enabled, isFalse);
+
+    await tester.tap(find.byKey(const ValueKey('terminal-toolbar-processes')));
+    await tester.pumpAndSettle();
+    expect(find.byType(ProcessManagerPanel), findsOneWidget);
+    expect(find.byType(ServerStatusPanel, skipOffstage: false), findsOneWidget);
+    expect(find.byType(DockerManagerPanel, skipOffstage: false), findsNothing);
+    expect(find.byType(NetworkPortsPanel, skipOffstage: false), findsNothing);
+    expect(find.byType(FirewallPanel, skipOffstage: false), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 }

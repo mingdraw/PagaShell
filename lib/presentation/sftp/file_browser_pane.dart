@@ -52,6 +52,16 @@ class FileBrowserEntry {
   final bool isDir;
   final int size;
   final DateTime? modified;
+
+  static final _lowerNames = Expando<String>();
+  String get lowerName => _lowerNames[this] ??= name.toLowerCase();
+
+  bool sameContents(FileBrowserEntry other) =>
+      path == other.path &&
+      name == other.name &&
+      isDir == other.isDir &&
+      size == other.size &&
+      modified == other.modified;
 }
 
 /// 仅用于本标签页两侧之间的文件拖放，携带拖动开始时的绝对路径。
@@ -153,6 +163,7 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
   final _filterController = TextEditingController();
   final _filterFocus = FocusNode();
   late List<FileBrowserEntry> _sortedEntries;
+  List<FileBrowserEntry>? _selectionSnapshot;
   _FileSortField? _sortField = _FileSortField.name;
   bool _sortAscending = true;
   bool _editingPath = false;
@@ -196,10 +207,12 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
   bool get _canMkdir =>
       onMkdir != null && cwd.isNotEmpty && !loading && error == null;
 
-  List<FileBrowserEntry> get _selectedEntries => [
-    for (final entry in entries)
-      if (_selected.contains(entry.path)) entry,
-  ];
+  List<FileBrowserEntry> get _selectedEntries => _selected.isEmpty
+      ? const []
+      : _selectionSnapshot ??= List.unmodifiable([
+          for (final entry in entries)
+            if (_selected.contains(entry.path)) entry,
+        ]);
 
   @override
   void initState() {
@@ -217,12 +230,13 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
   }
 
   void _rebuildSortedEntries() {
+    _selectionSnapshot = null;
     final query = _filterQuery.trim().toLowerCase();
     final filtered = query.isEmpty
         ? List.of(widget.entries)
         : [
             for (final entry in widget.entries)
-              if (entry.name.toLowerCase().contains(query)) entry,
+              if (entry.lowerName.contains(query)) entry,
           ];
     final field = _sortField;
     if (field == null) {
@@ -230,7 +244,7 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
       return;
     }
     int compareByName(FileBrowserEntry a, FileBrowserEntry b) {
-      final lower = a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      final lower = a.lowerName.compareTo(b.lowerName);
       return lower != 0 ? lower : a.name.compareTo(b.name);
     }
 
@@ -378,6 +392,7 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
       _selectionAdditive = keyboard.isShiftPressed;
       if (!_selectionToggle && !_selectionAdditive) {
         _selected.clear();
+        _selectionSnapshot = null;
         _anchor = null;
       }
     });
@@ -436,6 +451,7 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
     _selected
       ..clear()
       ..addAll(selection);
+    _selectionSnapshot = null;
   }
 
   void _selectionScrolled() {
@@ -526,6 +542,7 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
       _selected
         ..clear()
         ..addAll(_selectionBeforeDrag);
+      _selectionSnapshot = null;
       _anchor = _selectionAnchorBeforeDrag;
       _focusedIndex = _selectionFocusBeforeDrag;
       _resetSelectionDrag();
@@ -538,36 +555,29 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
     if (!oldWidget.active || oldWidget.sessionId != sessionId) {
       _focusListWhenActive();
     }
+    final directoryChanged =
+        oldWidget.cwd != cwd || oldWidget.sessionId != sessionId;
     final entriesChanged =
-        oldWidget.entries.length != widget.entries.length ||
-        oldWidget.entries.indexed.any(
-          (item) => item.$2.path != widget.entries[item.$1].path,
-        );
-    _rebuildSortedEntries();
+        !identical(oldWidget.entries, widget.entries) &&
+        (oldWidget.entries.length != widget.entries.length ||
+            oldWidget.entries.indexed.any(
+              (item) => !item.$2.sameContents(widget.entries[item.$1]),
+            ));
     if (!widget.active ||
         loading ||
         error != null ||
-        oldWidget.cwd != cwd ||
-        oldWidget.sessionId != sessionId ||
+        directoryChanged ||
         entriesChanged) {
       _resetSelectionDrag();
-    }
-    if (_directoryDropKeys.isNotEmpty) {
-      final directories = {
-        for (final entry in entries)
-          if (entry.isDir) entry.path,
-      };
-      _directoryDropKeys.removeWhere((path, _) => !directories.contains(path));
     }
     if (!widget.active || loading || error != null || oldWidget.cwd != cwd) {
       _externalHoverPath = null;
     }
-    if (oldWidget.cwd != cwd || oldWidget.sessionId != sessionId) {
+    if (directoryChanged) {
       _editingPath = false;
       _filtering = false;
       _filterQuery = '';
       _filterController.clear();
-      _rebuildSortedEntries();
       _selected.clear();
       _anchor = null;
       _focusedIndex = 0;
@@ -578,10 +588,19 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
           _scroll.jumpTo(0);
         }
       });
-    } else {
-      final paths = entries.map((entry) => entry.path).toSet();
-      _selected.removeWhere((path) => !paths.contains(path));
-      if (!paths.contains(_anchor)) _anchor = null;
+    }
+    if (entriesChanged || directoryChanged) {
+      _rebuildSortedEntries();
+      if (!directoryChanged) {
+        final paths = entries.map((entry) => entry.path).toSet();
+        _selected.removeWhere((path) => !paths.contains(path));
+        if (!paths.contains(_anchor)) _anchor = null;
+      }
+      final directories = {
+        for (final entry in entries)
+          if (entry.isDir) entry.path,
+      };
+      _directoryDropKeys.removeWhere((path, _) => !directories.contains(path));
     }
   }
 
@@ -607,6 +626,7 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
     final toggle =
         additive ?? (keyboard.isMetaPressed || keyboard.isControlPressed);
     setState(() {
+      _selectionSnapshot = null;
       final anchor = entries.indexWhere((item) => item.path == _anchor);
       _focusedIndex = index;
       if (extend && anchor >= 0) {
@@ -718,12 +738,14 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
     if (primary && key == LogicalKeyboardKey.keyA) {
       setState(() {
         _selected.addAll(entries.map((entry) => entry.path));
+        _selectionSnapshot = null;
         _anchor ??= entries.first.path;
       });
     } else if (key == LogicalKeyboardKey.escape) {
       setState(() {
         _resetSelectionDrag();
         _selected.clear();
+        _selectionSnapshot = null;
         _anchor = null;
       });
     } else if ((key == LogicalKeyboardKey.enter ||
@@ -1531,6 +1553,7 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
             icon: const AppIcon(AppIcons.x, size: 14),
             onPressed: () => setState(() {
               _selected.clear();
+              _selectionSnapshot = null;
               _anchor = null;
             }),
           ),
@@ -1744,17 +1767,15 @@ class _FileBrowserPaneState extends State<FileBrowserPane> {
         path: entry.path,
         name: entry.name,
         isDirectory: entry.isDir,
-        selectedFiles: List.of(_filesFor(entry)),
+        selectedFiles: targets,
       ),
       dragAnchorStrategy: pointerDragAnchorStrategy,
       feedback: shadcn.Card(
         child: SizedBox(
           width: 200,
           child: Text(
-            _filesFor(entry).length > 1
-                ? '已选择 @count 个文件'.trParams({
-                    'count': '${_filesFor(entry).length}',
-                  })
+            multi
+                ? '已选择 @count 个文件'.trParams({'count': '${targets.length}'})
                 : entry.name,
             overflow: TextOverflow.ellipsis,
           ),

@@ -48,6 +48,7 @@ class TerminalTabWorkspace extends StatefulWidget {
 
 class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
   final _splitKeys = <String, GlobalKey>{};
+  final _mountedPanels = <(String, TerminalSidePanelKind)>{};
   String? _zoomed;
 
   @override
@@ -69,6 +70,8 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
 
     visit(widget.tab.layout);
     _splitKeys.removeWhere((id, _) => !live.contains(id));
+    final hostIds = {for (final session in widget.sessions) session.host.id};
+    _mountedPanels.removeWhere((entry) => !hostIds.contains(entry.$1));
   }
 
   bool _toggleZoom(String id) {
@@ -89,29 +92,24 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
     );
   }
 
-  Widget _panes(Map<String, Session> sessions, bool synced) => Stack(
+  Widget _panes(Map<String, Session> sessions) => Stack(
     fit: StackFit.expand,
     children: [
       Offstage(
         offstage: _zoomed != null,
-        child: _layout(widget.tab.layout, sessions, synced),
+        child: _layout(widget.tab.layout, sessions),
       ),
-      if (_zoomed case final id?)
-        _pane(sessions[id]!, split: true, synced: synced),
+      if (_zoomed case final id?) _pane(sessions[id]!, split: true),
     ],
   );
 
-  Widget _layout(
-    SessionLayout layout,
-    Map<String, Session> sessions,
-    bool synced,
-  ) {
+  Widget _layout(SessionLayout layout, Map<String, Session> sessions) {
     if (layout is SessionSplit) {
       return _ResizableTerminalSplit(
         key: _splitKeys.putIfAbsent(layout.id, GlobalKey.new),
         axis: layout.axis,
-        first: _layout(layout.first, sessions, synced),
-        second: _layout(layout.second, sessions, synced),
+        first: _layout(layout.first, sessions),
+        second: _layout(layout.second, sessions),
       );
     }
     final id = (layout as SessionPane).sessionId;
@@ -120,40 +118,44 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
     if (id == _zoomed) return const SizedBox.expand();
     return ExcludeFocus(
       excluding: _zoomed != null,
-      child: _pane(sessions[id]!, split: sessions.length > 1, synced: synced),
+      child: _pane(sessions[id]!, split: sessions.length > 1),
     );
   }
 
-  Widget _pane(Session session, {required bool split, required bool synced}) {
+  Widget _pane(Session session, {required bool split}) {
     final id = session.id;
     final selected = widget.tab.selectedSessionId == id;
     final child = widget.paneBuilder(session, selected, _zoomed == id);
     if (!split) return _dropZones(session, child);
+    final contents = Stack(
+      fit: StackFit.expand,
+      children: [
+        child,
+        Positioned(
+          top: AppTheme.terminalPaneControlsInset,
+          right: AppTheme.terminalPaneControlsInset,
+          child: _paneControls(id),
+        ),
+      ],
+    );
+    final controller = Get.find<SessionController>();
     return Listener(
-      onPointerDown: (_) => Get.find<SessionController>().activate(id),
+      onPointerDown: (_) => controller.activate(id),
       child: _dropZones(
         session,
-        Container(
-          key: ValueKey('terminal-pane-$id'),
-          decoration: BoxDecoration(
-            border: Border.all(
-              color: synced
-                  ? StatusColors.connecting
-                  : selected && widget.active
-                  ? AppTheme.terminalSelectedBorder
-                  : AppTheme.terminalBorder,
-            ),
-          ),
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              child,
-              Positioned(
-                top: AppTheme.terminalPaneControlsInset,
-                right: AppTheme.terminalPaneControlsInset,
-                child: _paneControls(id),
+        Obx(
+          () => Container(
+            key: ValueKey('terminal-pane-$id'),
+            decoration: BoxDecoration(
+              border: Border.all(
+                color: controller.isInputSyncEnabled(widget.tab.id)
+                    ? StatusColors.connecting
+                    : selected && widget.active
+                    ? AppTheme.terminalSelectedBorder
+                    : AppTheme.terminalBorder,
               ),
-            ],
+            ),
+            child: contents,
           ),
         ),
       ),
@@ -317,9 +319,7 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
           child: ColoredBox(
             key: const ValueKey('terminal-surface'),
             color: AppTheme.terminalBackground,
-            child: Builder(
-              builder: (context) => Obx(() => _buildWorkspace(context)),
-            ),
+            child: Builder(builder: _buildWorkspace),
           ),
         ),
       ),
@@ -332,12 +332,11 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
     };
     final selected = sessions[widget.tab.selectedSessionId]!;
     final controller = Get.find<SessionController>();
-    final synced = controller.isInputSyncEnabled(widget.tab.id);
     if (selected.kind == SessionKind.containerTerminal) {
       return Column(
         children: [
-          _toolbar(selected, _splitButtons(controller, selected, synced)),
-          Expanded(child: _panes(sessions, synced)),
+          _toolbar(selected, _splitButtons(controller, selected)),
+          Expanded(child: _panes(sessions)),
         ],
       );
     }
@@ -358,7 +357,7 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
         toolbarBuilder: (context, panel, canExpand, toggle) => _toolbar(
           selected,
           [
-            ..._splitButtons(controller, selected, synced),
+            ..._splitButtons(controller, selected),
             _toolbarDivider(),
             _toolbarButton(
               name: 'open-sftp',
@@ -456,7 +455,7 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
             ),
           ],
         ),
-        terminal: _panes(sessions, synced),
+        terminal: _panes(sessions),
       ),
     );
   }
@@ -496,6 +495,9 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
     final tabId = widget.tab.id;
     final hostId = session.host.id;
     final active = widget.active && visible;
+    if (visible) _mountedPanels.add((hostId, panel));
+    bool mounted(TerminalSidePanelKind kind) =>
+        _mountedPanels.contains((hostId, kind));
     return ExcludeFocus(
       key: ValueKey(hostId),
       excluding: !active,
@@ -525,43 +527,73 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
               index: panel.index,
               sizing: StackFit.expand,
               children: [
-                ServerStatusPanel(
-                  source: controller.serverStatusSource(tabId, hostId: hostId),
-                  sourceUnavailableMessage: session.phase == SessionPhase.ready
-                      ? null
-                      : (session.phase.isBusy ? '连接建立后将显示服务状态' : '连接未就绪，暂无服务状态')
-                            .tr,
-                  active: active && panel == TerminalSidePanelKind.status,
-                ),
-                ProcessManagerPanel(
-                  source: controller.processManagerSource(
-                    tabId,
-                    hostId: hostId,
-                  ),
-                  active: active && panel == TerminalSidePanelKind.processes,
-                ),
-                DockerManagerPanel(
-                  source: controller.dockerManagerSource(tabId, hostId: hostId),
-                  onOpenTerminal:
-                      active && controller.canOpenDockerTerminal(session.id)
-                      ? (resource) async {
-                          await controller.openDockerTerminal(
-                            session.id,
-                            resource,
-                          );
-                        }
-                      : null,
-                  active: active && panel == TerminalSidePanelKind.docker,
-                ),
-                NetworkPortsPanel(
-                  source: controller.networkPortsSource(tabId, hostId: hostId),
-                  hostname: session.host.hostname,
-                  active: active && panel == TerminalSidePanelKind.networkPorts,
-                ),
-                FirewallPanel(
-                  source: controller.firewallSource(tabId, hostId: hostId),
-                  active: active && panel == TerminalSidePanelKind.firewall,
-                ),
+                mounted(TerminalSidePanelKind.status)
+                    ? ServerStatusPanel(
+                        source: controller.serverStatusSource(
+                          tabId,
+                          hostId: hostId,
+                        ),
+                        sourceUnavailableMessage:
+                            session.phase == SessionPhase.ready
+                            ? null
+                            : (session.phase.isBusy
+                                      ? '连接建立后将显示服务状态'
+                                      : '连接未就绪，暂无服务状态')
+                                  .tr,
+                        active: active && panel == TerminalSidePanelKind.status,
+                      )
+                    : const SizedBox.shrink(),
+                mounted(TerminalSidePanelKind.processes)
+                    ? ProcessManagerPanel(
+                        source: controller.processManagerSource(
+                          tabId,
+                          hostId: hostId,
+                        ),
+                        active:
+                            active && panel == TerminalSidePanelKind.processes,
+                      )
+                    : const SizedBox.shrink(),
+                mounted(TerminalSidePanelKind.docker)
+                    ? DockerManagerPanel(
+                        source: controller.dockerManagerSource(
+                          tabId,
+                          hostId: hostId,
+                        ),
+                        onOpenTerminal:
+                            active &&
+                                controller.canOpenDockerTerminal(session.id)
+                            ? (resource) async {
+                                await controller.openDockerTerminal(
+                                  session.id,
+                                  resource,
+                                );
+                              }
+                            : null,
+                        active: active && panel == TerminalSidePanelKind.docker,
+                      )
+                    : const SizedBox.shrink(),
+                mounted(TerminalSidePanelKind.networkPorts)
+                    ? NetworkPortsPanel(
+                        source: controller.networkPortsSource(
+                          tabId,
+                          hostId: hostId,
+                        ),
+                        hostname: session.host.hostname,
+                        active:
+                            active &&
+                            panel == TerminalSidePanelKind.networkPorts,
+                      )
+                    : const SizedBox.shrink(),
+                mounted(TerminalSidePanelKind.firewall)
+                    ? FirewallPanel(
+                        source: controller.firewallSource(
+                          tabId,
+                          hostId: hostId,
+                        ),
+                        active:
+                            active && panel == TerminalSidePanelKind.firewall,
+                      )
+                    : const SizedBox.shrink(),
               ],
             ),
           ),
@@ -620,7 +652,8 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
       for (final pane in widget.sessions)
         if (pane.host.id != selected.host.id) pane.host.id: pane.host.name,
     };
-    final mixed = otherServices.isNotEmpty;
+    final showFullTitle =
+        otherServices.isNotEmpty || selected.dockerTarget != null;
     final title = [selected.title, ...otherServices.values].join(' / ');
     final address = selected.address;
     final titleText = Text(
@@ -656,7 +689,7 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
               ),
               const SizedBox(width: 8),
               Flexible(
-                child: mixed
+                child: showFullTitle
                     ? shadcn.Tooltip(
                         tooltip: (_) =>
                             shadcn.TooltipContainer(child: Text(title)),
@@ -740,12 +773,12 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
     color: AppTheme.terminalBorder,
   );
 
-  List<Widget> _splitButtons(
-    SessionController controller,
-    Session selected,
-    bool synced,
-  ) {
+  List<Widget> _splitButtons(SessionController controller, Session selected) {
     final canSplit = controller.canSplitTerminal(selected.id);
+    final canSync =
+        widget.sessions.length > 1 &&
+        _zoomed == null &&
+        controller.canSyncInput(widget.tab.id);
     return [
       _toolbarButton(
         name: 'split-horizontal',
@@ -776,24 +809,25 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
       ),
       if (widget.sessions.length > 1) ...[
         const SizedBox(width: 4),
-        _toolbarButton(
-          name: 'input-sync',
-          label:
-              (_zoomed != null
-                      ? '还原分屏后可同步输入'
-                      : synced
-                      ? '同步输入中（点击关闭）'
-                      : '同步输入到此页签的所有窗格')
-                  .tr,
-          onPressed:
-              _zoomed == null &&
-                  (synced || controller.canSyncInput(widget.tab.id))
-              ? () => controller.toggleInputSync(widget.tab.id)
-              : null,
-          icon: AppIcons.arrowLeftRight,
-          selected: synced,
-          accent: synced ? StatusColors.connecting : null,
-        ),
+        Obx(() {
+          final synced = controller.isInputSyncEnabled(widget.tab.id);
+          return _toolbarButton(
+            name: 'input-sync',
+            label:
+                (_zoomed != null
+                        ? '还原分屏后可同步输入'
+                        : synced
+                        ? '同步输入中（点击关闭）'
+                        : '同步输入到此页签的所有窗格')
+                    .tr,
+            onPressed: _zoomed == null && (synced || canSync)
+                ? () => controller.toggleInputSync(widget.tab.id)
+                : null,
+            icon: AppIcons.arrowLeftRight,
+            selected: synced,
+            accent: synced ? StatusColors.connecting : null,
+          );
+        }),
       ],
     ];
   }

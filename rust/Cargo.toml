@@ -13,6 +13,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(frb_expand)"] }
 alacritty_terminal = { version = "=0.26.0", default-features = false }
 anyhow = "1.0.104"
 flutter_rust_bridge = "=2.13.0"
+futures-util = "0.3"
 russh = "0.62.4"
 russh-sftp = "2.3.0"
 tokio = { version = "1.53.1", features = ["full"] }
@@ -42,6 +43,12 @@ unicode-width = "0.2"
 openh264 = "0.9.9"
 rcgen = "0.14"
 tokio = { version = "1.53.1", features = ["test-util"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
 
 # Keep CPU bitmap/video decoders usable during Flutter Debug sessions too.
 [profile.dev.package.rust_lib_pagashell]

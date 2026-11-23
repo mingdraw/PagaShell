@@ -29,6 +29,7 @@ import 'session_close_confirmation.dart';
 import 'widgets/sidebar.dart';
 import 'widgets/window_controls.dart';
 import 'widgets/workspace.dart';
+import 'workspace_visibility.dart';
 
 /// 应用主框架：左侧服务栏、中间会话工作区和独立 Agent 右栏。
 ///
@@ -55,6 +56,9 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
   bool? _nativeTarget;
   late final Worker _sessionChanges;
   late final AppLifecycleListener _lifecycle;
+  final _monitoringVisible = ValueNotifier(true);
+  bool _windowMinimized = false;
+  AppLifecycleState? _lifecycleState;
   Future<bool>? _exitPending;
   bool _allowExit = false;
   bool _destroying = false;
@@ -84,8 +88,14 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
     });
     FocusManager.instance.addEarlyKeyEventHandler(_handleShortcut);
     _window.addListener(this);
+    _lifecycleState = WidgetsBinding.instance.lifecycleState;
+    _updateMonitoringVisibility();
     _lifecycle = AppLifecycleListener(
       onInactive: _shortcutKeys.clear,
+      onStateChange: (state) {
+        _lifecycleState = state;
+        _updateMonitoringVisibility();
+      },
       onExitRequested: () async =>
           await _prepareExit() ? AppExitResponse.exit : AppExitResponse.cancel,
     );
@@ -238,7 +248,8 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
     if (_allowExit) return Future.value(true);
     return _exitPending ??= (() async {
       var allow = true;
-      if (Get.isRegistered<AgentController>()) {
+      if (Get.isRegistered<AgentController>() &&
+          !Get.isPrepared<AgentController>()) {
         final agent = Get.find<AgentController>();
         allow = await agent.prepareForExit();
         if (!allow && mounted) {
@@ -300,6 +311,7 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
     _windowChannel.setMethodCallHandler(null);
     FocusManager.instance.removeEarlyKeyEventHandler(_handleShortcut);
     _lifecycle.dispose();
+    _monitoringVisible.dispose();
     _sessionChanges.dispose();
     _window.removeListener(this);
     if (!(_nativeTransition?.isCompleted ?? true)) {
@@ -337,6 +349,25 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
 
   @override
   void onWindowBlur() => _shortcutKeys.clear();
+
+  @override
+  void onWindowMinimized() {
+    _windowMinimized = true;
+    _updateMonitoringVisibility();
+  }
+
+  @override
+  void onWindowRestored() {
+    _windowMinimized = false;
+    _updateMonitoringVisibility();
+  }
+
+  void _updateMonitoringVisibility() {
+    _monitoringVisible.value =
+        !_windowMinimized &&
+        _lifecycleState != AppLifecycleState.hidden &&
+        _lifecycleState != AppLifecycleState.paused;
+  }
 
   void _cycleTab(int step) {
     final tabs = _sessions.tabs;
@@ -485,7 +516,10 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
           child: shadcn.Scaffold(
             child: AgentWorkspace(
               sidebar: _AnimatedSidebar(sidebarKey: _sidebar),
-              child: const Workspace(),
+              child: WorkspaceVisibility(
+                notifier: _monitoringVisible,
+                child: const Workspace(),
+              ),
             ),
           ),
         ),

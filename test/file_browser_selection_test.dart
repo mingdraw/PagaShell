@@ -23,7 +23,7 @@ class _Fixture {
     : local = _entries(FileBrowserSide.local, count),
       remote = _entries(FileBrowserSide.remote, count);
 
-  final List<FileBrowserEntry> local;
+  List<FileBrowserEntry> local;
   final List<FileBrowserEntry> remote;
   final rebuild = ValueNotifier(0);
   final transfers = <(FileBrowserSide, List<FileBrowserEntry>)>[];
@@ -96,6 +96,39 @@ ScrollPosition _scroll(WidgetTester tester, FileBrowserSide side) => tester
 
 void main() {
   tearDown(Get.reset);
+
+  testWidgets('目录刷新保留所选路径，传输使用刷新后的文件元数据', (tester) async {
+    const side = FileBrowserSide.local;
+    final fixture = _Fixture();
+    await fixture.open(tester);
+    await tester.tap(_row(side, '1.txt'));
+    await tester.pump(kDoubleTapTimeout);
+    final send = findAppIconButton('上传所选文件');
+    await tester.tap(send);
+    await tester.pump();
+    final first = fixture.transfers.single.$2;
+    expect(first.single.size, 100);
+
+    fixture.local = [
+      for (final entry in fixture.local)
+        if (entry.name == '1.txt')
+          FileBrowserEntry(
+            name: entry.name,
+            path: entry.path,
+            isDir: false,
+            size: 2048,
+          )
+        else
+          entry,
+    ];
+    fixture.rebuild.value++;
+    await tester.pump();
+    expect(_selected(tester, side), {'/local/1.txt'});
+    await tester.tap(send);
+    await tester.pump();
+    expect(fixture.transfers.last.$2.single.size, 2048);
+    expect(first.single.size, 100);
+  });
 
   for (final side in FileBrowserSide.values) {
     testWidgets('${side.name} 空白处反向画框实时选择文件和目录，收小选框更新高亮且不发起传输', (tester) async {

@@ -5,6 +5,55 @@ const OLD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 const NEW: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const IMAGE: &str = "registry.test/app:v2";
 
+#[tokio::test]
+async fn docker_http_exchange_reuses_one_stream_for_multiple_operations() {
+    use hyper::service::service_fn;
+    let (client, server) = tokio::io::duplex(4096);
+    let worker = tokio::spawn(async move {
+        hyper::server::conn::http1::Builder::new()
+            .serve_connection(
+                TokioIo::new(server),
+                service_fn(|request: Request<hyper::body::Incoming>| async move {
+                    let uri = request.uri().path().to_owned();
+                    let body = request.into_body().collect().await.unwrap().to_bytes();
+                    Ok::<_, std::convert::Infallible>(hyper::Response::new(Full::new(Bytes::from(
+                        format!("{uri}:{body:?}"),
+                    ))))
+                }),
+            )
+            .await
+    });
+    let connection = tokio::sync::Mutex::new(None);
+    let mut client = Some(client);
+    for (method, url, data) in [
+        (Method::GET, "/inspect", Bytes::new()),
+        (Method::POST, "/start", Bytes::from_static(b"start")),
+    ] {
+        let request = Request::builder()
+            .method(method)
+            .uri(url)
+            .body(Full::new(data.clone()))
+            .unwrap();
+        let response = exchange(
+            &connection,
+            async {
+                ApiConnection::handshake(client.take().expect("opened a second stream")).await
+            },
+            request,
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, format!("{url}:{data:?}").as_bytes());
+    }
+    drop(connection);
+    tokio::time::timeout(Duration::from_secs(1), worker)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
 fn original() -> Value {
     json!({"Id":OLD,"Name":"/app","Image":"sha256:original",
       "State":{"Running":true,"Paused":false},

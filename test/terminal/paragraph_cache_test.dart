@@ -115,4 +115,75 @@ void main() {
       expect(activeCache.glyph(1), same(glyph));
     });
   });
+
+  test('非 const 的等价 TerminalStyle 共享字形缓存且赋值时不失效绘制版本', () {
+    final firstStyle = TerminalStyle(
+      fontSize: 15,
+      fontFamily: 'FiraCode Nerd Font Mono',
+      fontFamilyFallback: List<String>.of(['Menlo', 'PingFang SC']),
+    );
+    final secondStyle = TerminalStyle(
+      fontSize: 15,
+      fontFamily: 'FiraCode Nerd Font Mono',
+      fontFamilyFallback: List<String>.of(['Menlo', 'PingFang SC']),
+    );
+    expect(identical(firstStyle, secondStyle), isFalse);
+    expect(firstStyle, secondStyle);
+    expect(firstStyle.hashCode, secondStyle.hashCode);
+
+    final firstCache = ParagraphCache.acquire(firstStyle, TextScaler.noScaling);
+    final secondCache = ParagraphCache.acquire(
+      secondStyle,
+      TextScaler.noScaling,
+    );
+    expect(secondCache, same(firstCache));
+    final glyph = firstCache.putGlyph(42, _layout('A'));
+
+    final painter = TerminalPainter(
+      theme: TerminalThemes.defaultTheme,
+      textStyle: firstStyle,
+      textScaler: TextScaler.noScaling,
+    );
+    final generationBefore = painter.generation;
+    painter.textStyle = secondStyle;
+    expect(painter.generation, generationBefore);
+    expect(glyph.debugDisposed, isFalse);
+
+    painter.dispose();
+    ParagraphCache.release(firstStyle, TextScaler.noScaling);
+    ParagraphCache.release(secondStyle, TextScaler.noScaling);
+    expect(glyph.debugDisposed, isTrue);
+  });
+
+  test('TerminalTheme 支持值相等与哈希一致', () {
+    final themeA = TerminalTheme(
+      cursor: TerminalThemes.defaultTheme.cursor,
+      selection: TerminalThemes.defaultTheme.selection,
+      foreground: TerminalThemes.defaultTheme.foreground,
+      background: TerminalThemes.defaultTheme.background,
+      black: TerminalThemes.defaultTheme.black,
+      red: TerminalThemes.defaultTheme.red,
+      green: TerminalThemes.defaultTheme.green,
+      yellow: TerminalThemes.defaultTheme.yellow,
+      blue: TerminalThemes.defaultTheme.blue,
+      magenta: TerminalThemes.defaultTheme.magenta,
+      cyan: TerminalThemes.defaultTheme.cyan,
+      white: TerminalThemes.defaultTheme.white,
+      brightBlack: TerminalThemes.defaultTheme.brightBlack,
+      brightRed: TerminalThemes.defaultTheme.brightRed,
+      brightGreen: TerminalThemes.defaultTheme.brightGreen,
+      brightYellow: TerminalThemes.defaultTheme.brightYellow,
+      brightBlue: TerminalThemes.defaultTheme.brightBlue,
+      brightMagenta: TerminalThemes.defaultTheme.brightMagenta,
+      brightCyan: TerminalThemes.defaultTheme.brightCyan,
+      brightWhite: TerminalThemes.defaultTheme.brightWhite,
+      searchHitBackground: TerminalThemes.defaultTheme.searchHitBackground,
+      searchHitBackgroundCurrent:
+          TerminalThemes.defaultTheme.searchHitBackgroundCurrent,
+      searchHitForeground: TerminalThemes.defaultTheme.searchHitForeground,
+    );
+    expect(identical(themeA, TerminalThemes.defaultTheme), isFalse);
+    expect(themeA, TerminalThemes.defaultTheme);
+    expect(themeA.hashCode, TerminalThemes.defaultTheme.hashCode);
+  });
 }

@@ -1,6 +1,9 @@
 import 'dart:convert';
+import 'dart:isolate';
+import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
+import 'package:flutter/foundation.dart' show listEquals;
 
 import '../../domain/vault/secret_store.dart';
 import 'encrypted_vault_storage.dart';
@@ -9,7 +12,7 @@ import 'encrypted_vault_storage.dart';
 ///
 /// 主密钥仅缓存在本实例内。旧版的逐项钥匙串记录按需迁移，只有加密文件
 /// 持久化成功后才清理旧记录；没有权限时保留旧值并允许重试。
-class EncryptedSecretStore implements SecretStore {
+class EncryptedSecretStore implements BatchSecretStore {
   EncryptedSecretStore({
     required this._keychain,
     required this._storage,
@@ -17,7 +20,6 @@ class EncryptedSecretStore implements SecretStore {
   });
 
   static const masterKeyRef = 'pagashell-vault-key-v1';
-  static final _header = utf8.encode('PagaShellVault1\n');
   static const _corrupt = SecretStoreException(
     '凭据保险库损坏或密钥不匹配，请保留保险库文件并检查系统钥匙串',
   );
@@ -25,42 +27,64 @@ class EncryptedSecretStore implements SecretStore {
   final SecretStore _keychain;
   final EncryptedVaultStorage _storage;
   final String keyRef;
-  final _cipher = AesGcm.with256bits();
-  SecretKey? _key;
+  Uint8List? _key;
+  Uint8List? _cachedCiphertext;
+  Map<String, String?>? _cachedEntries;
 
   @override
-  Future<String?> read(String ref) =>
-      _run('无法读取凭据：本地保险库不可用，请检查文件权限后重试', (transaction) async {
-        final entries = await _load(transaction);
-        if (entries.containsKey(ref)) return entries[ref];
-        // 旧条目的访问控制仍由 macOS 决定，无法用主密钥绕过首次授权。
-        final legacy = await _keychain.read(ref);
-        if (legacy == null) return null;
-        entries[ref] = legacy;
-        await _save(transaction, entries);
-        await _keychain.delete(ref);
-        return legacy;
-      });
+  Future<String?> read(String ref) async => (await readMany([ref]))[ref];
 
   @override
-  Future<void> put(String ref, String secret) =>
-      _run('无法保存凭据：本地保险库不可用，请检查文件权限后重试', (transaction) async {
-        final entries = await _loadForChange(transaction, ref);
-        // 先保证旧值已有加密副本，再清理旧项；清理失败不能提交替换值。
-        await _keychain.delete(ref);
-        entries[ref] = secret;
-        await _save(transaction, entries);
-      });
+  Future<Map<String, String?>> readMany(Iterable<String> refs) {
+    final requested = refs.toSet();
+    if (requested.isEmpty) return Future.value({});
+    return _run('无法读取凭据：本地保险库不可用，请检查文件权限后重试', (transaction) async {
+      final entries = await _load(transaction);
+      final legacy = await _legacyEntries(entries, requested);
+      if (legacy.isNotEmpty) {
+        await _save(transaction, {...entries, ...legacy});
+        for (final ref in legacy.keys) {
+          await _keychain.delete(ref);
+        }
+      }
+      return {for (final ref in requested) ref: legacy[ref] ?? entries[ref]};
+    });
+  }
 
   @override
-  Future<void> delete(String ref) =>
-      _run('无法删除凭据：本地保险库不可用，请检查文件权限后重试', (transaction) async {
-        final entries = await _loadForChange(transaction, ref);
+  Future<void> put(String ref, String secret) async {
+    await replaceMany({ref: secret});
+  }
+
+  @override
+  Future<void> delete(String ref) async {
+    await _replace({ref: null}, '无法删除凭据：本地保险库不可用，请检查文件权限后重试');
+  }
+
+  @override
+  Future<Map<String, String?>> replaceMany(Map<String, String?> changes) =>
+      _replace(Map.of(changes), '无法保存凭据：本地保险库不可用，请检查文件权限后重试');
+
+  Future<Map<String, String?>> _replace(
+    Map<String, String?> changes,
+    String failure,
+  ) {
+    if (changes.isEmpty) return Future.value({});
+    return _run(failure, (transaction) async {
+      final entries = await _load(transaction);
+      final legacy = await _legacyEntries(entries, changes.keys);
+      final baseline = legacy.isEmpty ? entries : {...entries, ...legacy};
+      // Protect legacy values before deleting their keychain copies. A failure
+      // to remove a legacy key cannot commit the replacement batch.
+      if (legacy.isNotEmpty) await _save(transaction, baseline);
+      for (final ref in changes.keys) {
         await _keychain.delete(ref);
-        // 保留已删除标记：旧版本重新写入时，不能回退复活。
-        entries[ref] = null;
-        await _save(transaction, entries);
-      });
+      }
+      // Null is a tombstone, so a legacy item cannot resurrect a deleted key.
+      await _save(transaction, {...baseline, ...changes});
+      return {for (final ref in changes.keys) ref: baseline[ref]};
+    });
+  }
 
   Future<T> _run<T>(
     String failure,
@@ -75,22 +99,21 @@ class EncryptedSecretStore implements SecretStore {
     }
   }
 
-  Future<Map<String, String?>> _loadForChange(
-    VaultTransaction transaction,
-    String ref,
+  Future<Map<String, String>> _legacyEntries(
+    Map<String, String?> entries,
+    Iterable<String> refs,
   ) async {
-    final entries = await _load(transaction);
-    if (!entries.containsKey(ref)) {
-      final legacy = await _keychain.read(ref);
-      if (legacy != null) {
-        entries[ref] = legacy;
-        await _save(transaction, entries);
-      }
+    final legacy = <String, String>{};
+    for (final ref in refs) {
+      if (entries.containsKey(ref)) continue;
+      // The original keychain record can still require macOS authorization.
+      final value = await _keychain.read(ref);
+      if (value != null) legacy[ref] = value;
     }
-    return entries;
+    return legacy;
   }
 
-  Future<SecretKey> _unlock({required bool create}) async {
+  Future<Uint8List> _unlock({required bool create}) async {
     final cached = _key;
     if (cached != null) return cached;
     final encoded = await _keychain.read(keyRef);
@@ -98,7 +121,7 @@ class EncryptedSecretStore implements SecretStore {
       try {
         final bytes = base64Decode(encoded);
         if (bytes.length != 32) throw const FormatException();
-        return _key = SecretKey(bytes);
+        return _key = bytes;
       } on FormatException {
         throw _corrupt;
       }
@@ -106,15 +129,27 @@ class EncryptedSecretStore implements SecretStore {
     if (!create) {
       throw const SecretStoreException('无法解锁凭据保险库：系统钥匙串中的密钥缺失，请保留保险库文件');
     }
-    final key = await _cipher.newSecretKey();
-    await _keychain.put(keyRef, base64Encode(await key.extractBytes()));
-    return _key = key;
+    final key = await AesGcm.with256bits().newSecretKey();
+    final bytes = Uint8List.fromList(await key.extractBytes());
+    await _keychain.put(keyRef, base64Encode(bytes));
+    return _key = bytes;
   }
 
   Future<Map<String, String?>> _load(VaultTransaction transaction) async {
     final bytes = await transaction.read();
-    if (bytes == null) return {};
-    if (bytes.length < _header.length + _cipher.nonceLength + 16) {
+    if (bytes == null) {
+      _cachedCiphertext = null;
+      _cachedEntries = null;
+      return const {};
+    }
+    // Compare under the file lock. A same-size replacement with the same mtime
+    // must still invalidate the plaintext cache.
+    if (listEquals(_cachedCiphertext, bytes)) {
+      return _cachedEntries!;
+    }
+    _cachedCiphertext = null;
+    _cachedEntries = null;
+    if (bytes.length < _header.length + AesGcm.with256bits().nonceLength + 16) {
       throw _corrupt;
     }
     for (var i = 0; i < _header.length; i++) {
@@ -122,21 +157,10 @@ class EncryptedSecretStore implements SecretStore {
     }
     final key = await _unlock(create: false);
     try {
-      final box = SecretBox.fromConcatenation(
-        bytes.sublist(_header.length),
-        nonceLength: _cipher.nonceLength,
-        macLength: 16,
-      );
-      final plain = await _cipher.decrypt(box, secretKey: key, aad: _header);
-      final decoded = jsonDecode(utf8.decode(plain));
-      if (decoded is! Map<String, dynamic> ||
-          decoded['version'] != 1 ||
-          decoded['entries'] is! Map<String, dynamic>) {
-        throw const FormatException();
-      }
-      return Map<String, String?>.from(
-        decoded['entries'] as Map<String, dynamic>,
-      );
+      final snapshot = Uint8List.fromList(bytes);
+      final entries = await _decodeInWorker(snapshot, key);
+      _cachedCiphertext = snapshot;
+      return _cachedEntries = entries;
     } on Object {
       throw _corrupt;
     }
@@ -146,13 +170,48 @@ class EncryptedSecretStore implements SecretStore {
     VaultTransaction transaction,
     Map<String, String?> entries,
   ) async {
-    final key = await _unlock(create: true);
-    // 每次写入生成独立随机 nonce，格式版本同时作为认证数据。
-    final box = await _cipher.encrypt(
-      utf8.encode(jsonEncode({'version': 1, 'entries': entries})),
-      secretKey: key,
-      aad: _header,
-    );
-    await transaction.write([..._header, ...box.concatenation()]);
+    final bytes = await _encodeInWorker(entries, await _unlock(create: true));
+    await transaction.write(bytes);
+    _cachedCiphertext = Uint8List.fromList(bytes);
+    _cachedEntries = entries;
   }
 }
+
+final _header = utf8.encode('PagaShellVault1\n');
+
+Future<Map<String, String?>> _decodeInWorker(Uint8List bytes, Uint8List key) =>
+    Isolate.run(() async {
+      final cipher = AesGcm.with256bits();
+      final box = SecretBox.fromConcatenation(
+        Uint8List.sublistView(bytes, _header.length),
+        nonceLength: cipher.nonceLength,
+        macLength: 16,
+      );
+      final plain = await cipher.decrypt(
+        box,
+        secretKey: SecretKey(key),
+        aad: _header,
+      );
+      final decoded = jsonDecode(utf8.decode(plain));
+      if (decoded is! Map<String, dynamic> ||
+          decoded['version'] != 1 ||
+          decoded['entries'] is! Map<String, dynamic>) {
+        throw const FormatException();
+      }
+      return Map<String, String?>.from(
+        decoded['entries'] as Map<String, dynamic>,
+      );
+    });
+
+Future<Uint8List> _encodeInWorker(
+  Map<String, String?> entries,
+  Uint8List key,
+) => Isolate.run(() async {
+  // A fresh random nonce for every write; the header is authenticated.
+  final box = await AesGcm.with256bits().encrypt(
+    utf8.encode(jsonEncode({'version': 1, 'entries': entries})),
+    secretKey: SecretKey(key),
+    aad: _header,
+  );
+  return Uint8List.fromList([..._header, ...box.concatenation()]);
+});

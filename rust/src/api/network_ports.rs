@@ -1,7 +1,10 @@
 use anyhow::{anyhow, Result};
 use std::time::Duration;
 
-use super::ssh::{read_only_exec, server_status_command, ReadOnlyExecPolicy};
+use super::ssh::{
+    defer_sudo_probe, read_only_exec, server_status_command, should_probe_sudo, ReadOnlyExecPolicy,
+    SudoProbe,
+};
 
 const POLICY: ReadOnlyExecPolicy = ReadOnlyExecPolicy {
     overall_timeout: Some(Duration::from_secs(8)),
@@ -15,15 +18,20 @@ const POLICY: ReadOnlyExecPolicy = ReadOnlyExecPolicy {
 
 /// 固定只读命令，独立 exec 通道，无 PTY，不读取进程命令行参数。
 pub async fn ssh_read_network_ports(session_id: u32) -> Result<String> {
-    let (output, code) = read_only_exec(
-        session_id,
-        server_status_command(include_str!("network_ports.sh")),
-        &POLICY,
-        2 * 1024 * 1024,
-    )
-    .await?;
+    let probe = should_probe_sudo(session_id, SudoProbe::Ports);
+    let mut command = server_status_command(include_str!("network_ports.sh"));
+    if !probe {
+        command.push_str(" paga-ports skip");
+    }
+    let (output, code) = read_only_exec(session_id, command, &POLICY, 2 * 1024 * 1024).await?;
     match code {
-        0 => Ok(String::from_utf8_lossy(&output).into_owned()),
+        0 => {
+            let output = String::from_utf8_lossy(&output).into_owned();
+            if probe && output.lines().nth(1) == Some("ACCESS LIMITED") {
+                defer_sudo_probe(session_id, SudoProbe::Ports);
+            }
+            Ok(output)
+        }
         64 => Err(anyhow!("网络端口仅支持 Linux 和 macOS")),
         69 => Err(anyhow!("未找到端口采集工具，请安装 ss 或 lsof")),
         77 => Err(anyhow!("没有权限读取网络端口")),

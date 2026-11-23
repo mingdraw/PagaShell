@@ -58,6 +58,7 @@ class _AgentWorkspaceState extends State<AgentWorkspace> {
   final _agentPanel = GlobalKey<AgentPanelState>();
   final _workspaceKey = GlobalKey();
   double? _dragWidth;
+  bool _panelMounted = false;
 
   void _quoteTerminalSelection(String text) {
     unawaited(_openAgentWithQuote(text));
@@ -100,6 +101,7 @@ class _AgentWorkspaceState extends State<AgentWorkspace> {
       return LayoutBuilder(
         builder: (context, constraints) {
           final visible = state.panelVisible && !fullscreen;
+          if (visible) _panelMounted = true;
           final sidebarWidth = sidebarVisible ? currentSidebarWidth : 0.0;
           final compact =
               constraints.maxWidth - sidebarWidth <
@@ -134,10 +136,13 @@ class _AgentWorkspaceState extends State<AgentWorkspace> {
                     key: const ValueKey('agent-sidebar-viewport'),
                     child: Offstage(
                       offstage: value == 0,
-                      child: Align(
-                        alignment: Alignment.centerRight,
-                        widthFactor: value,
-                        child: child,
+                      child: TickerMode(
+                        enabled: value > 0,
+                        child: Align(
+                          alignment: Alignment.centerRight,
+                          widthFactor: value,
+                          child: child,
+                        ),
                       ),
                     ),
                   ),
@@ -198,7 +203,11 @@ class _AgentWorkspaceState extends State<AgentWorkspace> {
                               ],
                             ),
                           ),
-                          Expanded(child: AgentPanel(key: _agentPanel)),
+                          Expanded(
+                            child: _panelMounted
+                                ? AgentPanel(key: _agentPanel)
+                                : const SizedBox.shrink(),
+                          ),
                         ],
                       ),
                     ),

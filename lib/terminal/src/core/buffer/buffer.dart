@@ -34,11 +34,12 @@ class Buffer {
 
   void applyFrame(TerminalFrame frame) {
     for (final update in frame.lines) {
-      final line = _byId.putIfAbsent(
-        update.id,
-        () => BufferLine(frame.columns, id: update.id),
-      );
-      line.update(update, frame.columns);
+      final existing = _byId[update.id];
+      if (existing == null) {
+        _byId[update.id] = BufferLine.fromFrame(update, frame.columns);
+      } else {
+        existing.update(update, frame.columns);
+      }
     }
     // 只更新行内容的帧（最常见）不改变行序，不分配 removed 列表。
     if (frame.trimFront > 0 ||

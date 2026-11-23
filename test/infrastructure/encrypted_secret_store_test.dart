@@ -44,6 +44,7 @@ class _FailingStorage implements EncryptedVaultStorage {
 
   final EncryptedVaultStorage delegate;
   bool failWrite = false;
+  int writes = 0;
 
   @override
   Future<T> transaction<T>(Future<T> Function(VaultTransaction) action) =>
@@ -64,6 +65,7 @@ class _FailingTransaction implements VaultTransaction {
   @override
   Future<void> write(List<int> encrypted) {
     if (storage.failWrite) throw StateError('sensitive-sentinel');
+    storage.writes++;
     return delegate.write(encrypted);
   }
 }
@@ -123,6 +125,43 @@ void main() {
       }
     }
     expect(keychain.reads, [EncryptedSecretStore.masterKeyRef]);
+  });
+
+  test('一次落盘更新一批凭据，失败保留旧值', () async {
+    await store.replaceMany({'a': 'before-a', 'b': 'before-b'});
+    final oldFile = await file.readAsBytes();
+    expect(storage.writes, 1);
+    storage.failWrite = true;
+    await expectLater(
+      store.replaceMany({'a': 'next-a', 'b': null}),
+      throwsA(isA<SecretStoreException>()),
+    );
+    expect(await file.readAsBytes(), oldFile);
+    expect(await store.readMany(['a', 'b']), {
+      'a': 'before-a',
+      'b': 'before-b',
+    });
+
+    storage.failWrite = false;
+    expect(await store.replaceMany({'a': 'next-a', 'b': null}), {
+      'a': 'before-a',
+      'b': 'before-b',
+    });
+    expect(storage.writes, 2);
+    expect(await reopen().readMany(['a', 'b']), {'a': 'next-a', 'b': null});
+  });
+
+  test('同大小同修改时间的外部替换也会让明文缓存失效', () async {
+    await store.put('ref', 'first');
+    final before = file.statSync();
+    final second = EncryptedSecretStore(
+      keychain: keychain,
+      storage: FileEncryptedVaultStorage(directory: () async => directory),
+    );
+    await second.put('ref', 'other');
+    await file.setLastModified(before.modified);
+    expect(file.statSync().size, before.size);
+    expect(await store.read('ref'), 'other');
   });
 
   test('旧条目先加密落盘再移除，后续更新无需逐条读钥匙串', () async {

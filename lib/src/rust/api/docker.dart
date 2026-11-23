@@ -18,8 +18,8 @@ Future<int> sshOpenDockerLogs({
   containerId: containerId,
 );
 
-Future<Uint8List?> sshNextDockerLogs({required int logId}) =>
-    RustLib.instance.api.crateApiDockerSshNextDockerLogs(logId: logId);
+Stream<Uint8List> sshStreamDockerLogs({required int logId}) =>
+    RustLib.instance.api.crateApiDockerSshStreamDockerLogs(logId: logId);
 
 Future<void> sshCloseDockerLogs({required int logId}) =>
     RustLib.instance.api.crateApiDockerSshCloseDockerLogs(logId: logId);

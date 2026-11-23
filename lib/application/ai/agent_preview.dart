@@ -14,7 +14,10 @@ class _AgentTurnPreview {
   AgentEntry? _reasoningEntry;
   Timer? _timer;
   bool _finished = false;
+  bool _reasoningDirty = false;
+  bool _answerDirty = false;
   static const _previewLimit = 512 * 1024;
+  static final _controlChars = RegExp(r'[\x00-\x08\x0b-\x1f\x7f-\x9f]');
 
   void add(String delta, bool reasoning) {
     if (_finished || !controller._live(generation)) return;
@@ -24,14 +27,19 @@ class _AgentTurnPreview {
     buffer.write(
       delta.length <= remaining ? delta : delta.substring(0, remaining),
     );
+    if (reasoning) {
+      _reasoningDirty = true;
+    } else {
+      _answerDirty = true;
+    }
     _timer ??= Timer(const Duration(milliseconds: 45), () {
       _timer = null;
       if (controller._live(generation)) {
-        _update(
-          _reasoning.toString(),
-          _answer.toString(),
-          AgentRequestState.running,
-        );
+        final reasoningText = _reasoningDirty ? _reasoning.toString() : null;
+        final answerText = _answerDirty ? _answer.toString() : null;
+        _reasoningDirty = false;
+        _answerDirty = false;
+        _update(reasoningText, answerText, AgentRequestState.running);
       }
     });
   }
@@ -45,6 +53,8 @@ class _AgentTurnPreview {
     _finished = true;
     _timer?.cancel();
     _timer = null;
+    _reasoningDirty = false;
+    _answerDirty = false;
     _update(reasoning, answer, state);
     return _answerEntry;
   }
@@ -55,7 +65,7 @@ class _AgentTurnPreview {
   AgentEntry? interrupt(AgentRequestState state) =>
       _finish(_reasoning.toString(), _answer.toString(), state);
 
-  void _update(String reasoning, String answer, AgentRequestState state) {
+  void _update(String? reasoning, String? answer, AgentRequestState state) {
     void apply(AgentEntryKind kind, String text) {
       final existing = kind == AgentEntryKind.reasoning
           ? _reasoningEntry
@@ -77,14 +87,17 @@ class _AgentTurnPreview {
       }
     }
 
-    final summary = reasoning
-        .replaceAll(key, '[redacted]')
-        .replaceAll(RegExp(r'[\x00-\x08\x0b-\x1f\x7f-\x9f]'), '');
-    apply(
-      AgentEntryKind.reasoning,
-      summary.length > 8000 ? '${summary.substring(0, 7999)}…' : summary,
-    );
-    if (state != AgentRequestState.running || controller._live(generation)) {
+    if (reasoning != null) {
+      final summary = reasoning
+          .replaceAll(key, '[redacted]')
+          .replaceAll(_controlChars, '');
+      apply(
+        AgentEntryKind.reasoning,
+        summary.length > 8000 ? '${summary.substring(0, 7999)}…' : summary,
+      );
+    }
+    if (answer != null &&
+        (state != AgentRequestState.running || controller._live(generation))) {
       apply(AgentEntryKind.assistant, answer);
     }
   }

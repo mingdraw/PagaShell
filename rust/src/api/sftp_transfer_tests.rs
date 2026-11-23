@@ -6,7 +6,7 @@ use russh_sftp::protocol::{
     Attrs, Data, ExtendedReply, FileAttributes, Handle, OpenFlags, Packet, Status, StatusCode,
     Version,
 };
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::Mutex as StdMutex;
 
 #[derive(Default)]
@@ -250,6 +250,15 @@ async fn fixture(
     options: Options,
     initial: Vec<u8>,
 ) -> (SftpSession, Arc<FileState>) {
+    let (client, state) = transfer_fixture(options, initial).await;
+    let session = SftpSession::new_with_config(client, config).await.unwrap();
+    (session, state)
+}
+
+async fn transfer_fixture(
+    options: Options,
+    initial: Vec<u8>,
+) -> (tokio::io::DuplexStream, Arc<FileState>) {
     let state = Arc::new(FileState {
         bytes: StdMutex::new(initial),
         exists: AtomicBool::new(!options.file_missing),
@@ -266,19 +275,141 @@ async fn fixture(
         },
     )
     .await;
-    let session = SftpSession::new_with_config(client, config).await.unwrap();
-    (session, state)
+    (client, state)
+}
+
+struct TransferMode {
+    upload: bool,
+    resume: bool,
+}
+
+async fn transfer_file(
+    stream: tokio::io::DuplexStream,
+    cancel: &CancellationToken,
+    local_path: &str,
+    remote_path: &str,
+    mode: TransferMode,
+    progress: &(impl Fn(TransferProgress) + Sync),
+) -> Result<()> {
+    if mode.upload {
+        let session = SftpSession::new_with_config(stream, sftp_client_config()).await?;
+        transfer_upload(
+            &session,
+            cancel,
+            local_path,
+            remote_path,
+            mode.resume,
+            progress,
+        )
+        .await
+    } else {
+        let session = DownloadSftp::new(stream).await?;
+        transfer_download(
+            &session,
+            cancel,
+            remote_path,
+            local_path,
+            mode.resume,
+            progress,
+        )
+        .await
+    }
 }
 
 fn payload(len: usize) -> Vec<u8> {
     (0..len).map(|index| (index % 251) as u8).collect()
 }
 
+#[tokio::test]
+async fn read_window_accepts_out_of_order_replies_and_retries_short_reads() {
+    use hyper::body::Bytes;
+    use russh_sftp::protocol::Read;
+    use tokio::io::DuplexStream;
+
+    async fn receive(peer: &mut DuplexStream) -> Packet {
+        let size = peer.read_u32().await.unwrap() as usize;
+        assert!(size <= 128);
+        let mut bytes = vec![0; size];
+        peer.read_exact(&mut bytes).await.unwrap();
+        Packet::try_from(&mut Bytes::from(bytes)).unwrap()
+    }
+    async fn respond(peer: &mut DuplexStream, packet: Packet) {
+        peer.write_all(&Bytes::try_from(packet).unwrap())
+            .await
+            .unwrap();
+    }
+    async fn request(peer: &mut DuplexStream) -> Read {
+        let Packet::Read(read) = receive(peer).await else {
+            panic!("expected a read request");
+        };
+        read
+    }
+
+    let (client, mut peer) = tokio::io::duplex(256 * 1024);
+    let bytes = payload(SFTP_DEFAULT_READ_LEN as usize * 3 + 11);
+    let server_bytes = bytes.clone();
+    let server = tokio::spawn(async move {
+        assert!(matches!(receive(&mut peer).await, Packet::Init(_)));
+        respond(&mut peer, Version::new().into()).await;
+        // No replies until four distinct offsets are in flight.
+        let mut reads = Vec::new();
+        for index in 0..4 {
+            let read = request(&mut peer).await;
+            assert_eq!(read.offset, index * u64::from(SFTP_DEFAULT_READ_LEN));
+            reads.push(read);
+        }
+        for read in reads.into_iter().rev() {
+            let len = if read.offset == 0 {
+                read.len / 2
+            } else {
+                read.len
+            };
+            let start = read.offset as usize;
+            respond(
+                &mut peer,
+                Data {
+                    id: read.id,
+                    data: server_bytes[start..start + len as usize].to_vec(),
+                }
+                .into(),
+            )
+            .await;
+        }
+        let remainder = request(&mut peer).await;
+        assert_eq!(remainder.offset, u64::from(SFTP_DEFAULT_READ_LEN / 2));
+        assert_eq!(remainder.len, SFTP_DEFAULT_READ_LEN / 2);
+        respond(
+            &mut peer,
+            Data {
+                id: remainder.id,
+                data: server_bytes[remainder.offset as usize..SFTP_DEFAULT_READ_LEN as usize]
+                    .to_vec(),
+            }
+            .into(),
+        )
+        .await;
+    });
+    let joined = async {
+        let session = DownloadSftp::new(client).await.unwrap();
+        let cancel = CancellationToken::new();
+        let mut reads = session.read_range(&cancel, "file", 0, bytes.len() as u64);
+        let mut output = Vec::new();
+        while let Some(chunk) = reads.next().await {
+            output.extend(chunk.unwrap());
+        }
+        assert_eq!(output, bytes);
+        server.await.unwrap();
+    };
+    tokio::time::timeout(Duration::from_secs(3), joined)
+        .await
+        .unwrap();
+}
+
 async fn download(session: &SftpSession, chunk: usize) -> Vec<u8> {
     let mut remote = session.open("file").await.unwrap();
     let mut buffer = vec![0; chunk];
     let mut bytes = Vec::new();
-    let cancel = AtomicBool::new(false);
+    let cancel = CancellationToken::new();
     loop {
         let len = transfer_io(&cancel, remote.read(&mut buffer))
             .await
@@ -293,7 +424,7 @@ async fn download(session: &SftpSession, chunk: usize) -> Vec<u8> {
 
 async fn upload(session: &SftpSession, bytes: &[u8], chunk: usize) {
     let mut remote = session.create("file").await.unwrap();
-    let cancel = AtomicBool::new(false);
+    let cancel = CancellationToken::new();
     for part in bytes.chunks(chunk) {
         transfer_io(&cancel, remote.write_all(part)).await.unwrap();
     }
@@ -433,7 +564,7 @@ async fn write_pipeline_is_bounded_and_flush_waits_for_acks() {
             .is_err()
     );
     gate.notify_one();
-    transfer_io(&AtomicBool::new(false), remote.flush())
+    transfer_io(&CancellationToken::new(), remote.flush())
         .await
         .unwrap();
     remote.shutdown().await.unwrap();
@@ -464,12 +595,12 @@ async fn buffered_write_and_close_errors_are_not_reported_as_success() {
         let mut remote = session.create("file").await.unwrap();
         remote.write_all(&payload(TRANSFER_CHUNK)).await.unwrap();
         if fail_write {
-            assert!(transfer_io(&AtomicBool::new(false), remote.flush())
+            assert!(transfer_io(&CancellationToken::new(), remote.flush())
                 .await
                 .is_err());
         } else {
             remote.flush().await.unwrap();
-            assert!(transfer_io(&AtomicBool::new(false), remote.shutdown())
+            assert!(transfer_io(&CancellationToken::new(), remote.shutdown())
                 .await
                 .is_err());
         }
@@ -480,8 +611,7 @@ async fn buffered_write_and_close_errors_are_not_reported_as_success() {
 #[tokio::test]
 async fn download_retains_partial_file_after_read_failure() {
     let bytes = payload(TRANSFER_CHUNK * 2 + 17);
-    let (session, _) = fixture(
-        sftp_client_config(),
+    let (session, _) = transfer_fixture(
         Options {
             fail_read_after: Some(TRANSFER_CHUNK),
             ..Options::default()
@@ -492,8 +622,8 @@ async fn download_retains_partial_file_after_read_failure() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("download.bin");
     let result = transfer_file(
-        &session,
-        &AtomicBool::new(false),
+        session,
+        &CancellationToken::new(),
         path.to_str().unwrap(),
         "file",
         TransferMode {
@@ -514,8 +644,7 @@ async fn download_retains_partial_file_after_read_failure() {
 async fn upload_retains_written_file_after_write_or_close_failure() {
     for fail_write in [true, false] {
         let bytes = payload(TRANSFER_CHUNK * 2 + 17);
-        let (session, state) = fixture(
-            sftp_client_config(),
+        let (session, state) = transfer_fixture(
             Options {
                 fail_write_after: fail_write.then_some(TRANSFER_CHUNK),
                 fail_close: !fail_write,
@@ -528,8 +657,8 @@ async fn upload_retains_written_file_after_write_or_close_failure() {
         let path = directory.path().join("upload.bin");
         tokio::fs::write(&path, &bytes).await.unwrap();
         let result = transfer_file(
-            &session,
-            &AtomicBool::new(false),
+            session,
+            &CancellationToken::new(),
             path.to_str().unwrap(),
             "file",
             TransferMode {
@@ -555,8 +684,7 @@ async fn upload_retains_written_file_after_write_or_close_failure() {
 async fn transfer_retains_existing_files_when_open_fails() {
     for upload in [true, false] {
         let bytes = b"original file".to_vec();
-        let (session, state) = fixture(
-            sftp_client_config(),
+        let (session, state) = transfer_fixture(
             Options {
                 fail_open: true,
                 ..Options::default()
@@ -568,8 +696,8 @@ async fn transfer_retains_existing_files_when_open_fails() {
         let path = directory.path().join("original.bin");
         tokio::fs::write(&path, &bytes).await.unwrap();
         let result = transfer_file(
-            &session,
-            &AtomicBool::new(false),
+            session,
+            &CancellationToken::new(),
             path.to_str().unwrap(),
             "file",
             TransferMode {
@@ -589,12 +717,12 @@ async fn transfer_retains_existing_files_when_open_fails() {
 #[tokio::test]
 async fn download_retains_written_file_after_cancellation() {
     let bytes = payload(PROGRESS_EMIT_EVERY as usize + TRANSFER_CHUNK);
-    let (session, _) = fixture(sftp_client_config(), Options::default(), bytes.clone()).await;
+    let (session, _) = transfer_fixture(Options::default(), bytes.clone()).await;
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("cancelled.bin");
-    let cancel = AtomicBool::new(false);
+    let cancel = CancellationToken::new();
     let result = transfer_file(
-        &session,
+        session,
         &cancel,
         path.to_str().unwrap(),
         "file",
@@ -604,7 +732,7 @@ async fn download_retains_written_file_after_cancellation() {
         },
         &|event| {
             assert!(!event.completed);
-            cancel.store(true, Ordering::Relaxed);
+            cancel.cancel();
         },
     )
     .await;
@@ -619,8 +747,7 @@ async fn download_retains_written_file_after_cancellation() {
 async fn single_file_transfer_completes_and_reports_final_progress() {
     for upload in [true, false] {
         let bytes = payload(TRANSFER_CHUNK + 17);
-        let (session, state) = fixture(
-            sftp_client_config(),
+        let (session, state) = transfer_fixture(
             Options::default(),
             if upload { Vec::new() } else { bytes.clone() },
         )
@@ -632,8 +759,8 @@ async fn single_file_transfer_completes_and_reports_final_progress() {
         }
         let events = StdMutex::new(Vec::new());
         transfer_file(
-            &session,
-            &AtomicBool::new(false),
+            session,
+            &CancellationToken::new(),
             path.to_str().unwrap(),
             "file",
             TransferMode {
@@ -659,8 +786,7 @@ async fn resumed_transfers_verify_prefix_and_write_only_the_remainder() {
     let bytes = payload(TRANSFER_CHUNK * 2 + 17);
     let offset = TRANSFER_CHUNK + 19;
     for upload in [true, false] {
-        let (session, state) = fixture(
-            sftp_client_config(),
+        let (session, state) = transfer_fixture(
             Options::default(),
             if upload {
                 bytes[..offset].to_vec()
@@ -676,8 +802,8 @@ async fn resumed_transfers_verify_prefix_and_write_only_the_remainder() {
             .unwrap();
         let events = StdMutex::new(Vec::new());
         transfer_file(
-            &session,
-            &AtomicBool::new(false),
+            session,
+            &CancellationToken::new(),
             path.to_str().unwrap(),
             "file",
             TransferMode {
@@ -714,8 +840,7 @@ async fn resumed_transfers_reject_mismatched_or_longer_targets_without_writing()
                 bytes[..TRANSFER_CHUNK].to_vec()
             };
             partial[0] ^= 0xff;
-            let (session, state) = fixture(
-                sftp_client_config(),
+            let (session, state) = transfer_fixture(
                 Options::default(),
                 if upload {
                     partial.clone()
@@ -730,8 +855,8 @@ async fn resumed_transfers_reject_mismatched_or_longer_targets_without_writing()
                 .await
                 .unwrap();
             let result = transfer_file(
-                &session,
-                &AtomicBool::new(false),
+                session,
+                &CancellationToken::new(),
                 path.to_str().unwrap(),
                 "file",
                 TransferMode {
@@ -767,8 +892,7 @@ async fn resumed_transfers_reject_mismatched_or_longer_targets_without_writing()
 async fn resumed_transfers_create_missing_targets_without_truncating_other_files() {
     let bytes = payload(TRANSFER_CHUNK + 17);
     for upload in [true, false] {
-        let (session, state) = fixture(
-            sftp_client_config(),
+        let (session, state) = transfer_fixture(
             Options {
                 file_missing: upload,
                 ..Options::default()
@@ -782,8 +906,8 @@ async fn resumed_transfers_create_missing_targets_without_truncating_other_files
             tokio::fs::write(&path, &bytes).await.unwrap();
         }
         transfer_file(
-            &session,
-            &AtomicBool::new(false),
+            session,
+            &CancellationToken::new(),
             path.to_str().unwrap(),
             "file",
             TransferMode {
@@ -808,8 +932,7 @@ async fn interrupted_transfers_resume_using_the_actual_preserved_bytes() {
         if upload {
             tokio::fs::write(&path, &bytes).await.unwrap();
         }
-        let (first, state) = fixture(
-            sftp_client_config(),
+        let (first, state) = transfer_fixture(
             Options {
                 fail_write_after: upload.then_some(TRANSFER_CHUNK),
                 fail_read_after: (!upload).then_some(TRANSFER_CHUNK),
@@ -819,8 +942,8 @@ async fn interrupted_transfers_resume_using_the_actual_preserved_bytes() {
         )
         .await;
         assert!(transfer_file(
-            &first,
-            &AtomicBool::new(false),
+            first,
+            &CancellationToken::new(),
             path.to_str().unwrap(),
             "file",
             TransferMode {
@@ -837,15 +960,14 @@ async fn interrupted_transfers_resume_using_the_actual_preserved_bytes() {
             tokio::fs::read(&path).await.unwrap()
         };
         assert_eq!(partial, bytes[..TRANSFER_CHUNK]);
-        let (second, state) = fixture(
-            sftp_client_config(),
+        let (second, state) = transfer_fixture(
             Options::default(),
             if upload { partial } else { bytes.clone() },
         )
         .await;
         transfer_file(
-            &second,
-            &AtomicBool::new(false),
+            second,
+            &CancellationToken::new(),
             path.to_str().unwrap(),
             "file",
             TransferMode {
@@ -874,8 +996,7 @@ async fn resume_rejects_remote_metadata_changes_before_writing() {
     let bytes = payload(TRANSFER_CHUNK * 2);
     for upload in [true, false] {
         let partial = bytes[..TRANSFER_CHUNK].to_vec();
-        let (session, state) = fixture(
-            sftp_client_config(),
+        let (session, state) = transfer_fixture(
             Options {
                 change_on_stat: Some(1),
                 ..Options::default()
@@ -893,8 +1014,8 @@ async fn resume_rejects_remote_metadata_changes_before_writing() {
             .await
             .unwrap();
         let error = transfer_file(
-            &session,
-            &AtomicBool::new(false),
+            session,
+            &CancellationToken::new(),
             path.to_str().unwrap(),
             "file",
             TransferMode {
@@ -924,8 +1045,7 @@ async fn resume_rejects_local_file_changes_during_prefix_verification() {
     for upload in [true, false] {
         let partial = bytes[..TRANSFER_CHUNK].to_vec();
         let gate = Arc::new(Notify::new());
-        let (session, state) = fixture(
-            sftp_client_config(),
+        let (session, state) = transfer_fixture(
             Options {
                 read_gate: Some(gate.clone()),
                 ..Options::default()
@@ -945,8 +1065,8 @@ async fn resume_rejects_local_file_changes_during_prefix_verification() {
         let task_path = path.clone();
         let transfer = tokio::spawn(async move {
             transfer_file(
-                &session,
-                &AtomicBool::new(false),
+                session,
+                &CancellationToken::new(),
                 task_path.to_str().unwrap(),
                 "file",
                 TransferMode {

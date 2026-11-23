@@ -66,7 +66,7 @@ ports_sudo=0
 ports_access=FULL
 if [ "$(id -u)" != 0 ]; then
   ports_access=LIMITED
-  if command -v sudo >/dev/null 2>&1; then
+  if [ "${1:-probe}" != skip ] && command -v sudo >/dev/null 2>&1; then
     ports_sudo=1
     if ports_collect >"$ports_temp/output"; then ports_access=FULL; else ports_sudo=0; fi
   fi

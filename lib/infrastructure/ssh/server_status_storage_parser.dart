@@ -2,6 +2,10 @@ import 'dart:convert';
 
 import '../../domain/ssh/server_status.dart';
 
+final _macSnapshotDevice = RegExp(r'^disk\d+s\d+s\d+$');
+final _macSliceSuffix = RegExp(r's\d+$');
+final _macWholeDiskPrefix = RegExp(r'^disk\d+');
+
 /// lsblk 的树可能重复列出跨盘 LVM/RAID 节点，先收集所有父设备关系。
 List<DiskUsage> parseLinuxStorage(
   List<String>? lines,
@@ -132,7 +136,7 @@ List<DiskUsage> parseLinuxStorage(
   final mounted = <FilesystemUsage>[];
   final fallbackContainers = {
     for (final fs in filesystems)
-      if (RegExp(r'^disk\d+s\d+s\d+$').hasMatch(_device(fs.device)))
+      if (_macSnapshotDevice.hasMatch(_device(fs.device)))
         _macWholeDevice(_device(fs.device)),
   };
   for (final fs in filesystems) {
@@ -141,7 +145,7 @@ List<DiskUsage> parseLinuxStorage(
     // 根卷可能挂载为 disk3s1s1 快照，其容量仍属于 disk3s1 所在容器。
     final volume = volumeContainers.containsKey(source)
         ? source
-        : source.replaceFirst(RegExp(r's\d+$'), '');
+        : source.replaceFirst(_macSliceSuffix, '');
     if (hiddenVolumes.contains(volume) || _macHelperMount(fs.mount)) continue;
     final containerId = volumeContainers[volume];
     final container = containers[containerId];
@@ -218,10 +222,12 @@ bool _macHelperMount(String mount) =>
     mount.startsWith('/System/Volumes/') && mount != '/System/Volumes/Data';
 
 String _macWholeDevice(String device) =>
-    RegExp(r'^disk\d+').firstMatch(device)?.group(0) ?? device;
+    _macWholeDiskPrefix.firstMatch(device)?.group(0) ?? device;
 
-String _device(Object? value) =>
-    value is String ? value.replaceFirst(RegExp(r'^/dev/'), '') : '';
+String _device(Object? value) {
+  if (value is! String) return '';
+  return value.startsWith('/dev/') ? value.substring(5) : value;
+}
 
 int? _integer(Object? value) => value is num
     ? value.toInt()

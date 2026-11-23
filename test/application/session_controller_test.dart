@@ -331,6 +331,47 @@ Future<String> _rejectChangedKey(
 
 void main() {
   group('SessionController', () {
+    test('会话状态只通知对应服务，等数量替换仍更新标签索引', () {
+      final controller = SessionController(engine: _FakeEngine());
+      addTearDown(controller.onClose);
+      controller.sessions.addAll([
+        const Session(id: 'terminal', host: _host, phase: SessionPhase.ready),
+        const Session(
+          id: 'proxy',
+          host: _host,
+          kind: SessionKind.dynamicProxy,
+          phase: SessionPhase.ready,
+        ),
+      ]);
+      controller.activeSessionId.value = 'terminal';
+      final initial = controller.tabs;
+      final changed = <String>[];
+      controller.addListenerId(
+        SessionController.hostActivityUpdateId(_host.id, gateway: false),
+        () => changed.add('host'),
+      );
+      controller.addListenerId(
+        SessionController.hostActivityUpdateId(_host.id, gateway: true),
+        () => changed.add('gateway'),
+      );
+      controller.sessions[0] = controller.sessions[0].copyWith(
+        phase: SessionPhase.failed,
+      );
+      expect(controller.tabs, same(initial));
+      expect(changed, ['host']);
+      expect(controller.hostActivity(_host.id, gateway: false).ready, isFalse);
+      expect(controller.hostActivity(_host.id, gateway: true).ready, isTrue);
+
+      controller.sessions[0] = const Session(
+        id: 'replacement',
+        host: _host,
+        phase: SessionPhase.ready,
+      );
+      expect(controller.tabById('terminal'), isNull);
+      expect(controller.tabForSession('replacement')?.id, 'replacement');
+      expect(controller.tabs.map((tab) => tab.id), ['replacement', 'proxy']);
+    });
+
     test('会话地址使用实际登录用户名，失败重试保留用户名和原服务配置', () async {
       final host = _host.copyWith(username: 'configured', port: 2222);
       for (final kind in [SessionKind.terminal, SessionKind.fileTransfer]) {
@@ -1550,7 +1591,7 @@ void main() {
           [hostId],
           [id],
         ]);
-        expect(container.title, resource.name);
+        expect(container.title, '${resource.name} · ${host.name}');
         expect(
           container.dockerTarget,
           DockerTerminalTarget(id: resource.id, name: resource.name),

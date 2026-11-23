@@ -850,6 +850,7 @@ class _FailedView extends StatelessWidget {
     final colors = shadcn.Theme.of(context).colorScheme;
     final errorMessage = AppTranslations.error(session.error ?? '未知错误');
     final hosts = savedHostControllerForSession(session);
+    final container = session.dockerTarget;
 
     return Center(
       child: SingleChildScrollView(
@@ -864,9 +865,9 @@ class _FailedView extends StatelessWidget {
             ),
             const SizedBox(height: 16),
             Text(
-              session.kind == SessionKind.containerTerminal
-                  ? '无法打开容器 @name 的终端'.trParams({'name': session.title})
-                  : '无法连接到 @address'.trParams({'address': session.address}),
+              container == null
+                  ? '无法连接到 @address'.trParams({'address': session.address})
+                  : '无法打开容器 @name 的终端'.trParams({'name': container.name}),
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 8),

@@ -35,6 +35,11 @@ class TerminalTextMatch {
 class _LogicalLine {
   _LogicalLine(List<BufferLine> source)
     : rows = [for (final line in source) (line: line, version: line.version)] {
+    if (rows.length == 1) {
+      starts.add(0);
+      text = rows[0].line.getText().trimRight();
+      return;
+    }
     final builder = StringBuffer();
     for (final row in rows) {
       starts.add(builder.length);

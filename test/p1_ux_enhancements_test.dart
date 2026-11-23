@@ -1029,6 +1029,8 @@ void main() {
     final first = find.byKey(const ValueKey('palette-host-h-prod'));
     final second = find.byKey(const ValueKey('palette-host-h-0'));
     final last = find.byKey(const ValueKey('palette-action-open-settings'));
+    expect(find.byKey(const ValueKey('palette-host-h-9')), findsNothing);
+    expect(last, findsNothing);
     final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
     await mouse.addPointer(location: tester.getCenter(first));
     await tester.pump();

@@ -577,55 +577,81 @@ class _RustDesktopSession implements RdpEngineSession {
   Future<void>? _closing;
 
   @override
-  Stream<RdpFrame> get frames async* {
+  Stream<RdpFrame> get frames {
     var sequence = 0;
-    while (!_closed) {
+    var pumping = false;
+    late final StreamController<RdpFrame> controller;
+    Future<void> pump() async {
+      if (pumping || controller.isClosed) return;
+      pumping = true;
       try {
-        final frame = await (isVnc ? vnc.vncFrame : desktop.desktopFrame)(
-          sessionId: id,
-          afterSequence: sequence,
-        );
-        if (_closed) return;
-        if (frame != null) {
+        // An async* stream only suspends at yield. When the frame RPC times
+        // out with no update, it would keep polling even with a paused viewer.
+        while (!_closed && controller.hasListener && !controller.isPaused) {
+          final frame = await (isVnc ? vnc.vncFrame : desktop.desktopFrame)(
+            sessionId: id,
+            afterSequence: sequence,
+          );
+          if (_closed || !controller.hasListener) return;
+          if (frame == null) continue;
           sequence = frame.sequence;
-          yield RdpFrame(
-            width: frame.width,
-            height: frame.height,
-            rgba: frame.rgba,
-            patchWidth: frame.bitmapWidth,
-            patchHeight: frame.bitmapHeight,
-            tiles: [
-              for (final tile in frame.tiles)
-                RdpTile(
-                  x: tile.x,
-                  y: tile.y,
-                  width: tile.width,
-                  height: tile.height,
-                  sourceX: tile.sourceX,
-                  sourceY: tile.sourceY,
-                ),
-            ],
-            cursor: frame.cursor == null
-                ? null
-                : RdpCursor(
-                    kind: switch (frame.cursor!.kind) {
-                      1 => RdpCursorKind.hidden,
-                      2 => RdpCursorKind.bitmap,
-                      _ => RdpCursorKind.system,
-                    },
-                    width: frame.cursor!.width,
-                    height: frame.cursor!.height,
-                    hotspotX: frame.cursor!.hotspotX,
-                    hotspotY: frame.cursor!.hotspotY,
-                    rgba: frame.cursor!.rgba,
+          controller.add(
+            RdpFrame(
+              width: frame.width,
+              height: frame.height,
+              rgba: frame.rgba,
+              patchWidth: frame.bitmapWidth,
+              patchHeight: frame.bitmapHeight,
+              tiles: [
+                for (final tile in frame.tiles)
+                  RdpTile(
+                    x: tile.x,
+                    y: tile.y,
+                    width: tile.width,
+                    height: tile.height,
+                    sourceX: tile.sourceX,
+                    sourceY: tile.sourceY,
                   ),
+              ],
+              cursor: frame.cursor == null
+                  ? null
+                  : RdpCursor(
+                      kind: switch (frame.cursor!.kind) {
+                        1 => RdpCursorKind.hidden,
+                        2 => RdpCursorKind.bitmap,
+                        _ => RdpCursorKind.system,
+                      },
+                      width: frame.cursor!.width,
+                      height: frame.cursor!.height,
+                      hotspotX: frame.cursor!.hotspotX,
+                      hotspotY: frame.cursor!.hotspotY,
+                      rgba: frame.cursor!.rgba,
+                    ),
+            ),
           );
         }
-      } on AnyhowException catch (e) {
-        if (_closed) return;
-        throw SshEngineException(e.message.split('\n').first, e);
+      } on Object catch (error, stack) {
+        if (!_closed && controller.hasListener) {
+          controller.addError(
+            error is AnyhowException
+                ? SshEngineException(error.message.split('\n').first, error)
+                : error,
+            stack,
+          );
+        }
+        unawaited(controller.close());
+      } finally {
+        pumping = false;
+        if (_closed && !controller.isClosed) unawaited(controller.close());
       }
     }
+
+    controller = StreamController<RdpFrame>(
+      sync: true,
+      onListen: () => scheduleMicrotask(() => unawaited(pump())),
+      onResume: () => unawaited(pump()),
+    );
+    return controller.stream;
   }
 
   Future<void> _input({
@@ -1305,7 +1331,7 @@ class _RustEngineSession
   @override
   Future<void> acknowledgeTerminalFrame(int frameId) => _guard(() async {
     if (_closed) return;
-    await rust.sshTerminalAck(sessionId: _sessionId, frameId: frameId);
+    rust.sshTerminalAck(sessionId: _sessionId, frameId: frameId);
   });
 
   @override
@@ -1478,11 +1504,7 @@ class _RustDockerLogSession implements DockerLogSession {
 
   Stream<List<int>> _chunks() async* {
     try {
-      while (_closing == null) {
-        final bytes = await docker.sshNextDockerLogs(logId: id);
-        if (_closing != null || bytes == null) return;
-        yield bytes;
-      }
+      if (_closing == null) yield* docker.sshStreamDockerLogs(logId: id);
     } on AnyhowException catch (e) {
       throw SshEngineException(e.message.split('\n').first, e);
     }

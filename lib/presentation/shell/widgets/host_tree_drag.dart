@@ -23,7 +23,7 @@ class HostTreeDraggable extends StatelessWidget {
   final HostTreeItem item;
   final TreeDragAnchor dragAnchor;
   final Widget child;
-  final Widget preview;
+  final WidgetBuilder preview;
 
   @override
   Widget build(BuildContext context) => AppTreeDraggable<HostTreeItem>(

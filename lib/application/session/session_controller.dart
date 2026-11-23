@@ -32,6 +32,13 @@ enum TerminalInsertResult {
   invalidText,
 }
 
+typedef HostSessionActivity = ({
+  bool active,
+  int count,
+  bool ready,
+  bool connecting,
+});
+
 /// 全局会话控制器：负责终端、文件传输与端口转发标签的创建、激活与关闭。
 ///
 /// [SshEngine] 通过构造函数显式注入（装配见 AppBinding），
@@ -45,7 +52,15 @@ class SessionController extends GetxController {
     this._vncEngine,
     this._systemProxy,
     this._shouldCloseTerminalOnDisconnect,
-  });
+  }) {
+    _sessionsChanged = sessions.listen((snapshot) {
+      _tabState.updateSessions(snapshot);
+      _updateHostActivity(snapshot, activeSessionId.value);
+    });
+    _activeChanged = activeSessionId.listen((id) {
+      _updateHostActivity(sessions(), id);
+    });
+  }
 
   final SshEngine _engine;
   final RdpEngine? _rdpEngine;
@@ -61,6 +76,52 @@ class SessionController extends GetxController {
   final RxList<String> recentHostIds = <String>[].obs;
   final _tabState = _SessionTabs();
   final _inputSync = Rxn<({String tabId, Map<String, Terminal> targets})>();
+  late final StreamSubscription<List<Session>> _sessionsChanged;
+  late final StreamSubscription<String?> _activeChanged;
+  Map<(String, bool), HostSessionActivity> _hostActivity = {};
+  static const _noHostActivity = (
+    active: false,
+    count: 0,
+    ready: false,
+    connecting: false,
+  );
+
+  static Object hostActivityUpdateId(String hostId, {required bool gateway}) =>
+      ('session-host-activity', hostId, gateway);
+
+  HostSessionActivity hostActivity(String hostId, {required bool gateway}) =>
+      _hostActivity[(hostId, gateway)] ?? _noHostActivity;
+
+  void _updateHostActivity(List<Session> snapshot, String? active) {
+    final next = <(String, bool), HostSessionActivity>{};
+    for (final session in snapshot) {
+      final key = (
+        session.host.id,
+        session.kind == SessionKind.portForward ||
+            session.kind == SessionKind.dynamicProxy,
+      );
+      final included =
+          session.kind != SessionKind.containerTerminal &&
+          session.phase != SessionPhase.closed;
+      final previous = next[key] ?? _noHostActivity;
+      if (!included && session.id != active) continue;
+      next[key] = (
+        active: previous.active || session.id == active,
+        count: previous.count + (included ? 1 : 0),
+        ready:
+            previous.ready || (included && session.phase == SessionPhase.ready),
+        connecting: previous.connecting || (included && session.phase.isBusy),
+      );
+    }
+    final previous = _hostActivity;
+    _hostActivity = next;
+    final changed = [
+      for (final (hostId, gateway) in {...previous.keys, ...next.keys})
+        if (previous[(hostId, gateway)] != next[(hostId, gateway)])
+          hostActivityUpdateId(hostId, gateway: gateway),
+    ];
+    if (changed.isNotEmpty) update(changed);
+  }
 
   void _recordRecentHost(String hostId) {
     recentHostIds.remove(hostId);
@@ -70,14 +131,12 @@ class SessionController extends GetxController {
     }
   }
 
-  List<SessionTab> get tabs => _tabState.list(sessions);
+  List<SessionTab> get tabs => _tabState.list();
   String? get activeTabId => tabForSession(activeSessionId.value)?.id;
 
-  SessionTab? tabForSession(String? id) =>
-      tabs.where((tab) => tab.sessionIds.contains(id)).firstOrNull;
+  SessionTab? tabForSession(String? id) => _tabState.forSession(id);
 
-  SessionTab? tabById(String id) =>
-      tabs.where((tab) => tab.id == id).firstOrNull;
+  SessionTab? tabById(String id) => _tabState.byId(id);
 
   bool _canReuseTerminalConnection(String id) =>
       !_disposed &&
@@ -2003,6 +2062,8 @@ class SessionController extends GetxController {
   @override
   void onClose() {
     _disposed = true;
+    unawaited(_sessionsChanged.cancel());
+    unawaited(_activeChanged.cancel());
     for (final connection in _serverStatusConnections.values) {
       unawaited(connection.close());
     }

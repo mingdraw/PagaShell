@@ -1,9 +1,10 @@
 part of 'agent_controller.dart';
 
 final _whitespaceCollapse = RegExp(r'\s+');
+const _historyReadError = '历史对话读取失败，请检查本地存储和凭据保险库后重试';
 
 class _AgentHistoryState {
-  final conversations = <AgentConversation>[].obs;
+  final conversations = <AgentConversationSummary>[].obs;
   final currentConversationId = RxnString();
   final loadingHistory = false.obs;
   final historyLoadFailed = false.obs;
@@ -14,6 +15,8 @@ class _AgentHistoryState {
   final deleting = <String>{};
   final deleted = <String>{};
   String? failedDeleteId;
+  String? openingId;
+  int openRevision = 0;
   Timer? saveDebounce;
   bool savePending = false;
   final turnWeights = Map<AgentTurn, int>.identity();
@@ -28,7 +31,7 @@ extension _AgentHistoryOperations on AgentController {
     loadingHistory.value = true;
     return _storage.loading = (() async {
       try {
-        final saved = await _conversations.readAll();
+        final saved = await _conversations.readSummaries();
         if (isClosed) return;
         final merged = {
           for (final item in saved)
@@ -48,7 +51,7 @@ extension _AgentHistoryOperations on AgentController {
       } on Object {
         if (!isClosed) {
           historyLoadFailed.value = true;
-          historyError.value = '历史对话读取失败，请检查本地存储和凭据保险库后重试';
+          historyError.value = _historyReadError;
         }
       } finally {
         if (!isClosed) loadingHistory.value = false;
@@ -154,7 +157,7 @@ extension _AgentHistoryOperations on AgentController {
     );
     // 一次替换，避免 removeWhere + insert 触发两次列表通知。
     conversations.assignAll([
-      snapshot,
+      snapshot.summary,
       for (final item in conversations)
         if (item.id != id) item,
     ]);
@@ -215,47 +218,73 @@ extension _AgentHistoryOperations on AgentController {
         _storage.failedDeleteId == null;
   }
 
-  bool _openConversation(String id) {
-    if (_storage.deleting.contains(id) || _storage.deleted.contains(id)) {
+  void _cancelHistoryOpen() {
+    _storage.openRevision++;
+    _storage.openingId = null;
+  }
+
+  Future<bool> _openConversation(String id, {bool Function()? canApply}) async {
+    _cancelHistoryOpen();
+    final revision = _storage.openRevision;
+    bool live() =>
+        !isClosed &&
+        revision == _storage.openRevision &&
+        !_storage.deleting.contains(id) &&
+        !_storage.deleted.contains(id) &&
+        (canApply?.call() ?? true);
+
+    if (!live() || !conversations.any((item) => item.id == id)) {
       return false;
     }
-    final saved = conversations.where((item) => item.id == id).firstOrNull;
-    if (saved == null) return false;
-    if (_storage.failedDeleteId == id) _storage.failedDeleteId = null;
-    if (currentConversationId.value == id) return true;
-    List<AgentTurn> turns;
+    if (currentConversationId.value == id) {
+      if (_storage.failedDeleteId == id) _storage.failedDeleteId = null;
+      return true;
+    }
+    _storage.openingId = id;
     try {
-      turns = saved.turns.map(AgentTurn.fromJson).toList();
+      // A queued save can still be encrypting a newer snapshot of this item.
+      final stored = _storage.unsaved[id] ?? await _conversations.read(id);
+      if (!live()) return false;
+      final saved = _storage.unsaved[id] ?? stored;
+      if (saved == null || saved.id != id) throw const FormatException();
+      final turns = saved.turns.map(AgentTurn.fromJson).toList();
+      if (_storage.failedDeleteId == id) _storage.failedDeleteId = null;
+      stop();
+      _resetConversation();
+      currentConversationId.value = saved.id;
+      _conversationModel = saved.model;
+      entries.assignAll([
+        for (final message in saved.messages)
+          AgentEntry(
+            message.kind,
+            message.text,
+            archivedCommand: message.command,
+            archivedFileChange: message.fileChange,
+            requestState: message.requestState,
+            requestError: message.requestError,
+            toolSummary: message.toolSummary,
+            hadSessionReferences: message.hadSessionReferences,
+          ),
+      ]);
+      _setHistory(turns);
+      _historyRevision = saved.historyRevision;
+      historyTrimmed.value = saved.historyTrimmed;
+      error.value = saved.error;
+      if (!historyLoadFailed.value && historyError.value == _historyReadError) {
+        historyError.value = null;
+      }
+      return true;
     } on Object {
-      historyError.value = '历史对话读取失败，请检查本地存储和凭据保险库后重试';
+      if (live()) historyError.value = _historyReadError;
       return false;
+    } finally {
+      if (revision == _storage.openRevision) _storage.openingId = null;
     }
-    stop();
-    _resetConversation();
-    currentConversationId.value = saved.id;
-    _conversationModel = saved.model;
-    entries.assignAll([
-      for (final message in saved.messages)
-        AgentEntry(
-          message.kind,
-          message.text,
-          archivedCommand: message.command,
-          archivedFileChange: message.fileChange,
-          requestState: message.requestState,
-          requestError: message.requestError,
-          toolSummary: message.toolSummary,
-          hadSessionReferences: message.hadSessionReferences,
-        ),
-    ]);
-    _setHistory(turns);
-    _historyRevision = saved.historyRevision;
-    historyTrimmed.value = saved.historyTrimmed;
-    error.value = saved.error;
-    return true;
   }
 
   Future<bool> _deleteConversation(String id) async {
     if (!_storage.deleting.add(id)) return false;
+    if (_storage.openingId == id) _cancelHistoryOpen();
     if (currentConversationId.value == id) {
       stop();
       _resetConversation();

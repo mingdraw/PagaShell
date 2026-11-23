@@ -353,7 +353,7 @@ void main() {
     expect(connect.requests, hasLength(2));
 
     agent.clear();
-    expect(agent.openConversation(conversationId), isTrue);
+    expect(await agent.openConversation(conversationId), isTrue);
     agent.setReferencedSessions([draft]);
     await agent.retry(agent.entries.first);
     expect(agent.error.value, reselect);
@@ -412,7 +412,7 @@ void main() {
         case 'clear':
           app.agent.clear();
         case 'open':
-          expect(app.agent.openConversation(savedId), isTrue);
+          expect(await app.agent.openConversation(savedId), isTrue);
         case 'delete':
           expect(await app.agent.deleteConversation(oldId), isTrue);
         case 'exit':
@@ -519,7 +519,7 @@ void main() {
     final connect = FakeAiConnect((_) => openAiReply('unexpected'));
     final restored = await _App.create(connect, history: repository);
     await restored.agent.loadConversations();
-    expect(restored.agent.openConversation(saved.id), isTrue);
+    expect(await restored.agent.openConversation(saved.id), isTrue);
     expect(restored.agent.entries.map((e) => e.requestState.value), [
       AgentRequestState.cancelled,
       AgentRequestState.cancelled,

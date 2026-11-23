@@ -8,10 +8,13 @@ use ::vnc::{
 };
 use anyhow::{anyhow, bail, Context, Result};
 use tokio::net::TcpStream;
-use tokio::sync::{watch, Mutex, Notify};
+use tokio::sync::{mpsc, oneshot, watch, Mutex};
+use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
-use crate::api::desktop::{DesktopCursor, DesktopFrame, DesktopTile};
+use crate::api::desktop::{DesktopCursor, DesktopFrame};
 use crate::desktop::Transport;
+use crate::desktop_frame::{FrameEncoder, FrameRequest};
 
 #[cfg(test)]
 #[path = "vnc_tests.rs"]
@@ -19,17 +22,29 @@ mod tests;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 const INPUT_TIMEOUT: Duration = Duration::from_secs(5);
+const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+// Some servers answer an incremental request with zero rectangles; the decoder
+// has no event for that message. Retry only while a consumer is waiting.
+const REFRESH_RETRY: Duration = Duration::from_millis(750);
 const MAX_PIXELS: usize = 8_294_400;
 static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 static SESSIONS: LazyLock<Mutex<HashMap<u32, Arc<Session>>>> = LazyLock::new(Default::default);
 
 struct Session {
-    client: VncClient,
-    image: Mutex<Framebuffer>,
-    held: Mutex<HeldInputs>,
-    updated: Notify,
-    cancel: watch::Sender<bool>,
+    frames: mpsc::Sender<FrameRequest>,
+    inputs: mpsc::Sender<InputRequest>,
+    cancel: CancellationToken,
     finished: watch::Sender<bool>,
+}
+
+struct InputRequest {
+    kind: u8,
+    code: u32,
+    flags: u16,
+    x: u16,
+    y: u16,
+    text: String,
+    reply: oneshot::Sender<Result<()>>,
 }
 
 #[derive(Default)]
@@ -38,17 +53,26 @@ struct HeldInputs {
     buttons: u8,
     x: u16,
     y: u16,
+    typed_key: Option<u32>,
+    wheel_active: bool,
 }
 
-#[derive(Default)]
 struct Framebuffer {
     width: u16,
     height: u16,
     pixels: Vec<u8>,
-    damage: Option<Rect>,
-    cursor: Option<DesktopCursor>,
-    cursor_changed: bool,
-    sequence: u32,
+    encoder: FrameEncoder,
+}
+
+impl Default for Framebuffer {
+    fn default() -> Self {
+        Self {
+            width: 0,
+            height: 0,
+            pixels: Vec::new(),
+            encoder: FrameEncoder::new(0, 0),
+        }
+    }
 }
 
 impl Framebuffer {
@@ -63,15 +87,7 @@ impl Framebuffer {
         self.width = width;
         self.height = height;
         self.pixels = vec![0; count * 4];
-        for pixel in self.pixels.as_chunks_mut::<4>().0 {
-            pixel[3] = 255;
-        }
-        self.damage = Some(Rect {
-            x: 0,
-            y: 0,
-            width,
-            height,
-        });
+        self.encoder.resize(width, height);
         Ok(())
     }
 
@@ -80,31 +96,6 @@ impl Framebuffer {
             && r.height > 0
             && u32::from(r.x) + u32::from(r.width) <= u32::from(self.width)
             && u32::from(r.y) + u32::from(r.height) <= u32::from(self.height)
-    }
-
-    fn damage(&mut self, r: Rect) {
-        self.damage = Some(match self.damage {
-            None => r,
-            Some(old) => {
-                let x = old.x.min(r.x);
-                let y = old.y.min(r.y);
-                Rect {
-                    x,
-                    y,
-                    width: (old.x + old.width).max(r.x + r.width) - x,
-                    height: (old.y + old.height).max(r.y + r.height) - y,
-                }
-            }
-        });
-    }
-
-    fn region(&self, r: Rect) -> Vec<u8> {
-        let mut pixels = Vec::with_capacity(usize::from(r.width) * usize::from(r.height) * 4);
-        for y in r.y..r.y + r.height {
-            let offset = (usize::from(y) * usize::from(self.width) + usize::from(r.x)) * 4;
-            pixels.extend_from_slice(&self.pixels[offset..offset + usize::from(r.width) * 4]);
-        }
-        pixels
     }
 
     fn blit(&mut self, r: Rect, pixels: &[u8]) -> Result<()> {
@@ -117,12 +108,34 @@ impl Framebuffer {
                 ((usize::from(r.y) + row) * usize::from(self.width) + usize::from(r.x)) * 4;
             self.pixels[offset..offset + stride]
                 .copy_from_slice(&pixels[row * stride..(row + 1) * stride]);
-            // RFB carries RGB padding, not alpha.
-            for pixel in self.pixels[offset..offset + stride].as_chunks_mut::<4>().0 {
-                pixel[3] = 255;
-            }
         }
-        self.damage(r);
+        self.encoder.damage_region(r.x, r.y, r.width, r.height);
+        Ok(())
+    }
+
+    fn copy(&mut self, dst: Rect, src: Rect) -> Result<()> {
+        if !self.valid(src)
+            || !self.valid(dst)
+            || dst.width != src.width
+            || dst.height != src.height
+        {
+            bail!("VNC 画面数据无效");
+        }
+        let stride = usize::from(self.width) * 4;
+        let bytes = usize::from(src.width) * 4;
+        for at in 0..src.height {
+            // A downward overlapping copy must start at the bottom row.
+            let row = if dst.y > src.y {
+                src.height - at - 1
+            } else {
+                at
+            };
+            let from = usize::from(src.y + row) * stride + usize::from(src.x) * 4;
+            let to = usize::from(dst.y + row) * stride + usize::from(dst.x) * 4;
+            self.pixels.copy_within(from..from + bytes, to);
+        }
+        self.encoder
+            .damage_region(dst.x, dst.y, dst.width, dst.height);
         Ok(())
     }
 
@@ -135,17 +148,12 @@ impl Framebuffer {
                 }
             }
             VncEvent::RawImage(r, pixels) => self.blit(r, &pixels)?,
-            VncEvent::Copy(dst, src) => {
-                if !self.valid(src) || dst.width != src.width || dst.height != src.height {
-                    bail!("VNC 画面数据无效");
-                }
-                self.blit(dst, &self.region(src))?;
-            }
+            VncEvent::Copy(dst, src) => self.copy(dst, src)?,
             VncEvent::SetCursor(r, rgba) => {
                 if rgba.len() != usize::from(r.width) * usize::from(r.height) * 4 {
                     bail!("VNC 光标无效");
                 }
-                self.cursor = Some(DesktopCursor {
+                self.encoder.cursor(DesktopCursor {
                     kind: if r.width == 0 || r.height == 0 { 1 } else { 2 },
                     width: r.width,
                     height: r.height,
@@ -153,7 +161,6 @@ impl Framebuffer {
                     hotspot_y: r.y,
                     rgba,
                 });
-                self.cursor_changed = true;
             }
             VncEvent::Error(_) => bail!("VNC 连接已断开，请重新连接"),
             // Tight/JPEG and server clipboard synchronization are not negotiated.
@@ -163,53 +170,14 @@ impl Framebuffer {
         Ok(())
     }
 
+    fn ready(&self, after: u32) -> bool {
+        self.width > 0 && self.encoder.ready(after)
+    }
+
     fn frame(&mut self, after: u32) -> Option<DesktopFrame> {
-        if self.width == 0 {
-            return None;
-        }
-        let resync = after != self.sequence || after == 0;
-        if !resync && self.damage.is_none() && !self.cursor_changed {
-            return None;
-        }
-        let r = if resync {
-            Some(Rect {
-                x: 0,
-                y: 0,
-                width: self.width,
-                height: self.height,
-            })
-        } else {
-            self.damage
-        };
-        let rgba = r.map(|rect| self.region(rect)).unwrap_or_default();
-        let cursor = if resync || self.cursor_changed {
-            self.cursor.clone()
-        } else {
-            None
-        };
-        self.sequence = self.sequence.wrapping_add(1).max(1);
-        self.damage = None;
-        self.cursor_changed = false;
-        Some(DesktopFrame {
-            sequence: self.sequence,
-            width: self.width,
-            height: self.height,
-            bitmap_width: r.map_or(0, |rect| rect.width),
-            bitmap_height: r.map_or(0, |rect| rect.height),
-            rgba,
-            tiles: r
-                .map(|rect| {
-                    vec![DesktopTile {
-                        x: rect.x,
-                        y: rect.y,
-                        width: rect.width,
-                        height: rect.height,
-                        source_x: 0,
-                        source_y: 0,
-                    }]
-                })
-                .unwrap_or_default(),
-            cursor,
+        self.ready(after).then(|| {
+            self.encoder
+                .snapshot_rgba(self.width, self.height, &self.pixels, after)
         })
     }
 }
@@ -254,19 +222,18 @@ pub(crate) async fn connect(
     })
     .await
     .context("VNC 连接超时")??;
-    let (cancel, cancel_rx) = watch::channel(false);
+    let (frames, frame_rx) = mpsc::channel(4);
+    let (inputs, input_rx) = mpsc::channel(64);
     let (finished, _) = watch::channel(false);
     let session = Arc::new(Session {
-        client,
-        image: Mutex::new(Framebuffer::default()),
-        held: Mutex::new(HeldInputs::default()),
-        updated: Notify::new(),
-        cancel,
+        frames,
+        inputs,
+        cancel: CancellationToken::new(),
         finished,
     });
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     SESSIONS.lock().await.insert(id, Arc::clone(&session));
-    tokio::spawn(run(session, cancel_rx));
+    tokio::spawn(run(session, client, frame_rx, input_rx));
     Ok(id)
 }
 
@@ -283,30 +250,125 @@ fn connect_error(error: VncError) -> anyhow::Error {
     }
 }
 
-async fn run(session: Arc<Session>, mut cancel: watch::Receiver<bool>) {
-    let mut poll = tokio::time::interval(Duration::from_millis(8));
-    let mut refresh = tokio::time::interval(Duration::from_millis(33));
+async fn run(
+    session: Arc<Session>,
+    client: VncClient,
+    mut frames: mpsc::Receiver<FrameRequest>,
+    mut inputs: mpsc::Receiver<InputRequest>,
+) {
+    let mut image = Framebuffer::default();
+    let mut held = HeldInputs::default();
+    let mut pending: Option<FrameRequest> = None;
+    let mut publish_at = None;
+    let mut refresh_at = Instant::now() + REFRESH_RETRY; // The library sends the first full request.
     let result: Result<()> = async {
         loop {
+            if pending.as_ref().is_some_and(|request| request.reply.is_closed()) { pending = None; }
+            let frame_ready = pending.as_ref().is_some_and(|request| image.ready(request.after));
+            let deadline = if frame_ready { publish_at.unwrap_or_else(Instant::now) } else { refresh_at };
             tokio::select! {
-                _ = cancel.changed() => return Ok(()),
-                _ = refresh.tick() => {
-                    tokio::time::timeout(INPUT_TIMEOUT, session.client.input(X11Event::Refresh)).await??;
+                _ = session.cancel.cancelled() => return Ok(()),
+                // recv_event holds the vnc-rs mutex. Only the owner uses the client,
+                // and select drops the read future before processing an input.
+                event = client.recv_event() => {
+                    accept_event(&mut image, &mut refresh_at, event?)?;
+                    if publish_at.is_none() { publish_at = Some(Instant::now() + FRAME_INTERVAL); }
                 }
-                _ = poll.tick() => {
-                    for _ in 0..256 {
-                        let Some(event) = session.client.poll_event().await? else { break; };
-                        session.image.lock().await.apply(event)?;
-                        session.updated.notify_waiters();
+                request = frames.recv() => pending = request,
+                request = inputs.recv() => {
+                    if let Some(InputRequest { kind, code, flags, x, y, text, mut reply }) = request {
+                        let result = tokio::select! {
+                            _ = session.cancel.cancelled() => return Ok(()),
+                            _ = reply.closed() => None,
+                            result = apply_input(&client, &mut held, kind, code, flags, x, y, text) => Some(result),
+                        };
+                        if !matches!(&result, Some(Ok(()))) {
+                            let _ = tokio::time::timeout(Duration::from_millis(200), held.release_transient(&client)).await;
+                        }
+                        if let Some(result) = result { let _ = reply.send(result); }
+                    }
+                }
+                _ = tokio::time::sleep_until(deadline), if pending.is_some() => {
+                    if frame_ready {
+                        // Collect the rectangles already queued by the decoder in
+                        // the same batch before exporting the dirty tiles.
+                        for _ in 0..256 {
+                            let Some(event) = client.poll_event().await? else { break; };
+                            accept_event(&mut image, &mut refresh_at, event)?;
+                        }
+                        let request = pending.take().unwrap();
+                        publish_at = None;
+                        if !request.reply.is_closed() {
+                            if let Some(frame) = image.frame(request.after) { let _ = request.reply.send(frame); }
+                        }
+                    } else {
+                        tokio::select! {
+                            _ = session.cancel.cancelled() => return Ok(()),
+                            result = send(&client, X11Event::Refresh) => result?,
+                        }
+                        refresh_at = Instant::now() + REFRESH_RETRY;
                     }
                 }
             }
         }
     }.await;
     let _ = result; // Protocol details and server strings never enter logs/UI.
+    drop(frames);
+    drop(pending);
+    drop(inputs);
+    if session.cancel.is_cancelled() {
+        let _ = tokio::time::timeout(Duration::from_secs(1), async {
+            if let Some(code) = held.typed_key.take() {
+                held.keys.insert(code);
+            }
+            for code in held.keys.drain() {
+                let _ = client.input(X11Event::KeyEvent((code, false).into())).await;
+            }
+            let _ = client
+                .input(X11Event::PointerEvent((held.x, held.y, 0).into()))
+                .await;
+        })
+        .await;
+    }
+    let _ = client.close().await;
     session.finished.send_replace(true);
-    session.updated.notify_waiters();
-    let _ = session.client.close().await;
+}
+
+impl HeldInputs {
+    async fn release_transient(&mut self, client: &VncClient) {
+        if let Some(key) = self.typed_key {
+            if client
+                .input(X11Event::KeyEvent((key, false).into()))
+                .await
+                .is_ok()
+            {
+                self.typed_key = None;
+            }
+        }
+        if self.wheel_active
+            && client
+                .input(X11Event::PointerEvent(
+                    (self.x, self.y, self.buttons).into(),
+                ))
+                .await
+                .is_ok()
+        {
+            self.wheel_active = false;
+        }
+    }
+}
+
+fn accept_event(image: &mut Framebuffer, refresh_at: &mut Instant, event: VncEvent) -> Result<()> {
+    if matches!(
+        &event,
+        VncEvent::RawImage(..)
+            | VncEvent::Copy(..)
+            | VncEvent::SetCursor(..)
+            | VncEvent::DesktopUpdate(..)
+    ) {
+        *refresh_at = Instant::now() + FRAME_INTERVAL;
+    }
+    image.apply(event)
 }
 
 async fn get(id: u32) -> Result<Arc<Session>> {
@@ -321,17 +383,18 @@ async fn get(id: u32) -> Result<Arc<Session>> {
 pub(crate) async fn frame(id: u32, after: u32) -> Result<Option<DesktopFrame>> {
     let session = get(id).await?;
     let wait = async {
-        loop {
-            let notified = session.updated.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if *session.finished.borrow() {
-                bail!("VNC 连接已断开，请重新连接");
+        let (reply, result) = oneshot::channel();
+        session
+            .frames
+            .send(FrameRequest { after, reply })
+            .await
+            .map_err(|_| anyhow!("VNC 连接已断开，请重新连接"))?;
+        match result.await {
+            Ok(frame) => Ok(Some(frame)),
+            Err(_) if session.frames.is_closed() || session.cancel.is_cancelled() => {
+                bail!("VNC 连接已断开，请重新连接")
             }
-            if let Some(frame) = session.image.lock().await.frame(after) {
-                return Ok(Some(frame));
-            }
-            notified.await;
+            Err(_) => Ok(None),
         }
     };
     tokio::time::timeout(Duration::from_millis(500), wait)
@@ -357,11 +420,46 @@ pub(crate) async fn input(
     text: String,
 ) -> Result<()> {
     let session = get(id).await?;
-    let mut held = session.held.lock().await;
+    anyhow::ensure!(kind <= 2, "VNC 输入类型无效");
+    anyhow::ensure!(kind != 2 || text.len() <= 65536, "VNC 输入文本过长");
+    let (reply, result) = oneshot::channel();
+    tokio::time::timeout(INPUT_TIMEOUT, async {
+        session
+            .inputs
+            .send(InputRequest {
+                kind,
+                code,
+                flags,
+                x,
+                y,
+                text,
+                reply,
+            })
+            .await
+            .map_err(|_| anyhow!("VNC 输入失败，连接已断开"))?;
+        result
+            .await
+            .map_err(|_| anyhow!("VNC 输入失败，连接已断开"))?
+    })
+    .await
+    .context("VNC 输入超时")?
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn apply_input(
+    client: &VncClient,
+    held: &mut HeldInputs,
+    kind: u8,
+    code: u32,
+    flags: u16,
+    x: u16,
+    y: u16,
+    text: String,
+) -> Result<()> {
     match kind {
         0 => {
             let down = flags & 1 == 0;
-            send(&session.client, X11Event::KeyEvent((code, down).into())).await?;
+            send(client, X11Event::KeyEvent((code, down).into())).await?;
             if down {
                 held.keys.insert(code);
             } else {
@@ -398,28 +496,19 @@ pub(crate) async fn input(
             if wheel != 0 {
                 for _ in 0..code.div_ceil(120).clamp(1, 8) {
                     send(
-                        &session.client,
+                        client,
                         X11Event::PointerEvent((x, y, held.buttons | wheel).into()),
                     )
                     .await?;
-                    send(
-                        &session.client,
-                        X11Event::PointerEvent((x, y, held.buttons).into()),
-                    )
-                    .await?;
+                    held.wheel_active = true;
+                    send(client, X11Event::PointerEvent((x, y, held.buttons).into())).await?;
+                    held.wheel_active = false;
                 }
             } else {
-                send(
-                    &session.client,
-                    X11Event::PointerEvent((x, y, held.buttons).into()),
-                )
-                .await?;
+                send(client, X11Event::PointerEvent((x, y, held.buttons).into())).await?;
             }
         }
         2 => {
-            if text.len() > 65536 {
-                bail!("VNC 输入文本过长");
-            }
             for c in text.chars() {
                 let code = if c == '\n' || c == '\r' {
                     0xff0d
@@ -430,8 +519,10 @@ pub(crate) async fn input(
                 } else {
                     0x01000000 | u32::from(c)
                 };
-                send(&session.client, X11Event::KeyEvent((code, true).into())).await?;
-                send(&session.client, X11Event::KeyEvent((code, false).into())).await?;
+                send(client, X11Event::KeyEvent((code, true).into())).await?;
+                held.typed_key = Some(code);
+                send(client, X11Event::KeyEvent((code, false).into())).await?;
+                held.typed_key = None;
             }
         }
         _ => bail!("VNC 输入类型无效"),
@@ -443,23 +534,10 @@ pub(crate) async fn disconnect(id: u32) {
     let Some(session) = SESSIONS.lock().await.remove(&id) else {
         return;
     };
-    // Release held input before closing the shared connection.
-    let _ = tokio::time::timeout(Duration::from_secs(1), async {
-        let mut held = session.held.lock().await;
-        for code in held.keys.drain() {
-            let _ = session
-                .client
-                .input(X11Event::KeyEvent((code, false).into()))
-                .await;
-        }
-        let _ = session
-            .client
-            .input(X11Event::PointerEvent((held.x, held.y, 0).into()))
-            .await;
-    })
+    session.cancel.cancel();
+    let _ = tokio::time::timeout(
+        Duration::from_secs(2),
+        session.finished.subscribe().wait_for(|finished| *finished),
+    )
     .await;
-    session.cancel.send_replace(true);
-    session.finished.send_replace(true);
-    session.updated.notify_waiters();
-    let _ = session.client.close().await;
 }

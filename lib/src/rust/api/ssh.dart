@@ -10,10 +10,10 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'page.dart';
 import 'terminal.dart';
 
-// These functions are ignored because they are not marked as `pub`: `ack`, `attempted`, `authenticate_inner`, `authenticate`, `begin_frame`, `bind_forward_ports`, `check_text_bytes`, `checked_text_metadata`, `desktop_tunnel`, `disconnect_handle`, `docker_api_channel`, `download_inner`, `due`, `expire_sync`, `feed`, `finish`, `flush`, `forward_listener`, `handshake`, `is_closed`, `is_missing_remote_file`, `load_private_key`, `local_changed`, `new`, `open_agent_channel`, `open_sftp_inner`, `open_sftp`, `pending`, `process_exec`, `process_target_command`, `read_only_exec`, `read_small_text_bytes`, `read_small_text`, `register_transfer`, `remote_changed`, `remove_dir_recursive`, `resize`, `resume_mismatch`, `save_small_text`, `server_status_command`, `sftp_client_config`, `shell_tx`, `spawn_port_forwards`, `start_docker_terminal_output`, `start_page_port_forwards`, `start_port_forwards`, `start_shell_output_with_command`, `start_shell_output`, `terminate_process_command`, `transfer_cleanup`, `transfer_file`, `transfer_io`, `unregister_transfer`, `upload_inner`, `verify_resume_prefix`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Credentials`, `ForwardTransport`, `FrameAcks`, `FramePacer`, `PageForwardEntry`, `PendingSession`, `PinningHandler`, `ReadOnlyExecPolicy`, `SessionEntry`, `ShellCmd`, `ShellOutput`, `TransferMode`, `TransferTimeout`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `check_server_key`, `clone`, `clone`, `clone`, `fmt`, `fmt`
-// These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
+// These functions are ignored because they are not marked as `pub`: `accepts_input`, `ack`, `attempted`, `authenticate_inner`, `authenticate`, `begin_frame`, `bind_forward_ports`, `check_text_bytes`, `checked_text_metadata`, `defer_sudo_probe`, `desktop_tunnel`, `disconnect_handle`, `docker_api_channel`, `download_inner`, `due`, `expire_sync`, `feed`, `finish`, `flush`, `forward_listener`, `handshake`, `is_closed`, `is_missing_remote_file`, `load_private_key`, `local_changed`, `merge`, `new_sftp_session`, `new`, `new`, `new`, `open_agent_channel`, `open_sftp`, `parse_chunk_size`, `pending`, `plan`, `process_exec`, `process_target_command`, `read_only_exec`, `read_range`, `read_small_text_bytes`, `read_small_text`, `read`, `register_transfer`, `remote_changed`, `remove_dir_recursive`, `resize`, `resume_mismatch`, `save_small_text`, `server_status_command`, `sftp_channel_failed`, `sftp_client_config`, `shell_tx`, `should_probe_sudo`, `spawn_port_forwards`, `start_docker_terminal_output`, `start_page_port_forwards`, `start_port_forwards`, `start_shell_output_with_command`, `start_shell_output`, `status_sample_command`, `status_sections`, `terminate_process_command`, `transfer_cleanup`, `transfer_download`, `transfer_io`, `transfer_upload`, `unregister_transfer`, `upload_inner`, `verify_resume_prefix`, `with_metadata_sftp`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Credentials`, `DownloadSftp`, `ForwardTransport`, `FrameAckRegistration`, `FrameAcks`, `FramePacer`, `PageForwardEntry`, `PendingSession`, `PinningHandler`, `ReadOnlyExecPolicy`, `SessionEntry`, `ShellCmd`, `ShellOutput`, `StatusSampleCache`, `SudoProbe`, `TransferTimeout`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `check_server_key`, `clone`, `clone`, `clone`, `drop`, `fmt`, `fmt`
+// These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`, `default`
 
 Future<SftpTextFile> sftpReadText({
   required int sessionId,
@@ -146,11 +146,10 @@ Future<void> sshResize({
 );
 
 /// Dart 已应用指定帧，放行下一帧。关闭会话、重复或迟到的 ack 静默忽略。
-Future<void> sshTerminalAck({required int sessionId, required int frameId}) =>
-    RustLib.instance.api.crateApiSshSshTerminalAck(
-      sessionId: sessionId,
-      frameId: frameId,
-    );
+void sshTerminalAck({required int sessionId, required int frameId}) => RustLib
+    .instance
+    .api
+    .crateApiSshSshTerminalAck(sessionId: sessionId, frameId: frameId);
 
 /// 用独立、无 PTY 的 exec 通道执行固定只读采集脚本，不影响交互终端。
 Future<String> sshReadServerStatus({required int sessionId}) =>
@@ -211,7 +210,7 @@ Stream<PortForwardEvent> sshStartPortForwards({
   ports: ports,
 );
 
-/// 列出远程目录（SFTP 子系统按需在同一连接上开通道）。
+/// 列出远程目录，复用会话的 SFTP 元数据通道。
 Future<List<SftpEntry>> sftpListDir({
   required int sessionId,
   required String path,

@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:drift/native.dart';
@@ -15,6 +16,8 @@ import 'package:pagashell/domain/services/identity_tree.dart';
 import 'package:pagashell/domain/vault/secret_store.dart';
 import 'package:pagashell/infrastructure/db/app_database.dart';
 import 'package:pagashell/infrastructure/db/drift_configuration_repository.dart';
+import 'package:pagashell/infrastructure/vault/encrypted_secret_store.dart';
+import 'package:pagashell/infrastructure/vault/encrypted_vault_storage.dart';
 
 class _Vault implements SecretStore {
   final values = <String, String>{};
@@ -632,6 +635,37 @@ void main() {
       );
       expect((await store.repository.read()).toJson(), before);
       expect(store.vault.values, secrets);
+    });
+
+    test('加密保险库批量导入的元数据写入失败时恢复原凭据', () async {
+      final directory = await Directory.systemTemp.createTemp(
+        'pagashell-import-vault-',
+      );
+      addTearDown(() => directory.delete(recursive: true));
+      final vault = EncryptedSecretStore(
+        keychain: _Vault(),
+        storage: FileEncryptedVaultStorage(directory: () async => directory),
+      );
+      final repository = DriftConfigurationRepository(store.db, vault);
+      await repository.merge(_fixture());
+      final before = (await repository.read()).toJson();
+      await store.db.customStatement(
+        "CREATE TRIGGER fail_import BEFORE UPDATE ON hosts BEGIN SELECT RAISE(ABORT, 'fixture failure'); END",
+      );
+      await expectLater(
+        repository.merge(
+          const ConnectionConfiguration(
+            services: [
+              Host(id: 'own', name: 'Changed', hostname: 'changed.test'),
+              Host(id: 'new', name: 'New', hostname: 'new.test'),
+            ],
+            hostSecrets: {'own': 'replacement', 'new': 'new-value'},
+          ),
+        ),
+        _configurationError,
+      );
+      expect((await repository.read()).toJson(), before);
+      expect(await vault.read('sec-host-new'), isNull);
     });
 
     test('凭据部分写入失败时恢复原值，元数据没有中间状态', () async {

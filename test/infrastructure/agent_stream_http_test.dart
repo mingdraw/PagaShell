@@ -390,4 +390,90 @@ void main() {
     expect(modes, [true, false]);
     expect(agent.entries.last.text, _answer);
   });
+
+  test(
+    'Anthropic 多分片 thinking、signature 与 text 通过 StringBuffer 准确拼接',
+    () async {
+      final (agent, server) = await _fixture(AiApiFormat.anthropic);
+      final bodies = <Map<String, dynamic>>[];
+      const chunks = 400;
+      final expectedThinking =
+          'T0${List.generate(chunks, (i) => 't$i ').join()}';
+      final expectedSignature =
+          'S0${List.generate(chunks, (i) => 's$i').join()}';
+      final expectedText = 'A0${List.generate(chunks, (i) => 'a$i ').join()}';
+
+      server.listen((request) async {
+        final response = request.response;
+        if (request.method == 'GET') {
+          response.headers.contentType = ContentType.json;
+          response.write('{"id":"fixture-model","max_tokens":4096}');
+        } else {
+          bodies.add(
+            jsonDecode(await utf8.decoder.bind(request).join())
+                as Map<String, dynamic>,
+          );
+          response.bufferOutput = false;
+          response.headers.contentType = ContentType(
+            'text',
+            'event-stream',
+            charset: 'utf-8',
+          );
+          if (bodies.length == 1) {
+            _write(response, [
+              _block('start', 0, {
+                'type': 'thinking',
+                'thinking': 'T0',
+                'signature': 'S0',
+              }),
+              for (var i = 0; i < chunks; i++)
+                _block('delta', 0, {
+                  'type': 'thinking_delta',
+                  'thinking': 't$i ',
+                }),
+              for (var i = 0; i < chunks; i++)
+                _block('delta', 0, {
+                  'type': 'signature_delta',
+                  'signature': 's$i',
+                }),
+              _block('stop', 0, {}),
+              _block('start', 1, {'type': 'text', 'text': 'A0'}),
+              for (var i = 0; i < chunks; i++)
+                _block('delta', 1, {'type': 'text_delta', 'text': 'a$i '}),
+              _block('stop', 1, {}),
+              {
+                'type': 'message_delta',
+                'delta': {'stop_reason': 'end_turn'},
+              },
+              {'type': 'message_stop'},
+            ]);
+          } else {
+            _write(response, _answerEvents(AiApiFormat.anthropic));
+          }
+        }
+        await response.close();
+      });
+
+      await agent.send('First turn').timeout(const Duration(seconds: 5));
+      expect(agent.error.value, isNull);
+      expect(
+        agent.entries.lastWhere((e) => e.kind == AgentEntryKind.assistant).text,
+        expectedText,
+      );
+      expect(
+        agent.entries.lastWhere((e) => e.kind == AgentEntryKind.reasoning).text,
+        expectedThinking,
+      );
+
+      await agent.send('Second turn').timeout(const Duration(seconds: 5));
+      final historyMessages = bodies[1]['messages'] as List<dynamic>;
+      final previousAssistant = historyMessages[1] as Map<String, dynamic>;
+      final blocks = previousAssistant['content'] as List<dynamic>;
+      expect(blocks[0], {
+        'type': 'thinking',
+        'thinking': expectedThinking,
+        'signature': expectedSignature,
+      });
+    },
+  );
 }

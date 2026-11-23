@@ -1,18 +1,27 @@
 use anyhow::{anyhow, Result};
 use std::time::Duration;
 
-use super::ssh::{read_only_exec, server_status_command, ReadOnlyExecPolicy};
+use crate::frb_generated::StreamSink;
+
+use super::ssh::{
+    defer_sudo_probe, read_only_exec, server_status_command, should_probe_sudo, ReadOnlyExecPolicy,
+    SudoProbe,
+};
 
 #[path = "docker_logs.rs"]
 mod logs;
 pub(super) use logs::close_session as close_logs_for_session;
+#[cfg(test)]
+pub(super) use logs::stream as stream_logs_for_test;
 
 pub async fn ssh_open_docker_logs(session_id: u32, container_id: String) -> Result<u32> {
     logs::open(session_id, &container_id).await
 }
 
-pub async fn ssh_next_docker_logs(log_id: u32) -> Result<Option<Vec<u8>>> {
-    logs::next(log_id).await
+pub async fn ssh_stream_docker_logs(log_id: u32, output: StreamSink<Vec<u8>>) {
+    if let Err(error) = logs::stream(log_id, |bytes| output.add(bytes).is_ok()).await {
+        let _ = output.add_error(error);
+    }
 }
 
 pub async fn ssh_close_docker_logs(log_id: u32) {
@@ -125,7 +134,11 @@ pub async fn ssh_read_docker_details(
 }
 
 async fn query(session_id: u32, kind: DockerResourceKind, id: Option<&str>) -> Result<String> {
-    let command = docker_command(kind, id)?;
+    let mut command = docker_command(kind, id)?;
+    let probe = should_probe_sudo(session_id, SudoProbe::Docker);
+    if !probe {
+        command.push_str(" skip");
+    }
     let max_bytes = if id.is_some() {
         256 * 1024
     } else {
@@ -133,6 +146,9 @@ async fn query(session_id: u32, kind: DockerResourceKind, id: Option<&str>) -> R
     };
     let (output, code) =
         read_only_exec(session_id, command, &DOCKER_EXEC_POLICY, max_bytes).await?;
+    if code == 77 && probe {
+        defer_sudo_probe(session_id, SudoProbe::Docker);
+    }
     match code {
         0 => Ok(String::from_utf8_lossy(&output).into_owned()),
         64 => Err(anyhow!("Docker 管理仅支持 Linux 和 macOS")),

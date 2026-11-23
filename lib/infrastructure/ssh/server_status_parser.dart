@@ -2,6 +2,19 @@ import '../../domain/ssh/server_status.dart';
 import '../../domain/ssh/ssh_engine.dart';
 import 'server_status_storage_parser.dart';
 
+final _whitespace = RegExp(r'\s+');
+final _cpuCoreId = RegExp(r'^cpu(\d+)$');
+final _shellEscape = RegExp(r'\\(["\\$`])');
+final _macIdleCpu = RegExp(r'([\d.]+)% idle');
+final _macPageSize = RegExp(r'page size of (\d+) bytes');
+final _macVmStatPage = RegExp(r'^(Pages [^:]+):\s+(\d+)\.');
+final _macDiskReadBytes = RegExp(r'"Bytes \(Read\)"=(\d+)');
+final _macDiskWriteBytes = RegExp(r'"Bytes \(Write\)"=(\d+)');
+final _macDiskBsdName = RegExp(r'"BSD Name" = "(disk\d+)"');
+final _decimalNumber = RegExp(r'\d+(?:\.\d+)?');
+final _macSwapTotal = RegExp(r'total = ([0-9.]+)([KMGT]?)');
+final _macSwapUsed = RegExp(r'used = ([0-9.]+)([KMGT]?)');
+
 /// 解析固定脚本的分段输出；Linux 读取内核计数，macOS 使用 C 语言环境。
 ServerStatusSample parseServerStatus(String output) {
   final sections = <String, List<String>>{};
@@ -37,7 +50,7 @@ ServerStatusSample parseServerStatus(String output) {
     final cpuCores = <int, CpuCounters>{};
     for (final line in sections['CPU']!.skip(1)) {
       final fields = _fields(line);
-      final id = RegExp(r'^cpu(\d+)$').firstMatch(fields.first);
+      final id = _cpuCoreId.firstMatch(fields.first);
       if (id == null) continue;
       final coreTicks = fields.skip(1).take(8).map(int.tryParse).toList();
       if (coreTicks.length < 4 ||
@@ -115,7 +128,7 @@ ServerStatusSample parseServerStatus(String output) {
   }
 }
 
-List<String> _fields(String line) => line.trim().split(RegExp(r'\s+'));
+List<String> _fields(String line) => line.trim().split(_whitespace);
 
 String? _linuxRelease(List<String>? lines) {
   final values = <String, String>{};
@@ -127,7 +140,7 @@ String? _linuxRelease(List<String>? lines) {
     if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
       value = value
           .substring(1, value.length - 1)
-          .replaceAllMapped(RegExp(r'\\(["\\$`])'), (match) => match.group(1)!);
+          .replaceAllMapped(_shellEscape, (match) => match.group(1)!);
     } else if (value.length >= 2 &&
         value.startsWith("'") &&
         value.endsWith("'")) {
@@ -164,20 +177,24 @@ List<FilesystemUsage> _filesystems(List<String>? lines) {
 }
 
 ServerStatusSample _parseMacStatus(Map<String, List<String>> sections) {
-  final cpuLines = sections['MAC_CPU']!
-      .where((line) => line.startsWith('CPU usage:'))
-      .toList();
-  if (cpuLines.length < 2) throw const FormatException('incomplete CPU sample');
-  final idle = RegExp(r'([\d.]+)% idle').firstMatch(cpuLines.last);
-  final cpu = 1 - double.parse(idle!.group(1)!) / 100;
+  final cpuCores = _macCpuCores(sections['MAC_CPU_CORES']);
+  // Older snapshots include two top samples; live collectors use Mach ticks.
+  final legacyCpu = sections['MAC_CPU']?.lastWhere(
+    (line) => line.startsWith('CPU usage:'),
+    orElse: () => '',
+  );
+  final idle = _macIdleCpu.firstMatch(legacyCpu ?? '');
+  final cpu = idle == null ? null : 1 - double.parse(idle.group(1)!) / 100;
   final memoryLines = sections['MAC_MEMORY']!;
-  final total = int.parse(memoryLines.first);
+  final cachedTotal = sections['MAC_MEMORY_TOTAL']?.firstOrNull;
+  final total = int.parse(cachedTotal ?? memoryLines.first);
+  final vmStart = cachedTotal == null ? 1 : 0;
   final pageSize = int.parse(
-    RegExp(r'page size of (\d+) bytes').firstMatch(memoryLines[1])!.group(1)!,
+    _macPageSize.firstMatch(memoryLines[vmStart])!.group(1)!,
   );
   final pages = <String, int>{};
-  for (final line in memoryLines.skip(2)) {
-    final match = RegExp(r'^(Pages [^:]+):\s+(\d+)\.').firstMatch(line);
+  for (final line in memoryLines.skip(vmStart + 1)) {
+    final match = _macVmStatPage.firstMatch(line);
     if (match != null) pages[match.group(1)!] = int.parse(match.group(2)!);
   }
   // 可回收的文件页与空闲页作为可用内存，压缩器占用仍计为已用。
@@ -201,8 +218,8 @@ ServerStatusSample _parseMacStatus(Map<String, List<String>> sections) {
   for (final line in sections['MAC_DISKS'] ?? <String>[]) {
     if (line.contains('<class IOBlockStorageDriver,')) current = null;
     if (line.contains('"Statistics"')) {
-      final read = RegExp(r'"Bytes \(Read\)"=(\d+)').firstMatch(line);
-      final write = RegExp(r'"Bytes \(Write\)"=(\d+)').firstMatch(line);
+      final read = _macDiskReadBytes.firstMatch(line);
+      final write = _macDiskWriteBytes.firstMatch(line);
       if (read != null && write != null) {
         current = IoCounters(
           int.parse(read.group(1)!),
@@ -210,14 +227,14 @@ ServerStatusSample _parseMacStatus(Map<String, List<String>> sections) {
         );
       }
     }
-    final name = RegExp(r'"BSD Name" = "(disk\d+)"').firstMatch(line);
+    final name = _macDiskBsdName.firstMatch(line);
     if (name != null && current != null) {
       disks[name.group(1)!] = current;
       current = null;
     }
   }
   final uptime = double.parse(_fields(sections['UPTIME']!.single).first);
-  if (uptime <= 0 || total <= 0 || cpu < 0 || cpu > 1) {
+  if (uptime <= 0 || total <= 0 || (cpu != null && (cpu < 0 || cpu > 1))) {
     throw const FormatException('invalid macOS sample');
   }
   final storage = parseMacStorage(
@@ -236,9 +253,9 @@ ServerStatusSample _parseMacStatus(Map<String, List<String>> sections) {
     loadAverage: _loadAverage(sections['LOAD']),
     measuredCpuFraction: cpu,
     uptimeSeconds: uptime,
-    cpuTotal: 0,
-    cpuIdle: 0,
-    cpuCores: _macCpuCores(sections['MAC_CPU_CORES']),
+    cpuTotal: cpuCores.values.fold(0, (sum, core) => sum + core.total),
+    cpuIdle: cpuCores.values.fold(0, (sum, core) => sum + core.idle),
+    cpuCores: cpuCores,
     memoryTotal: total,
     memoryAvailable: available.clamp(0, total),
     swapTotal: swap?.total,
@@ -255,7 +272,7 @@ Map<int, CpuCounters> _macCpuCores(List<String>? lines) {
   for (final line in lines ?? <String>[]) {
     final fields = _fields(line);
     if (fields.length != 3) continue;
-    final id = RegExp(r'^cpu(\d+)$').firstMatch(fields.first);
+    final id = _cpuCoreId.firstMatch(fields.first);
     final total = int.tryParse(fields[1]);
     final idle = int.tryParse(fields[2]);
     if (id == null ||
@@ -272,7 +289,7 @@ Map<int, CpuCounters> _macCpuCores(List<String>? lines) {
 }
 
 List<double> _loadAverage(List<String>? lines) {
-  final values = RegExp(r'\d+(?:\.\d+)?')
+  final values = _decimalNumber
       .allMatches(lines?.firstOrNull ?? '')
       .take(3)
       .map((match) => double.parse(match.group(0)!))
@@ -282,8 +299,8 @@ List<double> _loadAverage(List<String>? lines) {
 
 ({int total, int used})? _macSwap(List<String>? lines) {
   final text = lines?.join(' ') ?? '';
-  int? bytes(String key) {
-    final match = RegExp('$key = ([0-9.]+)([KMGT]?)').firstMatch(text);
+  int? bytes(RegExp pattern) {
+    final match = pattern.firstMatch(text);
     if (match == null) return null;
     final factor = switch (match.group(2)) {
       'K' => 1024,
@@ -298,8 +315,8 @@ List<double> _loadAverage(List<String>? lines) {
         : null;
   }
 
-  final total = bytes('total');
-  final used = bytes('used');
+  final total = bytes(_macSwapTotal);
+  final used = bytes(_macSwapUsed);
   return total == null || used == null
       ? null
       : (total: total, used: used.clamp(0, total));

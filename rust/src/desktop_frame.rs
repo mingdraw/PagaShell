@@ -58,6 +58,17 @@ impl FrameEncoder {
         }
     }
 
+    pub fn damage_region(&mut self, x: u16, y: u16, width: u16, height: u16) {
+        if width != 0 && height != 0 {
+            self.damage(InclusiveRectangle {
+                left: x,
+                top: y,
+                right: x.saturating_add(width - 1),
+                bottom: y.saturating_add(height - 1),
+            });
+        }
+    }
+
     pub fn cursor(&mut self, cursor: DesktopCursor) {
         self.cursor = Some(cursor);
         self.cursor_dirty = true;
@@ -68,14 +79,30 @@ impl FrameEncoder {
     }
 
     pub fn snapshot(&mut self, image: &DecodedImage, after: u32) -> DesktopFrame {
+        self.snapshot_rgba(image.width(), image.height(), image.data(), after)
+    }
+
+    pub fn resize(&mut self, width: u16, height: u16) -> bool {
         // EGFX ResetGraphics can change dimensions without DeactivateAll.
-        let resized = self.width != image.width() || self.height != image.height();
+        let resized = self.width != width || self.height != height;
         if resized {
-            let mut next = Self::new(image.width(), image.height());
+            let mut next = Self::new(width, height);
             next.sequence = self.sequence;
             next.cursor = self.cursor.take();
+            next.cursor_dirty = next.cursor.is_some();
             *self = next;
         }
+        resized
+    }
+
+    pub fn snapshot_rgba(
+        &mut self,
+        width: u16,
+        height: u16,
+        pixels: &[u8],
+        after: u32,
+    ) -> DesktopFrame {
+        let resized = self.resize(width, height);
         // A cancelled poll may have consumed an atlas. Recover every tile when
         // the caller's base differs, including the current cursor shape.
         let full = resized || after != self.sequence;
@@ -118,7 +145,7 @@ impl FrameEncoder {
             )
         };
         let mut rgba = if complete {
-            let mut rgba = image.data().to_vec();
+            let mut rgba = pixels.to_vec();
             for pixel in rgba.as_chunks_mut::<4>().0 {
                 pixel[3] = 255;
             }
@@ -126,7 +153,7 @@ impl FrameEncoder {
         } else {
             vec![0; usize::from(bitmap_width) * usize::from(bitmap_height) * 4]
         };
-        let input_stride = usize::from(image.width()) * 4;
+        let input_stride = usize::from(self.width) * 4;
         let output_stride = usize::from(bitmap_width) * 4;
         for (slot, index) in dirty.into_iter().enumerate() {
             let x = (index % self.columns) as u16 * TILE_SIZE;
@@ -156,9 +183,9 @@ impl FrameEncoder {
                     usize::from(image_row) * input_stride + usize::from(x.saturating_sub(1)) * 4;
                 let right = usize::from(image_row) * input_stride
                     + usize::from((x + width).min(self.width - 1)) * 4;
-                target[..4].copy_from_slice(&image.data()[left..left + 4]);
-                target[4..row_bytes + 4].copy_from_slice(&image.data()[input..input + row_bytes]);
-                target[row_bytes + 4..].copy_from_slice(&image.data()[right..right + 4]);
+                target[..4].copy_from_slice(&pixels[left..left + 4]);
+                target[4..row_bytes + 4].copy_from_slice(&pixels[input..input + row_bytes]);
+                target[row_bytes + 4..].copy_from_slice(&pixels[right..right + 4]);
                 // Normalize only copied rows while they are still cache-hot.
                 for pixel in target.as_chunks_mut::<4>().0 {
                     pixel[3] = 255;
@@ -183,8 +210,8 @@ impl FrameEncoder {
         self.sequence = self.sequence.wrapping_add(1).max(1);
         DesktopFrame {
             sequence: self.sequence,
-            width: image.width(),
-            height: image.height(),
+            width: self.width,
+            height: self.height,
             bitmap_width,
             bitmap_height,
             rgba,

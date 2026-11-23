@@ -11,6 +11,7 @@ import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
 import '../localization/app_translations.dart';
 import '../navigation/app_navigation.dart';
+import '../shell/workspace_visibility.dart';
 import '../theme/app_theme.dart';
 import 'panel_refresh_pause_button.dart';
 import 'process_details_dialog.dart';
@@ -31,7 +32,8 @@ class ProcessManagerPanel extends StatefulWidget {
   State<ProcessManagerPanel> createState() => _ProcessManagerPanelState();
 }
 
-class _ProcessManagerPanelState extends State<ProcessManagerPanel> {
+class _ProcessManagerPanelState extends State<ProcessManagerPanel>
+    with WorkspaceVisibilityObserver<ProcessManagerPanel> {
   ProcessManagerController? _controller;
   final _search = TextEditingController();
   final _scroll = ScrollController();
@@ -53,8 +55,12 @@ class _ProcessManagerPanelState extends State<ProcessManagerPanel> {
         ? null
         : ProcessManagerController(source: source);
     _searchChanged();
-    _controller?.setEnabled(widget.active);
+    onWorkspaceVisibilityChanged();
   }
+
+  @override
+  void onWorkspaceVisibilityChanged() =>
+      _controller?.setEnabled(widget.active && workspaceVisible);
 
   @override
   void didUpdateWidget(ProcessManagerPanel oldWidget) {
@@ -63,7 +69,7 @@ class _ProcessManagerPanelState extends State<ProcessManagerPanel> {
       _controller?.onClose();
       _createController();
     } else {
-      _controller?.setEnabled(widget.active);
+      onWorkspaceVisibilityChanged();
     }
   }
 

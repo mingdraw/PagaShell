@@ -12,6 +12,14 @@ abstract interface class SecretStore {
   Future<void> delete(String ref);
 }
 
+/// Optional support for batching vault access under one lock.
+abstract interface class BatchSecretStore implements SecretStore {
+  Future<Map<String, String?>> readMany(Iterable<String> refs);
+
+  /// Replaces the supplied values (null deletes) and returns the previous values.
+  Future<Map<String, String?>> replaceMany(Map<String, String?> changes);
+}
+
 /// 仅包含可展示的操作说明，不保留可能含敏感信息的平台异常原文。
 class SecretStoreException implements Exception {
   const SecretStoreException(this.message);

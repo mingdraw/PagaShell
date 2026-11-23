@@ -275,11 +275,7 @@ pub(crate) async fn run(
 ) -> Result<Option<String>> {
     validate_docker_id(DockerResourceKind::Compose, name)?;
     let result = async {
-        let client = Client {
-            session,
-            access: Access::prepare(session).await?,
-            deadline: Instant::now() + OPERATION_TIMEOUT,
-        };
+        let client = Client::new(session, Access::prepare(session).await?);
         let filters =
             component(&json!({"label":[format!("com.docker.compose.project={name}")]}).to_string());
         let response = client

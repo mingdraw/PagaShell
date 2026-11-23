@@ -13,7 +13,7 @@ import '../../../application/hosts/host_tree_controller.dart';
 import '../../../application/identities/identity_controller.dart';
 import '../../../application/identities/identity_folder_controller.dart';
 import '../../../application/identities/identity_tree_controller.dart';
-import '../../../application/session/session.dart';
+import '../../../application/session/session.dart' show SessionKind;
 import '../../../application/session/session_controller.dart';
 import '../../../application/settings/settings_controller.dart';
 import '../../../domain/entities/folder.dart';
@@ -22,10 +22,9 @@ import '../../../domain/entities/host_tree_item.dart';
 import '../../../domain/entities/identity.dart';
 import '../../../domain/entities/identity_tree_item.dart';
 import '../../../domain/entities/sidebar_state.dart';
-import '../../../domain/services/host_tree.dart';
-import '../../../domain/services/identity_tree.dart';
 import '../../components/app_icon.dart';
 import '../../components/app_icon_button.dart';
+import '../../components/app_indexed_selection.dart';
 import '../../components/app_list_row.dart';
 import '../../components/app_menu.dart';
 import '../../components/app_tree_drag.dart';
@@ -40,6 +39,7 @@ import 'host_tree_drag.dart';
 import 'identity_tree_drag.dart';
 
 part 'sidebar_search.dart';
+part 'sidebar_tree.dart';
 
 class Sidebar extends StatefulWidget {
   const Sidebar({super.key});
@@ -58,13 +58,9 @@ class SidebarStateView extends State<Sidebar> {
   final _searchScroll = ScrollController();
   final _treeScroll = ScrollController();
   final _treeViewport = GlobalKey();
-  final _searchIndex = 0.obs;
-  bool get _hostsExpanded =>
-      _settings.sidebarState.value.isSectionExpanded(SidebarSection.services);
-  bool get _identitiesExpanded =>
-      _settings.sidebarState.value.isSectionExpanded(SidebarSection.identities);
-  bool get _gatewaysExpanded =>
-      _settings.sidebarState.value.isSectionExpanded(SidebarSection.gateways);
+  final _searchIndex = ValueNotifier(0);
+  List<_SidebarSearchHit> _searchHits = const [];
+  String _searchHitsQuery = '';
   late final _dragAnchor = TreeDragAnchor(onPointer: _treeDragMoved);
   late final _identityDragAnchor = TreeDragAnchor(onPointer: _treeDragMoved);
   late final _gatewayDragAnchor = TreeDragAnchor(onPointer: _treeDragMoved);
@@ -76,6 +72,7 @@ class SidebarStateView extends State<Sidebar> {
   void dispose() {
     _searchController.dispose();
     _searchFocus.dispose();
+    _searchIndex.dispose();
     _searchScroll.dispose();
     _dragScrollTimer?.cancel();
     _treeScroll.dispose();
@@ -147,7 +144,7 @@ class SidebarStateView extends State<Sidebar> {
   }
 
   void _moveSearchSelection(int direction) {
-    final hits = _searchSidebar(_searchTerms(_searchController.text));
+    final hits = _searchHits;
     if (hits.isEmpty) return;
     final index =
         (_searchIndex.value.clamp(0, hits.length - 1) + direction) %
@@ -167,7 +164,11 @@ class SidebarStateView extends State<Sidebar> {
   }
 
   void _openSearchSelection() {
-    final hits = _searchSidebar(_searchTerms(_searchController.text));
+    final query = _searchController.text;
+    // A key event can arrive before the rebuild for a text change.
+    final hits = query == _searchHitsQuery
+        ? _searchHits
+        : _searchSidebar(_searchTerms(query));
     if (hits.isEmpty) return;
     final hit = hits[_searchIndex.value.clamp(0, hits.length - 1)];
     if (hit.identity case final identity?) {
@@ -182,9 +183,8 @@ class SidebarStateView extends State<Sidebar> {
   }
 
   Widget _searchResults(List<String> terms) {
-    final hits = _searchSidebar(terms);
+    final hits = _searchHits = _searchSidebar(terms);
     if (hits.isEmpty) return _EmptyHint(text: '没有匹配的结果'.tr);
-    final selected = _searchIndex.value.clamp(0, hits.length - 1);
     final headingBySlot = <int, SidebarSection>{};
     final rowBySlot = <int, int>{};
     SidebarSection? section;
@@ -228,32 +228,36 @@ class SidebarStateView extends State<Sidebar> {
         }
         final index = rowBySlot[slot]!;
         final hit = hits[index];
-        final display = (
-          terms: terms,
-          detail: hit.detail,
-          selected: index == selected,
-        );
-        if (hit.identity case final identity?) {
-          return _IdentityTile(
-            key: ValueKey(IdentityTreeItem.identity(identity.id)),
-            identity: identity,
-            depth: 0,
-            dragAnchor: _identityDragAnchor,
-            search: display,
-          );
-        }
-        final host = hit.host!;
-        final gateway = hit.section == SidebarSection.gateways;
-        return _HostTile(
-          key: gateway
-              ? ValueKey('search-gateway-${host.id}')
-              : ValueKey(HostTreeItem.host(host.id)),
-          host: host,
-          depth: 0,
-          dragAnchor: gateway ? _gatewayDragAnchor : _dragAnchor,
-          reorderable: false,
-          gateway: gateway,
-          search: display,
+        final key = ValueKey((hit.section, hit.identity?.id ?? hit.host!.id));
+        return AppIndexedSelection(
+          key: key,
+          selection: _searchIndex,
+          index: index,
+          itemCount: hits.length,
+          builder: (_, selected) {
+            final display = (
+              terms: terms,
+              detail: hit.detail,
+              selected: selected,
+            );
+            if (hit.identity case final identity?) {
+              return _IdentityTile(
+                identity: identity,
+                depth: 0,
+                dragAnchor: _identityDragAnchor,
+                search: display,
+              );
+            }
+            final gateway = hit.section == SidebarSection.gateways;
+            return _HostTile(
+              host: hit.host!,
+              depth: 0,
+              dragAnchor: gateway ? _gatewayDragAnchor : _dragAnchor,
+              reorderable: false,
+              gateway: gateway,
+              search: display,
+            );
+          },
         );
       },
     );
@@ -300,13 +304,6 @@ class SidebarStateView extends State<Sidebar> {
 
   @override
   Widget build(BuildContext context) {
-    final hostController = Get.find<HostController>();
-    final folderController = Get.find<FolderController>();
-    final treeController = Get.find<HostTreeController>();
-    final identityController = Get.find<IdentityController>();
-    final identityFolders = Get.find<IdentityFolderController>();
-    final identityTree = Get.find<IdentityTreeController>();
-
     return ColoredBox(
       color: AppTheme.sidebar(context),
       child: SizedBox(
@@ -375,160 +372,13 @@ class SidebarStateView extends State<Sidebar> {
               ),
             ),
             Expanded(
-              // Obx 的依赖追踪只在此 builder 同步执行期间生效，因此分组内容
-              // 必须在这里以同步函数完成（而非下沉到子 Widget 的 build），
-              // 否则新增服务/文件夹/凭证、展开折叠都不会触发重建。
               child: Obx(() {
-                final terms = _searchTerms(hostController.searchQuery.value);
+                final query = _hostController.searchQuery.value;
+                final terms = _searchTerms(query);
+                _searchHitsQuery = query;
                 if (terms.isNotEmpty) return _searchResults(terms);
-                // 服务、凭证、网关使用独立目录空间。
-                return ListView(
-                  key: _treeViewport,
-                  controller: _treeScroll,
-                  padding: const EdgeInsets.symmetric(vertical: 4),
-                  children: [
-                    // 组头兼作放置目标：把文件夹或服务移到根级末尾。
-                    DragTarget<HostTreeItem>(
-                      onWillAcceptWithDetails: (d) => treeController.canMove(
-                        d.data,
-                        const HostTreePlacement(parentId: null),
-                      ),
-                      onAcceptWithDetails: (d) {
-                        if (_dragAnchor.scrolledSinceMove) return;
-                        _setGroupExpanded(SidebarSection.services, true);
-                        unawaited(
-                          moveHostTreeItem(
-                            treeController,
-                            d.data,
-                            const HostTreePlacement(parentId: null),
-                          ),
-                        );
-                      },
-                      builder: (context, candidates, _) => ColoredBox(
-                        color: candidates.isEmpty
-                            ? shadcn.Colors.transparent
-                            : shadcn.Theme.of(context).colorScheme.primary
-                                  .withValues(alpha: 0.12),
-                        child: _SectionHeader(
-                          icon: AppIcons.server,
-                          title: '服务'.tr,
-                          count: hostController.hosts.length,
-                          expanded: _hostsExpanded,
-                          onToggle: () => _setGroupExpanded(
-                            SidebarSection.services,
-                            !_hostsExpanded,
-                          ),
-                          menuSemanticLabel: '服务组操作'.tr,
-                          actions: [
-                            ('new-host', '新建服务'.tr),
-                            ('new-folder', '新建文件夹'.tr),
-                          ],
-                          onAction: _onHostsGroupAction,
-                        ),
-                      ),
-                    ),
-                    AppTreeExpansion(
-                      key: const ValueKey('sidebar-services-expansion'),
-                      expanded: _hostsExpanded,
-                      children: _hostsExpanded
-                          ? _hostGroupChildren(
-                              folderController,
-                              treeController.snapshot,
-                              _dragAnchor,
-                            )
-                          : const [],
-                    ),
-                    const SizedBox(height: 4),
-                    DragTarget<IdentityTreeItem>(
-                      onWillAcceptWithDetails: (d) => identityTree.canMove(
-                        d.data,
-                        const IdentityTreePlacement(parentId: null),
-                      ),
-                      onAcceptWithDetails: (d) {
-                        if (_identityDragAnchor.scrolledSinceMove) return;
-                        _setGroupExpanded(SidebarSection.identities, true);
-                        unawaited(
-                          moveIdentityTreeItem(
-                            identityTree,
-                            d.data,
-                            const IdentityTreePlacement(parentId: null),
-                          ),
-                        );
-                      },
-                      builder: (context, candidates, _) => ColoredBox(
-                        color: candidates.isEmpty
-                            ? shadcn.Colors.transparent
-                            : shadcn.Theme.of(context).colorScheme.primary
-                                  .withValues(alpha: 0.12),
-                        child: _SectionHeader(
-                          icon: AppIcons.bookKey,
-                          title: '凭证'.tr,
-                          count: identityController.identities.length,
-                          expanded: _identitiesExpanded,
-                          onToggle: () => _setGroupExpanded(
-                            SidebarSection.identities,
-                            !_identitiesExpanded,
-                          ),
-                          menuSemanticLabel: '凭证组操作'.tr,
-                          actions: [
-                            ('new-identity', '新建凭证'.tr),
-                            ('new-folder', '新建文件夹'.tr),
-                          ],
-                          onAction: _onIdentitiesGroupAction,
-                        ),
-                      ),
-                    ),
-                    AppTreeExpansion(
-                      key: const ValueKey('sidebar-identities-expansion'),
-                      expanded: _identitiesExpanded,
-                      children: _identitiesExpanded
-                          ? _identityGroupChildren(
-                              identityFolders,
-                              identityTree.snapshot,
-                              _identityDragAnchor,
-                            )
-                          : const [],
-                    ),
-                    if (Get.isRegistered<GatewayTreeController>()) ...[
-                      const SizedBox(height: 4),
-                      _gatewayHeader(),
-                      AppTreeExpansion(
-                        key: const ValueKey('sidebar-gateways-expansion'),
-                        expanded: _gatewaysExpanded,
-                        children: [
-                          if (_gatewaysExpanded) ...[
-                            ..._buildTreeNodes(
-                              Get.find<GatewayFolderController>(),
-                              Get.find<GatewayTreeController>().snapshot,
-                              null,
-                              1,
-                              _gatewayDragAnchor,
-                              gateway: true,
-                            ),
-                            if (Get.find<GatewayController>().hosts.isEmpty)
-                              Padding(
-                                padding: const EdgeInsets.fromLTRB(
-                                  28,
-                                  8,
-                                  12,
-                                  8,
-                                ),
-                                child: Text(
-                                  '还没有网关，可通过组菜单新建'.tr,
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    color: shadcn.Theme.of(context)
-                                        .colorScheme
-                                        .mutedForeground,
-                                  ),
-                                ),
-                              ),
-                          ],
-                        ],
-                      ),
-                    ],
-                  ],
-                );
+                _searchHits = const [];
+                return _tree();
               }),
             ),
           ],
@@ -536,128 +386,6 @@ class SidebarStateView extends State<Sidebar> {
       ),
     );
   }
-
-  Widget _gatewayHeader() {
-    final tree = Get.find<GatewayTreeController>();
-    return DragTarget<HostTreeItem>(
-      onWillAcceptWithDetails: (d) =>
-          tree.canMove(d.data, const HostTreePlacement(parentId: null)),
-      onAcceptWithDetails: (d) {
-        if (_gatewayDragAnchor.scrolledSinceMove) return;
-        _setGroupExpanded(SidebarSection.gateways, true);
-        unawaited(
-          moveHostTreeItem(
-            tree,
-            d.data,
-            const HostTreePlacement(parentId: null),
-          ),
-        );
-      },
-      builder: (context, candidates, _) => ColoredBox(
-        color: candidates.isEmpty
-            ? shadcn.Colors.transparent
-            : shadcn.Theme.of(context).colorScheme.primary
-                  .withValues(alpha: 0.12),
-        child: _SectionHeader(
-          icon: AppIcons.network,
-          title: '网关'.tr,
-          count: tree.hosts.hosts.length,
-          expanded: _gatewaysExpanded,
-          onToggle: () =>
-              _setGroupExpanded(SidebarSection.gateways, !_gatewaysExpanded),
-          menuSemanticLabel: '网关组操作'.tr,
-          actions: [('new-gateway', '新建网关'.tr), ('new-folder', '新建文件夹'.tr)],
-          onAction: (action) {
-            if (action == 'new-gateway') {
-              showHostEditDialog(context, gateway: true);
-            }
-            if (action == 'new-folder') {
-              showFolderDialog(
-                context,
-                folderController: Get.find<GatewayFolderController>(),
-              );
-            }
-          },
-        ),
-      ),
-    );
-  }
-}
-
-/// 「服务」组内容：文件夹与服务共用同级顺序。
-///
-/// 必须在 Obx builder 内同步调用，读到的 hosts/folders/expanded 才会被追踪。
-List<Widget> _hostGroupChildren(
-  FolderController folderController,
-  HostTreeSnapshot snapshot,
-  TreeDragAnchor dragAnchor,
-) {
-  if (snapshot.childCount(null) == 0) {
-    return const [_EmptyHostsHint()];
-  }
-  return _buildTreeNodes(folderController, snapshot, null, 1, dragAnchor);
-}
-
-/// 「凭证」组内容。同样必须在 Obx builder 内同步调用。
-List<Widget> _identityGroupChildren(
-  IdentityFolderController folders,
-  IdentityTreeSnapshot snapshot,
-  TreeDragAnchor dragAnchor,
-) {
-  if (snapshot.childCount(null) == 0) return const [_EmptyIdentitiesHint()];
-  return _buildIdentityTreeNodes(folders, snapshot, null, 1, dragAnchor);
-}
-
-List<Widget> _buildIdentityTreeNodes(
-  IdentityFolderController folders,
-  IdentityTreeSnapshot snapshot,
-  String? parentId,
-  int depth,
-  TreeDragAnchor dragAnchor,
-) {
-  final widgets = <Widget>[];
-  for (final node in snapshot.childrenOf(parentId)) {
-    if (node.isFolder) {
-      final folder = node.folder!;
-      final expanded = folders.isExpanded(folder.id);
-      widgets.add(
-        _FolderTile(
-          key: ValueKey(node.item),
-          folder: folder,
-          containsIdentities: true,
-          depth: depth,
-          expanded: expanded,
-          childCount: snapshot.childCount(folder.id),
-          dragAnchor: dragAnchor,
-        ),
-      );
-      widgets.add(
-        AppTreeExpansion(
-          key: ValueKey('identity-folder-children:${folder.id}'),
-          expanded: expanded,
-          children: expanded
-              ? _buildIdentityTreeNodes(
-                  folders,
-                  snapshot,
-                  folder.id,
-                  depth + 1,
-                  dragAnchor,
-                )
-              : const [],
-        ),
-      );
-    } else {
-      widgets.add(
-        _IdentityTile(
-          key: ValueKey(node.item),
-          identity: node.identity!,
-          depth: depth,
-          dragAnchor: dragAnchor,
-        ),
-      );
-    }
-  }
-  return widgets;
 }
 
 /// 内置根组的组头：仅支持折叠与「新建」类操作，不提供重命名/删除。
@@ -733,61 +461,6 @@ class _SectionHeader extends StatelessWidget {
   }
 }
 
-List<Widget> _buildTreeNodes(
-  FolderController folderController,
-  HostTreeSnapshot snapshot,
-  String? parentId,
-  int depth,
-  TreeDragAnchor dragAnchor, {
-  bool gateway = false,
-}) {
-  final widgets = <Widget>[];
-  for (final node in snapshot.childrenOf(parentId)) {
-    if (node.isFolder) {
-      final folder = node.folder!;
-      final expanded = folderController.isExpanded(folder.id);
-      widgets.add(
-        _FolderTile(
-          key: ValueKey(node.item),
-          folder: folder,
-          containsGateways: gateway,
-          depth: depth,
-          expanded: expanded,
-          childCount: snapshot.childCount(folder.id),
-          dragAnchor: dragAnchor,
-        ),
-      );
-      widgets.add(
-        AppTreeExpansion(
-          key: ValueKey('host-folder-children:${folder.id}'),
-          expanded: expanded,
-          children: expanded
-              ? _buildTreeNodes(
-                  folderController,
-                  snapshot,
-                  folder.id,
-                  depth + 1,
-                  dragAnchor,
-                  gateway: gateway,
-                )
-              : const [],
-        ),
-      );
-    } else {
-      widgets.add(
-        _HostTile(
-          key: ValueKey(node.item),
-          host: node.host!,
-          gateway: gateway,
-          depth: depth,
-          dragAnchor: dragAnchor,
-        ),
-      );
-    }
-  }
-  return widgets;
-}
-
 class _FolderTile extends StatelessWidget {
   const _FolderTile({
     required this.folder,
@@ -797,7 +470,6 @@ class _FolderTile extends StatelessWidget {
     required this.dragAnchor,
     this.containsIdentities = false,
     this.containsGateways = false,
-    super.key,
   });
 
   final Folder folder;
@@ -938,7 +610,7 @@ class _FolderTile extends StatelessWidget {
         child: IdentityTreeDraggable(
           item: identityItem,
           dragAnchor: dragAnchor,
-          preview: row,
+          preview: (_) => row,
           child: tile,
         ),
       );
@@ -955,7 +627,7 @@ class _FolderTile extends StatelessWidget {
       child: HostTreeDraggable(
         item: item,
         dragAnchor: dragAnchor,
-        preview: row,
+        preview: (_) => row,
         child: tile,
       ),
     );
@@ -988,38 +660,6 @@ class _EmptyHint extends StatelessWidget {
       child: Text(
         text,
         style: TextStyle(fontSize: 13, color: colors.mutedForeground),
-      ),
-    );
-  }
-}
-
-class _EmptyHostsHint extends StatelessWidget {
-  const _EmptyHostsHint();
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = shadcn.Theme.of(context).colorScheme;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(28, 8, 12, 8),
-      child: Text(
-        '还没有服务'.tr,
-        style: TextStyle(fontSize: 12, color: colors.mutedForeground),
-      ),
-    );
-  }
-}
-
-class _EmptyIdentitiesHint extends StatelessWidget {
-  const _EmptyIdentitiesHint();
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = shadcn.Theme.of(context).colorScheme;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(28, 8, 12, 8),
-      child: Text(
-        '还没有凭证，连接服务时可保存'.tr,
-        style: TextStyle(fontSize: 12, color: colors.mutedForeground),
       ),
     );
   }
@@ -1091,7 +731,6 @@ class _IdentityTile extends StatefulWidget {
     required this.depth,
     required this.dragAnchor,
     this.search,
-    super.key,
   });
 
   final Identity identity;
@@ -1199,13 +838,12 @@ class _IdentityTileState extends State<_IdentityTile> {
       onTap: _handleTap,
     );
 
-    final previewRow = buildRow(showQuickActions: false);
     final row = buildRow(showQuickActions: _hovered);
     final item = IdentityTreeItem.identity(identity.id);
     final draggable = IdentityTreeDraggable(
       item: item,
       dragAnchor: widget.dragAnchor,
-      preview: previewRow,
+      preview: (_) => buildRow(showQuickActions: false),
       child: MouseRegion(
         onEnter: (_) {
           if (!_hovered) setState(() => _hovered = true);
@@ -1243,7 +881,6 @@ class _HostTile extends StatefulWidget {
     this.reorderable = true,
     this.gateway = false,
     this.search,
-    super.key,
   });
 
   final Host host;
@@ -1456,40 +1093,33 @@ class _HostTileState extends State<_HostTile> {
           : null,
       onTap: _handleTap,
     );
-    final previewRow = buildRow(showQuickActions: false, showStatus: false);
     final Widget row = Get.isRegistered<SessionController>()
-        ? Obx(() {
-            final controller = Get.find<SessionController>();
-            final active = controller.activeSession;
-            bool belongsToTile(Session session) =>
-                session.host.id == host.id &&
-                widget.gateway ==
-                    (session.kind == SessionKind.portForward ||
-                        session.kind == SessionKind.dynamicProxy);
-            final current = active != null && belongsToTile(active);
-            final hostSessions = controller.sessions
-                .where(
-                  (s) =>
-                      belongsToTile(s) &&
-                      s.kind != SessionKind.containerTerminal &&
-                      s.phase != SessionPhase.closed,
-                )
-                .toList();
-            final statusColor = hostSessions.isEmpty
-                ? null
-                : hostSessions.any((s) => s.phase == SessionPhase.ready)
-                ? StatusColors.ready
-                : hostSessions.any((s) => s.phase.isBusy)
-                ? StatusColors.connecting
-                : StatusColors.failed;
-            return buildRow(
-              showQuickActions: _hovered,
-              showStatus: true,
-              active: current,
-              statusColor: statusColor,
-              sessionCount: hostSessions.length,
-            );
-          })
+        ? GetBuilder<SessionController>(
+            id: SessionController.hostActivityUpdateId(
+              host.id,
+              gateway: widget.gateway,
+            ),
+            autoRemove: false,
+            builder: (controller) {
+              final summary = controller.hostActivity(
+                host.id,
+                gateway: widget.gateway,
+              );
+              return buildRow(
+                showQuickActions: _hovered,
+                showStatus: true,
+                active: summary.active,
+                sessionCount: summary.count,
+                statusColor: summary.count == 0
+                    ? null
+                    : summary.ready
+                    ? StatusColors.ready
+                    : summary.connecting
+                    ? StatusColors.connecting
+                    : StatusColors.failed,
+              );
+            },
+          )
         : buildRow(showQuickActions: _hovered, showStatus: true);
     final tile = MouseRegion(
       onEnter: (_) {
@@ -1517,7 +1147,7 @@ class _HostTileState extends State<_HostTile> {
     final draggable = HostTreeDraggable(
       item: item,
       dragAnchor: widget.dragAnchor,
-      preview: previewRow,
+      preview: (_) => buildRow(showQuickActions: false, showStatus: false),
       child: tile,
     );
     if (!widget.reorderable) return draggable;

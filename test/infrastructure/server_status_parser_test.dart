@@ -92,7 +92,7 @@ void main() {
   test('真实 macOS 脚本样本可解析全部指标', () {
     final sample = parseServerStatus(File(liveSample).readAsStringSync());
     expect(sample.system, 'macOS');
-    expect(sample.measuredCpuFraction, inInclusiveRange(0, 1));
+    expect(sample.cpuTotal, greaterThan(0));
     expect(sample.memoryTotal, greaterThan(0));
     expect(sample.network, isNotEmpty);
     expect(sample.disks, isNotEmpty);
@@ -108,7 +108,9 @@ void main() {
       final previous = parseServerStatus(
         File(previousLiveSample).readAsStringSync(),
       );
-      final cores = ServerStatus.fromSamples(sample, previous).cpuCores;
+      final status = ServerStatus.fromSamples(sample, previous);
+      expect(status.cpuFraction, inInclusiveRange(0, 1));
+      final cores = status.cpuCores;
       expect(cores.values.whereType<double>(), isNotEmpty);
       expect(
         cores.values.whereType<double>(),
@@ -199,6 +201,33 @@ void main() {
     expect(status.cpuCores[0], .8);
     expect(status.cpuCores[1], .3);
     expect(status.cpuFraction, closeTo(.3, .0001));
+  });
+
+  test('分频 macOS 样本使用独立的内存容量和 Mach CPU 计数', () {
+    final raw = macStatusOutput
+        .replaceFirst(
+          RegExp(
+            r'PAGASHELL_STATUS_MAC_CPU\n[\s\S]*?(?=PAGASHELL_STATUS_MAC_CPU_CORES)',
+          ),
+          '',
+        )
+        .replaceFirst(
+          'PAGASHELL_STATUS_MAC_MEMORY\n1073741824\n',
+          'PAGASHELL_STATUS_MAC_MEMORY_TOTAL\n1073741824\nPAGASHELL_STATUS_MAC_MEMORY\n',
+        );
+    final first = parseServerStatus(raw);
+    final second = parseServerStatus(
+      raw
+          .replaceFirst('cpu0 1000 800', 'cpu0 1100 820')
+          .replaceFirst('cpu1 1200 900', 'cpu1 1300 970')
+          .replaceFirst('\n1000\n', '\n1003\n'),
+    );
+    expect(first.memoryTotal, 1073741824);
+    expect(ServerStatus.fromSamples(first, null).cpuFraction, isNull);
+    expect(
+      ServerStatus.fromSamples(second, first).cpuFraction,
+      closeTo(.55, .0001),
+    );
   });
 
   test('缺失或异常核心数据不影响汇总和其它指标', () {

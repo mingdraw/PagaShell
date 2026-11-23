@@ -39,6 +39,7 @@ class NetworkPortsController extends GetxController {
   bool _inFlight = false;
   bool _manualRefreshQueued = false;
   int _generation = 0;
+  Set<(NetworkPortProtocol, int)> _terminablePorts = const {};
 
   bool get canTerminate => source is ProcessManagerSource;
 
@@ -104,15 +105,29 @@ class NetworkPortsController extends GetxController {
       .where((p) => p.protocol == port.protocol && p.port == port.port)
       .toList();
 
-  bool canTerminatePort(ListeningNetworkPort port) {
-    final group = _samePort(ports, port);
-    if (!canTerminate) return false;
-    try {
-      _owners(group);
-      return true;
-    } on SshEngineException {
-      return false;
+  bool canTerminatePort(ListeningNetworkPort port) =>
+      _terminablePorts.contains((port.protocol, port.port));
+
+  Set<(NetworkPortProtocol, int)> _indexTerminablePorts(
+    List<ListeningNetworkPort> snapshot,
+  ) {
+    if (!canTerminate) return const {};
+    final byPort = <(NetworkPortProtocol, int), Map<int, String>>{};
+    final invalid = <(NetworkPortProtocol, int)>{};
+    for (final entry in snapshot) {
+      final key = (entry.protocol, entry.port);
+      if (invalid.contains(key)) continue;
+      final owners = byPort.putIfAbsent(key, () => {});
+      if (entry.processes.isEmpty) invalid.add(key);
+      for (final owner in entry.processes) {
+        if (!canTerminateProcess(owner) ||
+            owners.putIfAbsent(owner.pid, () => owner.name) != owner.name) {
+          invalid.add(key);
+          break;
+        }
+      }
     }
+    return byPort.keys.toSet().difference(invalid);
   }
 
   Map<int, String> _owners(List<ListeningNetworkPort> group) {
@@ -187,6 +202,7 @@ class NetworkPortsController extends GetxController {
           (automatic && autoRefreshPaused.value)) {
         return;
       }
+      _terminablePorts = _indexTerminablePorts(sample.ports);
       ports.value = sample.ports;
       limited.value = sample.limited;
       updatedAt.value = DateTime.now();

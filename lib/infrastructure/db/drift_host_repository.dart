@@ -46,14 +46,18 @@ class DriftHostRepository implements HostRepository {
     rdpDomain: gateways ? '' : row.rdpDomain,
     colorValue: row.colorValue,
     sortOrder: row.sortOrder,
-    forwardPorts: List.unmodifiable(
-      (jsonDecode(row.forwardPortsJson) as List<dynamic>).map(
-        (value) => ForwardPort.fromJson(value as Map<String, dynamic>),
-      ),
-    ),
-    proxyConfig: ProxyConfig.fromJson(
-      jsonDecode(row.proxyConfigJson) as Map<String, dynamic>,
-    ),
+    forwardPorts: row.forwardPortsJson == '[]'
+        ? const []
+        : List.unmodifiable(
+            (jsonDecode(row.forwardPortsJson) as List<dynamic>).map(
+              (value) => ForwardPort.fromJson(value as Map<String, dynamic>),
+            ),
+          ),
+    proxyConfig: row.proxyConfigJson == '{}'
+        ? const ProxyConfig()
+        : ProxyConfig.fromJson(
+            jsonDecode(row.proxyConfigJson) as Map<String, dynamic>,
+          ),
   );
 
   @override

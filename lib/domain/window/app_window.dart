@@ -9,6 +9,8 @@ mixin AppWindowListener {
   void onWindowEnterFullScreen() {}
   void onWindowLeaveFullScreen() {}
   void onWindowBlur() {}
+  void onWindowMinimized() {}
+  void onWindowRestored() {}
 }
 
 /// 桌面主窗口操作抽象，便于生产环境对接原生实现并在测试中注入替身。

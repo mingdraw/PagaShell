@@ -214,7 +214,10 @@ class RdpSurface extends ChangeNotifier {
       transferred = true;
       _releaseUnused();
       _rebuildBatches();
-      if (retainedPixels > width * height * 3) await _compact();
+      // Small atlases can stay below the pixel limit while adding many draws.
+      if (_atlases.length > 16 || retainedPixels > width * height * 3) {
+        await _compact();
+      }
       if (!_disposed) {
         generation++;
         notifyListeners();

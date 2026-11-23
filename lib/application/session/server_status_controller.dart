@@ -81,13 +81,15 @@ class ServerStatusController extends GetxController {
       _inFlight = false;
       if (!_disposed && _enabled) {
         loading.value = false;
-        // 成功采集按启动时刻计时，macOS 的 1 秒 CPU 采样也纳入周期。
+        // 按启动时间计时，慢主机在下一次轮询前至少休息一小段时间。
+        final intervalMs = interval.inMilliseconds;
         final delay = error.value != null
             ? interval
             : Duration(
-                milliseconds:
-                    (interval.inMilliseconds - elapsed.elapsedMilliseconds)
-                        .clamp(0, interval.inMilliseconds),
+                milliseconds: (intervalMs - elapsed.elapsedMilliseconds).clamp(
+                  intervalMs.clamp(0, 1000),
+                  intervalMs,
+                ),
               );
         if (!autoRefreshPaused.value &&
             error.value != '服务状态仅支持 Linux 和 macOS') {

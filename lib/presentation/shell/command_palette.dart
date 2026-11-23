@@ -17,6 +17,7 @@ import '../../domain/ssh/ssh_endpoint.dart';
 import '../ai/agent_workspace.dart';
 import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
+import '../components/app_indexed_selection.dart';
 import '../components/app_list_row.dart';
 import '../hosts/host_edit_dialog.dart';
 import '../navigation/app_navigation.dart';
@@ -36,6 +37,15 @@ Future<void> showCommandPalette(BuildContext context) {
 }
 
 enum _PaletteSection { hosts, tabs, actions }
+
+typedef _PaletteGroup = ({
+  _PaletteSection section,
+  int start,
+  int end,
+  double top,
+  double headerHeight,
+  double rowHeight,
+});
 
 sealed class _PaletteEntry {
   const _PaletteEntry();
@@ -114,9 +124,8 @@ class _CommandPaletteState extends State<_CommandPalette> {
   final _scroll = ScrollController();
   final _input = TextEditingController();
   String _query = '';
-  int _selected = 0;
-  bool _keyboardScrolling = false;
-  bool _movingUp = false;
+  final _selected = ValueNotifier(0);
+  static final _space = RegExp(r'\s+');
   bool _confirming = false;
   ({PhysicalKeyboardKey key, bool transfer, bool newSession})? _pendingEnter;
 
@@ -124,6 +133,7 @@ class _CommandPaletteState extends State<_CommandPalette> {
   void dispose() {
     _scroll.dispose();
     _input.dispose();
+    _selected.dispose();
     super.dispose();
   }
 
@@ -165,7 +175,7 @@ class _CommandPaletteState extends State<_CommandPalette> {
     final recentIds = <String>{
       if (sessionController != null) ...sessionController.recentHostIds,
       if (settingsController != null)
-        ...settingsController.sidebarState.value.recentHostIds,
+        ...settingsController.sidebarRecentHostIds,
     };
     final sessions = sessionController?.sessions.toList() ?? const [];
     final tabs = sessionController?.tabs ?? const [];
@@ -179,7 +189,7 @@ class _CommandPaletteState extends State<_CommandPalette> {
     final tokens = _query
         .trim()
         .toLowerCase()
-        .split(RegExp(r'\s+'))
+        .split(_space)
         .where((token) => token.isNotEmpty)
         .toList();
     bool matches(String haystack) =>
@@ -328,7 +338,7 @@ class _CommandPaletteState extends State<_CommandPalette> {
     final workspaceContext = Get.context!;
     _confirming = true;
     AppNavigation.closeDialog<void>();
-    final entry = entries[_selected.clamp(0, entries.length - 1)];
+    final entry = entries[_selected.value.clamp(0, entries.length - 1)];
     switch (entry) {
       case _HostPaletteEntry(:final host):
         if (openTransfer && !host.isDesktop) {
@@ -355,6 +365,7 @@ class _CommandPaletteState extends State<_CommandPalette> {
     KeyEvent event,
     List<_PaletteEntry> entries,
     List<Host> allHosts,
+    List<_PaletteGroup> groups,
   ) {
     final enter =
         event.logicalKey == LogicalKeyboardKey.enter ||
@@ -387,13 +398,10 @@ class _CommandPaletteState extends State<_CommandPalette> {
       case LogicalKeyboardKey.arrowDown:
       case LogicalKeyboardKey.arrowUp:
         if (entries.isEmpty) return KeyEventResult.handled;
-        setState(() {
-          final current = _selected.clamp(0, entries.length - 1);
-          final step = event.logicalKey == LogicalKeyboardKey.arrowUp ? -1 : 1;
-          _selected = (current + step) % entries.length;
-          _keyboardScrolling = true;
-          _movingUp = _selected < current;
-        });
+        final current = _selected.value.clamp(0, entries.length - 1);
+        final step = event.logicalKey == LogicalKeyboardKey.arrowUp ? -1 : 1;
+        _selected.value = (current + step) % entries.length;
+        _reveal(groups, _selected.value);
         return KeyEventResult.handled;
       case LogicalKeyboardKey.enter:
       case LogicalKeyboardKey.numpadEnter:
@@ -426,6 +434,59 @@ class _CommandPaletteState extends State<_CommandPalette> {
     _ActionPaletteEntry() => '回车执行',
   };
 
+  List<_PaletteGroup> _groups(
+    BuildContext context,
+    List<_PaletteEntry> entries,
+  ) {
+    final textScaler = MediaQuery.textScalerOf(context);
+    final labelHeight = textScaler.scale(11) * 1.4 + 6;
+    final titleHeight = textScaler.scale(13) * 1.4;
+    final detailHeight = textScaler.scale(11) * 1.4 + 4;
+    var top = AppTheme.commandPaletteSectionGap;
+    final groups = <_PaletteGroup>[];
+    for (var start = 0; start < entries.length;) {
+      final section = entries[start].section;
+      var end = start + 1;
+      while (end < entries.length && entries[end].section == section) {
+        end++;
+      }
+      final headerHeight = labelHeight + (start == 0 ? 0.0 : 8.0);
+      final rowHeight =
+          AppTheme.commandPaletteItemPadding.vertical +
+          AppTheme.commandPaletteItemGap +
+          (section == _PaletteSection.actions
+              ? math.max(18.0, titleHeight)
+              : math.max(26.0, titleHeight + detailHeight));
+      groups.add((
+        section: section,
+        start: start,
+        end: end,
+        top: top,
+        headerHeight: headerHeight,
+        rowHeight: rowHeight,
+      ));
+      top += headerHeight + (end - start) * rowHeight;
+      start = end;
+    }
+    return groups;
+  }
+
+  void _reveal(List<_PaletteGroup> groups, int index) {
+    if (!_scroll.hasClients || !_scroll.position.hasContentDimensions) return;
+    final group = groups.firstWhere((group) => index < group.end);
+    final position = _scroll.position;
+    final top =
+        group.top +
+        group.headerHeight +
+        (index - group.start) * group.rowHeight;
+    final bottom = top + group.rowHeight;
+    final target = index == 0 || top < position.pixels
+        ? (index == 0 ? 0.0 : top)
+        : math.max(position.pixels, bottom - position.viewportDimension);
+    final offset = target.clamp(0.0, position.maxScrollExtent);
+    if (offset != position.pixels) position.jumpTo(offset);
+  }
+
   @override
   Widget build(BuildContext context) {
     final controller = Get.find<HostController>();
@@ -446,64 +507,7 @@ class _CommandPaletteState extends State<_CommandPalette> {
           child: Obx(() {
             final allHosts = controller.sorted;
             final entries = _buildEntries(allHosts);
-            final activeIndex = entries.isEmpty
-                ? 0
-                : _selected.clamp(0, entries.length - 1);
-
-            final listChildren = <Widget>[];
-            _PaletteSection? lastSection;
-            for (var index = 0; index < entries.length; index++) {
-              final entry = entries[index];
-              if (entry.section != lastSection) {
-                if (lastSection != null) {
-                  listChildren.add(const SizedBox(height: 8));
-                }
-                lastSection = entry.section;
-                listChildren.add(
-                  Padding(
-                    key: ValueKey('palette-section-${entry.section.name}'),
-                    padding: const EdgeInsets.fromLTRB(6, 2, 6, 4),
-                    child: Text(
-                      _sectionTitle(entry.section),
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                        color: colors.mutedForeground,
-                      ),
-                    ),
-                  ),
-                );
-              } else {
-                listChildren.add(
-                  const SizedBox(height: AppTheme.commandPaletteItemGap),
-                );
-              }
-              final selected = index == activeIndex;
-              listChildren.add(
-                _PaletteRowHost(
-                  selected: selected,
-                  ensureVisible: _keyboardScrolling,
-                  movingUp: _movingUp,
-                  onHover: () {
-                    if (_selected != index) {
-                      setState(() {
-                        _keyboardScrolling = false;
-                        _selected = index;
-                      });
-                    }
-                  },
-                  child: _buildRow(
-                    context,
-                    entry,
-                    selected: selected,
-                    onTap: () {
-                      _selected = index;
-                      _confirm(entries, allHosts);
-                    },
-                  ),
-                ),
-              );
-            }
+            final groups = _groups(context, entries);
 
             return SizedBox(
               width: 520,
@@ -512,7 +516,7 @@ class _CommandPaletteState extends State<_CommandPalette> {
                 children: [
                   Focus(
                     onKeyEvent: (node, event) =>
-                        _onKey(event, entries, allHosts),
+                        _onKey(event, entries, allHosts, groups),
                     child: shadcn.TextField(
                       key: const ValueKey('command-palette-input'),
                       controller: _input,
@@ -521,9 +525,7 @@ class _CommandPaletteState extends State<_CommandPalette> {
                         if (_scroll.hasClients) _scroll.jumpTo(0);
                         setState(() {
                           _query = v;
-                          _selected = 0;
-                          _keyboardScrolling = true;
-                          _movingUp = true;
+                          _selected.value = 0;
                         });
                       },
                       hintText: '输入服务名称 / 地址，回车连接…'.tr,
@@ -555,17 +557,84 @@ class _CommandPaletteState extends State<_CommandPalette> {
                   else
                     ConstrainedBox(
                       constraints: BoxConstraints(maxHeight: listMaxHeight),
-                      child: SingleChildScrollView(
+                      child: CustomScrollView(
                         key: const ValueKey('command-palette-list'),
                         controller: _scroll,
-                        padding: const EdgeInsets.symmetric(
-                          vertical: AppTheme.commandPaletteSectionGap,
-                        ),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: listChildren,
-                        ),
+                        shrinkWrap: true,
+                        slivers: [
+                          const SliverToBoxAdapter(
+                            child: SizedBox(
+                              height: AppTheme.commandPaletteSectionGap,
+                            ),
+                          ),
+                          for (final group in groups) ...[
+                            SliverToBoxAdapter(
+                              child: SizedBox(
+                                height: group.headerHeight,
+                                child: Padding(
+                                  padding: const EdgeInsets.fromLTRB(
+                                    6,
+                                    0,
+                                    6,
+                                    4,
+                                  ),
+                                  child: Align(
+                                    alignment: Alignment.bottomLeft,
+                                    child: Text(
+                                      _sectionTitle(group.section),
+                                      key: ValueKey(
+                                        'palette-section-${group.section.name}',
+                                      ),
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        height: 1.4,
+                                        fontWeight: FontWeight.w600,
+                                        color: colors.mutedForeground,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            SliverFixedExtentList.builder(
+                              itemExtent: group.rowHeight,
+                              itemCount: group.end - group.start,
+                              itemBuilder: (context, localIndex) {
+                                final index = group.start + localIndex;
+                                return Padding(
+                                  padding: const EdgeInsets.only(
+                                    bottom: AppTheme.commandPaletteItemGap,
+                                  ),
+                                  child: MouseRegion(
+                                    // A stationary pointer does not steal keyboard selection.
+                                    onHover: (_) => _selected.value = index,
+                                    child: AppIndexedSelection(
+                                      selection: _selected,
+                                      index: index,
+                                      itemCount: entries.length,
+                                      builder: (context, selected) => _buildRow(
+                                        context,
+                                        entries[index],
+                                        selected: selected,
+                                        onTap: () {
+                                          _selected.value = index;
+                                          _confirm(entries, allHosts);
+                                        },
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                          ],
+                          const SliverToBoxAdapter(
+                            child: SizedBox(
+                              height:
+                                  AppTheme.commandPaletteSectionGap -
+                                  AppTheme.commandPaletteItemGap,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   if (entries.isNotEmpty) ...[
@@ -574,12 +643,18 @@ class _CommandPaletteState extends State<_CommandPalette> {
                       padding: const EdgeInsets.only(top: 10, bottom: 2),
                       child: Align(
                         alignment: Alignment.centerLeft,
-                        child: Text(
-                          _shortcutHint(entries[activeIndex], isMac).tr,
-                          key: const ValueKey('command-palette-shortcuts'),
-                          style: TextStyle(
-                            fontSize: 11,
-                            color: colors.mutedForeground,
+                        child: ValueListenableBuilder<int>(
+                          valueListenable: _selected,
+                          builder: (context, index, _) => Text(
+                            _shortcutHint(
+                              entries[index.clamp(0, entries.length - 1)],
+                              isMac,
+                            ).tr,
+                            key: const ValueKey('command-palette-shortcuts'),
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: colors.mutedForeground,
+                            ),
                           ),
                         ),
                       ),
@@ -798,57 +873,4 @@ class _CommandPaletteState extends State<_CommandPalette> {
         );
     }
   }
-}
-
-class _PaletteRowHost extends StatefulWidget {
-  const _PaletteRowHost({
-    required this.selected,
-    required this.ensureVisible,
-    required this.movingUp,
-    required this.onHover,
-    required this.child,
-  });
-
-  final bool selected;
-  final bool ensureVisible;
-  final bool movingUp;
-  final VoidCallback onHover;
-  final Widget child;
-
-  @override
-  State<_PaletteRowHost> createState() => _PaletteRowHostState();
-}
-
-class _PaletteRowHostState extends State<_PaletteRowHost> {
-  @override
-  void initState() {
-    super.initState();
-    _revealIfSelected();
-  }
-
-  @override
-  void didUpdateWidget(covariant _PaletteRowHost oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (!oldWidget.selected || !oldWidget.ensureVisible) _revealIfSelected();
-  }
-
-  void _revealIfSelected() {
-    if (!widget.selected || !widget.ensureVisible) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !widget.selected || !widget.ensureVisible) return;
-      unawaited(
-        Scrollable.ensureVisible(
-          context,
-          alignmentPolicy: widget.movingUp
-              ? ScrollPositionAlignmentPolicy.keepVisibleAtStart
-              : ScrollPositionAlignmentPolicy.keepVisibleAtEnd,
-        ),
-      );
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) =>
-      // 键盘滚动时，静止指针下的行会变；只有实际移动才切换到鼠标选中。
-      MouseRegion(onHover: (_) => widget.onHover(), child: widget.child);
 }

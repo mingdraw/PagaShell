@@ -170,6 +170,49 @@ void main() {
     });
   });
 
+  testWidgets('小块更新达到图集数量上限时会压实，仍保留每块的颜色', (tester) async {
+    await tester.runAsync(() async {
+      final surface = RdpSurface();
+      addTearDown(surface.dispose);
+      const width = 640;
+      const height = 512;
+      await surface.apply(
+        RdpFrame(
+          width: width,
+          height: height,
+          rgba: solid(width, height, [255, 0, 0, 255]),
+        ),
+      );
+      for (var index = 0; index < 16; index++) {
+        await surface.apply(
+          RdpFrame(
+            width: width,
+            height: height,
+            patchWidth: 128,
+            patchHeight: 128,
+            rgba: solid(128, 128, [index, 0, 0, 255]),
+            tiles: [
+              RdpTile(
+                x: index % 5 * 128,
+                y: index ~/ 5 * 128,
+                width: 128,
+                height: 128,
+                sourceX: 0,
+                sourceY: 0,
+              ),
+            ],
+          ),
+        );
+      }
+      expect(surface.compactions, 1);
+      final pixels = await readPixels(surface);
+      for (var index = 0; index < 20; index++) {
+        final offset = (index ~/ 5 * 128 * width + index % 5 * 128) * 4;
+        expect(pixels[offset], index < 16 ? index : 255);
+      }
+    });
+  });
+
   testWidgets('无效图集不能覆盖有效基底，分辨率变化必须提供完整画面', (tester) async {
     await tester.runAsync(() async {
       final surface = RdpSurface();

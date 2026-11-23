@@ -21,6 +21,7 @@ import '../components/app_icon_button.dart';
 import '../components/app_menu.dart';
 import '../navigation/app_navigation.dart';
 import '../navigation/app_notice.dart';
+import '../shell/workspace_visibility.dart';
 import '../theme/app_theme.dart';
 import '../vnc/vnc_keyboard.dart';
 import 'rdp_fullscreen_toolbar.dart';
@@ -53,7 +54,7 @@ class RdpDesktopPanel extends StatefulWidget {
 }
 
 class _RdpDesktopPanelState extends State<RdpDesktopPanel>
-    with WidgetsBindingObserver {
+    with WidgetsBindingObserver, WorkspaceVisibilityObserver<RdpDesktopPanel> {
   final _focus = FocusNode();
   final _pressed = <int>{};
   final _vncPressed = <PhysicalKeyboardKey, int>{};
@@ -206,7 +207,7 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
   }
 
   void _syncFrames() {
-    final paused = !widget.active || !_appResumed;
+    final paused = !widget.active || !_appResumed || !workspaceVisible;
     if (paused == _framesPaused) return;
     _framesPaused = paused;
     if (paused) {
@@ -215,6 +216,9 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
       _frames?.resume();
     }
   }
+
+  @override
+  void onWorkspaceVisibilityChanged() => _syncFrames();
 
   void _focusChanged() {
     if (!_focus.hasFocus) _release();

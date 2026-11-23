@@ -90,7 +90,10 @@ class Session {
 
   final SessionKind kind;
   final DockerTerminalTarget? dockerTarget;
-  String get title => dockerTarget?.name ?? host.name;
+  String get title => switch (dockerTarget) {
+    final container? => '${container.name} · ${host.name}',
+    null => host.name,
+  };
   final SessionPhase phase;
 
   /// [SessionPhase.failed] 时的原因描述。

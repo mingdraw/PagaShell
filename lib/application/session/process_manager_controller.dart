@@ -10,7 +10,9 @@ class ProcessManagerController extends GetxController {
   ProcessManagerController({
     required this.source,
     this.interval = const Duration(seconds: 3),
-  });
+  }) {
+    _processesChanged = processes.listen((_) => _filteredOptions = null);
+  }
 
   final ProcessManagerSource source;
   final Duration interval;
@@ -32,11 +34,17 @@ class ProcessManagerController extends GetxController {
   bool _inFlight = false;
   bool _manualRefreshQueued = false;
   int _generation = 0;
+  late final StreamSubscription<List<ProcessUsage>> _processesChanged;
+  (String, ProcessSort)? _filteredOptions;
+  List<ProcessUsage> _filtered = const [];
 
   List<ProcessUsage> get visibleProcesses {
     final term = query.value.trim().toLowerCase();
     final order = sort.value;
-    final result = processes.where((usage) {
+    final snapshot = processes();
+    final options = (term, order);
+    if (options == _filteredOptions) return _filtered;
+    final result = snapshot.where((usage) {
       final p = usage.process;
       return term.isEmpty ||
           p.name.toLowerCase().contains(term) ||
@@ -49,7 +57,8 @@ class ProcessManagerController extends GetxController {
           : b.process.memoryBytes.compareTo(a.process.memoryBytes);
       return compared != 0 ? compared : a.process.pid.compareTo(b.process.pid);
     });
-    return result;
+    _filteredOptions = options;
+    return _filtered = List.unmodifiable(result);
   }
 
   void setEnabled(bool enabled) {
@@ -182,6 +191,7 @@ class ProcessManagerController extends GetxController {
     _generation++;
     _timer?.cancel();
     _feedbackTimer?.cancel();
+    unawaited(_processesChanged.cancel());
     super.onClose();
   }
 }

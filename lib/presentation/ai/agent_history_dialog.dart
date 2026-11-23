@@ -29,6 +29,8 @@ class _AgentHistoryDialogState extends State<_AgentHistoryDialog> {
   final _deleting = <String>{};
   final _search = TextEditingController();
   final _searchFocus = FocusNode();
+  String? _openingId;
+  AgentConversationSummary? _failedOpen;
 
   @override
   void initState() {
@@ -48,14 +50,36 @@ class _AgentHistoryDialogState extends State<_AgentHistoryDialog> {
     _searchFocus.requestFocus();
   }
 
-  bool _matches(AgentConversation item, String query) {
+  bool _matches(AgentConversationSummary item, String query) {
     if (query.isEmpty) return true;
-    final lower = query.toLowerCase();
-    return item.title.toLowerCase().contains(lower) ||
-        item.model.toLowerCase().contains(lower);
+    return item.title.toLowerCase().contains(query) ||
+        item.model.toLowerCase().contains(query);
   }
 
-  Future<void> _delete(AgentConversation conversation) async {
+  Future<void> _open(AgentConversationSummary item) async {
+    final route = ModalRoute.of<bool>(context);
+    setState(() {
+      _openingId = item.id;
+      _failedOpen = null;
+    });
+    final opened = await widget.agent.openConversation(
+      item.id,
+      canApply: () =>
+          mounted && _openingId == item.id && route?.isCurrent == true,
+    );
+    if (!mounted || _openingId != item.id) return;
+    setState(() {
+      _openingId = null;
+      if (!opened &&
+          route?.isCurrent == true &&
+          widget.agent.historyError.value != null) {
+        _failedOpen = item;
+      }
+    });
+    if (opened && route?.isCurrent == true) route?.navigator?.pop<bool>(true);
+  }
+
+  Future<void> _delete(AgentConversationSummary conversation) async {
     final confirmed = await AppNavigation.dialog<bool>(
       AppDialog(
         title: Text('删除对话'.tr),
@@ -76,7 +100,11 @@ class _AgentHistoryDialogState extends State<_AgentHistoryDialog> {
       ),
     );
     if (!mounted || confirmed != true) return;
-    setState(() => _deleting.add(conversation.id));
+    setState(() {
+      _deleting.add(conversation.id);
+      if (_failedOpen?.id == conversation.id) _failedOpen = null;
+      if (_openingId == conversation.id) _openingId = null;
+    });
     await widget.agent.deleteConversation(conversation.id);
     if (mounted) setState(() => _deleting.remove(conversation.id));
   }
@@ -98,6 +126,8 @@ class _AgentHistoryDialogState extends State<_AgentHistoryDialog> {
         height: contentHeight,
         child: Obx(() {
           final conversations = agent.conversations.toList();
+          final currentId = agent.currentConversationId.value;
+          final failedOpen = _failedOpen;
           return Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
@@ -110,8 +140,10 @@ class _AgentHistoryDialogState extends State<_AgentHistoryDialog> {
                 Align(
                   alignment: Alignment.centerRight,
                   child: shadcn.GhostButton(
-                    onPressed: agent.loadingHistory.value
+                    onPressed: agent.loadingHistory.value || _openingId != null
                         ? null
+                        : failedOpen != null && !agent.historyLoadFailed.value
+                        ? () => _open(failedOpen)
                         : agent.retryHistory,
                     child: Text('重试'.tr),
                   ),
@@ -125,7 +157,7 @@ class _AgentHistoryDialogState extends State<_AgentHistoryDialog> {
                     : ValueListenableBuilder<TextEditingValue>(
                         valueListenable: _search,
                         builder: (context, value, _) {
-                          final query = value.text.trim();
+                          final query = value.text.trim().toLowerCase();
                           final filtered = conversations
                               .where((item) => _matches(item, query))
                               .toList(growable: false);
@@ -201,10 +233,8 @@ class _AgentHistoryDialogState extends State<_AgentHistoryDialog> {
                                             item.id,
                                           );
                                           final isCurrent =
-                                              agent
-                                                  .currentConversationId
-                                                  .value ==
-                                              item.id;
+                                              currentId == item.id;
+                                          final opening = _openingId == item.id;
                                           return Row(
                                             children: [
                                               Expanded(
@@ -212,18 +242,9 @@ class _AgentHistoryDialogState extends State<_AgentHistoryDialog> {
                                                   key: ValueKey(
                                                     'agent-history-open-${item.id}',
                                                   ),
-                                                  onPressed: deleting
+                                                  onPressed: deleting || opening
                                                       ? null
-                                                      : () {
-                                                          if (agent
-                                                              .openConversation(
-                                                                item.id,
-                                                              )) {
-                                                            AppNavigation.closeDialog(
-                                                              result: true,
-                                                            );
-                                                          }
-                                                        },
+                                                      : () => _open(item),
                                                   child: SizedBox(
                                                     width: double.infinity,
                                                     child: Column(
@@ -242,6 +263,12 @@ class _AgentHistoryDialogState extends State<_AgentHistoryDialog> {
                                                                         .ellipsis,
                                                               ),
                                                             ),
+                                                            if (opening)
+                                                              const SizedBox.square(
+                                                                dimension: 14,
+                                                                child:
+                                                                    shadcn.CircularProgressIndicator(),
+                                                              ),
                                                             if (isCurrent) ...[
                                                               const SizedBox(
                                                                 width: 8,
@@ -281,7 +308,7 @@ class _AgentHistoryDialogState extends State<_AgentHistoryDialog> {
                                                         Text(
                                                           '@count 条消息'.trParams({
                                                             'count':
-                                                                '${item.messages.length}',
+                                                                '${item.messageCount}',
                                                           }),
                                                           style: TextStyle(
                                                             fontSize: 10,
@@ -323,7 +350,7 @@ class _AgentHistoryDialogState extends State<_AgentHistoryDialog> {
       ),
       actions: [
         shadcn.OutlineButton(
-          onPressed: () => AppNavigation.closeDialog<void>(),
+          onPressed: () => AppNavigation.closeDialog<bool>(),
           child: Text('关闭'.tr),
         ),
       ],

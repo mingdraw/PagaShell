@@ -13,6 +13,7 @@ import '../components/app_menu.dart';
 import '../localization/app_translations.dart';
 import '../navigation/app_navigation.dart';
 import '../navigation/app_notice.dart';
+import '../shell/workspace_visibility.dart';
 import '../theme/app_theme.dart';
 import 'docker_compose_dialog.dart';
 import 'docker_container_dialog.dart';
@@ -39,7 +40,8 @@ class DockerManagerPanel extends StatefulWidget {
   State<DockerManagerPanel> createState() => _DockerManagerPanelState();
 }
 
-class _DockerManagerPanelState extends State<DockerManagerPanel> {
+class _DockerManagerPanelState extends State<DockerManagerPanel>
+    with WorkspaceVisibilityObserver<DockerManagerPanel> {
   DockerManagerController? _controller;
   final _search = {
     for (final kind in DockerResourceKind.values) kind: TextEditingController(),
@@ -71,8 +73,12 @@ class _DockerManagerPanelState extends State<DockerManagerPanel> {
     for (final entry in _search.entries) {
       _controller?.states[entry.key]?.query.value = entry.value.text;
     }
-    _controller?.setEnabled(widget.active);
+    onWorkspaceVisibilityChanged();
   }
+
+  @override
+  void onWorkspaceVisibilityChanged() =>
+      _controller?.setEnabled(widget.active && workspaceVisible);
 
   @override
   void didUpdateWidget(DockerManagerPanel oldWidget) {
@@ -81,7 +87,7 @@ class _DockerManagerPanelState extends State<DockerManagerPanel> {
       _controller?.onClose();
       _createController();
     } else {
-      _controller?.setEnabled(widget.active);
+      onWorkspaceVisibilityChanged();
     }
   }
 

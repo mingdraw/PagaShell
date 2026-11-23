@@ -99,4 +99,44 @@ void main() {
     expect(replacement, isNot(same(client)));
     expect(replacement.isDisposed, isFalse);
   });
+
+  test('大 JSON POST 整块发送，带进度回调时按 32 KiB 分块上报', () async {
+    final received = <Map<String, dynamic>>[];
+    final methods = <String>[];
+    server.listen((request) async {
+      methods.add(request.method);
+      final raw = await utf8.decoder.bind(request).join();
+      received.add(jsonDecode(raw) as Map<String, dynamic>);
+      request.response.headers.contentType = ContentType.json;
+      request.response.write('{"ok":true}');
+      await request.response.close();
+    });
+
+    final payload = {'blob': 'x' * (80 * 1024)};
+    final postRes = await client.post<Map<String, dynamic>>(
+      origin.replace(path: '/large').toString(),
+      payload,
+    );
+    expect(postRes.isOk, isTrue);
+    expect(received.last, payload);
+
+    final progressSamples = <double>[];
+    final putRes = await client.httpClient.put<Map<String, dynamic>>(
+      origin.replace(path: '/chunked').toString(),
+      body: payload,
+      uploadProgress: progressSamples.add,
+    );
+    expect(putRes.isOk, isTrue);
+    expect(received.last, payload);
+    expect(progressSamples.length, inInclusiveRange(2, 4));
+    expect(progressSamples.last, 100.0);
+
+    final patchRes = await client.patch<Map<String, dynamic>>(
+      origin.replace(path: '/patch').toString(),
+      {'k': 'v'},
+    );
+    expect(patchRes.isOk, isTrue);
+    expect(received.last, {'k': 'v'});
+    expect(methods, ['POST', 'PUT', 'PATCH']);
+  });
 }

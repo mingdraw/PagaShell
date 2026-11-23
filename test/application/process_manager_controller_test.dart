@@ -83,6 +83,15 @@ void main() {
     controller.query.value = 'missing';
     expect(controller.visibleProcesses, isEmpty);
     expect(source.reads, hasLength(1));
+    final refresh = controller.refreshProcesses();
+    source.reads.last.complete(
+      processSnapshot(
+        time: 1003,
+        processes: [remoteProcess(pid: 72, name: 'missing-worker')],
+      ),
+    );
+    await refresh;
+    expect(controller.visibleProcesses.single.process.pid, 72);
     controller.setEnabled(false);
   });
 

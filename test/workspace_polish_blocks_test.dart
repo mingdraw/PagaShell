@@ -514,23 +514,21 @@ void main() {
 
     final now = DateTime(2026, 11, 18, 12, 0);
     agent.conversations.assignAll([
-      AgentConversation(
+      AgentConversationSummary(
         id: '00000000000000000000000000000001',
         title: 'Nginx 502 排查',
         createdAt: now,
         updatedAt: now,
         model: 'gpt-4o',
-        messages: const [AgentMessage(AgentEntryKind.user, '排查 502')],
-        turns: const [],
+        messageCount: 1,
       ),
-      AgentConversation(
+      AgentConversationSummary(
         id: '00000000000000000000000000000002',
         title: 'Docker 磁盘清理',
         createdAt: now,
         updatedAt: now,
         model: 'claude-3-7',
-        messages: const [AgentMessage(AgentEntryKind.user, '清理镜像')],
-        turns: const [],
+        messageCount: 1,
       ),
     ]);
     agent.currentConversationId.value = '00000000000000000000000000000001';

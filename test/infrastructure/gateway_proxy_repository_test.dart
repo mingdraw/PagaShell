@@ -200,4 +200,30 @@ void main() {
     expect(persisted.proxyConfig.toJson(), config.toJson());
     expect(persisted.forwardPorts, gateway.forwardPorts);
   });
+
+  test('AppDatabase 在后台连接上启用 SQLite WAL、NORMAL 与 busy_timeout', () async {
+    final dir = await Directory.systemTemp.createTemp('pagashell-wal-check-');
+    addTearDown(() => dir.delete(recursive: true));
+    final db = AppDatabase.openAt(dir.path);
+    addTearDown(db.close);
+
+    final journalMode =
+        (await db.customSelect('PRAGMA journal_mode;').getSingle())
+            .data
+            .values
+            .first;
+    final synchronous =
+        (await db.customSelect('PRAGMA synchronous;').getSingle())
+            .data
+            .values
+            .first;
+    final busyTimeout =
+        (await db.customSelect('PRAGMA busy_timeout;').getSingle())
+            .data
+            .values
+            .first;
+    expect(journalMode.toString().toLowerCase(), 'wal');
+    expect(synchronous, 1);
+    expect(busyTimeout, 5000);
+  });
 }

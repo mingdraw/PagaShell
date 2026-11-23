@@ -146,6 +146,10 @@ fn parse_pin(value: &str) -> Result<Vec<u8>> {
 }
 
 pub(crate) fn validate_gateway(gateway: &PageGateway) -> Result<()> {
+    gateway_pin(gateway).map(|_| ())
+}
+
+fn gateway_pin(gateway: &PageGateway) -> Result<Option<Vec<u8>>> {
     if gateway.server_host.trim().is_empty()
         || gateway.server_port == 0
         || gateway.token.is_empty()
@@ -158,47 +162,71 @@ pub(crate) fn validate_gateway(gateway: &PageGateway) -> Result<()> {
     {
         bail!("Page 网关配置无效，请检查 Client ID 与访问令牌");
     }
-    if !gateway.server_fingerprint.trim().is_empty() {
-        parse_pin(&gateway.server_fingerprint)?;
+    if gateway.server_fingerprint.trim().is_empty() {
+        Ok(None)
+    } else {
+        parse_pin(&gateway.server_fingerprint).map(Some)
     }
-    Ok(())
+}
+
+pub(crate) struct PageConnector {
+    gateway: PageGateway,
+    tls: Option<(TlsConnector, rustls::pki_types::ServerName<'static>)>,
+}
+
+impl PageConnector {
+    pub fn new(gateway: PageGateway) -> Result<Self> {
+        let tls = if let Some(fingerprint) = gateway_pin(&gateway)? {
+            let provider = Arc::new(rustls::crypto::ring::default_provider());
+            // Reuse the verifier and config; require the pinned certificate on
+            // each connection so rotation cannot be hidden by a cached ticket.
+            let mut config = rustls::ClientConfig::builder_with_provider(provider.clone())
+                .with_protocol_versions(&[&rustls::version::TLS13])?
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(PinVerifier {
+                    fingerprint,
+                    provider,
+                }))
+                .with_no_client_auth();
+            config.resumption = rustls::client::Resumption::disabled();
+            let name = rustls::pki_types::ServerName::try_from(gateway.server_host.clone())
+                .context("Page Server 地址无效")?;
+            Some((TlsConnector::from(Arc::new(config)), name))
+        } else {
+            None
+        };
+        Ok(Self { gateway, tls })
+    }
+
+    pub async fn connect(&self, host: &str, port: u16) -> Result<PageStream> {
+        let gateway = &self.gateway;
+        let tcp = TcpStream::connect((gateway.server_host.as_str(), gateway.server_port))
+            .await
+            .context("无法连接 Page Server")?;
+        tcp.set_nodelay(true)?;
+        let stream = if let Some((connector, name)) = &self.tls {
+            let tls = connector
+                .connect(name.clone(), tcp)
+                .await
+                .context("Page Server TLS 握手失败，请核对证书指纹")?;
+            PageStream::Tls(Box::new(tls))
+        } else {
+            PageStream::Tcp(tcp)
+        };
+        open_target(gateway, host, port, stream).await
+    }
 }
 
 pub(crate) async fn connect(gateway: PageGateway, host: &str, port: u16) -> Result<PageStream> {
-    validate_gateway(&gateway)?;
-    let fingerprint = if gateway.server_fingerprint.trim().is_empty() {
-        None
-    } else {
-        Some(parse_pin(&gateway.server_fingerprint)?)
-    };
-    let tcp = TcpStream::connect((gateway.server_host.as_str(), gateway.server_port))
-        .await
-        .context("无法连接 Page Server")?;
-    tcp.set_nodelay(true)?;
-    let mut stream = if let Some(fingerprint) = fingerprint {
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        // A configured pin requires TLS; handshake failures never fall back to TCP.
-        let mut config = rustls::ClientConfig::builder_with_provider(provider.clone())
-            .with_protocol_versions(&[&rustls::version::TLS13])?
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(PinVerifier {
-                fingerprint,
-                provider,
-            }))
-            .with_no_client_auth();
-        config.resumption = rustls::client::Resumption::disabled();
-        let tls = TlsConnector::from(Arc::new(config))
-            .connect(
-                rustls::pki_types::ServerName::try_from(gateway.server_host.clone())
-                    .context("Page Server 地址无效")?,
-                tcp,
-            )
-            .await
-            .context("Page Server TLS 握手失败，请核对证书指纹")?;
-        PageStream::Tls(Box::new(tls))
-    } else {
-        PageStream::Tcp(tcp)
-    };
+    PageConnector::new(gateway)?.connect(host, port).await
+}
+
+async fn open_target(
+    gateway: &PageGateway,
+    host: &str,
+    port: u16,
+    mut stream: PageStream,
+) -> Result<PageStream> {
     let frame = serde_json::to_vec(&Open {
         version: 1,
         kind: "open",

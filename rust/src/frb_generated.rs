@@ -39,7 +39,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.13.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1693592562;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -302371979;
 
 // Section: executor
 
@@ -1710,43 +1710,6 @@ fn wire__crate__api__ssh__ssh_handshake_via_page_impl(
         },
     )
 }
-fn wire__crate__api__docker__ssh_next_docker_logs_impl(
-    port_: flutter_rust_bridge::for_generated::MessagePort,
-    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
-    rust_vec_len_: i32,
-    data_len_: i32,
-) {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "ssh_next_docker_logs",
-            port: Some(port_),
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
-        },
-        move || {
-            let message = unsafe {
-                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
-                    ptr_,
-                    rust_vec_len_,
-                    data_len_,
-                )
-            };
-            let mut deserializer =
-                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
-            let api_log_id = <u32>::sse_decode(&mut deserializer);
-            deserializer.end();
-            move |context| async move {
-                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
-                    (move || async move {
-                        let output_ok =
-                            crate::api::docker::ssh_next_docker_logs(api_log_id).await?;
-                        std::result::Result::Ok(output_ok)
-                    })()
-                    .await,
-                )
-            }
-        },
-    )
-}
 fn wire__crate__api__docker__ssh_open_docker_logs_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -2564,7 +2527,7 @@ fn wire__crate__api__ssh__ssh_start_terminal_impl(
         },
     )
 }
-fn wire__crate__api__ssh__ssh_terminal_ack_impl(
+fn wire__crate__api__docker__ssh_stream_docker_logs_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
@@ -2572,9 +2535,51 @@ fn wire__crate__api__ssh__ssh_terminal_ack_impl(
 ) {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "ssh_terminal_ack",
+            debug_name: "ssh_stream_docker_logs",
             port: Some(port_),
             mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_log_id = <u32>::sse_decode(&mut deserializer);
+            let api_output =
+                <StreamSink<Vec<u8>, flutter_rust_bridge::for_generated::SseCodec>>::sse_decode(
+                    &mut deserializer,
+                );
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, ()>(
+                    (move || async move {
+                        let output_ok = Ok::<_, ()>({
+                            crate::api::docker::ssh_stream_docker_logs(api_log_id, api_output)
+                                .await;
+                        })?;
+                        std::result::Result::Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__ssh__ssh_terminal_ack_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "ssh_terminal_ack",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
         },
         move || {
             let message = unsafe {
@@ -2589,16 +2594,12 @@ fn wire__crate__api__ssh__ssh_terminal_ack_impl(
             let api_session_id = <u32>::sse_decode(&mut deserializer);
             let api_frame_id = <u32>::sse_decode(&mut deserializer);
             deserializer.end();
-            move |context| async move {
-                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
-                    (move || async move {
-                        let output_ok =
-                            crate::api::ssh::ssh_terminal_ack(api_session_id, api_frame_id).await?;
-                        std::result::Result::Ok(output_ok)
-                    })()
-                    .await,
-                )
-            }
+            transform_result_sse::<_, ()>((move || {
+                let output_ok = Ok::<_, ()>({
+                    crate::api::ssh::ssh_terminal_ack(api_session_id, api_frame_id);
+                })?;
+                std::result::Result::Ok(output_ok)
+            })())
         },
     )
 }
@@ -2947,6 +2948,14 @@ impl SseDecode for flutter_rust_bridge::for_generated::anyhow::Error {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut inner = <String>::sse_decode(deserializer);
         return flutter_rust_bridge::for_generated::anyhow::anyhow!("{}", inner);
+    }
+}
+
+impl SseDecode for StreamSink<Vec<u8>, flutter_rust_bridge::for_generated::SseCodec> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <String>::sse_decode(deserializer);
+        return StreamSink::deserialize(inner);
     }
 }
 
@@ -3511,17 +3520,6 @@ impl SseDecode for Option<u32> {
     }
 }
 
-impl SseDecode for Option<Vec<u8>> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        if (<bool>::sse_decode(deserializer)) {
-            return Some(<Vec<u8>>::sse_decode(deserializer));
-        } else {
-            return None;
-        }
-    }
-}
-
 impl SseDecode for crate::api::page::PageGateway {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -3899,86 +3897,85 @@ fn pde_ffi_dispatcher_primary_impl(
         }
         40 => wire__crate__api__ssh__ssh_handshake_via_page_impl(port, ptr, rust_vec_len, data_len),
         41 => {
-            wire__crate__api__docker__ssh_next_docker_logs_impl(port, ptr, rust_vec_len, data_len)
-        }
-        42 => {
             wire__crate__api__docker__ssh_open_docker_logs_impl(port, ptr, rust_vec_len, data_len)
         }
-        43 => wire__crate__api__docker__ssh_read_docker_details_impl(
+        42 => wire__crate__api__docker__ssh_read_docker_details_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        44 => wire__crate__api__docker__ssh_read_docker_resources_impl(
+        43 => wire__crate__api__docker__ssh_read_docker_resources_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        45 => wire__crate__api__firewall__ssh_read_firewall_impl(port, ptr, rust_vec_len, data_len),
-        46 => wire__crate__api__network_ports__ssh_read_network_ports_impl(
+        44 => wire__crate__api__firewall__ssh_read_firewall_impl(port, ptr, rust_vec_len, data_len),
+        45 => wire__crate__api__network_ports__ssh_read_network_ports_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        47 => {
+        46 => {
             wire__crate__api__ssh__ssh_read_process_details_impl(port, ptr, rust_vec_len, data_len)
         }
-        48 => wire__crate__api__ssh__ssh_read_processes_impl(port, ptr, rust_vec_len, data_len),
-        49 => wire__crate__api__agent_ops__ssh_read_remote_text_impl(
+        47 => wire__crate__api__ssh__ssh_read_processes_impl(port, ptr, rust_vec_len, data_len),
+        48 => wire__crate__api__agent_ops__ssh_read_remote_text_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        50 => wire__crate__api__agent_ops__ssh_read_server_profile_impl(
+        49 => wire__crate__api__agent_ops__ssh_read_server_profile_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        51 => wire__crate__api__ssh__ssh_read_server_status_impl(port, ptr, rust_vec_len, data_len),
-        52 => wire__crate__api__ssh__ssh_resize_impl(port, ptr, rust_vec_len, data_len),
-        53 => wire__crate__api__agent_ops__ssh_restore_remote_backup_impl(
+        50 => wire__crate__api__ssh__ssh_read_server_status_impl(port, ptr, rust_vec_len, data_len),
+        51 => wire__crate__api__ssh__ssh_resize_impl(port, ptr, rust_vec_len, data_len),
+        52 => wire__crate__api__agent_ops__ssh_restore_remote_backup_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        54 => wire__crate__api__docker__ssh_run_docker_compose_action_impl(
+        53 => wire__crate__api__docker__ssh_run_docker_compose_action_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        55 => wire__crate__api__docker__ssh_run_docker_container_action_impl(
+        54 => wire__crate__api__docker__ssh_run_docker_container_action_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        56 => wire__crate__api__docker__ssh_run_docker_image_action_impl(
+        55 => wire__crate__api__docker__ssh_run_docker_image_action_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        57 => wire__crate__api__firewall__ssh_run_firewall_service_action_impl(
+        56 => wire__crate__api__firewall__ssh_run_firewall_service_action_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        58 => {
+        57 => {
             wire__crate__api__ssh__ssh_start_docker_terminal_impl(port, ptr, rust_vec_len, data_len)
         }
-        59 => {
+        58 => {
             wire__crate__api__ssh__ssh_start_port_forwards_impl(port, ptr, rust_vec_len, data_len)
         }
-        60 => wire__crate__api__ssh__ssh_start_terminal_impl(port, ptr, rust_vec_len, data_len),
-        61 => wire__crate__api__ssh__ssh_terminal_ack_impl(port, ptr, rust_vec_len, data_len),
+        59 => wire__crate__api__ssh__ssh_start_terminal_impl(port, ptr, rust_vec_len, data_len),
+        60 => {
+            wire__crate__api__docker__ssh_stream_docker_logs_impl(port, ptr, rust_vec_len, data_len)
+        }
         62 => wire__crate__api__ssh__ssh_terminate_process_impl(port, ptr, rust_vec_len, data_len),
         63 => {
             wire__crate__api__ssh__ssh_validate_private_key_impl(port, ptr, rust_vec_len, data_len)
@@ -4006,6 +4003,7 @@ fn pde_ffi_dispatcher_sync_impl(
 ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
+        61 => wire__crate__api__ssh__ssh_terminal_ack_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -4687,6 +4685,13 @@ impl SseEncode for flutter_rust_bridge::for_generated::anyhow::Error {
     }
 }
 
+impl SseEncode for StreamSink<Vec<u8>, flutter_rust_bridge::for_generated::SseCodec> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        unimplemented!("")
+    }
+}
+
 impl SseEncode
     for StreamSink<crate::api::ssh::PortForwardEvent, flutter_rust_bridge::for_generated::SseCodec>
 {
@@ -5174,16 +5179,6 @@ impl SseEncode for Option<u32> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <u32>::sse_encode(value, serializer);
-        }
-    }
-}
-
-impl SseEncode for Option<Vec<u8>> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <bool>::sse_encode(self.is_some(), serializer);
-        if let Some(value) = self {
-            <Vec<u8>>::sse_encode(value, serializer);
         }
     }
 }

@@ -3006,6 +3006,7 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "flutter_rust_bridge",
+ "futures-util",
  "http-body-util",
  "hyper",
  "hyper-util",

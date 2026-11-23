@@ -11,6 +11,7 @@ import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
 import '../components/app_tree_expansion.dart';
 import '../localization/app_translations.dart';
+import '../shell/workspace_visibility.dart';
 import '../theme/app_theme.dart';
 import 'panel_refresh_pause_button.dart';
 import 'server_status_trend.dart';
@@ -33,7 +34,8 @@ class ServerStatusPanel extends StatefulWidget {
   State<ServerStatusPanel> createState() => _ServerStatusPanelState();
 }
 
-class _ServerStatusPanelState extends State<ServerStatusPanel> {
+class _ServerStatusPanelState extends State<ServerStatusPanel>
+    with WorkspaceVisibilityObserver<ServerStatusPanel> {
   ServerStatusController? _controller;
   bool _loadExpanded = false;
   bool _cpuExpanded = false;
@@ -55,10 +57,12 @@ class _ServerStatusPanelState extends State<ServerStatusPanel> {
     _controller = source == null
         ? null
         : ServerStatusController(source: source);
-    _syncSampling();
+    onWorkspaceVisibilityChanged();
   }
 
-  void _syncSampling() => _controller?.setEnabled(widget.active);
+  @override
+  void onWorkspaceVisibilityChanged() =>
+      _controller?.setEnabled(widget.active && workspaceVisible);
 
   @override
   void didUpdateWidget(ServerStatusPanel oldWidget) {
@@ -67,7 +71,7 @@ class _ServerStatusPanelState extends State<ServerStatusPanel> {
       _controller?.onClose();
       _createController();
     } else {
-      _syncSampling();
+      onWorkspaceVisibilityChanged();
     }
   }
 

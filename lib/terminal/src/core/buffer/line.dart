@@ -12,6 +12,15 @@ class BufferLine with IndexedItem {
     : _length = length,
       _data = Uint32List(length * 4);
 
+  /// 直接接管新帧分配的只读单元格数据，避免先创建空缓冲再立刻丢弃。
+  BufferLine.fromFrame(TerminalLine update, int columns)
+    : id = update.id,
+      _length = columns,
+      _data = update.cells,
+      _clusters = update.clusters,
+      isWrapped = update.wrapped,
+      _version = 1;
+
   final int id;
   int _length;
   Uint32List _data;
@@ -57,10 +66,27 @@ class BufferLine with IndexedItem {
     final end = (to ?? length).clamp(0, length);
     if (start == 0 && end == length && _cachedText != null) return _cachedText!;
     final text = StringBuffer();
-    for (var i = start; i < end; i++) {
-      final codepoint = getCodePoint(i);
-      if (codepoint != 0 && i + getWidth(i) <= end) {
-        text.write(_clusters[i] ?? String.fromCharCode(codepoint));
+    final clusters = _clusters;
+    if (clusters.isEmpty) {
+      for (var i = start; i < end; i++) {
+        final content = _data[i * 4 + 3];
+        final codepoint = content & CellContent.codepointMask;
+        if (codepoint != 0 && i + (content >> CellContent.widthShift) <= end) {
+          text.writeCharCode(codepoint);
+        }
+      }
+    } else {
+      for (var i = start; i < end; i++) {
+        final content = _data[i * 4 + 3];
+        final codepoint = content & CellContent.codepointMask;
+        if (codepoint != 0 && i + (content >> CellContent.widthShift) <= end) {
+          final cluster = clusters[i];
+          if (cluster != null) {
+            text.write(cluster);
+          } else {
+            text.writeCharCode(codepoint);
+          }
+        }
       }
     }
     final result = text.toString();
@@ -92,6 +118,7 @@ class BufferLine with IndexedItem {
   }
 
   void dispose() {
+    if (_anchors.isEmpty) return;
     for (final anchor in List<CellAnchor>.of(_anchors)) {
       anchor.dispose();
     }

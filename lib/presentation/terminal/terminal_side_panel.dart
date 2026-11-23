@@ -46,6 +46,7 @@ class _TerminalSidePanelState extends State<TerminalSidePanel>
   late final AnimationController _expansion;
   TerminalSidePanelKind _selected = TerminalSidePanelKind.status;
   bool _expanded = false;
+  bool _panelMounted = false;
   double _target = 0;
   double _panelWidth = AppTheme.serverStatusDefaultWidth;
   double? _preferredWidth;
@@ -78,6 +79,7 @@ class _TerminalSidePanelState extends State<TerminalSidePanel>
   }
 
   void _syncAnimation() {
+    if (_visible) _panelMounted = true;
     final target = _visible ? 1.0 : 0.0;
     if (!_canExpand || MediaQuery.disableAnimationsOf(context)) {
       _target = target;
@@ -92,6 +94,7 @@ class _TerminalSidePanelState extends State<TerminalSidePanel>
     setState(() {
       _expanded = _selected != kind || !_expanded;
       _selected = kind;
+      if (_visible) _panelMounted = true;
     });
     _syncAnimation();
   }
@@ -174,34 +177,39 @@ class _TerminalSidePanelState extends State<TerminalSidePanel>
               },
               child: Offstage(
                 offstage: _expansion.value == 0,
-                child: IgnorePointer(
-                  key: const ValueKey('terminal-side-panel-viewport'),
-                  ignoring: !_visible || _expansion.isAnimating,
-                  child: ExcludeFocus(
-                    excluding: !_visible,
-                    child: ExcludeSemantics(
+                child: TickerMode(
+                  enabled: _expansion.value > 0,
+                  child: IgnorePointer(
+                    key: const ValueKey('terminal-side-panel-viewport'),
+                    ignoring: !_visible || _expansion.isAnimating,
+                    child: ExcludeFocus(
                       excluding: !_visible,
-                      child: ClipRect(
-                        child: LayoutBuilder(
-                          builder: (_, constraints) {
-                            // 过渡期间固定内容宽度，裁剪代替把卡片挤压至零。
-                            final width = _expansion.isAnimating || !_visible
-                                ? math.max(
-                                    AppTheme.serverStatusMinWidth,
-                                    _panelWidth,
-                                  )
-                                : constraints.maxWidth;
-                            return OverflowBox(
-                              alignment: Alignment.centerLeft,
-                              minWidth: width,
-                              maxWidth: width,
-                              child: widget.panelBuilder(
-                                context,
-                                _selected,
-                                _visible,
-                              ),
-                            );
-                          },
+                      child: ExcludeSemantics(
+                        excluding: !_visible,
+                        child: ClipRect(
+                          child: LayoutBuilder(
+                            builder: (_, constraints) {
+                              // 过渡期间固定内容宽度，裁剪代替把卡片挤压至零。
+                              final width = _expansion.isAnimating || !_visible
+                                  ? math.max(
+                                      AppTheme.serverStatusMinWidth,
+                                      _panelWidth,
+                                    )
+                                  : constraints.maxWidth;
+                              return OverflowBox(
+                                alignment: Alignment.centerLeft,
+                                minWidth: width,
+                                maxWidth: width,
+                                child: _panelMounted
+                                    ? widget.panelBuilder(
+                                        context,
+                                        _selected,
+                                        _visible,
+                                      )
+                                    : const SizedBox.shrink(),
+                              );
+                            },
+                          ),
                         ),
                       ),
                     ),

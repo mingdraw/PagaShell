@@ -711,7 +711,7 @@ ss -lntp
       final saved = agent.currentConversationId.value!;
       await tester.tap(find.byKey(const ValueKey('agent-new-chat')));
       await tester.pumpAndSettle();
-      expect(agent.openConversation(saved), isTrue);
+      expect(await agent.openConversation(saved), isTrue);
       await tester.pumpAndSettle();
       expect(find.text('检查结果'), findsOneWidget);
       expect(find.byType(Table), findsOneWidget);
@@ -948,7 +948,8 @@ ss -lntp
     await tester.pumpAndSettle();
     expect(await exit, ui.AppExitResponse.exit);
     expect(agent.busy.value, isFalse);
-    expect(agent.conversations.single.messages.first.text, 'Save before exit');
+    expect(agent.conversations.single.title, 'Save before exit');
+    expect(agent.conversations.single.messageCount, 1);
     response.complete(openAiReply('Late exit response'));
     await tester.pumpAndSettle();
     expect(agent.entries, hasLength(1));
@@ -2382,4 +2383,41 @@ ss -lntp
       await tester.pumpWidget(const SizedBox.shrink());
     });
   }
+
+  testWidgets('Agent 面板默认收起时不提前挂载也不实例化 lazyPut 控制器，展开后才挂载', (tester) async {
+    await pump(tester);
+    expect(
+      find.byKey(const ValueKey('agent-panel'), skipOffstage: false),
+      findsNothing,
+    );
+    expect(Get.isPrepared<AgentController>(), isTrue);
+
+    await tester.tap(findAppIconButton('AI Agent'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('agent-panel')), findsOneWidget);
+    expect(Get.isPrepared<AgentController>(), isFalse);
+    expect(Get.isRegistered<AgentController>(), isTrue);
+
+    await tester.tap(findAppIconButton('收起 Agent'));
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('agent-panel'), skipOffstage: false),
+      findsOneWidget,
+    );
+    expect(find.byKey(const ValueKey('agent-panel')), findsNothing);
+    expect(
+      find.byKey(const ValueKey('agent-panel')).hitTestable(),
+      findsNothing,
+    );
+    final ticker = tester.widget<TickerMode>(
+      find
+          .ancestor(
+            of: find.byKey(const ValueKey('agent-panel'), skipOffstage: false),
+            matching: find.byType(TickerMode, skipOffstage: false),
+          )
+          .first,
+    );
+    expect(ticker.enabled, isFalse);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 }

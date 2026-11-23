@@ -93,11 +93,9 @@ async fn server(
                     let size = match kind { 3 => 9, 4 => 7, 5 => 5, _ => panic!("unexpected input type {kind}") };
                     let mut body = vec![0; size];
                     if stream.read_exact(&mut body).await.is_err() { break; }
-                    if kind != 3 {
-                        let mut bytes = vec![kind];
-                        bytes.extend_from_slice(&body);
-                        let _ = events.send(bytes);
-                    }
+                    let mut bytes = vec![kind];
+                    bytes.extend_from_slice(&body);
+                    let _ = events.send(bytes);
                 }
             }
         }
@@ -141,9 +139,9 @@ async fn rfb_versions_password_frame_pointer_keyboard_and_disconnect() {
         let first = next_frame(id, 0, &[255, 0, 0, 255, 0, 255, 0, 255]).await;
         assert_eq!((first.width, first.height), (2, 1));
         commands.send(raw_frame(1, 1, &[0, 0, 255, 0])).unwrap();
-        let patch = next_frame(id, first.sequence, &[0, 0, 255, 255]).await;
-        assert_eq!(patch.bitmap_width, 1);
-        assert_eq!(patch.tiles[0].x, 1);
+        let patch = next_frame(id, first.sequence, &[255, 0, 0, 255, 0, 0, 255, 255]).await;
+        assert_eq!(patch.bitmap_width, 2);
+        assert_eq!(patch.tiles[0].x, 0);
         input(id, 0, 0xff51, 0, 0, 0, String::new()).await.unwrap();
         input(id, 0, 0xff51, 1, 0, 0, String::new()).await.unwrap();
         input(id, 1, 0, 0x9000, 1, 0, String::new()).await.unwrap();
@@ -151,13 +149,14 @@ async fn rfb_versions_password_frame_pointer_keyboard_and_disconnect() {
             .await
             .unwrap();
         let mut received = Vec::new();
-        for _ in 0..5 {
-            received.push(
-                tokio::time::timeout(Duration::from_secs(1), events.recv())
-                    .await
-                    .unwrap()
-                    .unwrap(),
-            );
+        while received.len() < 5 {
+            let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if event[0] != 3 {
+                received.push(event);
+            }
         }
         assert_eq!(received[0], [4, 1, 0, 0, 0, 0, 0xff, 0x51]);
         assert_eq!(received[1], [4, 0, 0, 0, 0, 0, 0xff, 0x51]);
@@ -173,6 +172,40 @@ async fn rfb_versions_password_frame_pointer_keyboard_and_disconnect() {
             .unwrap()
             .unwrap();
     }
+}
+
+#[tokio::test]
+async fn refresh_is_requested_only_when_a_viewer_needs_an_update() {
+    let (port, commands, mut events, worker) = server(8, false).await;
+    let id = connect("127.0.0.1".into(), port, String::new(), None, None)
+        .await
+        .unwrap();
+    let request = tokio::time::timeout(Duration::from_secs(1), events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&request[..2], &[3, 0]);
+    commands
+        .send(raw_frame(0, 2, &[255, 0, 0, 0, 0, 255, 0, 0]))
+        .unwrap();
+    let first = next_frame(id, 0, &[255, 0, 0, 255, 0, 255, 0, 255]).await;
+    assert!(
+        tokio::time::timeout(REFRESH_RETRY + FRAME_INTERVAL, events.recv())
+            .await
+            .is_err()
+    );
+    let next = tokio::spawn(frame(id, first.sequence));
+    let request = tokio::time::timeout(Duration::from_secs(1), events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&request[..2], &[3, 1]);
+    commands.send(raw_frame(1, 1, &[0, 0, 255, 0])).unwrap();
+    let update = next.await.unwrap().unwrap().unwrap();
+    assert_eq!(update.rgba, [255, 0, 0, 255, 0, 0, 255, 255]);
+    disconnect(id).await;
+    drop(commands);
+    worker.await.unwrap();
 }
 
 #[tokio::test]
@@ -234,7 +267,7 @@ fn framebuffer_handles_overlapping_copy_resync_and_rejects_invalid_rectangles() 
         .unwrap();
     assert_eq!(
         image.frame(first.sequence).unwrap().rgba,
-        [1, 0, 0, 255, 2, 0, 0, 255]
+        [1, 0, 0, 255, 1, 0, 0, 255, 2, 0, 0, 255]
     );
     let full = image.frame(0).unwrap();
     assert_eq!(full.rgba, [1, 0, 0, 255, 1, 0, 0, 255, 2, 0, 0, 255]);
@@ -250,4 +283,54 @@ fn framebuffer_handles_overlapping_copy_resync_and_rejects_invalid_rectangles() 
         )
         .is_err());
     assert!(image.resize(8192, 8192).is_err());
+}
+
+#[test]
+fn sparse_vnc_rectangles_pack_their_tiles_without_reuploading_the_desktop() {
+    let mut image = Framebuffer::default();
+    image.resize(512, 256).unwrap();
+    let first = image.frame(0).unwrap();
+    image
+        .blit(
+            Rect {
+                x: 3,
+                y: 2,
+                width: 1,
+                height: 1,
+            },
+            &[255, 0, 0, 0],
+        )
+        .unwrap();
+    image
+        .blit(
+            Rect {
+                x: 500,
+                y: 200,
+                width: 1,
+                height: 1,
+            },
+            &[0, 0, 255, 0],
+        )
+        .unwrap();
+    let atlas = image.frame(first.sequence).unwrap();
+    assert_eq!(
+        atlas
+            .tiles
+            .iter()
+            .map(|tile| (tile.x, tile.y))
+            .collect::<Vec<_>>(),
+        [(0, 0), (384, 128)]
+    );
+    assert!(atlas.rgba.len() < first.rgba.len());
+    for (x, y, color) in [(3, 2, [255, 0, 0, 255]), (500, 200, [0, 0, 255, 255])] {
+        let tile = atlas
+            .tiles
+            .iter()
+            .find(|tile| x >= tile.x && x < tile.x + tile.width)
+            .unwrap();
+        let pixel = (usize::from(y - tile.y + tile.source_y) * usize::from(atlas.bitmap_width)
+            + usize::from(x - tile.x + tile.source_x))
+            * 4;
+        assert_eq!(atlas.rgba[pixel..pixel + 4], color);
+    }
 }

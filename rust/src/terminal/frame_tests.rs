@@ -148,12 +148,15 @@ fn identical_recycled_rows_never_reuse_old_identity() {
     let mut mirror = Mirror::default();
     core.feed(b"repeat\r\nrepeat\r\nrepeat");
     mirror.check(&mut core, "duplicates");
-    let original: HashSet<_> = core.main.order.iter().copied().collect();
+    let original: HashSet<_> = core.row_order(false).iter().copied().collect();
     for _ in 0..50 {
         core.feed(b"\r\nrepeat");
     }
     mirror.check(&mut core, "recycled");
-    assert!(core.main.order.iter().all(|id| !original.contains(id)));
+    assert!(core
+        .row_order(false)
+        .iter()
+        .all(|id| !original.contains(id)));
 }
 
 #[test]
@@ -164,10 +167,10 @@ fn height_resize_preserves_rows_in_both_buffers_and_width_reflow_invalidates_ids
         core.feed(format!("row-{n}\r\n").as_bytes());
     }
     mirror.check(&mut core, "before grow");
-    let original = core.main.order.clone();
+    let original = core.row_order(false);
     core.resize(10, 7);
     mirror.check(&mut core, "grow with history");
-    assert_eq!(core.main.order, original);
+    assert_eq!(core.row_order(false), original);
     core.resize(10, 2);
     mirror.check(&mut core, "shrink with cursor at bottom");
     core.feed(b"\x1b[?1049hALT");
@@ -178,10 +181,13 @@ fn height_resize_preserves_rows_in_both_buffers_and_width_reflow_invalidates_ids
     }
     core.feed(b"\x1b[?1049l");
     mirror.check(&mut core, "restore main after height changes");
-    let before_reflow: HashSet<_> = core.main.order.iter().copied().collect();
+    let before_reflow: HashSet<_> = core.row_order(false).iter().copied().collect();
     core.resize(5, 5);
     mirror.check(&mut core, "width reflow");
-    assert!(core.main.order.iter().all(|id| !before_reflow.contains(id)));
+    assert!(core
+        .row_order(false)
+        .iter()
+        .all(|id| !before_reflow.contains(id)));
     core.resize(5, 5);
     assert!(core.frame().is_none(), "same dimensions must be a no-op");
 }

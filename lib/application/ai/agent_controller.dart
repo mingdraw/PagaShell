@@ -116,7 +116,7 @@ class AgentController extends GetxController {
   final _tools = _AgentToolState();
   final _queue = _AgentQueueState();
   int get queuedCount => _queue.pending.length;
-  RxList<AgentConversation> get conversations => _storage.conversations;
+  RxList<AgentConversationSummary> get conversations => _storage.conversations;
   RxnString get currentConversationId => _storage.currentConversationId;
   RxBool get loadingHistory => _storage.loadingHistory;
   RxBool get historyLoadFailed => _storage.historyLoadFailed;
@@ -247,7 +247,8 @@ class AgentController extends GetxController {
 
   Future<void> retryHistory() => _retryHistory();
   Future<bool> prepareForExit() => _prepareForExit();
-  bool openConversation(String id) => _openConversation(id);
+  Future<bool> openConversation(String id, {bool Function()? canApply}) =>
+      _openConversation(id, canApply: canApply);
   Future<bool> deleteConversation(String id) => _deleteConversation(id);
 
   List<Session> get selectableSessions => _sessions.sessions
@@ -510,6 +511,7 @@ class AgentController extends GetxController {
 
   void _resetConversation() {
     _cancelPendingSave();
+    _cancelHistoryOpen();
     currentConversationId.value = null;
     _conversationModel = null;
     selectedSessions.clear();
@@ -527,6 +529,7 @@ class AgentController extends GetxController {
     _sessionsWorker?.dispose();
     stop();
     _cancelPendingSave();
+    _cancelHistoryOpen();
     _setHistory([]);
     _storage.turnWeights.clear();
     super.onClose();

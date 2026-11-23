@@ -15,6 +15,7 @@ import '../components/app_menu.dart';
 import '../localization/app_translations.dart';
 import '../navigation/app_navigation.dart';
 import '../navigation/app_notice.dart';
+import '../shell/workspace_visibility.dart';
 import '../theme/app_theme.dart';
 import 'network_port_termination_dialog.dart';
 import 'panel_refresh_pause_button.dart';
@@ -36,7 +37,8 @@ class NetworkPortsPanel extends StatefulWidget {
   State<NetworkPortsPanel> createState() => _NetworkPortsPanelState();
 }
 
-class _NetworkPortsPanelState extends State<NetworkPortsPanel> {
+class _NetworkPortsPanelState extends State<NetworkPortsPanel>
+    with WorkspaceVisibilityObserver<NetworkPortsPanel> {
   NetworkPortsController? _controller;
   final _search = TextEditingController();
   final _scroll = ScrollController();
@@ -56,8 +58,12 @@ class _NetworkPortsPanelState extends State<NetworkPortsPanel> {
         ? null
         : NetworkPortsController(source: widget.source!);
     _searchChanged();
-    _controller?.setEnabled(widget.active);
+    onWorkspaceVisibilityChanged();
   }
+
+  @override
+  void onWorkspaceVisibilityChanged() =>
+      _controller?.setEnabled(widget.active && workspaceVisible);
 
   @override
   void didUpdateWidget(NetworkPortsPanel oldWidget) {
@@ -66,7 +72,7 @@ class _NetworkPortsPanelState extends State<NetworkPortsPanel> {
       _controller?.onClose();
       _createController();
     } else {
-      _controller?.setEnabled(widget.active);
+      onWorkspaceVisibilityChanged();
     }
   }
 
@@ -349,7 +355,7 @@ class _NetworkPortsPanelState extends State<NetworkPortsPanel> {
                             padding: const EdgeInsets.fromLTRB(10, 0, 10, 12),
                             itemCount: entries.length,
                             itemBuilder: (_, index) =>
-                                Obx(() => _card(controller, entries[index])),
+                                _card(controller, entries[index]),
                           ),
                   ),
                 ],
@@ -403,7 +409,9 @@ class _NetworkPortsPanelState extends State<NetworkPortsPanel> {
                   ),
                 SizedBox.square(
                   dimension: 22,
-                  child: _stopButton(controller, port),
+                  child: port.processes.isEmpty
+                      ? _stopButton(controller, port)
+                      : Obx(() => _stopButton(controller, port)),
                 ),
               ],
             ),
@@ -552,14 +560,13 @@ class _NetworkPortsPanelState extends State<NetworkPortsPanel> {
     NetworkPortsController controller,
     ListeningNetworkPort port,
   ) {
-    final pending = controller.preparing.toSet()
-      ..addAll(controller.terminating.toSet());
-    final busy = port.processes.any((p) => pending.contains(p.pid));
-    final available =
-        widget.active &&
-        !_showingTermination &&
-        !busy &&
-        controller.canTerminatePort(port);
+    final busy = port.processes.any(
+      (p) =>
+          controller.preparing.contains(p.pid) ||
+          controller.terminating.contains(p.pid),
+    );
+    final canStop = controller.canTerminatePort(port);
+    final available = widget.active && !_showingTermination && !busy && canStop;
     final icon = AppIcon(
       busy ? AppIcons.hourglass : AppIcons.square,
       size: 13,
@@ -570,9 +577,7 @@ class _NetworkPortsPanelState extends State<NetworkPortsPanel> {
       child: AppIconButton(
         key: ValueKey('network-port-stop-${port.identity}'),
         semanticLabel: '结束全部进程'.tr,
-        tooltip:
-            (controller.canTerminatePort(port) ? '结束此端口的全部进程' : '无法核对此端口的全部进程')
-                .tr,
+        tooltip: (canStop ? '结束此端口的全部进程' : '无法核对此端口的全部进程').tr,
         density: shadcn.ButtonDensity.compact,
         icon: icon,
         onPressed: available

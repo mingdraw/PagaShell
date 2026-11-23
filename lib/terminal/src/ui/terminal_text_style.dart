@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/widgets.dart';
 
 const _kDefaultFontSize = 13.0;
@@ -85,4 +86,21 @@ class TerminalStyle {
       fontFamilyFallback: fontFamilyFallback ?? this.fontFamilyFallback,
     );
   }
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TerminalStyle &&
+          fontSize == other.fontSize &&
+          height == other.height &&
+          fontFamily == other.fontFamily &&
+          listEquals(fontFamilyFallback, other.fontFamilyFallback);
+
+  @override
+  int get hashCode => Object.hash(
+    fontSize,
+    height,
+    fontFamily,
+    Object.hashAll(fontFamilyFallback),
+  );
 }

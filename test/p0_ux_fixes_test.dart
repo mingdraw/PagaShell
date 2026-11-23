@@ -444,14 +444,13 @@ void main() {
     final agent = Get.find<AgentController>();
     final now = DateTime(2026, 11, 18, 12, 0);
     agent.conversations.assignAll([
-      AgentConversation(
+      AgentConversationSummary(
         id: '00000000000000000000000000000010',
         title: '小窗高度测试对话',
         createdAt: now,
         updatedAt: now,
         model: 'gpt-4o',
-        messages: const [AgentMessage(AgentEntryKind.user, 'hello')],
-        turns: const [],
+        messageCount: 1,
       ),
     ]);
     unawaited(showAgentHistory(agent));

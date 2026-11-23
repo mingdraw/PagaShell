@@ -11,6 +11,7 @@ import '../components/app_icon_button.dart';
 import '../components/app_menu.dart';
 import '../localization/app_translations.dart';
 import '../navigation/app_navigation.dart';
+import '../shell/workspace_visibility.dart';
 import '../theme/app_theme.dart';
 import 'firewall_confirm_dialog.dart';
 import 'firewall_rule_dialog.dart';
@@ -26,7 +27,8 @@ class FirewallPanel extends StatefulWidget {
   State<FirewallPanel> createState() => _FirewallPanelState();
 }
 
-class _FirewallPanelState extends State<FirewallPanel> {
+class _FirewallPanelState extends State<FirewallPanel>
+    with WorkspaceVisibilityObserver<FirewallPanel> {
   FirewallController? _controller;
   final _search = TextEditingController();
   final _scroll = ScrollController();
@@ -46,8 +48,12 @@ class _FirewallPanelState extends State<FirewallPanel> {
         ? null
         : FirewallController(source: widget.source!);
     _searchChanged();
-    _controller?.setEnabled(widget.active);
+    onWorkspaceVisibilityChanged();
   }
+
+  @override
+  void onWorkspaceVisibilityChanged() =>
+      _controller?.setEnabled(widget.active && workspaceVisible);
 
   @override
   void didUpdateWidget(FirewallPanel oldWidget) {
@@ -56,7 +62,7 @@ class _FirewallPanelState extends State<FirewallPanel> {
       _controller?.onClose();
       _createController();
     } else {
-      _controller?.setEnabled(widget.active);
+      onWorkspaceVisibilityChanged();
     }
   }
 

@@ -56,6 +56,31 @@ class _ActionSource implements NetworkPortsSource, ProcessManagerSource {
 }
 
 void main() {
+  testWidgets('端口快照更新终止资格，同端口名称冲突不影响另一协议', (tester) async {
+    final source = _ActionSource();
+    ListeningNetworkPort port(NetworkPortProtocol protocol, String owner) =>
+        ListeningNetworkPort(
+          protocol: protocol,
+          port: 8080,
+          addresses: const [],
+          processes: [NetworkPortProcess(pid: 42, name: owner)],
+        );
+    final tcp = port(NetworkPortProtocol.tcp, 'api');
+    final udp = port(NetworkPortProtocol.udp, 'api');
+    source.ports = NetworkPortsSnapshot(ports: [tcp, udp]);
+    final controller = NetworkPortsController(source: source);
+    addTearDown(controller.onClose);
+    controller.setEnabled(true);
+    await tester.pump();
+    expect(controller.canTerminatePort(tcp), isTrue);
+    source.ports = NetworkPortsSnapshot(
+      ports: [tcp, udp, port(NetworkPortProtocol.tcp, 'other')],
+    );
+    await controller.refreshPorts();
+    expect(controller.canTerminatePort(tcp), isFalse);
+    expect(controller.canTerminatePort(udp), isTrue);
+  });
+
   testWidgets('结束前按需核对进程与端口，传递启动时间，禁止重复提交并刷新端口', (tester) async {
     final source = _ActionSource();
     final controller = NetworkPortsController(source: source);

@@ -127,6 +127,9 @@ class _Decoder {
   final thought = StringBuffer();
   final _chatTools = <int, _ToolFragment>{};
   final _blocks = <int, Map<String, dynamic>>{};
+  final _blockText = <int, StringBuffer>{};
+  final _blockThinking = <int, StringBuffer>{};
+  final _blockSignature = <int, StringBuffer>{};
   final _toolJson = <int, StringBuffer>{};
   final _openBlocks = <int>{};
   String? _finishReason;
@@ -136,7 +139,11 @@ class _Decoder {
 
   void _emit(Object? value, {bool reasoning = false}) {
     if (value is! String || value.isEmpty) return;
-    (reasoning ? thought : text).write(value);
+    if (reasoning) {
+      thought.write(value);
+    } else if (format != AiApiFormat.anthropic) {
+      text.write(value);
+    }
     onDelta(value, reasoning);
   }
 
@@ -244,9 +251,22 @@ class _Decoder {
       );
       _blocks[index] = block;
       _openBlocks.add(index);
-      if (block['type'] == 'text') _emit(block['text']);
+      if (block['type'] == 'text') {
+        if (block['text'] case final String initial when initial.isNotEmpty) {
+          _blockText.putIfAbsent(index, StringBuffer.new).write(initial);
+          _emit(initial);
+        }
+      }
       if (block['type'] == 'thinking') {
-        _emit(block['thinking'], reasoning: true);
+        if (block['thinking'] case final String initial
+            when initial.isNotEmpty) {
+          _blockThinking.putIfAbsent(index, StringBuffer.new).write(initial);
+          _emit(initial, reasoning: true);
+        }
+        if (block['signature'] case final String initial
+            when initial.isNotEmpty) {
+          _blockSignature.putIfAbsent(index, StringBuffer.new).write(initial);
+        }
       }
       return;
     }
@@ -254,6 +274,12 @@ class _Decoder {
     final block = _blocks[index]!;
     if (type == 'content_block_stop') {
       _openBlocks.remove(index);
+      final textBuf = _blockText.remove(index);
+      if (textBuf != null) block['text'] = textBuf.toString();
+      final thinkingBuf = _blockThinking.remove(index);
+      if (thinkingBuf != null) block['thinking'] = thinkingBuf.toString();
+      final signatureBuf = _blockSignature.remove(index);
+      if (signatureBuf != null) block['signature'] = signatureBuf.toString();
       final json = _toolJson.remove(index);
       if (json?.isNotEmpty == true) {
         block['input'] = jsonDecode(json.toString()) as Map<String, dynamic>;
@@ -264,15 +290,15 @@ class _Decoder {
     switch ((block['type'], delta['type'])) {
       case ('text', 'text_delta'):
         final part = delta['text'] as String;
-        block['text'] = (block['text'] as String? ?? '') + part;
+        _blockText.putIfAbsent(index, StringBuffer.new).write(part);
         _emit(part);
       case ('thinking', 'thinking_delta'):
         final part = delta['thinking'] as String;
-        block['thinking'] = (block['thinking'] as String? ?? '') + part;
+        _blockThinking.putIfAbsent(index, StringBuffer.new).write(part);
         _emit(part, reasoning: true);
       case ('thinking', 'signature_delta'):
         final part = delta['signature'] as String;
-        block['signature'] = (block['signature'] as String? ?? '') + part;
+        _blockSignature.putIfAbsent(index, StringBuffer.new).write(part);
       case ('tool_use', 'input_json_delta'):
         _toolJson
             .putIfAbsent(index, StringBuffer.new)

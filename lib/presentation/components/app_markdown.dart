@@ -1,4 +1,3 @@
-import 'package:flutter/rendering.dart' show SelectedContent;
 import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
 import 'package:markdown/markdown.dart' as md;
@@ -8,6 +7,7 @@ import '../theme/app_theme.dart';
 import 'app_copy_button.dart';
 import 'app_icon.dart';
 import 'app_icon_button.dart';
+import 'app_selectable_region.dart';
 
 const _codeFallback = [
   'PingFang SC',
@@ -15,62 +15,6 @@ const _codeFallback = [
   'Noto Sans CJK SC',
   'monospace',
 ];
-
-class _SelectableMarkdown extends StatefulWidget {
-  const _SelectableMarkdown(this.child);
-
-  final Widget child;
-
-  @override
-  State<_SelectableMarkdown> createState() => _SelectableMarkdownState();
-}
-
-class _SelectableMarkdownState extends State<_SelectableMarkdown> {
-  final _selection = _MarkdownSelectionDelegate();
-
-  @override
-  Widget build(BuildContext context) => SelectableRegion(
-    selectionControls: shadcn.shadcnTextSelectionHandleControls,
-    contextMenuBuilder: (context, state) => shadcn.ContextMenuPopup(
-      anchorContext: state.context,
-      position: state.contextMenuAnchors.primaryAnchor + const Offset(8, -8),
-      children: [
-        for (final item in state.contextMenuButtonItems)
-          if (item.type == ContextMenuButtonType.copy ||
-              item.type == ContextMenuButtonType.selectAll)
-            shadcn.MenuButton(
-              onPressed: (_) => item.onPressed?.call(),
-              child: Text(
-                (item.type == ContextMenuButtonType.copy ? '复制' : '全选').tr,
-              ),
-            ),
-      ],
-    ),
-    child: SelectionContainer(delegate: _selection, child: widget.child),
-  );
-
-  @override
-  void dispose() {
-    _selection.dispose();
-    super.dispose();
-  }
-}
-
-class _MarkdownSelectionDelegate extends StaticSelectionContainerDelegate {
-  @override
-  SelectedContent? getSelectedContent() {
-    // Flutter's default joins separate text widgets with no separator.
-    final blocks = [
-      for (final selectable in selectables)
-        if (selectable.getSelectedContent() case final content?
-            when content.plainText.isNotEmpty)
-          content.plainText,
-    ];
-    return blocks.isEmpty
-        ? null
-        : SelectedContent(plainText: blocks.join('\n'));
-  }
-}
 
 /// 将 Markdown 语法树映射为原生组件；链接与图片保留可复制的文本。
 class AppMarkdown extends StatefulWidget {
@@ -89,6 +33,11 @@ class AppMarkdown extends StatefulWidget {
 }
 
 class _AppMarkdownState extends State<AppMarkdown> {
+  static const _maxDocuments = 64;
+  static const _maxCacheUnits = 256 * 1024;
+  static const _maxDocumentUnits = 48 * 1024;
+  static final _documents = <String, List<md.Node>>{};
+  static int _cachedUnits = 0;
   late List<md.Node> _nodes;
 
   @override
@@ -104,15 +53,33 @@ class _AppMarkdownState extends State<AppMarkdown> {
   }
 
   void _parse() {
-    _nodes = md.Document(
-      extensionSet: md.ExtensionSet.gitHubFlavored,
-      encodeHtml: false,
-    ).parse(widget.text);
+    final text = widget.text;
+    if (_documents.remove(text) case final cached?) {
+      _documents[text] = cached;
+      _nodes = cached;
+      return;
+    }
+    // Only the source and parsed nodes are shared. Styling, selection, and
+    // per-message actions are constructed by each renderer.
+    _nodes = List.unmodifiable(
+      md.Document(
+        extensionSet: md.ExtensionSet.gitHubFlavored,
+        encodeHtml: false,
+      ).parse(text),
+    );
+    if (text.length > _maxDocumentUnits) return;
+    _documents[text] = _nodes;
+    _cachedUnits += text.length;
+    while (_documents.length > _maxDocuments || _cachedUnits > _maxCacheUnits) {
+      final oldest = _documents.keys.first;
+      _documents.remove(oldest);
+      _cachedUnits -= oldest.length;
+    }
   }
 
   @override
-  Widget build(BuildContext context) => _SelectableMarkdown(
-    _MarkdownRenderer(
+  Widget build(BuildContext context) => AppSelectableRegion(
+    child: _MarkdownRenderer(
       context,
       onInsertToTerminal: widget.onInsertToTerminal,
       defaultCodeLabel: widget.defaultCodeLabel,
@@ -469,7 +436,9 @@ class AppMarkdownCodeBlock extends StatelessWidget {
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,
             padding: const EdgeInsets.all(10),
-            child: selection == null ? _SelectableMarkdown(content) : content,
+            child: selection == null
+                ? AppSelectableRegion(child: content)
+                : content,
           ),
         ],
       ),

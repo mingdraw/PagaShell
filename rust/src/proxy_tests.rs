@@ -182,12 +182,10 @@ fn rule(kind: RuleType, value: &str) -> Rule {
 
 #[tokio::test]
 async fn proxy_rules_cover_ipv4_ipv6_cidr_and_domain_boundaries() {
-    let router = Router {
-        mode: Mode::Rule,
-        gateway: None,
-        traffic: Arc::default(),
-        rules: vec![
-            rule(RuleType::Ip, "10.0.0.0/16"),
+    let router = Router::new(
+        Mode::Rule,
+        [
+            rule(RuleType::Ip, "10.0.7.4/16"),
             rule(RuleType::Ip, "2001:db8::/32"),
             rule(RuleType::Ip, "192.0.2.4"),
             rule(RuleType::Ip, "::1/128"),
@@ -195,7 +193,8 @@ async fn proxy_rules_cover_ipv4_ipv6_cidr_and_domain_boundaries() {
             rule(RuleType::DomainPrefix, "api."),
             rule(RuleType::DomainSuffix, "example.com"),
         ],
-    };
+        None,
+    );
     for host in [
         "10.0.255.255",
         "2001:db8:abcd::1",
@@ -206,16 +205,25 @@ async fn proxy_rules_cover_ipv4_ipv6_cidr_and_domain_boundaries() {
         "example.com",
         "sub.EXAMPLE.COM.",
     ] {
-        assert!(router.use_gateway(host, 443).await.unwrap(), "{host}");
+        assert!(
+            matches!(router.route(host, 443).await.unwrap(), Route::Gateway),
+            "{host}"
+        );
     }
     for host in ["10.1.0.1", "2001:db9::1", "192.0.2.5", "::2"] {
-        assert!(!router.use_gateway(host, 443).await.unwrap(), "{host}");
+        assert!(
+            matches!(router.route(host, 443).await.unwrap(), Route::Direct),
+            "{host}"
+        );
     }
-    let suffix = rule(RuleType::DomainSuffix, "example.com");
-    assert!(!suffix.domain_matches("evilexample.com"));
-    assert!(!suffix.domain_matches("example.com.evil"));
-    assert!(!rule(RuleType::DomainPrefix, "api.").domain_matches("api-evil.test"));
-    assert!(!rule(RuleType::DomainExact, "exact.test").domain_matches("sub.exact.test"));
+    for host in [
+        "evilexample.com",
+        "example.com.evil",
+        "api-evil.test",
+        "sub.exact.internal",
+    ] {
+        assert!(!router.rules.domain_matches(host));
+    }
     for value in ["10.0.0.0/33", "::/129", "256.0.0.1", "10.1/8", "::1%lo0"] {
         assert!(Rule::parse(RuleSpec {
             kind: RuleType::Ip,
@@ -223,13 +231,54 @@ async fn proxy_rules_cover_ipv4_ipv6_cidr_and_domain_boundaries() {
         })
         .is_err());
     }
-    let router = Router {
-        mode: Mode::Rule,
-        gateway: None,
-        traffic: Arc::default(),
-        rules: vec![rule(RuleType::Ip, "127.0.0.0/8"), rule(RuleType::Ip, "::1")],
-    };
-    assert!(router.use_gateway("localhost", 80).await.unwrap());
+    let router = Router::new(
+        Mode::Rule,
+        [rule(RuleType::Ip, "127.0.0.0/8"), rule(RuleType::Ip, "::1")],
+        None,
+    );
+    assert!(matches!(
+        router.route("localhost", 80).await.unwrap(),
+        Route::Gateway
+    ));
+}
+
+#[tokio::test]
+async fn direct_proxy_dials_the_same_addresses_it_used_for_ip_rules() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = Router::new(
+        Mode::Rule,
+        [
+            rule(RuleType::Ip, "192.0.2.0/24"),
+            rule(RuleType::DomainSuffix, "gateway.invalid"),
+        ],
+        None,
+    );
+    router.dns.lock().await.insert(
+        ("direct.invalid".into(), address.port()),
+        DnsEntry {
+            addresses: Arc::new([address]),
+            expires: Instant::now() + DNS_TTL,
+        },
+    );
+    // Only the cached addresses can reach this server. Resolving the original
+    // host again would fail rather than connecting to the listener.
+    let mut stream = router
+        .connect("direct.invalid", address.port())
+        .await
+        .unwrap();
+    stream.write_all(b"OK").await.unwrap();
+    let (mut peer, _) = listener.accept().await.unwrap();
+    let mut bytes = [0; 2];
+    peer.read_exact(&mut bytes).await.unwrap();
+    assert_eq!(&bytes, b"OK");
+    assert!(matches!(
+        router
+            .route("device.gateway.invalid", address.port())
+            .await
+            .unwrap(),
+        Route::Gateway
+    ));
 }
 
 #[tokio::test]

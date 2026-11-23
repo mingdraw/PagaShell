@@ -37,6 +37,10 @@ final _nftSource4 = RegExp(r'\bip\s+saddr\s+(\{[^}]+\}|[0-9./]+)');
 final _nftSource6 = RegExp(r'\bip6\s+saddr\s+(\{[^}]+\}|[0-9a-fA-F:./]+)');
 final _nftComment = RegExp(r'\bcomment\s+"([^"]*)"');
 final _nftVerdict = RegExp(r'\b(accept|drop|reject)\b');
+final _whitespace = RegExp(r'\s+');
+final _firewalldRichAccept = RegExp(r'\baccept\s*$');
+final _firewalldRichDeny = RegExp(r'\b(drop|reject(?:\s+type="[^"]*")?)\s*$');
+final _ufwComment = RegExp(r'\s+#\s*(.*)$');
 
 const _wellKnownPorts = <String, String>{
   'ftp': '21',
@@ -256,7 +260,7 @@ List<FirewallRule> _parseFirewalld(
       continue;
     }
     if (section == 'FIREWALLD_PORTS') {
-      for (final token in trimmed.split(RegExp(r'\s+'))) {
+      for (final token in trimmed.split(_whitespace)) {
         final match = _firewalldPort.firstMatch(token);
         if (match == null) continue;
         final port = match[1]!;
@@ -287,10 +291,9 @@ List<FirewallRule> _parseFirewalld(
           ? FirewallProtocol.tcp
           : FirewallProtocol.udp;
       final FirewallAction action;
-      if (RegExp(r'\baccept\s*$').hasMatch(trimmed)) {
+      if (_firewalldRichAccept.hasMatch(trimmed)) {
         action = FirewallAction.allow;
-      } else if (RegExp(r'\b(drop|reject(?:\s+type="[^"]*")?)\s*$')
-          .hasMatch(trimmed)) {
+      } else if (_firewalldRichDeny.hasMatch(trimmed)) {
         action = FirewallAction.deny;
       } else {
         continue;
@@ -344,7 +347,7 @@ List<FirewallRule> _parseUfw(List<String> lines, List<_Listener> listeners) {
     final exactBody = numbered[2]!.trimRight();
     var body = exactBody;
     var comment = '';
-    final hash = RegExp(r'\s+#\s*(.*)$').firstMatch(body);
+    final hash = _ufwComment.firstMatch(body);
     if (hash != null) {
       comment = _clean(hash[1]!);
       body = body.substring(0, hash.start).trimRight();

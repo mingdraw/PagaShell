@@ -26,6 +26,8 @@ enum AgentFileChangeState {
 
 enum AgentRequestState { queued, running, completed, failed, cancelled }
 
+final _conversationId = RegExp(r'^[a-f0-9]{32}$');
+
 /// 历史命令仅保存展示信息，不包含会话句柄或执行授权。
 class AgentArchivedCommand {
   const AgentArchivedCommand({
@@ -248,6 +250,48 @@ class AgentMessage {
   );
 }
 
+/// List and search data; it deliberately holds neither messages nor API context.
+class AgentConversationSummary {
+  const AgentConversationSummary({
+    required this.id,
+    required this.title,
+    required this.createdAt,
+    required this.updatedAt,
+    required this.model,
+    required this.messageCount,
+  });
+
+  final String id, title, model;
+  final DateTime createdAt, updatedAt;
+  final int messageCount;
+
+  Map<String, dynamic> toJson() => {
+    'version': 1,
+    'id': id,
+    'title': title,
+    'createdAt': createdAt.toUtc().toIso8601String(),
+    'updatedAt': updatedAt.toUtc().toIso8601String(),
+    'model': model,
+    'messageCount': messageCount,
+  };
+
+  factory AgentConversationSummary.fromJson(Map<String, dynamic> json) {
+    final id = json['id'] as String;
+    final count = json['messageCount'] as int;
+    if (json['version'] != 1 || !_conversationId.hasMatch(id) || count < 0) {
+      throw const FormatException();
+    }
+    return AgentConversationSummary(
+      id: id,
+      title: json['title'] as String,
+      createdAt: DateTime.parse(json['createdAt'] as String),
+      updatedAt: DateTime.parse(json['updatedAt'] as String),
+      model: json['model'] as String,
+      messageCount: count,
+    );
+  }
+}
+
 class AgentConversation {
   const AgentConversation({
     required this.id,
@@ -274,6 +318,15 @@ class AgentConversation {
   final int historyRevision;
   final String? error;
 
+  AgentConversationSummary get summary => AgentConversationSummary(
+    id: id,
+    title: title,
+    createdAt: createdAt,
+    updatedAt: updatedAt,
+    model: model,
+    messageCount: messages.length,
+  );
+
   Map<String, dynamic> toJson() => {
     'version': 1,
     'id': id,
@@ -291,7 +344,7 @@ class AgentConversation {
   factory AgentConversation.fromJson(Map<String, dynamic> json) {
     if (json['version'] != 1) throw const FormatException();
     final id = json['id'] as String;
-    if (!RegExp(r'^[a-f0-9]{32}$').hasMatch(id)) {
+    if (!_conversationId.hasMatch(id)) {
       throw const FormatException();
     }
     return AgentConversation(

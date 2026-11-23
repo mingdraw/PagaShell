@@ -5,7 +5,7 @@ final _privateKeyBlockPattern = RegExp(
   caseSensitive: false,
 );
 final _sensitiveAssignmentPattern = RegExp(
-  r'''(\b[\w.-]*(?:password|passwd|requirepass|masterauth|api[-_]?key|(?:access|refresh)[-_]?token|client[-_]?secret|secret[-_]?key|authorization)\b["']?(?:\s*[=:]\s*|\t+| +))([^\s\r\n].*)''',
+  r'''((?<![\w.-])[\w.-]*(?:password|passwd|requirepass|masterauth|api[-_]?key|(?:access|refresh)[-_]?token|client[-_]?secret|secret[-_]?key|authorization)\b["']?(?:\s*[=:]\s*|\t+| +))([^\s\r\n].*)''',
   caseSensitive: false,
   multiLine: true,
 );
@@ -13,7 +13,9 @@ final _sudoPromptPhrasePattern = RegExp(
   r'^(?:is required|is needed|required|prompt)\b',
   caseSensitive: false,
 );
-final _urlPasswordPattern = RegExp(r'(\b[\w+.-]+://[^:/\s@]+:)[^/\s@]+(@)');
+final _urlPasswordPattern = RegExp(
+  r'((?<![\w+.-])[\w+.-]+://[^:/\s@]+:)[^/\s@]+(@)',
+);
 final _ansiEscapePattern = RegExp(r'\x1b\[[0-?]*[ -/]*[@-~]');
 final _controlCharPattern = RegExp(r'[\x00-\x08\x0b-\x1f\x7f]');
 final _sudoNonInteractivePattern = RegExp(r'\bsudo\s+-n\b');

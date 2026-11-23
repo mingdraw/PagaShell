@@ -3,23 +3,27 @@
 //! 会话以 u32 句柄标识，注册在进程级会话表中；终端通道由单一 owner task
 //! 持有，读写/resize/关闭通过 mpsc 指令传递，避免跨任务共享可变通道。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use futures_util::{stream, StreamExt};
 use russh::client::{self, Handle};
 use russh::keys::{decode_secret_key, HashAlg, PrivateKey, PrivateKeyWithHashAlg, PublicKey};
 use russh::{ChannelMsg, Disconnect};
-use russh_sftp::client::{Config as SftpConfig, SftpSession};
+use russh_sftp::client::error::Error as SftpError;
+use russh_sftp::client::rawsession::Limits as SftpLimits;
+use russh_sftp::client::{Config as SftpConfig, RawSftpSession, SftpSession};
 use russh_sftp::protocol::{FileAttributes, OpenFlags, StatusCode};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch, Mutex, Notify, RwLock};
 use tokio::task::{JoinHandle, JoinSet};
+use tokio_util::sync::CancellationToken;
 
 use super::terminal::TerminalFrame;
 use crate::frb_generated::StreamSink;
@@ -77,10 +81,10 @@ async fn read_small_text_bytes(file: &mut russh_sftp::client::fs::File) -> Resul
 }
 
 pub async fn sftp_read_text(session_id: u32, path: String) -> Result<SftpTextFile> {
-    let sftp = open_sftp(session_id).await?;
-    let result = read_small_text(&sftp, &path).await;
-    let _ = sftp.close().await;
-    result
+    with_metadata_sftp(session_id, true, |sftp| async move {
+        read_small_text(&sftp, &path).await
+    })
+    .await
 }
 
 async fn read_small_text(sftp: &SftpSession, path: &str) -> Result<SftpTextFile> {
@@ -114,10 +118,10 @@ pub async fn sftp_save_text(
         original.modified_unix.is_some(),
         "无法确认文件修改时间，不能保存"
     );
-    let sftp = open_sftp(session_id).await?;
-    let result = save_small_text(&sftp, &path, &original, &text).await;
-    let _ = sftp.close().await;
-    result
+    with_metadata_sftp(session_id, true, |sftp| async move {
+        save_small_text(&sftp, &path, &original, &text).await
+    })
+    .await
 }
 
 async fn save_small_text(
@@ -176,6 +180,9 @@ pub struct TransferProgress {
 const TRANSFER_CHUNK: usize = 128 * 1024;
 // 保持有界的写入流水线；较高 RTT 下允许最多约 2 MiB 的数据等待确认。
 const TRANSFER_MAX_CONCURRENT_WRITES: usize = 16;
+const TRANSFER_MAX_CONCURRENT_READS: usize = 16;
+// A conservative fallback for servers which do not advertise a read limit.
+const SFTP_DEFAULT_READ_LEN: u32 = 32 * 1024;
 const PROGRESS_EMIT_EVERY: u64 = 512 * 1024;
 const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(200);
 const TRANSFER_IO_TIMEOUT: Duration = Duration::from_secs(10);
@@ -184,6 +191,8 @@ const TRANSFER_RESPONSE_ATTEMPTS: usize = 3;
 const SSH_CLEANUP_TIMEOUT: Duration = Duration::from_millis(500);
 /// 终端帧最短间隔：与旧的固定 16ms 节拍一致，ack 很快时也不超过约 60 帧/秒。
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+const TERMINAL_DIRTY_BUDGET: usize = 1024 * 1024;
+const TERMINAL_INPUT_BUDGET: usize = 128 * 1024;
 
 fn sftp_client_config() -> SftpConfig {
     SftpConfig {
@@ -206,17 +215,10 @@ impl std::error::Error for TransferTimeout {}
 
 // 包括写入确认、flush 和 shutdown；库自身的 request timeout 不覆盖写入确认。
 async fn transfer_io<T, E: Into<anyhow::Error>>(
-    cancel: &AtomicBool,
+    cancel: &CancellationToken,
     operation: impl Future<Output = std::result::Result<T, E>>,
 ) -> Result<T> {
-    let cancelled = async {
-        loop {
-            if cancel.load(Ordering::Relaxed) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    };
+    let cancelled = cancel.cancelled();
     tokio::pin!(operation);
     tokio::pin!(cancelled);
     for _ in 0..TRANSFER_RESPONSE_ATTEMPTS {
@@ -263,6 +265,33 @@ impl FrameAcks {
                 .is_ok()
         {
             self.notify.notify_one();
+        }
+    }
+}
+
+static TERMINAL_ACKS: LazyLock<std::sync::RwLock<HashMap<u32, Arc<FrameAcks>>>> =
+    LazyLock::new(|| std::sync::RwLock::new(HashMap::new()));
+
+struct FrameAckRegistration(u32, Arc<FrameAcks>);
+
+impl FrameAckRegistration {
+    fn new(session_id: u32, acks: Arc<FrameAcks>) -> Self {
+        TERMINAL_ACKS
+            .write()
+            .unwrap()
+            .insert(session_id, acks.clone());
+        Self(session_id, acks)
+    }
+}
+
+impl Drop for FrameAckRegistration {
+    fn drop(&mut self) {
+        let mut entries = TERMINAL_ACKS.write().unwrap();
+        if entries
+            .get(&self.0)
+            .is_some_and(|acks| Arc::ptr_eq(acks, &self.1))
+        {
+            entries.remove(&self.0);
         }
     }
 }
@@ -318,10 +347,11 @@ struct SessionEntry {
     gateway_id: Option<u32>,
     shell_tx: Option<mpsc::Sender<ShellCmd>>,
     shell_task: Option<JoinHandle<()>>,
-    /// 终端帧的 ack 通道；shell 尚未启动时为 None。
-    frame_acks: Option<Arc<FrameAcks>>,
     pending_terminal_size: Option<(u32, u32)>,
     forwards: Option<(watch::Sender<bool>, JoinHandle<()>)>,
+    sftp_metadata: Arc<Mutex<Option<Arc<SftpSession>>>>,
+    status_cache: Arc<Mutex<StatusSampleCache>>,
+    sudo_probe_after: [Option<tokio::time::Instant>; 2],
 }
 
 static SESSIONS: LazyLock<Mutex<HashMap<u32, SessionEntry>>> =
@@ -329,7 +359,7 @@ static SESSIONS: LazyLock<Mutex<HashMap<u32, SessionEntry>>> =
 static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 
 /// 进行中传输的取消标志表，键为 Dart 侧分配的 transfer_id。
-static TRANSFER_CANCELS: LazyLock<Mutex<HashMap<u32, Arc<AtomicBool>>>> =
+static TRANSFER_CANCELS: LazyLock<Mutex<HashMap<u32, CancellationToken>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// 未认证的握手结果。确认指纹后只能在这条连接上认证，避免二次连接竞态。
@@ -436,6 +466,8 @@ async fn handshake(
     let using_page = page_gateway.is_some();
     let config = Arc::new(client::Config {
         keepalive_interval: Some(Duration::from_secs(30)),
+        nodelay: true,
+        window_size: 8 * 1024 * 1024,
         ..Default::default()
     });
 
@@ -690,9 +722,11 @@ async fn authenticate(
             gateway_id: entry.gateway_id,
             shell_tx: None,
             shell_task: None,
-            frame_acks: None,
             pending_terminal_size: None,
             forwards: None,
+            sftp_metadata: Arc::default(),
+            status_cache: Arc::default(),
+            sudo_probe_after: [None; 2],
         },
     );
     Ok(session_id)
@@ -800,6 +834,19 @@ impl ShellOutput {
         self.core.pending()
     }
 
+    fn accepts_input(&self, parsed: usize) -> bool {
+        // While the VTE parser is buffering a synchronized update, allow it to
+        // see the closing sequence. VTE separately bounds that buffer and its age.
+        self.core.synchronizing()
+            || (parsed < TERMINAL_INPUT_BUDGET
+                && self.core.pending_cell_bytes() < TERMINAL_DIRTY_BUDGET)
+    }
+
+    fn parse_chunk_size(&self) -> usize {
+        // Newlines can turn a single packet into many dirty rows.
+        (TERMINAL_DIRTY_BUDGET / self.core.cell_bytes_per_row() / 4).clamp(1, 2048)
+    }
+
     fn expire_sync(&mut self) -> Vec<u8> {
         self.core.expire_sync()
     }
@@ -854,7 +901,7 @@ async fn start_shell_output_with_command(
         )
     };
 
-    let mut channel = {
+    let channel = {
         let guard = handle.read().await;
         guard.channel_open_session().await?
     };
@@ -870,7 +917,6 @@ async fn start_shell_output_with_command(
 
     let (tx, mut rx) = mpsc::channel::<ShellCmd>(64);
     let acks = Arc::<FrameAcks>::default();
-    let mut pacer = FramePacer::new(acks.clone());
     let mut sessions = SESSIONS.lock().await;
     let entry = sessions
         .get_mut(&session_id)
@@ -885,28 +931,45 @@ async fn start_shell_output_with_command(
     }
     // 与队列一起注册任务，关闭时可直接取消正在等待 SSH 流控的写入，
     // 不必把 Close 排在可能已经填满的输入队列后面。
+    let mut pacer = FramePacer::new(acks.clone());
+    let ack_registration = FrameAckRegistration::new(session_id, acks);
+    let (mut channel, writer) = channel.split();
     entry.shell_task = Some(tokio::spawn(async move {
+        let _ack_registration = ack_registration;
         let mut channel_closed = false;
         let mut exit_code = None;
+        let mut pending_packet = None;
+        let mut parsed = 0usize;
+        let mut outbound = VecDeque::new();
+        let mut writing = None;
         // Only container terminals retain a bounded startup diagnostic for classification.
         let mut startup_diagnostic = Vec::new();
         loop {
             if channel_closed && !output.pending() {
                 break;
             }
+            if !channel_closed && writing.is_none() {
+                if let Some(command) = outbound.pop_front() {
+                    let writer = &writer;
+                    writing = Some(Box::pin(async move {
+                        match command {
+                            ShellCmd::Data(data) => writer.data_bytes(data).await,
+                            ShellCmd::Resize(c, r) => writer.window_change(c, r, 0, 0).await,
+                        }
+                    }));
+                }
+            }
+            // Leaving the russh receiver unread bounds queued plaintext while Dart
+            // applies a frame. Keep receiving commands and polling writes/acks.
+            let can_parse = !channel_closed && output.accepts_input(parsed);
             tokio::select! {
-                msg = channel.wait(), if !channel_closed => match msg {
+                msg = channel.wait(), if can_parse && pending_packet.is_none() => match msg {
                     Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => {
                         if report_exit.is_some() {
                             let length = data.len().min(8192 - startup_diagnostic.len());
                             startup_diagnostic.extend_from_slice(&data[..length]);
                         }
-                        let replies = output.feed(&data);
-                        // Device/cursor queries are answered in Rust, in order on
-                        // this same channel. They never round-trip through Dart.
-                        if !replies.is_empty() && channel.data(&replies[..]).await.is_err() {
-                            break;
-                        }
+                        if !data.is_empty() { pending_packet = Some((data, 0usize)); }
                     }
                     Some(ChannelMsg::Close) | None => {
                         channel_closed = true;
@@ -920,30 +983,45 @@ async fn start_shell_output_with_command(
                     },
                     Some(_) => {}
                 },
-                // 待 ack 期间继续解析并累积脏行，只有收到匹配 ack 才合成下一帧。
+                _ = std::future::ready(()), if can_parse && pending_packet.is_some() => {
+                    let (data, offset) = pending_packet.as_mut().unwrap();
+                    let end = (*offset + output.parse_chunk_size()).min(data.len());
+                    let replies = output.feed(&data[*offset..end]);
+                    parsed = parsed.saturating_add(end - *offset);
+                    *offset = end;
+                    if end == data.len() { pending_packet = None; }
+                    if !replies.is_empty() { outbound.push_back(ShellCmd::Data(replies)); }
+                }
                 _ = pacer.due(), if output.pending() => {
                     let replies = output.expire_sync();
-                    if !channel_closed && !replies.is_empty() && channel.data(&replies[..]).await.is_err() { break; }
+                    if !channel_closed && !replies.is_empty() { outbound.push_back(ShellCmd::Data(replies)); }
                     if !output.flush(&mut pacer) { break; }
+                    if !output.pending() { parsed = 0; }
                 },
-                cmd = rx.recv(), if !channel_closed => match cmd {
+                result = async { writing.as_mut().unwrap().await }, if !channel_closed && writing.is_some() => {
+                    writing = None;
+                    if result.is_err() { break; }
+                },
+                cmd = rx.recv(), if !channel_closed && outbound.is_empty() => match cmd {
                     Some(ShellCmd::Data(data)) => {
-                        if channel.data(&data[..]).await.is_err() {
-                            break;
-                        }
+                        outbound.push_back(ShellCmd::Data(data));
                     }
                     Some(ShellCmd::Resize(c, r)) => {
                         output.resize(c, r);
-                        let _ = channel.window_change(c, r, 0, 0).await;
+                        outbound.push_back(ShellCmd::Resize(c, r));
                     }
                     None => {
                         let _ = tokio::time::timeout(SSH_CLEANUP_TIMEOUT, async {
-                            let _ = channel.eof().await;
-                            let _ = channel.close().await;
+                            let _ = writer.eof().await;
+                            let _ = writer.close().await;
                         }).await;
                         break;
                     }
                 },
+            }
+            // A peer that refuses both queries and input cannot grow this queue indefinitely.
+            if outbound.len() > 64 {
+                break;
             }
         }
         if let (Some(report), Some(code)) = (report_exit, exit_code.filter(|code| *code != 0)) {
@@ -951,7 +1029,6 @@ async fn start_shell_output_with_command(
         }
     }));
     entry.shell_tx = Some(tx);
-    entry.frame_acks = Some(acks);
     Ok(())
 }
 
@@ -985,65 +1062,164 @@ pub async fn ssh_resize(session_id: u32, cols: u32, rows: u32) -> Result<()> {
 }
 
 /// Dart 已应用指定帧，放行下一帧。关闭会话、重复或迟到的 ack 静默忽略。
-pub async fn ssh_terminal_ack(session_id: u32, frame_id: u32) -> Result<()> {
-    let acks = SESSIONS
-        .lock()
-        .await
-        .get(&session_id)
-        .and_then(|entry| entry.frame_acks.clone());
-    if let Some(acks) = acks {
+#[flutter_rust_bridge::frb(sync)]
+pub fn ssh_terminal_ack(session_id: u32, frame_id: u32) {
+    if let Some(acks) = TERMINAL_ACKS.read().unwrap().get(&session_id) {
         acks.ack(frame_id);
     }
-    Ok(())
 }
 
 /// 用独立、无 PTY 的 exec 通道执行固定只读采集脚本，不影响交互终端。
 pub async fn ssh_read_server_status(session_id: u32) -> Result<String> {
-    let handle = SESSIONS
+    let cache = SESSIONS
         .lock()
         .await
         .get(&session_id)
         .ok_or_else(|| anyhow!("会话不存在: {session_id}"))?
-        .handle
+        .status_cache
         .clone();
-    let mut channel = tokio::time::timeout(Duration::from_secs(8), async {
-        handle.read().await.channel_open_session().await
-    })
-    .await
-    .map_err(|_| anyhow!("服务状态采集超时"))??;
-    let result = tokio::time::timeout(Duration::from_secs(8), async {
-        channel
-            .exec(
-                true,
-                server_status_command(include_str!("server_status.sh")),
-            )
-            .await?;
-        let mut output = Vec::new();
-        let mut exit_status = None;
-        while let Some(message) = channel.wait().await {
-            match message {
-                ChannelMsg::Data { data } => {
-                    if output.len() + data.len() > 512 * 1024 {
-                        return Err(anyhow!("服务状态数据过大"));
-                    }
-                    output.extend_from_slice(&data);
-                }
-                ChannelMsg::Failure => return Err(anyhow!("服务器不允许采集服务状态")),
-                ChannelMsg::ExitStatus { exit_status: code } => exit_status = Some(code),
-                ChannelMsg::Close => break,
-                _ => {}
+    let mut cache = cache.lock().await;
+    let plan = cache.plan(tokio::time::Instant::now());
+    let command = status_sample_command(plan);
+    let (output, code) = read_only_exec(session_id, command, &STATUS_POLICY, STATUS_LIMIT).await?;
+    anyhow::ensure!(code == 0, "无法获取服务状态，请检查远端系统及读取权限");
+    let output = String::from_utf8(output).map_err(|_| anyhow!("服务状态输出格式无效"))?;
+    cache.merge(output, plan, tokio::time::Instant::now())
+}
+
+const STATUS_LIMIT: usize = 512 * 1024;
+const STATUS_STORAGE_INTERVAL: Duration = Duration::from_secs(30);
+static STATUS_SCRIPT: LazyLock<String> =
+    LazyLock::new(|| server_status_command(include_str!("server_status.sh")));
+
+fn status_sample_command((system, storage): (bool, bool)) -> String {
+    format!(
+        "{} paga-status {} {}",
+        *STATUS_SCRIPT,
+        u8::from(system),
+        u8::from(storage)
+    )
+}
+const STATUS_POLICY: ReadOnlyExecPolicy = ReadOnlyExecPolicy {
+    overall_timeout: Some(Duration::from_secs(8)),
+    closed: "服务状态连接已关闭",
+    timeout: "服务状态采集超时",
+    connection: "无法获取服务状态，请检查远端系统及读取权限",
+    denied: "服务器不允许采集服务状态",
+    too_large: "服务状态数据过大",
+    incomplete: "服务状态输出格式无效",
+};
+
+#[flutter_rust_bridge::frb(ignore)]
+#[derive(Default)]
+struct StatusSampleCache {
+    system: Option<String>,
+    storage: Option<(tokio::time::Instant, String)>,
+}
+
+impl StatusSampleCache {
+    fn plan(&self, now: tokio::time::Instant) -> (bool, bool) {
+        (
+            self.system.is_none(),
+            self.storage
+                .as_ref()
+                .is_none_or(|(expires, _)| now >= *expires),
+        )
+    }
+
+    fn merge(
+        &mut self,
+        output: String,
+        plan: (bool, bool),
+        now: tokio::time::Instant,
+    ) -> Result<String> {
+        const END: &str = "PAGASHELL_STATUS_END";
+        let Some(sample) = output.trim_end().strip_suffix(END) else {
+            return Ok(output);
+        };
+        if plan.0 {
+            self.system = Some(status_sections(
+                sample,
+                &[
+                    "ARCHITECTURE",
+                    "OS_RELEASE",
+                    "MAC_VERSION",
+                    "MAC_MEMORY_TOTAL",
+                ],
+            ));
+        }
+        if plan.1 {
+            self.storage = Some((
+                now + STATUS_STORAGE_INTERVAL,
+                status_sections(
+                    sample,
+                    &[
+                        "FILESYSTEMS",
+                        "LINUX_STORAGE",
+                        "LINUX_DEVICE_ALIASES",
+                        "MAC_STORAGE",
+                        "MAC_APFS",
+                    ],
+                ),
+            ));
+        }
+        if plan.0 && plan.1 {
+            return Ok(output);
+        }
+        let mut merged = sample.to_owned();
+        if !plan.0 {
+            merged.push_str(self.system.as_deref().unwrap_or_default());
+        }
+        if !plan.1 {
+            if let Some((_, storage)) = &self.storage {
+                merged.push_str(storage);
             }
         }
-        if exit_status != Some(0) {
-            return Err(anyhow!("无法获取服务状态，请检查远端系统及读取权限"));
+        merged.push_str(END);
+        merged.push('\n');
+        anyhow::ensure!(merged.len() <= STATUS_LIMIT, STATUS_POLICY.too_large);
+        Ok(merged)
+    }
+}
+
+fn status_sections(sample: &str, names: &[&str]) -> String {
+    let mut result = String::new();
+    let mut include = false;
+    for line in sample.lines() {
+        if let Some(name) = line.strip_prefix("PAGASHELL_STATUS_") {
+            include = names.contains(&name);
         }
-        String::from_utf8(output).map_err(|_| anyhow!("服务状态输出格式无效"))
-    })
-    .await
-    .map_err(|_| anyhow!("服务状态采集超时"))
-    .and_then(|value| value);
-    let _ = tokio::time::timeout(SSH_CLEANUP_TIMEOUT, channel.close()).await;
+        if include {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
     result
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum SudoProbe {
+    Ports,
+    Docker,
+}
+
+pub(super) fn should_probe_sudo(session_id: u32, probe: SudoProbe) -> bool {
+    // The cache is advisory. Do not wait for the registry outside the exec deadline.
+    SESSIONS.try_lock().map_or(true, |entries| {
+        entries
+            .get(&session_id)
+            .and_then(|entry| entry.sudo_probe_after[probe as usize])
+            .is_none_or(|after| tokio::time::Instant::now() >= after)
+    })
+}
+
+pub(super) fn defer_sudo_probe(session_id: u32, probe: SudoProbe) {
+    if let Ok(mut entries) = SESSIONS.try_lock() {
+        if let Some(entry) = entries.get_mut(&session_id) {
+            entry.sudo_probe_after[probe as usize] =
+                Some(tokio::time::Instant::now() + Duration::from_secs(60));
+        }
+    }
 }
 
 #[flutter_rust_bridge::frb(ignore)]
@@ -1564,14 +1740,12 @@ async fn forward_listener(
     while connections.join_next().await.is_some() {}
 }
 
-/// 在指定会话的连接上按需打开一条 SFTP 子系统通道。
-async fn open_sftp(session_id: u32) -> Result<SftpSession> {
-    transfer_io(&AtomicBool::new(false), open_sftp_inner(session_id)).await
-}
-
 const SSH_CONNECTION_CLOSED: &str = "SSH连接已断开，请刷新重新连接";
 
-async fn open_sftp_inner(session_id: u32) -> Result<SftpSession> {
+async fn new_sftp_session<T, F: Future<Output = Result<T>>>(
+    session_id: u32,
+    initialize: impl FnOnce(russh::ChannelStream<client::Msg>) -> F,
+) -> Result<T> {
     let handle = {
         let sessions = SESSIONS.lock().await;
         sessions
@@ -1589,9 +1763,7 @@ async fn open_sftp_inner(session_id: u32) -> Result<SftpSession> {
         let channel = guard.channel_open_session().await?;
         drop(guard);
         channel.request_subsystem(true, "sftp").await?;
-        SftpSession::new_with_config(channel.into_stream(), sftp_client_config())
-            .await
-            .context("SFTP 子系统初始化失败")
+        initialize(channel.into_stream()).await
     }
     .await;
     // 连接可能在开通道或初始化子系统期间退出，不能继续把失效句柄当目录错误。
@@ -1601,10 +1773,89 @@ async fn open_sftp_inner(session_id: u32) -> Result<SftpSession> {
     result
 }
 
-/// 列出远程目录（SFTP 子系统按需在同一连接上开通道）。
+async fn open_sftp(session_id: u32) -> Result<SftpSession> {
+    new_sftp_session(session_id, |stream| async {
+        SftpSession::new_with_config(stream, sftp_client_config())
+            .await
+            .context("SFTP 子系统初始化失败")
+    })
+    .await
+}
+
+async fn with_metadata_sftp<T, F: Future<Output = Result<T>>>(
+    session_id: u32,
+    opens_handle: bool,
+    operation: impl FnOnce(Arc<SftpSession>) -> F,
+) -> Result<T> {
+    let (handle, cache) = {
+        let sessions = SESSIONS.lock().await;
+        let session = sessions
+            .get(&session_id)
+            .ok_or_else(|| anyhow!(SSH_CONNECTION_CLOSED))?;
+        (session.handle.clone(), session.sftp_metadata.clone())
+    };
+    anyhow::ensure!(!handle.read().await.is_closed(), SSH_CONNECTION_CLOSED);
+    let sftp = {
+        let mut slot = cache.lock().await;
+        if let Some(sftp) = slot.as_ref() {
+            Arc::clone(sftp)
+        } else {
+            let sftp =
+                Arc::new(transfer_io(&CancellationToken::new(), open_sftp(session_id)).await?);
+            *slot = Some(sftp.clone());
+            sftp
+        }
+    };
+
+    let result = operation(sftp.clone()).await;
+    if let Err(error) = &result {
+        let ssh_closed = handle.read().await.is_closed();
+        // russh-sftp's read_dir does not close a handle when READDIR fails;
+        // dropping an unsuccessful text handle also skips local limit accounting.
+        if opens_handle || ssh_closed || sftp_channel_failed(error) {
+            let mut slot = cache.lock().await;
+            if slot
+                .as_ref()
+                .is_some_and(|cached| Arc::ptr_eq(cached, &sftp))
+            {
+                // Existing operations can finish on their Arc. The next call opens a new one.
+                *slot = None;
+            }
+        }
+        if ssh_closed {
+            anyhow::bail!(SSH_CONNECTION_CLOSED);
+        }
+    }
+    result
+}
+
+fn sftp_channel_failed(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| match cause.downcast_ref::<SftpError>() {
+            Some(
+                SftpError::Timeout
+                | SftpError::IO(_)
+                | SftpError::UnexpectedBehavior(_)
+                | SftpError::UnexpectedPacket,
+            ) => true,
+            Some(SftpError::Status(status)) => matches!(
+                status.status_code,
+                StatusCode::NoConnection | StatusCode::ConnectionLost
+            ),
+            _ => cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
+                use std::io::ErrorKind::*;
+                matches!(
+                    error.kind(),
+                    BrokenPipe | ConnectionAborted | ConnectionReset | NotConnected | TimedOut
+                )
+            }),
+        })
+}
+
+/// 列出远程目录，复用会话的 SFTP 元数据通道。
 pub async fn sftp_list_dir(session_id: u32, path: String) -> Result<Vec<SftpEntry>> {
-    let sftp = open_sftp(session_id).await?;
-    let result = async {
+    with_metadata_sftp(session_id, true, |sftp| async move {
         let mut entries = Vec::new();
         for entry in sftp.read_dir(&path).await.context("读取目录失败")? {
             let meta = entry.metadata();
@@ -1616,49 +1867,44 @@ pub async fn sftp_list_dir(session_id: u32, path: String) -> Result<Vec<SftpEntr
             });
         }
         Ok(entries)
-    }
-    .await;
-    let _ = sftp.close().await;
-    result
+    })
+    .await
 }
 
 /// 规范化远程路径（解析 `.`/`..`/符号链接）；用「.」可取得家目录。
 pub async fn sftp_canonicalize(session_id: u32, path: String) -> Result<String> {
-    let sftp = open_sftp(session_id).await?;
-    let result = sftp.canonicalize(&path).await.context("解析路径失败");
-    let _ = sftp.close().await;
-    result
+    with_metadata_sftp(session_id, false, |sftp| async move {
+        sftp.canonicalize(&path).await.context("解析路径失败")
+    })
+    .await
 }
 
 /// 创建远程目录。
 pub async fn sftp_mkdir(session_id: u32, path: String) -> Result<()> {
-    let sftp = open_sftp(session_id).await?;
-    let result = sftp.create_dir(&path).await.context("创建目录失败");
-    let _ = sftp.close().await;
-    result.map(|_| ())
+    with_metadata_sftp(session_id, false, |sftp| async move {
+        sftp.create_dir(&path).await.context("创建目录失败")
+    })
+    .await
 }
 
 /// 重命名/移动远程文件或目录。
 pub async fn sftp_rename(session_id: u32, from: String, to: String) -> Result<()> {
-    let sftp = open_sftp(session_id).await?;
-    let result = sftp.rename(&from, &to).await.context("重命名失败");
-    let _ = sftp.close().await;
-    result.map(|_| ())
+    with_metadata_sftp(session_id, false, |sftp| async move {
+        sftp.rename(&from, &to).await.context("重命名失败")
+    })
+    .await
 }
 
 /// 删除远程文件；[is_dir] 为 true 时递归删除目录。
 pub async fn sftp_remove(session_id: u32, path: String, is_dir: bool) -> Result<()> {
-    let sftp = open_sftp(session_id).await?;
-    let result = if is_dir {
-        remove_dir_recursive(&sftp, &path).await
-    } else {
-        sftp.remove_file(&path)
-            .await
-            .context("删除文件失败")
-            .map(|_| ())
-    };
-    let _ = sftp.close().await;
-    result
+    with_metadata_sftp(session_id, is_dir, |sftp| async move {
+        if is_dir {
+            remove_dir_recursive(&sftp, &path).await
+        } else {
+            sftp.remove_file(&path).await.context("删除文件失败")
+        }
+    })
+    .await
 }
 
 /// 递归删除目录（异步递归需要 Box::pin）。
@@ -1684,8 +1930,8 @@ fn remove_dir_recursive<'a>(
 
 /// 请求取消一个进行中的传输；无此传输时为无操作。
 pub async fn sftp_cancel_transfer(transfer_id: u32) -> Result<()> {
-    if let Some(flag) = TRANSFER_CANCELS.lock().await.get(&transfer_id) {
-        flag.store(true, Ordering::Relaxed);
+    if let Some(cancel) = TRANSFER_CANCELS.lock().await.get(&transfer_id) {
+        cancel.cancel();
     }
     Ok(())
 }
@@ -1703,16 +1949,13 @@ pub async fn sftp_download(
 ) {
     let cancel = register_transfer(transfer_id).await;
     let result = async {
-        let sftp = transfer_io(&cancel, open_sftp(session_id)).await?;
-        transfer_file(
+        let sftp = transfer_io(&cancel, new_sftp_session(session_id, DownloadSftp::new)).await?;
+        transfer_download(
             &sftp,
             &cancel,
-            &local_path,
             &remote_path,
-            TransferMode {
-                upload: false,
-                resume,
-            },
+            &local_path,
+            resume,
             &|event| {
                 let _ = progress.add(event);
             },
@@ -1727,21 +1970,120 @@ pub async fn sftp_download(
     }
 }
 
-async fn download_inner(
-    sftp: &SftpSession,
-    cancel: &AtomicBool,
+struct DownloadSftp {
+    session: RawSftpSession,
+    read_len: u32,
+}
+
+impl DownloadSftp {
+    async fn new(
+        stream: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    ) -> Result<Self> {
+        let config = sftp_client_config();
+        let mut packet_len = u64::from(config.max_packet_len);
+        let mut read_len = u64::from(SFTP_DEFAULT_READ_LEN);
+        let mut session = RawSftpSession::new_with_config(stream, config);
+        let version = session.init().await.context("SFTP 子系统初始化失败")?;
+        if version
+            .extensions
+            .get(russh_sftp::extensions::LIMITS)
+            .is_some_and(|version| version == "1")
+        {
+            let limits =
+                SftpLimits::from(session.limits().await.context("无法读取 SFTP 子系统限制")?);
+            packet_len = packet_len.min(limits.packet_len.unwrap_or(packet_len));
+            read_len = limits.read_len.unwrap_or(read_len);
+            session.set_limits(limits);
+        }
+        // A DATA packet has a type, request id and a length field before its bytes.
+        anyhow::ensure!(packet_len > 9, "SFTP 子系统数据包限制过小");
+        let read_len = read_len.min(packet_len - 9).min(TRANSFER_CHUNK as u64) as u32;
+        Ok(Self { session, read_len })
+    }
+
+    async fn read(
+        &self,
+        cancel: &CancellationToken,
+        handle: &str,
+        offset: u64,
+        len: u32,
+    ) -> Result<Vec<u8>> {
+        match transfer_io(cancel, self.session.read(handle, offset, len)).await {
+            Ok(data) => {
+                anyhow::ensure!(data.data.len() <= len as usize, "SFTP 读取响应超出请求长度");
+                Ok(data.data)
+            }
+            Err(error)
+                if matches!(error.downcast_ref::<SftpError>(),
+                    Some(SftpError::Status(status)) if status.status_code == StatusCode::Eof
+                ) =>
+            {
+                Ok(Vec::new())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn read_range<'a>(
+        &'a self,
+        cancel: &'a CancellationToken,
+        handle: &'a str,
+        start: u64,
+        end: u64,
+    ) -> impl futures_util::Stream<Item = Result<Vec<u8>>> + 'a {
+        stream::iter((start..end).step_by(self.read_len as usize))
+            .map(move |offset| async move {
+                let len = (end - offset).min(u64::from(self.read_len)) as u32;
+                let mut data = self.read(cancel, handle, offset, len).await?;
+                // A server may return less than requested without reaching EOF.
+                while data.len() < len as usize {
+                    let filled = data.len();
+                    let more = self
+                        .read(cancel, handle, offset + filled as u64, len - filled as u32)
+                        .await?;
+                    anyhow::ensure!(!more.is_empty(), "远程文件已变化，下载未完成");
+                    data.extend_from_slice(&more);
+                }
+                Ok(data)
+            })
+            .buffered(TRANSFER_MAX_CONCURRENT_READS)
+    }
+}
+
+async fn transfer_download(
+    sftp: &DownloadSftp,
+    cancel: &CancellationToken,
     remote_path: &str,
     local_path: &str,
     resume: bool,
     progress: &(impl Fn(TransferProgress) + Sync),
 ) -> Result<()> {
-    let meta = transfer_io(cancel, sftp.metadata(remote_path))
+    let result = download_inner(sftp, cancel, remote_path, local_path, resume, progress).await;
+    let _ = sftp.session.close_session();
+    result
+}
+
+async fn download_inner(
+    sftp: &DownloadSftp,
+    cancel: &CancellationToken,
+    remote_path: &str,
+    local_path: &str,
+    resume: bool,
+    progress: &(impl Fn(TransferProgress) + Sync),
+) -> Result<()> {
+    let meta = transfer_io(cancel, sftp.session.stat(remote_path))
         .await
-        .context("读取远程文件信息失败")?;
+        .context("读取远程文件信息失败")?
+        .attrs;
     let total = meta.size.unwrap_or(0);
-    let mut remote = transfer_io(cancel, sftp.open(remote_path))
-        .await
-        .context("打开远程文件失败")?;
+    let remote = transfer_io(
+        cancel,
+        sftp.session
+            .open(remote_path, OpenFlags::READ, FileAttributes::empty()),
+    )
+    .await
+    .context("打开远程文件失败")?
+    .handle;
     let mut local = if resume {
         match tokio::fs::OpenOptions::new()
             .read(true)
@@ -1773,11 +2115,33 @@ async fn download_inner(
         if meta.size.is_some_and(|size| offset > size) {
             return Err(resume_mismatch());
         }
-        verify_resume_prefix(cancel, &mut remote, &mut local, offset, total, progress).await?;
+        let mut checked = 0;
+        let mut last_emit = 0;
+        let mut local_bytes = vec![0; sftp.read_len as usize];
+        let reads = sftp.read_range(cancel, &remote, 0, offset);
+        tokio::pin!(reads);
+        while let Some(bytes) = reads.next().await {
+            let bytes = bytes.context("读取续传源文件失败")?;
+            let target = &mut local_bytes[..bytes.len()];
+            transfer_io(cancel, local.read_exact(target))
+                .await
+                .context("读取续传目标文件失败")?;
+            anyhow::ensure!(bytes == target, resume_mismatch());
+            checked += bytes.len() as u64;
+            if checked - last_emit >= PROGRESS_EMIT_EVERY || checked == offset {
+                last_emit = checked;
+                progress(TransferProgress {
+                    transferred: checked,
+                    total,
+                    completed: false,
+                });
+            }
+        }
         let after = local.metadata().await.context("读取本地文件信息失败")?;
-        let source = transfer_io(cancel, sftp.metadata(remote_path))
+        let source = transfer_io(cancel, sftp.session.stat(remote_path))
             .await
-            .context("读取远程文件信息失败")?;
+            .context("读取远程文件信息失败")?
+            .attrs;
         if local_changed(&before, &after) || remote_changed(&meta, &source) {
             return Err(anyhow!("续传期间文件已变化，请重新发起传输"));
         }
@@ -1786,24 +2150,35 @@ async fn download_inner(
         0
     };
 
-    let mut buf = vec![0u8; TRANSFER_CHUNK];
+    // If the server did not supply the size, read until EOF as before. Otherwise
+    // keep a fixed request window and yield contiguous ranges in file order.
+    let remote = remote.as_str();
+    let reads = match meta.size {
+        Some(end) => {
+            futures_util::future::Either::Left(sftp.read_range(cancel, remote, transferred, end))
+        }
+        None => futures_util::future::Either::Right(stream::try_unfold(
+            transferred,
+            |offset| async move {
+                let bytes = sftp.read(cancel, remote, offset, sftp.read_len).await?;
+                let next = offset + bytes.len() as u64;
+                Ok((!bytes.is_empty()).then_some((bytes, next)))
+            },
+        )),
+    };
+    tokio::pin!(reads);
     let mut last_emit = transferred;
     let mut last_emit_at = tokio::time::Instant::now();
     loop {
-        if cancel.load(Ordering::Relaxed) {
+        if cancel.is_cancelled() {
             return Err(anyhow!("传输已取消"));
         }
-        let n = transfer_io(cancel, remote.read(&mut buf))
-            .await
-            .context("读取远程文件失败")?;
-        if n == 0 {
+        let Some(bytes) = reads.next().await else {
             break;
-        }
-        local
-            .write_all(&buf[..n])
-            .await
-            .context("写入本地文件失败")?;
-        transferred += n as u64;
+        };
+        let bytes = bytes.context("读取远程文件失败")?;
+        local.write_all(&bytes).await.context("写入本地文件失败")?;
+        transferred += bytes.len() as u64;
         if transferred - last_emit >= PROGRESS_EMIT_EVERY
             || last_emit_at.elapsed() >= PROGRESS_EMIT_INTERVAL
         {
@@ -1817,12 +2192,16 @@ async fn download_inner(
         }
     }
     local.flush().await.context("写入本地文件失败")?;
-    let source_after = transfer_io(cancel, sftp.metadata(remote_path))
+    let source_after = transfer_io(cancel, sftp.session.stat(remote_path))
         .await
-        .context("读取远程文件信息失败")?;
+        .context("读取远程文件信息失败")?
+        .attrs;
     if (meta.size.is_some() && transferred != total) || remote_changed(&meta, &source_after) {
         return Err(anyhow!("远程文件已变化，下载未完成"));
     }
+    transfer_io(cancel, sftp.session.close(remote))
+        .await
+        .context("关闭远程文件失败")?;
     progress(TransferProgress {
         transferred,
         total,
@@ -1845,15 +2224,12 @@ pub async fn sftp_upload(
     let cancel = register_transfer(transfer_id).await;
     let result = async {
         let sftp = transfer_io(&cancel, open_sftp(session_id)).await?;
-        transfer_file(
+        transfer_upload(
             &sftp,
             &cancel,
             &local_path,
             &remote_path,
-            TransferMode {
-                upload: true,
-                resume,
-            },
+            resume,
             &|event| {
                 let _ = progress.add(event);
             },
@@ -1867,33 +2243,23 @@ pub async fn sftp_upload(
     }
 }
 
-async fn transfer_file(
+async fn transfer_upload(
     sftp: &SftpSession,
-    cancel: &AtomicBool,
+    cancel: &CancellationToken,
     local_path: &str,
     remote_path: &str,
-    mode: TransferMode,
+    resume: bool,
     progress: &(impl Fn(TransferProgress) + Sync),
 ) -> Result<()> {
-    let result = if mode.upload {
-        upload_inner(sftp, cancel, local_path, remote_path, mode.resume, progress).await
-    } else {
-        download_inner(sftp, cancel, remote_path, local_path, mode.resume, progress).await
-    };
+    let result = upload_inner(sftp, cancel, local_path, remote_path, resume, progress).await;
     // 包括断线重连触发的取消：只释放资源，不删除已写入的目标文件。
     transfer_cleanup(sftp.close()).await;
     result
 }
 
-#[derive(Clone, Copy)]
-struct TransferMode {
-    upload: bool,
-    resume: bool,
-}
-
 async fn upload_inner(
     sftp: &SftpSession,
-    cancel: &AtomicBool,
+    cancel: &CancellationToken,
     local_path: &str,
     remote_path: &str,
     resume: bool,
@@ -1958,7 +2324,7 @@ async fn upload_inner(
     let mut last_emit = transferred;
     let mut last_emit_at = tokio::time::Instant::now();
     loop {
-        if cancel.load(Ordering::Relaxed) {
+        if cancel.is_cancelled() {
             return Err(anyhow!("传输已取消"));
         }
         let n = local.read(&mut buf).await.context("读取本地文件失败")?;
@@ -2020,7 +2386,7 @@ fn is_missing_remote_file(error: &anyhow::Error) -> bool {
 }
 
 async fn verify_resume_prefix(
-    cancel: &AtomicBool,
+    cancel: &CancellationToken,
     source: &mut (impl tokio::io::AsyncRead + Unpin),
     target: &mut (impl tokio::io::AsyncRead + Unpin),
     offset: u64,
@@ -2033,12 +2399,18 @@ async fn verify_resume_prefix(
     let mut last_emit = 0;
     while checked < offset {
         let len = (offset - checked).min(TRANSFER_CHUNK as u64) as usize;
-        transfer_io(cancel, source.read_exact(&mut source_buf[..len]))
-            .await
-            .context("读取续传源文件失败")?;
-        transfer_io(cancel, target.read_exact(&mut target_buf[..len]))
-            .await
-            .context("读取续传目标文件失败")?;
+        tokio::try_join!(
+            async {
+                transfer_io(cancel, source.read_exact(&mut source_buf[..len]))
+                    .await
+                    .context("读取续传源文件失败")
+            },
+            async {
+                transfer_io(cancel, target.read_exact(&mut target_buf[..len]))
+                    .await
+                    .context("读取续传目标文件失败")
+            },
+        )?;
         if source_buf[..len] != target_buf[..len] {
             return Err(resume_mismatch());
         }
@@ -2055,8 +2427,8 @@ async fn verify_resume_prefix(
     Ok(())
 }
 
-async fn register_transfer(transfer_id: u32) -> Arc<AtomicBool> {
-    let flag = Arc::new(AtomicBool::new(false));
+async fn register_transfer(transfer_id: u32) -> CancellationToken {
+    let flag = CancellationToken::new();
     TRANSFER_CANCELS
         .lock()
         .await
@@ -2089,6 +2461,7 @@ mod tests {
     use russh::keys::ssh_key::{Algorithm, Cipher, Kdf, LineEnding};
     use russh::keys::{encode_pkcs8_pem, encode_pkcs8_pem_encrypted};
     use russh::server;
+    use std::sync::atomic::AtomicBool;
 
     #[tokio::test(start_paused = true)]
     async fn frame_pacer_requires_matching_ack_and_preserves_minimum_interval() {
@@ -2184,7 +2557,7 @@ mod tests {
     async fn transfer_stalled_upload_fails_after_bounded_response_waits_and_cleanup() {
         // 对端保留连接但不读数据，模拟上传断网后写入/确认永久阻塞。
         let (mut remote, _peer) = tokio::io::duplex(1);
-        let cancel = AtomicBool::new(false);
+        let cancel = CancellationToken::new();
         let started = tokio::time::Instant::now();
         let error = transfer_io(&cancel, remote.write_all(&[1, 2]))
             .await
@@ -2201,7 +2574,7 @@ mod tests {
         let (mut remote, _peer) = tokio::io::duplex(1);
         let mut buf = [0];
         let started = tokio::time::Instant::now();
-        let error = transfer_io(&AtomicBool::new(false), remote.read(&mut buf))
+        let error = transfer_io(&CancellationToken::new(), remote.read(&mut buf))
             .await
             .unwrap_err();
         assert!(error.downcast_ref::<TransferTimeout>().is_some());
@@ -2217,7 +2590,7 @@ mod tests {
             peer.read_exact(&mut bytes).await.unwrap();
             bytes
         });
-        transfer_io(&AtomicBool::new(false), remote.write_all(&[1, 2]))
+        transfer_io(&CancellationToken::new(), remote.write_all(&[1, 2]))
             .await
             .unwrap();
         assert_eq!(reader.await.unwrap(), [1, 2]);
@@ -2225,10 +2598,10 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn transfer_cancellation_interrupts_pending_io_without_waiting_for_timeout() {
-        let cancel = AtomicBool::new(false);
+        let cancel = CancellationToken::new();
         let stop = async {
             tokio::time::sleep(Duration::from_millis(250)).await;
-            cancel.store(true, Ordering::Relaxed);
+            cancel.cancel();
         };
         let started = tokio::time::Instant::now();
         let (result, ()) = tokio::join!(
@@ -2241,14 +2614,14 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn transfer_does_not_retry_permanent_errors_or_cancelled_requests() {
-        let cancel = AtomicBool::new(false);
+        let cancel = CancellationToken::new();
         let started = tokio::time::Instant::now();
         let error = transfer_io(&cancel, async { Err::<(), _>(anyhow!("权限不足")) })
             .await
             .unwrap_err();
         assert_eq!(error.to_string(), "权限不足");
         assert_eq!(started.elapsed(), Duration::ZERO);
-        cancel.store(true, Ordering::Relaxed);
+        cancel.cancel();
         let invoked = AtomicBool::new(false);
         let error = transfer_io(&cancel, async {
             invoked.store(true, Ordering::Relaxed);
@@ -2262,7 +2635,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn transfer_deadline_is_per_operation_not_the_whole_file() {
-        let cancel = AtomicBool::new(false);
+        let cancel = CancellationToken::new();
         let started = tokio::time::Instant::now();
         for _ in 0..4 {
             transfer_io(&cancel, async {
@@ -3665,7 +4038,7 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
                     StatusServer {
                         output,
                         exit_code,
-                        command: server_status_command(include_str!("server_status.sh")),
+                        command: status_sample_command((true, true)),
                         hang: false,
                     },
                 )
@@ -3702,6 +4075,35 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
             ssh_disconnect(id).await.unwrap();
             task.abort();
         }
+    }
+
+    #[test]
+    fn status_sample_cache_refreshes_storage_without_reusing_runtime_counters() {
+        let mut cache = StatusSampleCache::default();
+        let now = tokio::time::Instant::now();
+        let first = "PAGASHELL_STATUS_OS\nLinux\nPAGASHELL_STATUS_ARCHITECTURE\naarch64\nPAGASHELL_STATUS_UPTIME\n900\nPAGASHELL_STATUS_FILESYSTEMS\nold disk data\nPAGASHELL_STATUS_END\n";
+        assert_eq!(cache.plan(now), (true, true));
+        assert_eq!(cache.merge(first.into(), (true, true), now).unwrap(), first);
+
+        let later = now + Duration::from_secs(3);
+        let quick =
+            "PAGASHELL_STATUS_OS\nLinux\nPAGASHELL_STATUS_UPTIME\n903\nPAGASHELL_STATUS_END\n";
+        assert_eq!(cache.plan(later), (false, false));
+        let output = cache.merge(quick.into(), (false, false), later).unwrap();
+        assert!(output.contains("UPTIME\n903"));
+        assert!(!output.contains("UPTIME\n900"));
+        assert!(
+            output.contains("ARCHITECTURE\naarch64\nPAGASHELL_STATUS_FILESYSTEMS\nold disk data\n")
+        );
+        let next_storage = now + STATUS_STORAGE_INTERVAL;
+        assert_eq!(cache.plan(next_storage), (false, true));
+        let refresh = quick.replace(
+            "PAGASHELL_STATUS_END",
+            "PAGASHELL_STATUS_FILESYSTEMS\nnew disk data\nPAGASHELL_STATUS_END",
+        );
+        let output = cache.merge(refresh, (false, true), next_storage).unwrap();
+        assert!(output.contains("FILESYSTEMS\nnew disk data"));
+        assert!(!output.contains("old disk data"));
     }
 
     async fn process_test_connection(
@@ -3888,7 +4290,7 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
     #[tokio::test]
     async fn docker_log_channel_streams_separately_and_releases_pending_reads() {
         use crate::api::docker::{
-            ssh_close_docker_logs, ssh_next_docker_logs, ssh_open_docker_logs,
+            ssh_close_docker_logs, ssh_open_docker_logs, stream_logs_for_test,
         };
 
         let (closed, mut closures) = mpsc::unbounded_channel();
@@ -3905,17 +4307,17 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
             let logs = ssh_open_docker_logs(id, "0123456789ab".into())
                 .await
                 .unwrap();
-            for line in [b"first line\n".as_slice(), b"stderr line\n".as_slice()] {
-                assert_eq!(
-                    tokio::time::timeout(Duration::from_secs(1), ssh_next_docker_logs(logs))
-                        .await
-                        .unwrap()
-                        .unwrap()
-                        .as_deref(),
-                    Some(line)
-                );
-            }
-            let mut pending = tokio::spawn(ssh_next_docker_logs(logs));
+            let (send, mut receive) = mpsc::unbounded_channel();
+            let mut pending = tokio::spawn(stream_logs_for_test(logs, move |bytes| {
+                send.send(bytes).is_ok()
+            }));
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(1), receive.recv())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                b"first line\nstderr line\n"
+            );
             assert!(
                 tokio::time::timeout(Duration::from_millis(20), &mut pending)
                     .await
@@ -3932,13 +4334,14 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
                         .is_some()
                 );
             }
-            assert!(tokio::time::timeout(Duration::from_secs(1), pending)
+            tokio::time::timeout(Duration::from_secs(1), pending)
                 .await
                 .unwrap()
                 .unwrap()
-                .unwrap()
-                .is_none());
-            assert!(ssh_next_docker_logs(logs).await.unwrap().is_none());
+                .unwrap();
+            stream_logs_for_test(logs, |_| panic!("stream was already closed"))
+                .await
+                .unwrap();
         }
         task.abort();
     }
@@ -4425,7 +4828,7 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
             tokio::time::timeout(Duration::from_secs(2), async {
                 while let Some(frame) = frames.recv().await {
                     saw_diagnostic |= !diagnostic_prefix.is_empty() && frame_text(&frame).contains(&diagnostic_prefix);
-                    ssh_terminal_ack(id, frame.frame_id).await.unwrap();
+                    ssh_terminal_ack(id, frame.frame_id);
                 }
             })
             .await
@@ -4502,7 +4905,7 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
             tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
                     let frame = output.recv().await.unwrap();
-                    ssh_terminal_ack(id, frame.frame_id).await.unwrap();
+                    ssh_terminal_ack(id, frame.frame_id);
                     if frame_text(&frame).contains("container$") {
                         break;
                     }
@@ -4519,7 +4922,7 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
             tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
                     let frame = output.recv().await.unwrap();
-                    ssh_terminal_ack(id, frame.frame_id).await.unwrap();
+                    ssh_terminal_ack(id, frame.frame_id);
                     if frame_has_char(&frame, '中') {
                         break;
                     }
@@ -4535,7 +4938,7 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
             tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
                     let frame = output.recv().await.unwrap();
-                    ssh_terminal_ack(id, frame.frame_id).await.unwrap();
+                    ssh_terminal_ack(id, frame.frame_id);
                     if (frame.columns, frame.rows) == (110, 35) {
                         break;
                     }
@@ -4550,7 +4953,7 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
             );
             tokio::time::timeout(Duration::from_secs(2), async {
                 while let Some(frame) = output.recv().await {
-                    ssh_terminal_ack(id, frame.frame_id).await.unwrap();
+                    ssh_terminal_ack(id, frame.frame_id);
                 }
             })
             .await
@@ -4627,7 +5030,7 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
         let prompt = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 let frame = output.recv().await.unwrap();
-                ssh_terminal_ack(id, frame.frame_id).await.unwrap();
+                ssh_terminal_ack(id, frame.frame_id);
                 if frame_has_char(&frame, '$') {
                     break frame;
                 }
@@ -4646,7 +5049,7 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
             .await
             .unwrap()
             .unwrap();
-        ssh_terminal_ack(id, frame.frame_id).await.unwrap();
+        ssh_terminal_ack(id, frame.frame_id);
         assert!(frame_has_char(&frame, '中'));
         ssh_resize(id, 120, 40).await.unwrap();
         assert_eq!(
@@ -4739,7 +5142,7 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
             loop {
                 let frame = output.recv().await.unwrap();
                 let prompt = frame_text(&frame).contains("test$");
-                ssh_terminal_ack(id, frame.frame_id).await.unwrap();
+                ssh_terminal_ack(id, frame.frame_id);
                 if prompt {
                     assert_eq!(frame.cursor_x, 6);
                     break;
@@ -4760,7 +5163,7 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
                 .unwrap()
                 .unwrap();
             assert!(frame_text(&frame).contains(input));
-            ssh_terminal_ack(id, frame.frame_id).await.unwrap();
+            ssh_terminal_ack(id, frame.frame_id);
             allow_open.notify_one();
             assert_eq!(
                 ssh_read_server_status(id).await.unwrap(),
@@ -4923,7 +5326,7 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
             80,
             24,
             ShellOutput {
-                core: Box::new(TerminalCore::new(80, 24, 100)),
+                core: Box::new(TerminalCore::new(80, 24, 10000)),
                 emit: Box::new(move |frame| output_tx.send(frame).is_ok()),
             },
         )
@@ -4939,7 +5342,7 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
                 if frame_has_char(&frame, '$') {
                     break frame;
                 }
-                ssh_terminal_ack(id, frame.frame_id).await.unwrap();
+                ssh_terminal_ack(id, frame.frame_id);
             }
         })
         .await
@@ -4955,7 +5358,7 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
         }
         tokio::time::sleep(Duration::from_millis(350)).await;
         assert!(output.try_recv().is_err(), "frame sent before ack");
-        ssh_terminal_ack(id, prompt.frame_id).await.unwrap();
+        ssh_terminal_ack(id, prompt.frame_id);
         let merged = tokio::time::timeout(Duration::from_secs(2), output.recv())
             .await
             .unwrap()
@@ -4973,13 +5376,13 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
             next_terminal_event(&mut events).await,
             TerminalEvent::Data(b"d".to_vec())
         );
-        ssh_terminal_ack(id, prompt.frame_id).await.unwrap();
+        ssh_terminal_ack(id, prompt.frame_id);
         assert!(
             tokio::time::timeout(Duration::from_millis(350), output.recv())
                 .await
                 .is_err()
         );
-        ssh_terminal_ack(id, merged.frame_id).await.unwrap();
+        ssh_terminal_ack(id, merged.frame_id);
         let late = tokio::time::timeout(Duration::from_secs(2), output.recv())
             .await
             .unwrap()
@@ -4996,6 +5399,46 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
                 .await
                 .is_err()
         );
+        let mut burst = b"\r\n".to_vec();
+        burst.extend(b"row\r\n".repeat(5000));
+        burst.extend_from_slice(b"burst-end");
+        ssh_write(id, burst).await.unwrap();
+        ssh_write(id, b"\x03".to_vec()).await.unwrap();
+        // Control input must still reach the server while output awaits Dart.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if events.recv().await.unwrap() == TerminalEvent::Data(vec![3]) {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(output.try_recv().is_err(), "burst escaped the ack gate");
+        ssh_terminal_ack(id, late.frame_id);
+        let last = tokio::time::timeout(Duration::from_secs(3), async {
+            let mut count = 0;
+            loop {
+                let frame = output.recv().await.unwrap();
+                let bytes = frame
+                    .lines
+                    .iter()
+                    .map(|line| line.cells.len() * 4)
+                    .sum::<usize>();
+                assert!(
+                    bytes <= TERMINAL_DIRTY_BUDGET * 2,
+                    "oversized terminal update: {bytes}"
+                );
+                count += 1;
+                if frame_text(&frame).contains("burst-end") {
+                    assert!(count > 1);
+                    break frame;
+                }
+                ssh_terminal_ack(id, frame.frame_id);
+            }
+        })
+        .await
+        .unwrap();
         let shell_abort = SESSIONS.lock().await[&id]
             .shell_task
             .as_ref()
@@ -5007,7 +5450,8 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
             .unwrap();
         assert!(shell_abort.is_finished());
         // 会话关闭后的迟到 ack 不报错。
-        ssh_terminal_ack(id, late.frame_id).await.unwrap();
+        ssh_terminal_ack(id, last.frame_id);
+        assert!(!TERMINAL_ACKS.read().unwrap().contains_key(&id));
         server_task.abort();
     }
 
@@ -5063,7 +5507,7 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
                 if frame_has_char(&frame, '$') {
                     break frame;
                 }
-                ssh_terminal_ack(id, frame.frame_id).await.unwrap();
+                ssh_terminal_ack(id, frame.frame_id);
             }
         })
         .await
@@ -5079,7 +5523,7 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
                 .is_err()
         );
 
-        ssh_terminal_ack(id, prompt.frame_id).await.unwrap();
+        ssh_terminal_ack(id, prompt.frame_id);
         let final_frame = tokio::time::timeout(Duration::from_secs(2), output.recv())
             .await
             .unwrap()
@@ -5090,7 +5534,7 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
             .await
             .unwrap()
             .is_none());
-        ssh_terminal_ack(id, final_frame.frame_id).await.unwrap();
+        ssh_terminal_ack(id, final_frame.frame_id);
         ssh_disconnect(id).await.unwrap();
         server_task.abort();
     }
@@ -5361,6 +5805,22 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
             sftp_canonicalize(id, ".".into()).await.unwrap(),
             "/gateway-test"
         );
+        let cache = SESSIONS.lock().await[&id].sftp_metadata.clone();
+        let first = cache.lock().await.as_ref().unwrap().clone();
+        assert_eq!(
+            sftp_canonicalize(id, ".".into()).await.unwrap(),
+            "/gateway-test"
+        );
+        assert!(Arc::ptr_eq(&first, cache.lock().await.as_ref().unwrap()));
+        first.set_timeout(1);
+        first.close().await.unwrap();
+        assert!(sftp_canonicalize(id, ".".into()).await.is_err());
+        assert!(cache.lock().await.is_none());
+        assert_eq!(
+            sftp_canonicalize(id, ".".into()).await.unwrap(),
+            "/gateway-test"
+        );
+        assert!(!Arc::ptr_eq(&first, cache.lock().await.as_ref().unwrap()));
         // 模拟事件循环退出，但注册表仍持有原句柄的断线状态。
         let handle = SESSIONS.lock().await.get(&id).unwrap().handle.clone();
         handle

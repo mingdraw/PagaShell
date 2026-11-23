@@ -10,6 +10,8 @@ fi
 [ -n "$docker_bin" ] || exit 70
 kind=$1
 target=$2
+docker_probe=${3:-probe}
+docker_sudo_endpoint=
 # Buffer each attempt separately so a failed query cannot prepend partial JSON
 # to a successful sudo retry. Temporary files are private and always removed.
 umask 077
@@ -34,12 +36,23 @@ docker_failure() {
 }
 
 docker_query() {
+  if [ -n "$docker_sudo_endpoint" ]; then
+    docker_exec sudo -n -- "$docker_bin" --host "$docker_sudo_endpoint" "$@"
+    docker_code=$?
+    if [ "$docker_code" -eq 0 ]; then cat "$docker_temp_dir/output"; return; fi
+    docker_failure
+    docker_reason=$?
+    case "$docker_error" in *'sudo:'*) return 77 ;; esac
+    [ "$docker_reason" -eq 1 ] || return "$docker_reason"
+    return 75
+  fi
   docker_exec "$docker_bin" "$@"
   docker_code=$?
   if [ "$docker_code" -eq 0 ]; then cat "$docker_temp_dir/output"; return; fi
   docker_failure
   docker_reason=$?
   if [ "$docker_reason" -eq 77 ]; then
+    [ "$docker_probe" != skip ] || return 77
     command -v sudo >/dev/null 2>&1 || return 77
     # Keep the same daemon when sudo changes HOME or removes Docker variables.
     # Privilege escalation only helps access a local Unix socket.
@@ -54,7 +67,11 @@ docker_query() {
     # -n never prompts for or consumes a password during background polling.
     docker_exec sudo -n -- "$docker_bin" --host "$docker_endpoint" "$@"
     docker_code=$?
-    if [ "$docker_code" -eq 0 ]; then cat "$docker_temp_dir/output"; return; fi
+    if [ "$docker_code" -eq 0 ]; then
+      docker_sudo_endpoint=$docker_endpoint
+      cat "$docker_temp_dir/output"
+      return
+    fi
     docker_failure
     docker_reason=$?
     if [ "$docker_reason" -eq 1 ]; then

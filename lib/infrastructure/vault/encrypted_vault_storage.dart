@@ -23,20 +23,41 @@ class FileEncryptedVaultStorage implements EncryptedVaultStorage {
   final Future<Directory> Function() _directory;
   static const filename = 'credentials.vault';
   static final _queues = <String, Future<void>>{};
+  Future<File>? _resolvedFile;
+
+  Future<File> _resolveFile() async {
+    final directory = await _directory();
+    await directory.create(recursive: true);
+    return File(path.join(await directory.resolveSymbolicLinks(), filename));
+  }
+
+  Future<File> _file() async {
+    final resolved = _resolvedFile ??= _resolveFile();
+    try {
+      return await resolved;
+    } on Object {
+      if (identical(_resolvedFile, resolved)) _resolvedFile = null;
+      rethrow;
+    }
+  }
 
   @override
   Future<T> transaction<T>(Future<T> Function(VaultTransaction) action) async {
-    final directory = await _directory();
-    await directory.create(recursive: true);
-    final directoryPath = await directory.resolveSymbolicLinks();
-    final file = File(path.join(directoryPath, filename));
+    final file = await _file();
     final previous = _queues[file.path] ?? Future<void>.value();
     final release = Completer<void>();
     _queues[file.path] = release.future;
     await previous;
     RandomAccessFile? lock;
     try {
-      lock = await File('${file.path}.lock').open(mode: FileMode.append);
+      final lockFile = File('${file.path}.lock');
+      try {
+        lock = await lockFile.open(mode: FileMode.append);
+      } on FileSystemException catch (error) {
+        if (!_isMissing(error)) rethrow;
+        await file.parent.create(recursive: true);
+        lock = await lockFile.open(mode: FileMode.append);
+      }
       await lock.lock(FileLock.blockingExclusive);
       return await action(_FileVaultTransaction(file));
     } finally {
@@ -53,6 +74,10 @@ class FileEncryptedVaultStorage implements EncryptedVaultStorage {
   }
 }
 
+bool _isMissing(FileSystemException error) =>
+    error.osError?.errorCode == 2 ||
+    (Platform.isWindows && error.osError?.errorCode == 3);
+
 class _FileVaultTransaction implements VaultTransaction {
   const _FileVaultTransaction(this.file);
 
@@ -64,8 +89,7 @@ class _FileVaultTransaction implements VaultTransaction {
       return await file.readAsBytes();
     } on FileSystemException catch (error) {
       // 只把不存在视为初次使用；权限或 I/O 失败不得当作空库覆盖。
-      if (error.osError?.errorCode == 2 ||
-          (Platform.isWindows && error.osError?.errorCode == 3)) {
+      if (_isMissing(error)) {
         return null;
       }
       rethrow;

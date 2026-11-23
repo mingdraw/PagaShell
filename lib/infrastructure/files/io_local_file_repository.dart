@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:win32/win32.dart' as win32;
 
@@ -77,10 +78,13 @@ class IoLocalFileRepository
   }
 
   @override
-  Future<List<LocalFileEntry>> listDirectory(String path) async {
+  Future<List<LocalFileEntry>> listDirectory(String path) =>
+      Isolate.run(() => _listDirectory(path));
+
+  static List<LocalFileEntry> _listDirectory(String path) {
     final entries = <LocalFileEntry>[];
     try {
-      await for (final entity in Directory(path).list(followLinks: false)) {
+      for (final entity in Directory(path).listSync(followLinks: false)) {
         final stat = entity.statSync();
         if (stat.type != FileSystemEntityType.directory &&
             stat.type != FileSystemEntityType.file) {
@@ -113,7 +117,7 @@ class IoLocalFileRepository
     return entries;
   }
 
-  bool _hasWindowsHiddenAttribute(String path) {
+  static bool _hasWindowsHiddenAttribute(String path) {
     if (!Platform.isWindows) return false;
     final nativePath = path.toPcwstr();
     try {

@@ -1,6 +1,10 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:get/get.dart';
+import 'package:get/get_connect/http/src/exceptions/exceptions.dart';
+import 'package:get/get_connect/http/src/request/request.dart';
 
 import '../../domain/entities/app_proxy_settings.dart';
 import 'app_proxy_resolver.dart';
@@ -15,12 +19,30 @@ class AppConnect extends GetConnect {
   });
 
   final AppProxyResolver? _proxyResolver;
-  _ProxiedGetHttpClient? _proxiedClient;
+  _FastBodyGetHttpClient? _client;
 
   @override
   GetHttpClient get httpClient {
-    if (_proxyResolver == null) return super.httpClient;
-    return _proxiedClient ??= _ProxiedGetHttpClient(
+    final existing = _client;
+    if (existing != null) return existing;
+    if (_proxyResolver == null) {
+      return _client = _FastBodyGetHttpClient(
+        userAgent: userAgent,
+        sendUserAgent: sendUserAgent,
+        timeout: timeout,
+        followRedirects: followRedirects,
+        maxRedirects: maxRedirects,
+        maxAuthRetries: maxAuthRetries,
+        allowAutoSignedCert: allowAutoSignedCert,
+        baseUrl: baseUrl,
+        trustedCertificates: trustedCertificates,
+        withCredentials: withCredentials,
+        findProxy: findProxy,
+        defaultContentType: defaultContentType,
+        defaultDecoder: defaultDecoder,
+      );
+    }
+    return _client = _ProxiedGetHttpClient(
       proxyResolver: _proxyResolver,
       userAgent: userAgent,
       sendUserAgent: sendUserAgent,
@@ -39,8 +61,8 @@ class AppConnect extends GetConnect {
 
   @override
   void dispose() {
-    _proxiedClient?.close();
-    _proxiedClient = null;
+    _client?.close();
+    _client = null;
     super.dispose();
   }
 
@@ -50,6 +72,265 @@ class AppConnect extends GetConnect {
     dispose();
     super.onClose();
   }
+}
+
+/// 绕过 get 4.7.3 `GetHttpClient._trackProgress` 逐字节 `bodyBytes.map((i) => [i])`
+/// 流式发包：整块（或带进度时按 32 KiB 分块）构建 `Request` 并经由 `send` 发出。
+class _FastBodyGetHttpClient extends GetHttpClient {
+  _FastBodyGetHttpClient({
+    required super.userAgent,
+    required super.sendUserAgent,
+    required super.timeout,
+    required super.followRedirects,
+    required super.maxRedirects,
+    required super.maxAuthRetries,
+    required super.allowAutoSignedCert,
+    required super.baseUrl,
+    required super.trustedCertificates,
+    required super.withCredentials,
+    super.findProxy,
+    required String defaultContentType,
+    required Decoder<dynamic>? defaultDecoder,
+  }) {
+    this.defaultContentType = defaultContentType;
+    this.defaultDecoder = defaultDecoder;
+  }
+
+  static const _progressChunkSize = 32 * 1024;
+
+  Future<Response<T>> _sendWithBody<T>(
+    String? url,
+    String method, {
+    dynamic body,
+    String? contentType,
+    Map<String, String>? headers,
+    Map<String, dynamic>? query,
+    Decoder<T>? decoder,
+    ResponseInterceptor<T>? responseInterceptor,
+    Progress? uploadProgress,
+  }) async {
+    try {
+      final request = await _buildBodyRequest<T>(
+        url,
+        method,
+        body: body,
+        contentType: contentType,
+        headers: headers,
+        query: query,
+        decoder: decoder,
+        responseInterceptor: responseInterceptor,
+        uploadProgress: uploadProgress,
+      );
+      return await send<T>(request);
+    } on Exception catch (e) {
+      if (!errorSafety) {
+        throw GetHttpException(e.toString());
+      }
+      return Response<T>(statusText: 'Can not connect to server. Reason: $e');
+    }
+  }
+
+  Future<Request<T>> _buildBodyRequest<T>(
+    String? url,
+    String method, {
+    required dynamic body,
+    required String? contentType,
+    required Map<String, String>? headers,
+    required Map<String, dynamic>? query,
+    required Decoder<T>? decoder,
+    required ResponseInterceptor<T>? responseInterceptor,
+    required Progress? uploadProgress,
+  }) async {
+    final requestHeaders = <String, String>{};
+    if (sendUserAgent) {
+      requestHeaders['user-agent'] = userAgent;
+    }
+
+    List<int>? bodyBytes;
+    if (body is FormData) {
+      bodyBytes = await body.toBytes();
+      requestHeaders['content-length'] = bodyBytes.length.toString();
+      requestHeaders['content-type'] =
+          'multipart/form-data; boundary=${body.boundary}';
+    } else if (contentType != null &&
+        contentType.toLowerCase() == 'application/x-www-form-urlencoded' &&
+        body is Map) {
+      final parts = <String>[];
+      body.forEach((Object? key, Object? value) {
+        parts.add(
+          '${Uri.encodeQueryComponent('$key')}='
+          '${Uri.encodeQueryComponent('$value')}',
+        );
+      });
+      bodyBytes = utf8.encode(parts.join('&'));
+      if (sendContentLength) {
+        requestHeaders['content-length'] = bodyBytes.length.toString();
+      }
+      requestHeaders['content-type'] = contentType;
+    } else if (body is Map || body is List) {
+      bodyBytes = utf8.encode(jsonEncode(body));
+      if (sendContentLength) {
+        requestHeaders['content-length'] = bodyBytes.length.toString();
+      }
+      requestHeaders['content-type'] = contentType ?? defaultContentType;
+    } else if (body is String) {
+      bodyBytes = utf8.encode(body);
+      if (sendContentLength) {
+        requestHeaders['content-length'] = bodyBytes.length.toString();
+      }
+      requestHeaders['content-type'] = contentType ?? defaultContentType;
+    } else if (body == null) {
+      if (sendContentLength) {
+        requestHeaders['content-length'] = '0';
+      }
+      requestHeaders['content-type'] = contentType ?? defaultContentType;
+    } else if (!errorSafety) {
+      throw UnexpectedFormat('body cannot be ${body.runtimeType}');
+    }
+
+    if (headers != null) {
+      requestHeaders.addAll(headers);
+    }
+
+    final Stream<List<int>>? bodyStream;
+    if (bodyBytes == null) {
+      bodyStream = null;
+    } else if (uploadProgress == null || bodyBytes.isEmpty) {
+      bodyStream = Stream<List<int>>.value(bodyBytes);
+    } else {
+      bodyStream = _chunkedProgressStream(bodyBytes, uploadProgress);
+    }
+
+    final defaultInterceptor = defaultResponseInterceptor;
+    final effectiveInterceptor =
+        responseInterceptor ??
+        (defaultInterceptor == null
+            ? null
+            : (request, targetType, response) async =>
+                  await defaultInterceptor(request, targetType, response)
+                      as Response<T>?);
+
+    return Request<T>(
+      method: method,
+      url: createUri(url, query),
+      headers: requestHeaders,
+      bodyBytes: bodyStream,
+      contentLength: bodyBytes?.length ?? 0,
+      followRedirects: followRedirects,
+      maxRedirects: maxRedirects,
+      decoder: decoder ?? (defaultDecoder as Decoder<T>?),
+      responseInterceptor: effectiveInterceptor,
+    );
+  }
+
+  static Stream<List<int>> _chunkedProgressStream(
+    List<int> bodyBytes,
+    Progress uploadProgress,
+  ) async* {
+    final bytes = bodyBytes is Uint8List
+        ? bodyBytes
+        : Uint8List.fromList(bodyBytes);
+    final length = bytes.length;
+    var sent = 0;
+    while (sent < length) {
+      final end = sent + _progressChunkSize < length
+          ? sent + _progressChunkSize
+          : length;
+      final chunk = Uint8List.sublistView(bytes, sent, end);
+      sent = end;
+      uploadProgress(sent / length * 100);
+      yield chunk;
+    }
+  }
+
+  @override
+  Future<Response<T>> post<T>(
+    String? url, {
+    dynamic body,
+    String? contentType,
+    Map<String, String>? headers,
+    Map<String, dynamic>? query,
+    Decoder<T>? decoder,
+    ResponseInterceptor<T>? responseInterceptor,
+    Progress? uploadProgress,
+  }) => _sendWithBody<T>(
+    url,
+    'post',
+    body: body,
+    contentType: contentType,
+    headers: headers,
+    query: query,
+    decoder: decoder,
+    responseInterceptor: responseInterceptor,
+    uploadProgress: uploadProgress,
+  );
+
+  @override
+  Future<Response<T>> put<T>(
+    String url, {
+    dynamic body,
+    String? contentType,
+    Map<String, String>? headers,
+    Map<String, dynamic>? query,
+    Decoder<T>? decoder,
+    ResponseInterceptor<T>? responseInterceptor,
+    Progress? uploadProgress,
+  }) => _sendWithBody<T>(
+    url,
+    'put',
+    body: body,
+    contentType: contentType,
+    headers: headers,
+    query: query,
+    decoder: decoder,
+    responseInterceptor: responseInterceptor,
+    uploadProgress: uploadProgress,
+  );
+
+  @override
+  Future<Response<T>> patch<T>(
+    String url, {
+    dynamic body,
+    String? contentType,
+    Map<String, String>? headers,
+    Map<String, dynamic>? query,
+    Decoder<T>? decoder,
+    ResponseInterceptor<T>? responseInterceptor,
+    Progress? uploadProgress,
+  }) => _sendWithBody<T>(
+    url,
+    'patch',
+    body: body,
+    contentType: contentType,
+    headers: headers,
+    query: query,
+    decoder: decoder,
+    responseInterceptor: responseInterceptor,
+    uploadProgress: uploadProgress,
+  );
+
+  @override
+  Future<Response<T>> request<T>(
+    String url,
+    String method, {
+    dynamic body,
+    String? contentType,
+    Map<String, String>? headers,
+    Map<String, dynamic>? query,
+    Decoder<T>? decoder,
+    ResponseInterceptor<T>? responseInterceptor,
+    Progress? uploadProgress,
+  }) => _sendWithBody<T>(
+    url,
+    method,
+    body: body,
+    contentType: contentType,
+    headers: headers,
+    query: query,
+    decoder: decoder,
+    responseInterceptor: responseInterceptor,
+    uploadProgress: uploadProgress,
+  );
 }
 
 class _ProxySlot {
@@ -71,7 +352,7 @@ class _SlotRecord {
   final Future<_ProxySlot> future;
 }
 
-class _ProxiedGetHttpClient extends GetHttpClient {
+class _ProxiedGetHttpClient extends _FastBodyGetHttpClient {
   _ProxiedGetHttpClient({
     required this.proxyResolver,
     required super.userAgent,
@@ -84,17 +365,14 @@ class _ProxiedGetHttpClient extends GetHttpClient {
     required super.baseUrl,
     required this.trustedCertificates,
     required this.withCredentials,
-    required String defaultContentType,
-    required Decoder<dynamic>? defaultDecoder,
+    required super.defaultContentType,
+    required super.defaultDecoder,
   }) : super(
          allowAutoSignedCert: allowAutoSignedCert,
          trustedCertificates: trustedCertificates,
          withCredentials: withCredentials,
          findProxy: (_) => 'DIRECT',
-       ) {
-    this.defaultContentType = defaultContentType;
-    this.defaultDecoder = defaultDecoder;
-  }
+       );
 
   final AppProxyResolver proxyResolver;
   final bool allowAutoSignedCert;
@@ -145,7 +423,7 @@ class _ProxiedGetHttpClient extends GetHttpClient {
       proxyDirective = 'PROXY 127.0.0.1:${bridge.port}';
     }
     final client =
-        GetHttpClient(
+        _FastBodyGetHttpClient(
             userAgent: userAgent,
             sendUserAgent: sendUserAgent,
             timeout: timeout,
@@ -157,9 +435,9 @@ class _ProxiedGetHttpClient extends GetHttpClient {
             trustedCertificates: trustedCertificates,
             withCredentials: withCredentials,
             findProxy: (_) => proxyDirective,
+            defaultContentType: defaultContentType,
+            defaultDecoder: defaultDecoder,
           )
-          ..defaultContentType = defaultContentType
-          ..defaultDecoder = defaultDecoder
           ..defaultResponseInterceptor = defaultResponseInterceptor
           ..errorSafety = errorSafety;
     return _ProxySlot(client, bridge);

@@ -363,6 +363,51 @@ void main() {
     expect(failedSocksRes.isOk, isFalse);
   });
 
+  test('系统代理按完整目标合并查询，过期和配置变化后重新解析', () async {
+    final settings = SettingsController(
+      repository: InMemorySettingsRepository(),
+    );
+    addTearDown(settings.onClose);
+    const first = AppProxyEndpoint(
+      protocol: AppProxyProtocol.http,
+      host: '127.0.0.1',
+      port: 8001,
+    );
+    const second = AppProxyEndpoint(
+      protocol: AppProxyProtocol.http,
+      host: '127.0.0.1',
+      port: 8002,
+    );
+    final systemLookup = _FakeSystemLookup(first);
+    var elapsed = Duration.zero;
+    final resolver = AppProxyResolver(
+      settings: settings,
+      systemLookup: systemLookup,
+      elapsed: () => elapsed,
+    );
+    final target = Uri.parse('https://example.test/api?route=a');
+    expect(
+      await Future.wait([resolver.resolve(target), resolver.resolve(target)]),
+      [first, first],
+    );
+    expect(systemLookup.calls, 1);
+
+    systemLookup.endpoint = second;
+    expect(await resolver.resolve(target), first);
+    expect(await resolver.resolve(target.replace(query: 'route=b')), second);
+    expect(systemLookup.calls, 2);
+
+    elapsed = const Duration(seconds: 10);
+    expect(await resolver.resolve(target), second);
+    expect(systemLookup.calls, 3);
+
+    await settings.saveProxySettings(mode: AppProxyMode.off);
+    expect(await resolver.resolve(target), isNull);
+    await settings.saveProxySettings(mode: AppProxyMode.auto);
+    expect(await resolver.resolve(target), second);
+    expect(systemLookup.calls, 4);
+  });
+
   test('HTTPS 代理会发起 TLS 握手并透传到上游代理端口', () async {
     final tcpServer = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
     addTearDown(tcpServer.close);
