@@ -91,7 +91,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Flutter checkout failed' }
           Add-Content $env:GITHUB_PATH "$env:RUNNER_TEMP\flutter\bin"
       - run: flutter --version
-      - run: flutter pub get
+      - run: flutter pub get --enforce-lockfile
       - name: Verify update helper transactions
         run: python scripts/test_updater_helpers.py
       - name: Verify Windows update launcher
@@ -103,20 +103,20 @@ jobs:
       - name: Analyze and test
         if: matrix.platform == 'linux' && matrix.arch == 'amd64'
         run: |
-          flutter analyze
-          flutter test
+          flutter analyze --no-pub
+          flutter test --no-pub
           cargo fmt --manifest-path rust/Cargo.toml --check
           cargo clippy --manifest-path rust/Cargo.toml --locked --all-targets -- -D warnings
           cargo test --manifest-path rust/Cargo.toml --locked
       - name: Verify Windows terminal input and close lifecycle
         if: runner.os == 'Windows'
-        run: flutter test test/terminal_input_test.dart test/window_close_test.dart --reporter expanded
+        run: flutter test --no-pub test/terminal_input_test.dart test/window_close_test.dart --reporter expanded
       - name: Build Linux
         if: runner.os == 'Linux'
-        run: flutter build linux --release
+        run: flutter build linux --release --no-pub
       - name: Build Windows
         if: runner.os == 'Windows'
-        run: flutter build windows --release
+        run: flutter build windows --release --no-pub
       - name: Include Visual C++ runtime
         if: runner.os == 'Windows'
         shell: pwsh
@@ -184,7 +184,7 @@ jobs:
         env:
           XCODE_ARCH: ${{ matrix.xcode_arch }}
         run: |
-          flutter build macos --release --config-only
+          flutter build macos --release --config-only --no-pub
           xcodebuild -workspace macos/Runner.xcworkspace -scheme Runner \
             -configuration Release -derivedDataPath build/macos \
             -destination 'generic/platform=macOS' \

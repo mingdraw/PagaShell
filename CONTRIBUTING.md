@@ -14,6 +14,8 @@ flutter pub get
 # Windows / Linux：flutter run -d windows / flutter run -d linux
 ```
 
+Release 使用 `pub.dev` 和仓库中的 `pubspec.lock`。更新并提交依赖锁文件时，请先将 `PUB_HOSTED_URL` 设为 `https://pub.dev`；可用 `flutter pub get --enforce-lockfile` 检查锁文件能否用于发布。
+
 ### macOS 调试连接与热重载
 
 启动脚本合并 `no_proxy` 和 `NO_PROXY`，补齐 `localhost`、`127.0.0.1` 和 IPv6 本机地址，避免 VM Service / DDS 的 WebSocket 被 HTTP 代理转发；外部代理和已有绕过项仍保留。它会先结束当前检出目录的旧 Debug 应用，再交给 `flutter run` 构建和启动。请先结束旧 Debug 应用中需要保留的连接。

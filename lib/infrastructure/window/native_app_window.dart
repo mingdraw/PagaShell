@@ -61,18 +61,8 @@ class NativeAppWindow implements AppWindow {
         for (final listener in _listeners.toList()) {
           if (_listeners.contains(listener)) listener.onWindowBlur();
         }
-      case WindowFocusedEvent():
-      case WindowMinimizedEvent():
-      case WindowMaximizedEvent():
-      case WindowRestoredEvent():
-      case WindowMovedEvent():
-      case WindowResizedEvent():
-      case WindowCreatedEvent():
-      case WindowClosedEvent():
-      case WindowPropertyChangedEvent():
-      case WindowOcclusionChangedEvent():
-      case WindowDockedEvent():
-      case WindowUndockedEvent():
+      case _:
+        // AppWindow does not expose other native events, such as scale changes.
         break;
     }
   }
