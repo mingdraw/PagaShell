@@ -240,7 +240,11 @@ class AgentController extends GetxController {
 
   Future<void> loadConversations({bool retry = false}) =>
       _loadConversations(retry: retry);
-  Future<void> get historySaved => _storage.persistence;
+  Future<void> get historySaved {
+    _flushPendingSave();
+    return _storage.persistence;
+  }
+
   Future<void> retryHistory() => _retryHistory();
   Future<bool> prepareForExit() => _prepareForExit();
   bool openConversation(String id) => _openConversation(id);
@@ -428,7 +432,7 @@ class AgentController extends GetxController {
         if (turn.calls.isEmpty) {
           _trimHistory(turns);
           if (!_live(generation)) return;
-          _history = turns;
+          _setHistory(turns);
           committed = true;
           if (reply.truncated) error.value = 'AI 回复达到服务商长度上限，请缩小问题或继续提问';
           break;
@@ -492,7 +496,11 @@ class AgentController extends GetxController {
     busy.value = false;
     _rejectPending();
     _cancelQueuedRequests();
-    if (wasBusy) _saveConversation();
+    if (wasBusy || _storage.savePending) {
+      _saveConversation();
+    } else {
+      _cancelPendingSave();
+    }
   }
 
   void clear() {
@@ -501,11 +509,13 @@ class AgentController extends GetxController {
   }
 
   void _resetConversation() {
+    _cancelPendingSave();
     currentConversationId.value = null;
     _conversationModel = null;
     selectedSessions.clear();
     entries.clear();
-    _history = [];
+    _setHistory([]);
+    _storage.turnWeights.clear();
     _historyRevision = 0;
     historyTrimmed.value = false;
     error.value = null;
@@ -516,7 +526,9 @@ class AgentController extends GetxController {
     _settingsWorker?.dispose();
     _sessionsWorker?.dispose();
     stop();
-    _history = [];
+    _cancelPendingSave();
+    _setHistory([]);
+    _storage.turnWeights.clear();
     super.onClose();
   }
 }

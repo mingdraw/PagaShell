@@ -24,11 +24,25 @@ AgentCommandRisk classifyShellCommand(String command) {
   return AgentCommandRisk.mutating;
 }
 
+final _disallowedShellChars = RegExp(
+  r'''[<>&;\x60$\\\r\n\x00-\x08\x0b-\x1f\x7f]''',
+);
+final _mysqlReadOnly = RegExp(
+  r'^(?:SHOW\s+(?:(?:GLOBAL|SESSION)\s+)?(?:VARIABLES|STATUS)|SELECT\s+VERSION\(\))$',
+  caseSensitive: false,
+);
+final _psqlShow = RegExp(r'^SHOW\s+[a-z_][a-z0-9_]*$', caseSensitive: false);
+final _psqlSensitive = RegExp(
+  r'(?:conninfo|command|pass|secret|ssl_key)',
+  caseSensitive: false,
+);
+final _shortLinesArg = RegExp(r'^-[0-9]{1,4}$');
+final _linesCountArg = RegExp(r'^[0-9]{1,4}$');
+
 List<List<String>>? _literalPipeline(String command) {
   if (command.isEmpty ||
       command.length > 8000 ||
-      RegExp(r'''[<>&;\x60$\\\r\n\x00-\x08\x0b-\x1f\x7f]''')
-          .hasMatch(command)) {
+      _disallowedShellChars.hasMatch(command)) {
     return null;
   }
   final stages = <List<String>>[[]];
@@ -173,22 +187,13 @@ bool _isReadOnly(List<String> words, bool piped) {
     'mysql' =>
       args.length == 2 &&
           args.first == '-e' &&
-          RegExp(
-            r'^(?:SHOW\s+(?:(?:GLOBAL|SESSION)\s+)?(?:VARIABLES|STATUS)|SELECT\s+VERSION\(\))$',
-            caseSensitive: false,
-          ).hasMatch(args.last),
+          _mysqlReadOnly.hasMatch(args.last),
     'psql' =>
       args.length == 3 &&
           args[0] == '-X' &&
           args[1] == '-c' &&
-          RegExp(
-            r'^SHOW\s+[a-z_][a-z0-9_]*$',
-            caseSensitive: false,
-          ).hasMatch(args.last) &&
-          !RegExp(
-            r'(?:conninfo|command|pass|secret|ssl_key)',
-            caseSensitive: false,
-          ).hasMatch(args.last),
+          _psqlShow.hasMatch(args.last) &&
+          !_psqlSensitive.hasMatch(args.last),
     'redis-cli' =>
       args.length == 1 &&
               const {'INFO', 'PING'}.contains(args.first.toUpperCase()) ||
@@ -216,11 +221,11 @@ bool _isReadOnly(List<String> words, bool piped) {
 }
 
 bool _checkLines(List<String> args, bool piped) {
-  if (args.isNotEmpty && RegExp(r'^-[0-9]{1,4}$').hasMatch(args.first)) {
+  if (args.isNotEmpty && _shortLinesArg.hasMatch(args.first)) {
     args = args.sublist(1);
   } else if (args.length >= 2 &&
       args.first == '-n' &&
-      RegExp(r'^[0-9]{1,4}$').hasMatch(args[1])) {
+      _linesCountArg.hasMatch(args[1])) {
     args = args.sublist(2);
   }
   return args.isEmpty

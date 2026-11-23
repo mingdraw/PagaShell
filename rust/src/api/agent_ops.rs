@@ -17,6 +17,8 @@ use crate::frb_generated::StreamSink;
 
 const FILE_LIMIT: usize = 2 * 1024 * 1024;
 const EXEC_LIMIT: usize = 2 * 1024 * 1024;
+const EXEC_FLUSH_BYTES: usize = 16 * 1024;
+const EXEC_FLUSH_INTERVAL: Duration = Duration::from_millis(32);
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
 const PROFILE_POLICY: ReadOnlyExecPolicy = ReadOnlyExecPolicy {
     overall_timeout: Some(Duration::from_secs(8)),
@@ -116,22 +118,31 @@ pub async fn ssh_exec_cancel(session_id: u32, exec_id: u32) {
 struct Utf8Chunks(Vec<u8>);
 
 impl Utf8Chunks {
-    fn push(&mut self, bytes: &[u8]) -> String {
+    fn push_into(&mut self, bytes: &[u8], out: &mut String) {
+        if bytes.is_empty() {
+            return;
+        }
+        // Fast path: no buffered tail and packet is valid UTF-8 (zero extra copy).
+        if self.0.is_empty() {
+            if let Ok(valid) = std::str::from_utf8(bytes) {
+                out.push_str(valid);
+                return;
+            }
+        }
         self.0.extend_from_slice(bytes);
-        let mut text = String::new();
         let mut consumed = 0;
         while consumed < self.0.len() {
             match std::str::from_utf8(&self.0[consumed..]) {
                 Ok(valid) => {
-                    text.push_str(valid);
+                    out.push_str(valid);
                     consumed = self.0.len();
                 }
                 Err(error) => {
                     let end = consumed + error.valid_up_to();
-                    text.push_str(std::str::from_utf8(&self.0[consumed..end]).unwrap_or_default());
+                    out.push_str(std::str::from_utf8(&self.0[consumed..end]).unwrap_or_default());
                     consumed = end;
                     if let Some(length) = error.error_len() {
-                        text.push('\u{fffd}');
+                        out.push('\u{fffd}');
                         consumed += length;
                     } else {
                         break;
@@ -140,7 +151,103 @@ impl Utf8Chunks {
             }
         }
         self.0.drain(..consumed);
+    }
+
+    #[cfg(test)]
+    fn push(&mut self, bytes: &[u8]) -> String {
+        let mut text = String::new();
+        self.push_into(bytes, &mut text);
         text
+    }
+}
+
+struct ExecBatcher<'a> {
+    sink: &'a StreamSink<SshExecEvent>,
+    decoders: [Utf8Chunks; 2],
+    pending_stderr: Option<bool>,
+    pending: String,
+    remaining: usize,
+    truncated: bool,
+    last_flush: Instant,
+}
+
+impl<'a> ExecBatcher<'a> {
+    fn new(sink: &'a StreamSink<SshExecEvent>) -> Self {
+        Self {
+            sink,
+            decoders: [Utf8Chunks(Vec::new()), Utf8Chunks(Vec::new())],
+            pending_stderr: None,
+            pending: String::new(),
+            remaining: EXEC_LIMIT,
+            truncated: false,
+            last_flush: Instant::now(),
+        }
+    }
+
+    fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    fn next_flush_at(&self) -> Instant {
+        self.last_flush + EXEC_FLUSH_INTERVAL
+    }
+
+    fn flush(&mut self) -> bool {
+        let Some(stderr) = self.pending_stderr.take() else {
+            return true;
+        };
+        if self.pending.is_empty() {
+            return true;
+        }
+        let data = std::mem::take(&mut self.pending);
+        self.last_flush = Instant::now();
+        self.sink
+            .add(SshExecEvent::new(
+                if stderr { "stderr" } else { "stdout" },
+                data,
+            ))
+            .is_ok()
+    }
+
+    fn push(&mut self, stderr: bool, data: &[u8]) -> bool {
+        if self.remaining == 0 {
+            self.truncated |= !data.is_empty();
+            return true;
+        }
+        let take = data.len().min(self.remaining);
+        self.remaining -= take;
+        self.truncated |= take < data.len();
+        if take == 0 {
+            return true;
+        }
+        if self.pending_stderr.is_some_and(|current| current != stderr) && !self.flush() {
+            return false;
+        }
+        if self.pending_stderr.is_none() {
+            self.pending_stderr = Some(stderr);
+            self.last_flush = Instant::now();
+        }
+        self.decoders[usize::from(stderr)].push_into(&data[..take], &mut self.pending);
+        if self.pending.len() >= EXEC_FLUSH_BYTES
+            || self.last_flush.elapsed() >= EXEC_FLUSH_INTERVAL
+        {
+            return self.flush();
+        }
+        true
+    }
+
+    fn finish(&mut self) {
+        let _ = self.flush();
+        if !self.truncated {
+            for (decoder, kind) in self.decoders.iter().zip(["stdout", "stderr"]) {
+                if !decoder.0.is_empty() {
+                    let _ = self.sink.add(SshExecEvent::new(
+                        kind,
+                        String::from_utf8_lossy(&decoder.0).into(),
+                    ));
+                }
+            }
+        }
     }
 }
 
@@ -216,6 +323,82 @@ async fn run_channel(
     result
 }
 
+async fn run_channel_streaming(
+    session_id: u32,
+    command: String,
+    time_limit: Duration,
+    cancellation: &CancellationToken,
+    batcher: &mut ExecBatcher<'_>,
+) -> ChannelExit {
+    let deadline = Instant::now() + time_limit;
+    let opened = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => return ChannelExit::Cancelled,
+        result = timeout_at(deadline, open_agent_channel(session_id)) => result,
+    };
+    let mut channel = match opened {
+        Ok(Ok(channel)) => channel,
+        Ok(Err(error)) => return ChannelExit::Error(error),
+        Err(_) => return ChannelExit::Timeout,
+    };
+    let result = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => ChannelExit::Cancelled,
+        result = timeout_at(deadline, async {
+            channel.exec(true, command).await?;
+            channel.eof().await?;
+            let mut status = None;
+            loop {
+                let message = if batcher.has_pending() {
+                    tokio::select! {
+                        biased;
+                        message = channel.wait() => message,
+                        _ = tokio::time::sleep_until(batcher.next_flush_at()) => {
+                            if !batcher.flush() {
+                                return Ok(ChannelExit::Cancelled);
+                            }
+                            continue;
+                        }
+                    }
+                } else {
+                    channel.wait().await
+                };
+                let Some(message) = message else {
+                    break;
+                };
+                let keep_reading = match message {
+                    ChannelMsg::Data { data } => batcher.push(false, &data),
+                    ChannelMsg::ExtendedData { data, ext: 1 } => batcher.push(true, &data),
+                    ChannelMsg::ExitStatus { exit_status } => {
+                        status = Some(exit_status);
+                        true
+                    }
+                    ChannelMsg::Failure => bail!("远端拒绝后台执行"),
+                    ChannelMsg::ExitSignal { .. } => bail!("远端进程被信号终止"),
+                    ChannelMsg::Close => break,
+                    _ => true,
+                };
+                if !keep_reading {
+                    return Ok(ChannelExit::Cancelled);
+                }
+            }
+            Ok(ChannelExit::Status(status.ok_or_else(|| anyhow!("SSH 后台命令未返回退出码"))?))
+        }) => match result {
+            Ok(Ok(exit)) => exit,
+            Ok(Err(error)) => ChannelExit::Error(error),
+            Err(_) => ChannelExit::Timeout,
+        },
+    };
+    let _ = timeout(CLEANUP_TIMEOUT, async {
+        if matches!(result, ChannelExit::Timeout | ChannelExit::Cancelled) {
+            let _ = channel.signal(Sig::TERM).await;
+        }
+        channel.close().await
+    })
+    .await;
+    result
+}
+
 /// Callers must bind the command to a current session and obtain any required
 /// approval before opening this user-authorized command channel.
 pub async fn ssh_exec_stream(
@@ -250,39 +433,17 @@ pub async fn ssh_exec_stream(
     {
         return;
     }
-    let mut decoders = [Utf8Chunks(Vec::new()), Utf8Chunks(Vec::new())];
-    let mut remaining = EXEC_LIMIT;
-    let result = run_channel(
+    let mut batcher = ExecBatcher::new(&sink);
+    let result = run_channel_streaming(
         session_id,
         command,
-        &[],
         Duration::from_secs(timeout_secs.clamp(1, 600).into()),
         &cancellation,
-        |stderr, data| {
-            let take = data.len().min(remaining);
-            remaining -= take;
-            terminal.truncated |= take < data.len();
-            let output = decoders[usize::from(stderr)].push(&data[..take]);
-            output.is_empty()
-                || sink
-                    .add(SshExecEvent::new(
-                        if stderr { "stderr" } else { "stdout" },
-                        output,
-                    ))
-                    .is_ok()
-        },
+        &mut batcher,
     )
     .await;
-    if !terminal.truncated {
-        for (decoder, kind) in decoders.iter().zip(["stdout", "stderr"]) {
-            if !decoder.0.is_empty() {
-                let _ = sink.add(SshExecEvent::new(
-                    kind,
-                    String::from_utf8_lossy(&decoder.0).into(),
-                ));
-            }
-        }
-    }
+    batcher.finish();
+    terminal.truncated = batcher.truncated;
     match result {
         ChannelExit::Status(code) => terminal.exit_code = i32::try_from(code).ok(),
         ChannelExit::Timeout => terminal.timed_out = true,
@@ -366,45 +527,73 @@ fn validate_path(path: &str) -> Result<()> {
     Ok(())
 }
 
+fn contains_ascii_ignore_case(haystack: &str, needle: &str) -> bool {
+    let needle = needle.as_bytes();
+    if needle.is_empty() {
+        return true;
+    }
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
+fn ends_with_ascii_ignore_case(value: &str, suffix: &str) -> bool {
+    let value = value.as_bytes();
+    let suffix = suffix.as_bytes();
+    value.len() >= suffix.len() && value[value.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+}
+
+fn is_sensitive_key(key: &str) -> bool {
+    const EXACT: &[&str] = &[
+        "password",
+        "passwd",
+        "requirepass",
+        "masterauth",
+        "api_key",
+        "apikey",
+        "secret_key",
+        "access_token",
+        "client_secret",
+        "token",
+        "authorization",
+        "sslpassword",
+        "primary_conninfo",
+    ];
+    EXACT.iter().any(|name| key.eq_ignore_ascii_case(name))
+        || ends_with_ascii_ignore_case(key, "_password")
+        || ends_with_ascii_ignore_case(key, "_token")
+        || ends_with_ascii_ignore_case(key, "_secret")
+}
+
+fn is_sensitive_line(raw: &str) -> bool {
+    let line = raw.trim();
+    if line.is_empty() {
+        return false;
+    }
+    if line.contains("-----")
+        && ((contains_ascii_ignore_case(line, "-----begin ")
+            && contains_ascii_ignore_case(line, "private key-----"))
+            || contains_ascii_ignore_case(line, "-----begin pgp private key block-----"))
+    {
+        return true;
+    }
+    if line.starts_with(['#', ';']) {
+        return false;
+    }
+    let (key, value) = line.split_once(['=', ':', ' ', '\t']).unwrap_or((line, ""));
+    let key = key.trim_matches(['\'', '"']);
+    if !is_sensitive_key(key) {
+        return false;
+    }
+    let value =
+        value.trim_matches(|c: char| c.is_whitespace() || matches!(c, '=' | ':' | '"' | '\''));
+    !value.is_empty()
+}
+
 fn validate_text(bytes: &[u8]) -> Result<&str> {
     let text = check_text_bytes(bytes)?;
-    let sensitive = text.lines().any(|line| {
-        let line = line.trim().to_ascii_lowercase();
-        if (line.contains("-----begin ") && line.contains("private key-----"))
-            || line.contains("-----begin pgp private key block-----")
-        {
-            return true;
-        }
-        if line.starts_with(['#', ';']) {
-            return false;
-        }
-        let (key, value) = line
-            .split_once(['=', ':', ' ', '\t'])
-            .unwrap_or((&line, ""));
-        let key = key.trim_matches(['\'', '"']);
-        let value =
-            value.trim_matches(|c: char| c.is_whitespace() || matches!(c, '=' | ':' | '"' | '\''));
-        !value.is_empty()
-            && (matches!(
-                key,
-                "password"
-                    | "passwd"
-                    | "requirepass"
-                    | "masterauth"
-                    | "api_key"
-                    | "apikey"
-                    | "secret_key"
-                    | "access_token"
-                    | "client_secret"
-                    | "token"
-                    | "authorization"
-                    | "sslpassword"
-                    | "primary_conninfo"
-            ) || key.ends_with("_password")
-                || key.ends_with("_token")
-                || key.ends_with("_secret"))
-    });
-    ensure!(!sensitive, "SENSITIVE_FILE");
+    ensure!(!text.lines().any(is_sensitive_line), "SENSITIVE_FILE");
     Ok(text)
 }
 

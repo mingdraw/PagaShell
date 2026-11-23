@@ -1,43 +1,114 @@
 part of 'agent_controller.dart';
 
+final _privateKeyBlockPattern = RegExp(
+  r'-----BEGIN [^\r\n]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?(?:-----END [^\r\n]*PRIVATE KEY(?: BLOCK)?-----|$)',
+  caseSensitive: false,
+);
+final _sensitiveAssignmentPattern = RegExp(
+  r'''(\b[\w.-]*(?:password|passwd|requirepass|masterauth|api[-_]?key|(?:access|refresh)[-_]?token|client[-_]?secret|secret[-_]?key|authorization)\b["']?(?:\s*[=:]\s*|\t+| +))([^\s\r\n].*)''',
+  caseSensitive: false,
+  multiLine: true,
+);
+final _sudoPromptPhrasePattern = RegExp(
+  r'^(?:is required|is needed|required|prompt)\b',
+  caseSensitive: false,
+);
+final _urlPasswordPattern = RegExp(r'(\b[\w+.-]+://[^:/\s@]+:)[^/\s@]+(@)');
+final _ansiEscapePattern = RegExp(r'\x1b\[[0-?]*[ -/]*[@-~]');
+final _controlCharPattern = RegExp(r'[\x00-\x08\x0b-\x1f\x7f]');
+final _sudoNonInteractivePattern = RegExp(r'\bsudo\s+-n\b');
+final _sudoErrorPattern = RegExp(
+  r'sudo:[^\r\n]*(?:password is required|a terminal is required|需要密码|需要终端)',
+  caseSensitive: false,
+);
+
 String _scrubAgentOutput(String text) => text
-    .replaceAll(
-      RegExp(
-        r'-----BEGIN [^\r\n]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?(?:-----END [^\r\n]*PRIVATE KEY(?: BLOCK)?-----|$)',
-        caseSensitive: false,
-      ),
-      '[private key removed]',
-    )
+    .replaceAll(_privateKeyBlockPattern, '[private key removed]')
+    .replaceAllMapped(_sensitiveAssignmentPattern, (match) {
+      final value = match[2]!;
+      // Keep human-readable sudo diagnostics, never credential assignments.
+      if (_sudoPromptPhrasePattern.hasMatch(value)) {
+        return match[0]!;
+      }
+      return '${match[1]}[redacted]';
+    })
     .replaceAllMapped(
-      RegExp(
-        r'''(\b[\w.-]*(?:password|passwd|requirepass|masterauth|api[-_]?key|(?:access|refresh)[-_]?token|client[-_]?secret|secret[-_]?key|authorization)\b["']?(?:\s*[=:]\s*|\t+| +))([^\s\r\n].*)''',
-        caseSensitive: false,
-        multiLine: true,
-      ),
-      (match) {
-        final value = match[2]!;
-        // Keep human-readable sudo diagnostics, never credential assignments.
-        if (RegExp(
-          r'^(?:is required|is needed|required|prompt)\b',
-          caseSensitive: false,
-        ).hasMatch(value)) {
-          return match[0]!;
-        }
-        return '${match[1]}[redacted]';
-      },
-    )
-    .replaceAllMapped(
-      RegExp(r'(\b[\w+.-]+://[^:/\s@]+:)[^/\s@]+(@)'),
+      _urlPasswordPattern,
       (match) => '${match[1]}[redacted]${match[2]}',
     );
 
+/// Zero-copy check matching [_scrubAgentOutput] without allocating copies of
+/// large configuration files.
+bool _containsSensitiveOutput(String text) {
+  if (_privateKeyBlockPattern.hasMatch(text)) return true;
+  if (_urlPasswordPattern.hasMatch(text)) return true;
+  for (final match in _sensitiveAssignmentPattern.allMatches(text)) {
+    final value = match[2]!;
+    if (!_sudoPromptPhrasePattern.hasMatch(value)) return true;
+  }
+  return false;
+}
+
+/// Counts UTF-8 bytes without allocating a temporary Uint8List.
+bool _exceedsUtf8Limit(String text, int maxBytes) {
+  if (text.length > maxBytes) return true;
+  if (text.length * 3 <= maxBytes) return false;
+  var bytes = 0;
+  for (var i = 0; i < text.length; i++) {
+    final cu = text.codeUnitAt(i);
+    if (cu <= 0x7f) {
+      bytes += 1;
+    } else if (cu <= 0x7ff) {
+      bytes += 2;
+    } else if ((cu & 0xfc00) == 0xd800 &&
+        i + 1 < text.length &&
+        (text.codeUnitAt(i + 1) & 0xfc00) == 0xdc00) {
+      bytes += 4;
+      i++;
+    } else {
+      bytes += 3;
+    }
+    if (bytes > maxBytes) return true;
+  }
+  return false;
+}
+
 String _outputText(String value) => _scrubAgentOutput(
   value
-      .replaceAll(RegExp(r'\x1b\[[0-?]*[ -/]*[@-~]'), '')
+      .replaceAll(_ansiEscapePattern, '')
       .replaceAll('\r\n', '\n')
       .replaceAll('\r', '\n')
-      .replaceAll(RegExp(r'[\x00-\x08\x0b-\x1f\x7f]'), ''),
+      .replaceAll(_controlCharPattern, ''),
 );
+
+/// Keeps only the most recent [_limit] characters so periodic live-output UI
+/// previews run in O(1) instead of scrubbing a growing multi-megabyte buffer.
+class _TailWindow {
+  static const _limit = 8192;
+  String _older = '';
+  final _recent = StringBuffer();
+
+  void write(String chunk) {
+    if (chunk.isEmpty) return;
+    if (chunk.length >= _limit) {
+      _older = '';
+      _recent.clear();
+      _recent.write(_tail(chunk, _limit));
+      return;
+    }
+    _recent.write(chunk);
+    if (_recent.length >= _limit) {
+      _older = _tail(_recent.toString(), _limit);
+      _recent.clear();
+    }
+  }
+
+  String snapshot() {
+    if (_older.isEmpty) return _recent.toString();
+    if (_recent.isEmpty) return _older;
+    return _tail('$_older$_recent', _limit);
+  }
+}
 
 String _prefix(String text, int length) {
   if (text.length <= length) return text;
@@ -131,7 +202,7 @@ extension _AgentExecOperations on AgentController {
       proposal: proposal,
     );
     if (entries.any((entry) => identical(entry.command, proposal))) {
-      _saveConversation();
+      _saveConversation(deferred: true);
     }
     return jsonEncode({
       'session_id': target.id,
@@ -149,6 +220,9 @@ extension _AgentExecOperations on AgentController {
   }) async {
     final elapsed = Stopwatch()..start();
     final output = [StringBuffer(), StringBuffer()];
+    final tailWindows = proposal == null
+        ? null
+        : [_TailWindow(), _TailWindow()];
     var terminal = const SshExecEvent(
       SshExecEventKind.exit,
       data: 'SSH 后台命令未完成，请检查连接',
@@ -181,7 +255,7 @@ extension _AgentExecOperations on AgentController {
           if (shown == received) return;
           shown = received;
           String preview(int index) {
-            final text = _outputText(output[index].toString());
+            final text = _outputText(tailWindows![index].snapshot());
             final lastBreak = text.lastIndexOf('\n');
             return lastBreak < 0
                 ? ''
@@ -209,7 +283,9 @@ extension _AgentExecOperations on AgentController {
           final budget = 2 * 1024 * 1024 - received;
           final chunk = _prefix(event.data, budget);
           clipped |= chunk.length < event.data.length;
-          output[event.kind == SshExecEventKind.stdout ? 0 : 1].write(chunk);
+          final streamIndex = event.kind == SshExecEventKind.stdout ? 0 : 1;
+          output[streamIndex].write(chunk);
+          tailWindows?[streamIndex].write(chunk);
           received += chunk.length;
         },
         onError: (Object _, StackTrace _) => finish(null),
@@ -227,14 +303,11 @@ extension _AgentExecOperations on AgentController {
     }
     final err = output[1].toString();
     final needsSudo =
-        RegExp(r'\bsudo\s+-n\b').hasMatch(command) &&
+        _sudoNonInteractivePattern.hasMatch(command) &&
         (terminal.exitCode == 77 ||
             (terminal.exitCode != null &&
                 terminal.exitCode != 0 &&
-                RegExp(
-                  r'sudo:[^\r\n]*(?:password is required|a terminal is required|需要密码|需要终端)',
-                  caseSensitive: false,
-                ).hasMatch(err)));
+                _sudoErrorPattern.hasMatch(err)));
     final stdout = _outputText(output[0].toString());
     final stderr = _outputText(err);
     if (stopped || clipped || stdout.length > 12000 || stderr.length > 12000) {
@@ -273,6 +346,7 @@ extension _AgentExecOperations on AgentController {
         proposal.error.value = terminal.data;
       }
       proposal.running.value = false;
+      proposal._invalidateArchive();
     }
     return result;
   }

@@ -18,11 +18,13 @@ bool _readySshTarget(Session? target) =>
     !target.host.isDesktop &&
     target.engineSession != null;
 
+final _pathControlChars = RegExp(r'[\x00-\x1f\x7f-\x9f]');
+
 bool _validAgentPath(Object? value, {bool directory = false}) =>
     value is String &&
     value.startsWith('/') &&
     value.length <= 1500 &&
-    !RegExp(r'[\x00-\x1f\x7f-\x9f]').hasMatch(value) &&
+    !_pathControlChars.hasMatch(value) &&
     ((directory && value == '/') ||
         value
             .substring(1)

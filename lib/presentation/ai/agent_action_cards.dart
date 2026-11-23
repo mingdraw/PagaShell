@@ -24,6 +24,8 @@ const _mono = TextStyle(
   fontSize: 12,
 );
 
+final _sudoNonInteractiveFlag = RegExp(r'(\bsudo)\s+-n\b');
+
 void showAgentTerminalInsertResult(
   TerminalInsertResult result, {
   required String unavailable,
@@ -66,11 +68,28 @@ class _AgentCommandCardState extends State<AgentCommandCard> {
   final _editor = TextEditingController();
   bool _editing = false;
   bool _confirming = false;
+  String? _cachedCommand;
+  AgentCommandRisk _cachedRisk = AgentCommandRisk.mutating;
+  bool _cachedValid = false;
   AgentCommandProposal get proposal => widget.proposal;
   AgentController get agent => widget.agent;
   bool get _exec => proposal.executionMode == AgentCommandExecutionMode.exec;
   String get _target =>
       '${proposal.target.host.name} · ${proposal.target.address}';
+
+  ({AgentCommandRisk risk, bool valid}) _inspectCommand(String command) {
+    if (_cachedCommand == command) {
+      return (risk: _cachedRisk, valid: _cachedValid);
+    }
+    _cachedCommand = command;
+    _cachedRisk = proposal.isStructuredRead
+        ? AgentCommandRisk.readOnly
+        : command == proposal.effectiveCommand
+        ? proposal.risk
+        : classifyShellCommand(command);
+    _cachedValid = AgentCommandProposal.isValidCommand(command);
+    return (risk: _cachedRisk, valid: _cachedValid);
+  }
 
   @override
   void dispose() {
@@ -130,7 +149,7 @@ class _AgentCommandCardState extends State<AgentCommandCard> {
   void _fill(String command, {bool sudo = false, bool decline = false}) {
     if (sudo) {
       command = command.replaceAllMapped(
-        RegExp(r'(\bsudo)\s+-n\b'),
+        _sudoNonInteractiveFlag,
         (match) => match[1]!,
       );
     }
@@ -152,16 +171,12 @@ class _AgentCommandCardState extends State<AgentCommandCard> {
     final editing = pending && _editing;
     final command = editing ? _editor.text : proposal.effectiveCommand;
     final multiline = command.contains('\n') || command.contains('\r');
-    final risk = proposal.isStructuredRead
-        ? AgentCommandRisk.readOnly
-        : classifyShellCommand(command);
+    final inspected = _inspectCommand(command);
+    final risk = inspected.risk;
     final highRisk = risk == AgentCommandRisk.highRisk;
     final confirm = highRisk || multiline;
     final canSend =
-        agent.canSendCommand(proposal) &&
-        AgentCommandProposal.isValidCommand(command);
-    final needsSudo = proposal.sudoPasswordRequired.value;
-    final duration = proposal.durationMs.value;
+        pending && agent.canSendCommand(proposal) && inspected.valid;
     final colors = shadcn.Theme.of(context).colorScheme;
     return _ActionFrame(
       highlight: confirm ? colors.destructive : null,
@@ -260,71 +275,118 @@ class _AgentCommandCardState extends State<AgentCommandCard> {
               ),
             ],
           )
-        else if (running) ...[
-          Wrap(
-            spacing: 8,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              _Pill(
-                '正在执行 · @seconds 秒'.trParams({
-                  'seconds': _seconds(duration ?? 0),
-                }),
-              ),
-              if (!proposal.isStructuredRead)
-                shadcn.OutlineButton(
-                  key: const ValueKey('agent-command-cancel'),
-                  size: shadcn.ButtonSize.small,
-                  onPressed: proposal.cancelling.value
-                      ? null
-                      : () => unawaited(proposal.cancelRunningExec()),
-                  child: Text('中断命令'.tr),
-                ),
-            ],
-          ),
-          if (proposal.liveOutput.value.isNotEmpty)
-            _OutputSection(
-              '实时输出'.tr,
-              proposal.liveOutput.value,
-              initiallyExpanded: true,
+        else if (running)
+          _RunningExecStatus(proposal: proposal)
+        else if (_exec && state == AgentCommandState.sent)
+          _CompletedExecResult(
+            proposal: proposal,
+            agent: agent,
+            onTerminalFallback: () =>
+                _fill(proposal.effectiveCommand, sudo: true),
+          )
+        else
+          _small(_commandState(state)),
+      ],
+    );
+  });
+}
+
+/// Isolates high-frequency duration and streaming output updates so the outer
+/// command card and code block do not rebuild every 150 ms.
+class _RunningExecStatus extends StatelessWidget {
+  const _RunningExecStatus({required this.proposal});
+  final AgentCommandProposal proposal;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      Wrap(
+        spacing: 8,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          Obx(
+            () => _Pill(
+              '正在执行 · @seconds 秒'.trParams({
+                'seconds': _seconds(proposal.durationMs.value ?? 0),
+              }),
             ),
-        ] else if (_exec && state == AgentCommandState.sent) ...[
+          ),
+          if (!proposal.isStructuredRead)
+            Obx(
+              () => shadcn.OutlineButton(
+                key: const ValueKey('agent-command-cancel'),
+                size: shadcn.ButtonSize.small,
+                onPressed: proposal.cancelling.value
+                    ? null
+                    : () => unawaited(proposal.cancelRunningExec()),
+                child: Text('中断命令'.tr),
+              ),
+            ),
+        ],
+      ),
+      Obx(() {
+        final live = proposal.liveOutput.value;
+        if (live.isEmpty) return const SizedBox.shrink();
+        return _OutputSection('实时输出'.tr, live, initiallyExpanded: true);
+      }),
+    ],
+  );
+}
+
+class _CompletedExecResult extends StatelessWidget {
+  const _CompletedExecResult({
+    required this.proposal,
+    required this.agent,
+    required this.onTerminalFallback,
+  });
+  final AgentCommandProposal proposal;
+  final AgentController agent;
+  final VoidCallback onTerminalFallback;
+
+  @override
+  Widget build(BuildContext context) => Obx(() {
+    final colors = shadcn.Theme.of(context).colorScheme;
+    final needsSudo = proposal.sudoPasswordRequired.value;
+    final duration = proposal.durationMs.value;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Align(
+          alignment: Alignment.centerLeft,
+          child: _Pill(
+            key: const ValueKey('agent-command-result'),
+            needsSudo
+                ? '需要 sudo 密码'.tr
+                : _execStatus(
+                    proposal.exitCode.value,
+                    duration,
+                    timedOut: proposal.timedOut.value,
+                    cancelled: proposal.cancelled.value,
+                  ),
+            color: proposal.exitCode.value == 0
+                ? StatusColors.ready
+                : colors.destructive,
+          ),
+        ),
+        if (proposal.error.value case final error?) _small(error.tr),
+        if (proposal.truncated.value) _small('输出已截断'.tr),
+        if (proposal.stdout.value.isNotEmpty)
+          _OutputSection('标准输出'.tr, proposal.stdout.value),
+        if (proposal.stderr.value.isNotEmpty)
+          _OutputSection('错误输出'.tr, proposal.stderr.value),
+        if (needsSudo)
           Align(
             alignment: Alignment.centerLeft,
-            child: _Pill(
-              key: const ValueKey('agent-command-result'),
-              needsSudo
-                  ? '需要 sudo 密码'.tr
-                  : _execStatus(
-                      proposal.exitCode.value,
-                      duration,
-                      timedOut: proposal.timedOut.value,
-                      cancelled: proposal.cancelled.value,
-                    ),
-              color: proposal.exitCode.value == 0
-                  ? StatusColors.ready
-                  : colors.destructive,
+            child: shadcn.OutlineButton(
+              key: const ValueKey('agent-command-terminal-fallback'),
+              size: shadcn.ButtonSize.small,
+              onPressed: agent.canFillCommand(proposal)
+                  ? onTerminalFallback
+                  : null,
+              child: Text('改在终端运行'.tr),
             ),
           ),
-          if (proposal.error.value case final error?) _small(error.tr),
-          if (proposal.truncated.value) _small('输出已截断'.tr),
-          if (proposal.stdout.value.isNotEmpty)
-            _OutputSection('标准输出'.tr, proposal.stdout.value),
-          if (proposal.stderr.value.isNotEmpty)
-            _OutputSection('错误输出'.tr, proposal.stderr.value),
-          if (needsSudo)
-            Align(
-              alignment: Alignment.centerLeft,
-              child: shadcn.OutlineButton(
-                key: const ValueKey('agent-command-terminal-fallback'),
-                size: shadcn.ButtonSize.small,
-                onPressed: agent.canFillCommand(proposal)
-                    ? () => _fill(proposal.effectiveCommand, sudo: true)
-                    : null,
-                child: Text('改在终端运行'.tr),
-              ),
-            ),
-        ] else
-          _small(_commandState(state)),
       ],
     );
   });
@@ -382,92 +444,99 @@ class _AgentFileChangeCardState extends State<AgentFileChangeCard> {
   }
 
   @override
-  Widget build(BuildContext context) => Obx(() {
-    final state = proposal.state.value;
-    final working = proposal.working.value;
-    final backup = proposal.backupPath.value;
-    final validation = proposal.validationPassed.value;
-    final colors = shadcn.Theme.of(context).colorScheme;
-    return _ActionFrame(
-      children: [
-        _Target(title: '${proposal.target.title} · ${proposal.target.address}'),
-        _FilePills(
+  Widget build(BuildContext context) => _ActionFrame(
+    children: [
+      _Target(title: '${proposal.target.title} · ${proposal.target.address}'),
+      Obx(
+        () => _FilePills(
           creates: proposal.createsFile,
           sudo: proposal.useSudo,
-          state: state,
+          state: proposal.state.value,
         ),
-        const SizedBox(height: 6),
-        _PathRow(proposal.path),
-        Text(proposal.purpose, style: const TextStyle(fontSize: 12)),
-        _small('+${proposal.diff.added} / -${proposal.diff.removed}'),
-        UnifiedDiffView(diffText: proposal.diffPreview),
-        if (proposal.validationCommand case final command?)
-          _small('配置校验：@command'.trParams({'command': command})),
-        if (state == AgentFileChangeState.pending && !proposal.createsFile)
-          _small('应用时将自动备份原文件'.tr),
-        if (backup != null) _PathRow(backup, label: '备份'.tr),
-        if (validation != null)
-          Align(
-            alignment: Alignment.centerLeft,
-            child: _Pill(
-              (validation ? '校验通过' : '校验失败').tr,
-              color: validation ? StatusColors.ready : colors.destructive,
-            ),
-          ),
-        if (proposal.validationOutput.value case final output?
-            when output.isNotEmpty)
-          _OutputSection('校验输出'.tr, output),
-        if (proposal.error.value case final error?)
-          Text(
-            error.tr,
-            style: TextStyle(fontSize: 11, color: colors.destructive),
-          ),
-        if (working)
-          _small('正在处理远程文件'.tr)
-        else
-          Wrap(
-            spacing: 8,
-            runSpacing: 6,
-            children: [
-              if (state == AgentFileChangeState.pending) ...[
-                shadcn.OutlineButton(
-                  size: shadcn.ButtonSize.small,
-                  onPressed: () => widget.agent.rejectFileChange(proposal),
-                  child: Text('拒绝'.tr),
+      ),
+      const SizedBox(height: 6),
+      _PathRow(proposal.path),
+      Text(proposal.purpose, style: const TextStyle(fontSize: 12)),
+      _small('+${proposal.diff.added} / -${proposal.diff.removed}'),
+      UnifiedDiffView(diffText: proposal.diffPreview),
+      if (proposal.validationCommand case final command?)
+        _small('配置校验：@command'.trParams({'command': command})),
+      Obx(() {
+        final state = proposal.state.value;
+        final working = proposal.working.value;
+        final backup = proposal.backupPath.value;
+        final validation = proposal.validationPassed.value;
+        final colors = shadcn.Theme.of(context).colorScheme;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (state == AgentFileChangeState.pending && !proposal.createsFile)
+              _small('应用时将自动备份原文件'.tr),
+            if (backup != null) _PathRow(backup, label: '备份'.tr),
+            if (validation != null)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: _Pill(
+                  (validation ? '校验通过' : '校验失败').tr,
+                  color: validation ? StatusColors.ready : colors.destructive,
                 ),
-                shadcn.PrimaryButton(
-                  key: const ValueKey('agent-file-apply'),
-                  size: shadcn.ButtonSize.small,
-                  onPressed: widget.agent.canApplyFileChange(proposal)
-                      ? () => widget.agent.approveFileChange(proposal)
-                      : null,
-                  child: Text('应用修改'.tr),
-                ),
-              ],
-              if (state == AgentFileChangeState.applied)
-                shadcn.OutlineButton(
-                  key: const ValueKey('agent-file-rollback'),
-                  size: shadcn.ButtonSize.small,
-                  onPressed: widget.agent.canRollbackFileChange(proposal)
-                      ? () => unawaited(_rollback())
-                      : null,
-                  child: Text('回滚更改'.tr),
-                ),
-              if (proposal.sudoPasswordRequired.value)
-                shadcn.OutlineButton(
-                  size: shadcn.ButtonSize.small,
-                  onPressed: () => _insert(
-                    proposal.target.id,
-                    proposal.terminalFallback,
-                    available: widget.agent.canFillFileChange(proposal),
-                  ),
-                  child: Text('改在终端运行'.tr),
-                ),
-            ],
-          ),
-      ],
-    );
-  });
+              ),
+            if (proposal.validationOutput.value case final output?
+                when output.isNotEmpty)
+              _OutputSection('校验输出'.tr, output),
+            if (proposal.error.value case final error?)
+              Text(
+                error.tr,
+                style: TextStyle(fontSize: 11, color: colors.destructive),
+              ),
+            if (working)
+              _small('正在处理远程文件'.tr)
+            else
+              Wrap(
+                spacing: 8,
+                runSpacing: 6,
+                children: [
+                  if (state == AgentFileChangeState.pending) ...[
+                    shadcn.OutlineButton(
+                      size: shadcn.ButtonSize.small,
+                      onPressed: () => widget.agent.rejectFileChange(proposal),
+                      child: Text('拒绝'.tr),
+                    ),
+                    shadcn.PrimaryButton(
+                      key: const ValueKey('agent-file-apply'),
+                      size: shadcn.ButtonSize.small,
+                      onPressed: widget.agent.canApplyFileChange(proposal)
+                          ? () => widget.agent.approveFileChange(proposal)
+                          : null,
+                      child: Text('应用修改'.tr),
+                    ),
+                  ],
+                  if (state == AgentFileChangeState.applied)
+                    shadcn.OutlineButton(
+                      key: const ValueKey('agent-file-rollback'),
+                      size: shadcn.ButtonSize.small,
+                      onPressed: widget.agent.canRollbackFileChange(proposal)
+                          ? () => unawaited(_rollback())
+                          : null,
+                      child: Text('回滚更改'.tr),
+                    ),
+                  if (proposal.sudoPasswordRequired.value)
+                    shadcn.OutlineButton(
+                      size: shadcn.ButtonSize.small,
+                      onPressed: () => _insert(
+                        proposal.target.id,
+                        proposal.terminalFallback,
+                        available: widget.agent.canFillFileChange(proposal),
+                      ),
+                      child: Text('改在终端运行'.tr),
+                    ),
+                ],
+              ),
+          ],
+        );
+      }),
+    ],
+  );
 }
 
 class ArchivedCommandCard extends StatelessWidget {
@@ -538,6 +607,37 @@ class _UnifiedDiffViewState extends State<UnifiedDiffView> {
   bool _expanded = false;
   final _vertical = ScrollController();
   final _horizontal = ScrollController();
+  List<String> _rows = const [];
+  int _maxChars = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _parseDiff(widget.diffText);
+  }
+
+  @override
+  void didUpdateWidget(covariant UnifiedDiffView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.diffText != widget.diffText) {
+      _parseDiff(widget.diffText);
+    }
+  }
+
+  void _parseDiff(String diffText) {
+    if (diffText.isEmpty) {
+      _rows = const [];
+      _maxChars = 0;
+      return;
+    }
+    final rows = diffText.trimRight().split('\n');
+    var largest = 0;
+    for (final row in rows) {
+      if (row.length > largest) largest = row.length;
+    }
+    _rows = rows;
+    _maxChars = largest;
+  }
 
   @override
   void dispose() {
@@ -548,10 +648,10 @@ class _UnifiedDiffViewState extends State<UnifiedDiffView> {
 
   @override
   Widget build(BuildContext context) {
-    if (widget.diffText.isEmpty) return const SizedBox.shrink();
-    final rows = widget.diffText.trimRight().split('\n');
+    if (_rows.isEmpty) return const SizedBox.shrink();
+    final rows = _rows;
     final colors = shadcn.Theme.of(context).colorScheme;
-    final chars = rows.fold<int>(0, (largest, row) => max(largest, row.length));
+    final chars = _maxChars;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [

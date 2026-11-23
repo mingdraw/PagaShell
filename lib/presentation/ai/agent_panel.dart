@@ -40,7 +40,7 @@ class AgentPanelState extends State<AgentPanel> {
   final _scroll = ScrollController();
   late final AgentController _agent = Get.find<AgentController>();
   late final Worker _entries;
-  bool _stickToBottom = true;
+  final _stickToBottom = ValueNotifier<bool>(true);
   bool _bottomScheduled = false;
   bool _confirmingFullAccess = false;
 
@@ -50,8 +50,8 @@ class AgentPanelState extends State<AgentPanel> {
     _scroll.addListener(_onScroll);
     _entries = ever(_agent.entries, (_) {
       if (_agent.entries.isEmpty) {
-        if (!_stickToBottom && mounted) {
-          setState(() => _stickToBottom = true);
+        if (!_stickToBottom.value && mounted) {
+          _stickToBottom.value = true;
         }
         return;
       }
@@ -67,23 +67,23 @@ class AgentPanelState extends State<AgentPanel> {
     // A wheel or trackpad can move only a few pixels per event. Even this
     // small move away from the bottom must cancel a pending follow.
     final atBottom = position.extentAfter <= _bottomTolerance;
-    if (atBottom != _stickToBottom) {
-      setState(() => _stickToBottom = atBottom);
+    if (atBottom != _stickToBottom.value) {
+      _stickToBottom.value = atBottom;
     }
   }
 
   void _scrollToBottom() {
-    if (!_stickToBottom) setState(() => _stickToBottom = true);
+    if (!_stickToBottom.value) _stickToBottom.value = true;
     _scheduleScrollToBottom();
   }
 
   void _scheduleScrollToBottom() {
-    if (!_stickToBottom || _bottomScheduled) return;
+    if (!_stickToBottom.value || _bottomScheduled) return;
     _bottomScheduled = true;
     final binding = WidgetsBinding.instance;
     binding.addPostFrameCallback((_) {
       _bottomScheduled = false;
-      if (!mounted || !_stickToBottom || !_scroll.hasClients) return;
+      if (!mounted || !_stickToBottom.value || !_scroll.hasClients) return;
       final position = _scroll.position;
       if (position.pixels != position.maxScrollExtent) {
         position.jumpTo(position.maxScrollExtent);
@@ -96,6 +96,7 @@ class AgentPanelState extends State<AgentPanel> {
   void dispose() {
     _entries.dispose();
     _scroll.removeListener(_onScroll);
+    _stickToBottom.dispose();
     _input.dispose();
     _focus.dispose();
     _scroll.dispose();
@@ -333,11 +334,14 @@ class AgentPanelState extends State<AgentPanel> {
                       },
                     ),
                   ),
-                  if (!_stickToBottom)
-                    Positioned(
-                      left: 0,
-                      right: 0,
-                      bottom: 10,
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 10,
+                    child: ValueListenableBuilder<bool>(
+                      valueListenable: _stickToBottom,
+                      builder: (context, sticky, child) =>
+                          sticky ? const SizedBox.shrink() : child!,
                       child: Center(
                         child: DecoratedBox(
                           decoration: BoxDecoration(
@@ -363,6 +367,7 @@ class AgentPanelState extends State<AgentPanel> {
                         ),
                       ),
                     ),
+                  ),
                 ],
               );
             }),

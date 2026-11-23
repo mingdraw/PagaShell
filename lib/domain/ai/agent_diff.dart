@@ -168,44 +168,117 @@ class UnifiedDiff {
   }
 }
 
-List<String> _lines(String text) => [
-  for (final match in RegExp(r'[^\n]*\n|[^\n]+$').allMatches(text)) match[0]!,
-];
+List<String> _lines(String text) {
+  if (text.isEmpty) return const [];
+  final lines = <String>[];
+  var start = 0;
+  while (start < text.length) {
+    final newline = text.indexOf('\n', start);
+    if (newline < 0) {
+      lines.add(text.substring(start));
+      break;
+    }
+    lines.add(text.substring(start, newline + 1));
+    start = newline + 1;
+  }
+  return lines;
+}
 
-Iterable<DiffLine> _changes(
-  List<String> oldLines,
-  List<String> newLines,
-) sync* {
+const _maxMyersDistance = 1500;
+
+/// Myers O((M + N) * D) shortest edit script with line-hash prefiltering.
+/// Falls back to a single remove/add block only when the edit distance itself
+/// exceeds [_maxMyersDistance], rather than failing on large files with small
+/// edits near both ends.
+Iterable<DiffLine> _changes(List<String> oldLines, List<String> newLines) {
   final m = oldLines.length;
   final n = newLines.length;
-  // Common prefixes/suffixes are already removed. For a very large
-  // replacement, show a single delete/add region without quadratic work.
-  if (m == 0 || n == 0 || (m + 1) * (n + 1) > 1000000) {
-    yield* oldLines.map((line) => DiffLine(DiffLineKind.removed, line));
-    yield* newLines.map((line) => DiffLine(DiffLineKind.added, line));
-    return;
+  if (m == 0) {
+    return [for (final line in newLines) DiffLine(DiffLineKind.added, line)];
   }
-  final width = n + 1;
-  final table = Uint32List((m + 1) * width);
-  for (var i = m - 1; i >= 0; i--) {
-    for (var j = n - 1; j >= 0; j--) {
-      final at = i * width + j;
-      table[at] = oldLines[i] == newLines[j]
-          ? 1 + table[at + width + 1]
-          : max(table[at + width], table[at + 1]);
+  if (n == 0) {
+    return [for (final line in oldLines) DiffLine(DiffLineKind.removed, line)];
+  }
+  final maxD = min(m + n, _maxMyersDistance);
+  final offset = maxD;
+  final v = Int32List(2 * maxD + 1);
+  final oldHashes = Int32List(m);
+  for (var i = 0; i < m; i++) {
+    oldHashes[i] = oldLines[i].hashCode;
+  }
+  final newHashes = Int32List(n);
+  for (var j = 0; j < n; j++) {
+    newHashes[j] = newLines[j].hashCode;
+  }
+  final trace = <Int32List>[];
+  var foundD = -1;
+  for (var d = 0; d <= maxD; d++) {
+    for (var k = -d; k <= d; k += 2) {
+      final int startX;
+      if (k == -d || (k != d && v[offset + k - 1] < v[offset + k + 1])) {
+        startX = v[offset + k + 1];
+      } else {
+        startX = v[offset + k - 1] + 1;
+      }
+      var x = startX;
+      var y = x - k;
+      while (x < m &&
+          y < n &&
+          oldHashes[x] == newHashes[y] &&
+          oldLines[x] == newLines[y]) {
+        x++;
+        y++;
+      }
+      v[offset + k] = x;
+      if (x >= m && y >= n) {
+        foundD = d;
+        break;
+      }
     }
+    if (foundD >= 0) break;
+    final snapshot = Int32List(2 * d + 1);
+    snapshot.setRange(0, snapshot.length, v, offset - d);
+    trace.add(snapshot);
   }
-  var i = 0;
-  var j = 0;
-  while (i < m || j < n) {
-    if (i < m && j < n && oldLines[i] == newLines[j]) {
-      yield DiffLine(DiffLineKind.context, oldLines[i++]);
-      j++;
-    } else if (i < m &&
-        (j == n || table[(i + 1) * width + j] >= table[i * width + j + 1])) {
-      yield DiffLine(DiffLineKind.removed, oldLines[i++]);
+  if (foundD < 0) {
+    return [
+      for (final line in oldLines) DiffLine(DiffLineKind.removed, line),
+      for (final line in newLines) DiffLine(DiffLineKind.added, line),
+    ];
+  }
+  final reversed = <DiffLine>[];
+  var x = m;
+  var y = n;
+  for (var d = foundD; d > 0; d--) {
+    final prev = trace[d - 1];
+    final prevOffset = d - 1;
+    final k = x - y;
+    final int prevK;
+    if (k == -d ||
+        (k != d && prev[prevOffset + k - 1] < prev[prevOffset + k + 1])) {
+      prevK = k + 1;
     } else {
-      yield DiffLine(DiffLineKind.added, newLines[j++]);
+      prevK = k - 1;
+    }
+    final prevX = prev[prevOffset + prevK];
+    final prevY = prevX - prevK;
+    while (x > prevX && y > prevY) {
+      x--;
+      y--;
+      reversed.add(DiffLine(DiffLineKind.context, oldLines[x]));
+    }
+    if (x > prevX) {
+      x--;
+      reversed.add(DiffLine(DiffLineKind.removed, oldLines[x]));
+    } else if (y > prevY) {
+      y--;
+      reversed.add(DiffLine(DiffLineKind.added, newLines[y]));
     }
   }
+  while (x > 0 && y > 0) {
+    x--;
+    y--;
+    reversed.add(DiffLine(DiffLineKind.context, oldLines[x]));
+  }
+  return reversed.reversed;
 }

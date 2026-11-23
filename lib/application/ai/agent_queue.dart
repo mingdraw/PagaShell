@@ -174,11 +174,15 @@ extension _AgentQueueOperations on AgentController {
     await next.done.future;
   }
 
-  void _checkpoint(_AgentQueuedRequest request, List<AgentTurn> turns) {
+  void _checkpoint(
+    _AgentQueuedRequest request,
+    List<AgentTurn> turns, {
+    bool deferredSave = true,
+  }) {
     request.entry._hasToolCheckpoint = true;
     _trimHistory(turns);
-    _history = List.of(turns);
-    _saveConversation();
+    _setHistory(List.of(turns));
+    _saveConversation(deferred: deferredSave);
   }
 
   void _preserveInterruptedBatch(_AgentQueuedRequest? request) {
@@ -197,7 +201,7 @@ extension _AgentQueueOperations on AgentController {
           toolCallId: assistant.calls[i].id,
         ),
     ];
-    _checkpoint(request, complete);
+    _checkpoint(request, complete, deferredSave: false);
   }
 
   void _cancelQueuedRequests() {

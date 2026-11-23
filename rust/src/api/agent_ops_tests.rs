@@ -126,10 +126,21 @@ fn rejects_sensitive_files_and_symbolic_links() {
     }
     for bytes in [
         b"-----BEGIN OPENSSH PRIVATE KEY-----".as_slice(),
+        b"-----begin rsa private key-----",
         b"requirepass example",
         b"password = example",
+        b"DB_PASSWORD=secret",
+        b"\"Api_Key\": \"abc\"",
+        b"auth_token: xyz",
     ] {
         assert!(validate_text(bytes).is_err());
+    }
+    for bytes in [
+        b"# password = ignored comment\ninnodb_buffer_pool_size = 4G\n".as_slice(),
+        b"; requirepass commented\nmax_connections = 500\n",
+        b"password =\n",
+    ] {
+        assert!(validate_text(bytes).is_ok());
     }
 }
 

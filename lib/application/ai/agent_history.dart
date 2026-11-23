@@ -1,5 +1,7 @@
 part of 'agent_controller.dart';
 
+final _whitespaceCollapse = RegExp(r'\s+');
+
 class _AgentHistoryState {
   final conversations = <AgentConversation>[].obs;
   final currentConversationId = RxnString();
@@ -12,6 +14,10 @@ class _AgentHistoryState {
   final deleting = <String>{};
   final deleted = <String>{};
   String? failedDeleteId;
+  Timer? saveDebounce;
+  bool savePending = false;
+  final turnWeights = Map<AgentTurn, int>.identity();
+  List<Map<String, dynamic>>? serializedTurns;
 }
 
 extension _AgentHistoryOperations on AgentController {
@@ -84,7 +90,41 @@ extension _AgentHistoryOperations on AgentController {
     if (persist) _saveConversation();
   }
 
-  void _saveConversation() {
+  void _setHistory(List<AgentTurn> next) {
+    _history = next;
+    _storage.serializedTurns = null;
+  }
+
+  void _cancelPendingSave() {
+    _storage.saveDebounce?.cancel();
+    _storage.saveDebounce = null;
+    _storage.savePending = false;
+  }
+
+  void _flushPendingSave() {
+    if (!_storage.savePending) return;
+    _cancelPendingSave();
+    _saveConversationNow();
+  }
+
+  void _saveConversation({bool deferred = false}) {
+    if (entries.isEmpty || isClosed) return;
+    if (deferred) {
+      _storage.savePending = true;
+      _storage.saveDebounce ??= Timer(const Duration(milliseconds: 500), () {
+        _storage.saveDebounce = null;
+        if (!isClosed && _storage.savePending) {
+          _storage.savePending = false;
+          _saveConversationNow();
+        }
+      });
+      return;
+    }
+    _cancelPendingSave();
+    _saveConversationNow();
+  }
+
+  void _saveConversationNow() {
     if (entries.isEmpty) return;
     final now = DateTime.now();
     final id = currentConversationId.value ??= List.generate(
@@ -96,7 +136,10 @@ extension _AgentHistoryOperations on AgentController {
     final first = entries
         .firstWhere((entry) => entry.kind == AgentEntryKind.user)
         .text
-        .replaceAll(RegExp(r'\s+'), ' ');
+        .replaceAll(_whitespaceCollapse, ' ');
+    final serializedTurns = _storage.serializedTurns ??= List.unmodifiable(
+      _history.map((turn) => turn.toJson()),
+    );
     final snapshot = AgentConversation(
       id: id,
       title: String.fromCharCodes(first.runes.take(60)),
@@ -104,7 +147,7 @@ extension _AgentHistoryOperations on AgentController {
       updatedAt: now,
       model: _conversationModel ?? currentModel?.model ?? '',
       messages: List.unmodifiable(entries.map((entry) => entry.toMessage())),
-      turns: List.unmodifiable(_history.map((turn) => turn.toJson())),
+      turns: serializedTurns,
       historyTrimmed: historyTrimmed.value,
       historyRevision: _historyRevision,
       error: error.value,
@@ -204,7 +247,7 @@ extension _AgentHistoryOperations on AgentController {
           hadSessionReferences: message.hadSessionReferences,
         ),
     ]);
-    _history = turns;
+    _setHistory(turns);
     _historyRevision = saved.historyRevision;
     historyTrimmed.value = saved.historyTrimmed;
     error.value = saved.error;
@@ -236,7 +279,8 @@ extension _AgentHistoryOperations on AgentController {
   /// 移除旧轮次并压缩长工具链。可见对话及审阅卡片不受影响。
   void _trimHistory(List<AgentTurn> turns) {
     const budget = 120000;
-    int weight(AgentTurn turn) => switch (turn) {
+    final weightCache = _storage.turnWeights;
+    int weight(AgentTurn turn) => weightCache[turn] ??= switch (turn) {
       _ when turn.anthropicContent.isNotEmpty => jsonEncode(
         turn.anthropicContent,
       ).length,
@@ -359,6 +403,10 @@ extension _AgentHistoryOperations on AgentController {
           '$summarized earlier tool results were compacted for space. They may include changes. Verify current state before repeating actions.',
         ),
       );
+    }
+    if (weightCache.length > turns.length + 64) {
+      final live = Set<AgentTurn>.identity()..addAll(turns);
+      weightCache.removeWhere((turn, _) => !live.contains(turn));
     }
     if (trimmed) {
       ++_historyRevision;

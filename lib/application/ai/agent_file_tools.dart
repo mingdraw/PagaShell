@@ -32,27 +32,31 @@ class AgentFileChangeProposal {
   final sudoPasswordRequired = false.obs;
   final error = RxnString();
   bool get createsFile => originalSha256 == null;
-  late final String diffPreview = diff.toText(path, maxChars: 5 * 1024 * 1024);
+  late final String diffPreview = diff.toText(path, maxChars: 256 * 1024);
   late final String _archiveDiff = diff.toText(path);
   String get terminalFallback => 'sudoedit -- ${_quotePath(path)}';
+  AgentArchivedFileChange? _archivedCache;
 
-  AgentArchivedFileChange _archive() => AgentArchivedFileChange(
-    path: path,
-    purpose: purpose,
-    target: target.title,
-    diffText: _archiveDiff,
-    addedLines: diff.added,
-    removedLines: diff.removed,
-    backupPath: backupPath.value,
-    createdNew: createsFile,
-    usedSudo: useSudo,
-    validationOutput: validationOutput.value,
-    validationPassed: validationPassed.value,
-    state: state.value == AgentFileChangeState.pending
-        ? AgentFileChangeState.unavailable
-        : state.value,
-    error: error.value,
-  );
+  void _invalidateArchive() => _archivedCache = null;
+
+  AgentArchivedFileChange _archive() =>
+      _archivedCache ??= AgentArchivedFileChange(
+        path: path,
+        purpose: purpose,
+        target: target.title,
+        diffText: _archiveDiff,
+        addedLines: diff.added,
+        removedLines: diff.removed,
+        backupPath: backupPath.value,
+        createdNew: createsFile,
+        usedSudo: useSudo,
+        validationOutput: validationOutput.value,
+        validationPassed: validationPassed.value,
+        state: state.value == AgentFileChangeState.pending
+            ? AgentFileChangeState.unavailable
+            : state.value,
+        error: error.value,
+      );
 }
 
 String _quotePath(String path) => "'${path.replaceAll("'", "'\\''")}'";
@@ -114,8 +118,9 @@ extension _AgentFileOperations on AgentController {
     } finally {
       if (review != null) {
         review.running.value = false;
+        review._invalidateArchive();
         if (entries.any((entry) => identical(entry.command, review))) {
-          _saveConversation();
+          _saveConversation(deferred: true);
         }
       }
     }
@@ -284,13 +289,12 @@ extension _AgentFileOperations on AgentController {
         return error.message;
       }
     }
-    if (updated.length > 2 * 1024 * 1024 ||
-        utf8.encode(updated).length > 2 * 1024 * 1024) {
+    if (_exceedsUtf8Limit(updated, 2 * 1024 * 1024)) {
       return 'Configuration exceeds the 2 MiB limit.';
     }
-    if (_scrubAgentOutput(updated) != updated ||
-        _scrubAgentOutput(original?.text ?? '') != (original?.text ?? '') ||
-        RegExp(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]').hasMatch(updated)) {
+    if (_containsSensitiveOutput(updated) ||
+        (original != null && _containsSensitiveOutput(original.text)) ||
+        _controlCharPattern.hasMatch(updated)) {
       return 'Possible credentials, private key or nontext content. Nothing written.';
     }
     if (original?.text == updated) {
@@ -329,6 +333,7 @@ extension _AgentFileOperations on AgentController {
       }
       proposal.working.value = false;
       proposal._content = null;
+      proposal._invalidateArchive();
       return 'File change declined or target no longer available. Nothing written.';
     }
     waitingForApproval.value = false;
@@ -397,6 +402,7 @@ extension _AgentFileOperations on AgentController {
     } finally {
       proposal.working.value = false;
       proposal._content = null;
+      proposal._invalidateArchive();
       _saveFileCard(proposal);
     }
   }
@@ -425,6 +431,7 @@ extension _AgentFileOperations on AgentController {
     if (proposal._decision.isCompleted) return;
     proposal.state.value = AgentFileChangeState.rejected;
     proposal._content = null;
+    proposal._invalidateArchive();
     proposal._decision.complete(false);
     _saveFileCard(proposal);
   }
@@ -465,6 +472,7 @@ extension _AgentFileOperations on AgentController {
       return false;
     } finally {
       proposal.working.value = false;
+      proposal._invalidateArchive();
       _saveFileCard(proposal);
     }
   }

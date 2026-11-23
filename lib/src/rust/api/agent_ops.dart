@@ -7,8 +7,8 @@ import '../frb_generated.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `close_session`, `file_command`, `hash`, `new`, `push`, `register_operation`, `register`, `run_channel`, `run_file_command`, `secret_path`, `shell_word`, `validate_hash`, `validate_path`, `validate_suffix`, `validate_text`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ChannelExit`, `ExecRegistration`, `OperationId`, `Utf8Chunks`
+// These functions are ignored because they are not marked as `pub`: `close_session`, `contains_ascii_ignore_case`, `ends_with_ascii_ignore_case`, `file_command`, `finish`, `flush`, `has_pending`, `hash`, `is_sensitive_key`, `is_sensitive_line`, `new`, `new`, `next_flush_at`, `push_into`, `push`, `register_operation`, `register`, `run_channel_streaming`, `run_channel`, `run_file_command`, `secret_path`, `shell_word`, `validate_hash`, `validate_path`, `validate_suffix`, `validate_text`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ChannelExit`, `ExecBatcher`, `ExecRegistration`, `OperationId`, `Utf8Chunks`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `clone`, `drop`, `eq`, `hash`
 
 Future<void> sshExecCancel({required int sessionId, required int execId}) =>

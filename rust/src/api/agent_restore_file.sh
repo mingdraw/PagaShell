@@ -9,7 +9,7 @@ if [ -z "$suffix" ]; then
     rm "$target" || exit 74
 else
     backup=$target.pagashell.bak.$suffix
-    require_hash "$backup" "$backup_hash"
+    require_regular "$backup"
     scratch=$(mktemp "$parent/.pagashell-restore.XXXXXXXX") || exit 74
     copy_preserving "$backup" "$scratch"
     require_hash "$scratch" "$backup_hash"

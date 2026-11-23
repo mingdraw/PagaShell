@@ -50,4 +50,27 @@ void main() {
       expect(UnifiedDiff.between(original, updated).hunks, hasLength(2));
     },
   );
+
+  test(
+    'Myers diff keeps minimal hunks on large configs with edits near both ends',
+    () {
+      final originalLines = List.generate(2000, (i) => 'option_$i = $i\n');
+      final updatedLines = List<String>.of(originalLines)
+        ..[5] = 'option_5 = tuned_5\n'
+        ..[1995] = 'option_1995 = tuned_1995\n';
+      final diff = UnifiedDiff.between(
+        originalLines.join(),
+        updatedLines.join(),
+      );
+      expect(diff.added, 2);
+      expect(diff.removed, 2);
+      expect(diff.hunks, hasLength(2));
+      final rendered = diff.toText('/etc/mysql/mysqld.cnf');
+      expect(rendered, contains('-option_5 = 5\n+option_5 = tuned_5\n'));
+      expect(
+        rendered,
+        contains('-option_1995 = 1995\n+option_1995 = tuned_1995\n'),
+      );
+    },
+  );
 }

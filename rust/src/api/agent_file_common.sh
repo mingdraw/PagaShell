@@ -120,6 +120,22 @@ copy_preserving() {
     [ "$before" = "$after" ] || exit 74
 }
 
+copy_metadata() {
+    meta=$(stat_field '%u %g %a' '%u %g %Lp' "$1") || exit 74
+    set -- "$2" $meta
+    dest=$1
+    uid=$2
+    gid=$3
+    mode=$4
+    chmod "$mode" "$dest" || exit 74
+    current=$(stat_field '%u:%g' '%u:%g' "$dest") || exit 74
+    if [ "$uid:$gid" != "$current" ]; then
+        chown "$uid:$gid" "$dest" || exit 74
+    fi
+    after=$(stat_field '%u:%g:%a' '%u:%g:%Lp' "$dest") || exit 74
+    [ "$uid:$gid:$mode" = "$after" ] || exit 74
+}
+
 replace_file() {
     # Linux GNU/BusyBox mv -T treats the destination as a file path.
     case "$(uname -s)" in
