@@ -10,6 +10,7 @@ class InMemorySettingsRepository implements SettingsRepository {
     this.languageCode,
     this.automaticUpdates = true,
     this.closeTerminalOnDisconnect = false,
+    this.minimizeToTrayOnClose = false,
     this.proxySettings = const AppProxySettings(),
     this.customQuickCommandGroups = const [],
     SidebarState? sidebarState,
@@ -19,6 +20,7 @@ class InMemorySettingsRepository implements SettingsRepository {
   String? languageCode;
   bool automaticUpdates;
   bool closeTerminalOnDisconnect;
+  bool minimizeToTrayOnClose;
   AppProxySettings proxySettings;
   List<QuickCommandCategory> customQuickCommandGroups;
 
@@ -56,6 +58,13 @@ class InMemorySettingsRepository implements SettingsRepository {
   @override
   Future<void> saveCloseTerminalOnDisconnect(bool enabled) async =>
       closeTerminalOnDisconnect = enabled;
+
+  @override
+  Future<bool> readMinimizeToTrayOnClose() async => minimizeToTrayOnClose;
+
+  @override
+  Future<void> saveMinimizeToTrayOnClose(bool enabled) async =>
+      minimizeToTrayOnClose = enabled;
 
   @override
   Future<AppProxySettings> readProxySettings() async => proxySettings;

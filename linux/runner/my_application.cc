@@ -7,6 +7,7 @@
 
 #include "flutter/generated_plugin_registrant.h"
 #include "clipboard.h"
+#include "system_tray.h"
 
 struct _MyApplication {
   GtkApplication parent_instance;
@@ -18,6 +19,50 @@ G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
 // Called when first Flutter frame received.
 static void first_frame_cb(MyApplication* self, FlView* view) {
   gtk_widget_show(gtk_widget_get_toplevel(GTK_WIDGET(view)));
+}
+
+static gboolean destroy_window_idle_cb(gpointer user_data) {
+  GtkWidget* window = GTK_WIDGET(user_data);
+  if (GTK_IS_WIDGET(window) && !gtk_widget_in_destruction(window)) {
+    gtk_widget_destroy(window);
+  }
+  g_object_unref(window);
+  return G_SOURCE_REMOVE;
+}
+
+static void window_channel_call_cb(FlMethodChannel*, FlMethodCall* call,
+                                   gpointer user_data) {
+  GtkWindow* window = GTK_WINDOW(user_data);
+  const gchar* method = fl_method_call_get_name(call);
+  if (g_strcmp0(method, "showWindow") == 0) {
+    gtk_widget_show(GTK_WIDGET(window));
+    gtk_window_deiconify(window);
+    gtk_window_present(window);
+    fl_method_call_respond_success(call, nullptr, nullptr);
+    return;
+  }
+  if (g_strcmp0(method, "hideWindow") == 0) {
+    gtk_widget_hide(GTK_WIDGET(window));
+    fl_method_call_respond_success(call, nullptr, nullptr);
+    return;
+  }
+  if (g_strcmp0(method, "destroyWindow") == 0) {
+    fl_method_call_respond_success(call, nullptr, nullptr);
+    g_idle_add(destroy_window_idle_cb, g_object_ref(window));
+    return;
+  }
+  fl_method_call_respond_not_implemented(call, nullptr);
+}
+
+static void register_window_channel(FlView* view, GtkWindow* window) {
+  g_autoptr(FlStandardMethodCodec) codec = fl_standard_method_codec_new();
+  g_autoptr(FlMethodChannel) channel = fl_method_channel_new(
+      fl_engine_get_binary_messenger(fl_view_get_engine(view)),
+      "pagashell/window", FL_METHOD_CODEC(codec));
+  fl_method_channel_set_method_call_handler(channel, window_channel_call_cb,
+                                            window, nullptr);
+  g_object_set_data_full(G_OBJECT(view), "pagashell-window",
+                         g_object_ref(channel), g_object_unref);
 }
 
 // Implements GApplication::activate.
@@ -86,6 +131,8 @@ static void my_application_activate(GApplication* application) {
 
   fl_register_plugins(FL_PLUGIN_REGISTRY(view));
   RegisterClipboard(view);
+  register_window_channel(view, window);
+  RegisterSystemTray(view, window);
 
   gtk_widget_grab_focus(GTK_WIDGET(view));
 }

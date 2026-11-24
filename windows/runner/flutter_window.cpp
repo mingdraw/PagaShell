@@ -1,5 +1,6 @@
 #include "flutter_window.h"
 #include "system_proxy.h"
+#include "system_tray.h"
 
 #include <optional>
 #include <algorithm>
@@ -185,7 +186,30 @@ bool FlutterWindow::OnCreate() {
       &flutter::StandardMethodCodec::GetInstance());
   window_channel_->SetMethodCallHandler(
       [this](const flutter::MethodCall<Value>& call, std::unique_ptr<Result> result) {
-        if (call.method_name() != "destroy") {
+        if (call.method_name() == "showWindow") {
+          HWND hwnd = GetHandle();
+          if (hwnd) {
+            if (IsIconic(hwnd)) {
+              ShowWindow(hwnd, SW_RESTORE);
+            } else {
+              ShowWindow(hwnd, SW_SHOW);
+            }
+            BringWindowToTop(hwnd);
+            SetForegroundWindow(hwnd);
+          }
+          result->Success();
+          return;
+        }
+        if (call.method_name() == "hideWindow") {
+          HWND hwnd = GetHandle();
+          if (hwnd) {
+            ShowWindow(hwnd, SW_HIDE);
+          }
+          result->Success();
+          return;
+        }
+        if (call.method_name() != "destroy" &&
+            call.method_name() != "destroyWindow") {
           result->NotImplemented();
           return;
         }
@@ -196,6 +220,15 @@ bool FlutterWindow::OnCreate() {
           return;
         }
         result->Success();
+      });
+  tray_channel_ = std::make_unique<flutter::MethodChannel<Value>>(
+      flutter_controller_->engine()->messenger(), "pagashell/tray",
+      &flutter::StandardMethodCodec::GetInstance());
+  system_tray_ =
+      std::make_unique<WindowsSystemTray>(GetHandle(), tray_channel_.get());
+  tray_channel_->SetMethodCallHandler(
+      [this](const flutter::MethodCall<Value>& call, std::unique_ptr<Result> result) {
+        system_tray_->Handle(call, std::move(result));
       });
   system_proxy_ = std::make_unique<SystemNetworkProxy>();
   system_proxy_channel_ = std::make_unique<flutter::MethodChannel<Value>>(
@@ -227,6 +260,11 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  if (system_tray_) {
+    system_tray_->Dispose();
+    system_tray_.reset();
+  }
+  tray_channel_.reset();
   window_channel_.reset();
   system_proxy_channel_.reset();
   system_proxy_.reset();
@@ -245,9 +283,20 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
   if (message == kDestroyWindowMessage) {
     // Dart has finished saving data and restoring the system proxy. Remove the
     // window now, then shut down Flutter while the native loop still exists.
+    if (system_tray_) {
+      system_tray_->Dispose();
+    }
     ShowWindow(hwnd, SW_HIDE);
     Destroy();
     return 0;
+  }
+
+  if (system_tray_) {
+    std::optional<LRESULT> tray_result =
+        system_tray_->HandleMessage(hwnd, message, wparam, lparam);
+    if (tray_result) {
+      return *tray_result;
+    }
   }
 
   // Give Flutter, including plugins, an opportunity to handle window messages.

@@ -20,6 +20,10 @@ abstract interface class SettingsRepository {
 
   Future<void> saveCloseTerminalOnDisconnect(bool enabled);
 
+  Future<bool> readMinimizeToTrayOnClose();
+
+  Future<void> saveMinimizeToTrayOnClose(bool enabled);
+
   Future<bool> readAutomaticUpdates();
 
   Future<void> saveAutomaticUpdates(bool enabled);

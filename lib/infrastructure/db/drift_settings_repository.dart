@@ -15,6 +15,7 @@ class DriftSettingsRepository implements SettingsRepository {
   static const _languageCodeKey = 'language_code';
   static const _sidebarStateKey = 'sidebar_state';
   static const _closeTerminalOnDisconnectKey = 'close_terminal_on_disconnect';
+  static const _minimizeToTrayOnCloseKey = 'minimize_to_tray_on_close';
   static const _automaticUpdatesKey = 'automatic_updates';
   static const _proxySettingsKey = 'proxy_settings';
   static const _customQuickCommandsKey = 'custom_quick_commands';
@@ -34,6 +35,24 @@ class DriftSettingsRepository implements SettingsRepository {
       .insertOnConflictUpdate(
         AppSettingsCompanion.insert(
           key: _closeTerminalOnDisconnectKey,
+          value: enabled.toString(),
+        ),
+      );
+
+  @override
+  Future<bool> readMinimizeToTrayOnClose() async {
+    final row = await (_db.select(
+      _db.appSettings,
+    )..where((s) => s.key.equals(_minimizeToTrayOnCloseKey))).getSingleOrNull();
+    return row?.value == 'true';
+  }
+
+  @override
+  Future<void> saveMinimizeToTrayOnClose(bool enabled) => _db
+      .into(_db.appSettings)
+      .insertOnConflictUpdate(
+        AppSettingsCompanion.insert(
+          key: _minimizeToTrayOnCloseKey,
           value: enabled.toString(),
         ),
       );

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 24" width="28" height="24">
+  <g style="color:#000000">
+    <path d="M 3.00 5.10 L 9.60 12.00 L 3.00 18.90" fill="none" stroke="currentColor" stroke-width="2.96" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M 9.60 12.00 H 13.80 M 13.80 12.00 V 9.20 A 1.75 1.75 0 0 1 15.55 7.45 H 16.80 M 13.80 12.00 V 14.80 A 1.75 1.75 0 0 0 15.55 16.55 H 16.80" fill="none" stroke="currentColor" stroke-width="1.80" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M 18.40 4.30 H 24.40 A 2.00 2.00 0 0 1 26.40 6.30 V 8.60 A 2.00 2.00 0 0 1 24.40 10.60 H 18.40 A 2.00 2.00 0 0 1 16.40 8.60 V 6.30 A 2.00 2.00 0 0 1 18.40 4.30 Z M 24.62 7.45 A 1.22 1.22 0 1 0 22.18 7.45 A 1.22 1.22 0 1 0 24.62 7.45 Z" fill="currentColor" fill-rule="evenodd"/>
+    <path d="M 18.40 13.40 H 24.40 A 2.00 2.00 0 0 1 26.40 15.40 V 17.70 A 2.00 2.00 0 0 1 24.40 19.70 H 18.40 A 2.00 2.00 0 0 1 16.40 17.70 V 15.40 A 2.00 2.00 0 0 1 18.40 13.40 Z M 24.62 16.55 A 1.22 1.22 0 1 0 22.18 16.55 A 1.22 1.22 0 1 0 24.62 16.55 Z" fill="currentColor" fill-rule="evenodd"/>
+  </g>
+</svg>

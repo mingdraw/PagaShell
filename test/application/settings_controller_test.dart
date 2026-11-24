@@ -171,6 +171,33 @@ void main() {
     expect(controller.themeMode.value, AppThemeMode.light);
     expect(repository.themeMode, AppThemeMode.light);
   });
+
+  test('关闭最小化到托盘默认关闭，持久化成功才更新状态且读取失败回退关闭', () async {
+    final repository = InMemorySettingsRepository();
+    final controller = SettingsController(repository: repository);
+    await controller.ready;
+    expect(controller.minimizeToTrayOnClose.value, isFalse);
+
+    await controller.setMinimizeToTrayOnClose(true);
+    expect(controller.minimizeToTrayOnClose.value, isTrue);
+    expect(repository.minimizeToTrayOnClose, isTrue);
+
+    final failing = _FailingTraySettingRepository(minimizeToTrayOnClose: true);
+    final guarded = SettingsController(repository: failing);
+    await guarded.ready;
+    expect(guarded.minimizeToTrayOnClose.value, isTrue);
+    await expectLater(
+      guarded.setMinimizeToTrayOnClose(false),
+      throwsStateError,
+    );
+    expect(guarded.minimizeToTrayOnClose.value, isTrue);
+    expect(failing.minimizeToTrayOnClose, isTrue);
+
+    final unreadable = _UnreadableTraySettingRepository();
+    final fallback = SettingsController(repository: unreadable);
+    await fallback.ready;
+    expect(fallback.minimizeToTrayOnClose.value, isFalse);
+  });
 }
 
 class _UnreadableSidebarRepository extends InMemorySettingsRepository {
@@ -228,4 +255,18 @@ class _DelayedSaveRepository extends InMemorySettingsRepository {
     }
     await super.saveThemeMode(mode);
   }
+}
+
+class _FailingTraySettingRepository extends InMemorySettingsRepository {
+  _FailingTraySettingRepository({super.minimizeToTrayOnClose});
+
+  @override
+  Future<void> saveMinimizeToTrayOnClose(bool enabled) async =>
+      throw StateError('write failed');
+}
+
+class _UnreadableTraySettingRepository extends InMemorySettingsRepository {
+  @override
+  Future<bool> readMinimizeToTrayOnClose() async =>
+      throw StateError('read failed');
 }

@@ -1,13 +1,20 @@
 import 'dart:ui' show Offset;
 
 import 'package:flutter/foundation.dart' show ObserverList;
-import 'package:flutter/services.dart' show SystemNavigator;
+import 'package:flutter/services.dart'
+    show MethodChannel, MissingPluginException, SystemNavigator;
 import 'package:window_manager/window_manager.dart';
 
 import '../../domain/window/app_window.dart';
 
 /// 基于 `window_manager` 0.7+ 原生接口实现的桌面窗口控制器。
 class NativeAppWindow implements AppWindow {
+  NativeAppWindow({Window? window}) {
+    _cachedWindow =
+        window ?? _tryNative<Window?>(WindowManager.instance.getCurrent);
+  }
+
+  static const _windowChannel = MethodChannel('pagashell/window');
   final _listeners = ObserverList<AppWindowListener>();
 
   Window? _cachedWindow;
@@ -132,6 +139,35 @@ class NativeAppWindow implements AppWindow {
   }
 
   @override
+  Future<bool> isVisible() async => _window?.isVisible ?? true;
+
+  @override
+  Future<void> show() async {
+    try {
+      await _windowChannel.invokeMethod<void>('showWindow');
+      return;
+    } on MissingPluginException {
+      // Fall back to window_manager when no custom runner handler is mounted.
+    }
+    final window = _window;
+    if (window == null) return;
+    if (window.isMinimized) window.restore();
+    window.show();
+    window.focus();
+  }
+
+  @override
+  Future<void> hide() async {
+    try {
+      await _windowChannel.invokeMethod<void>('hideWindow');
+      return;
+    } on MissingPluginException {
+      // Fall back to window_manager when no custom runner handler is mounted.
+    }
+    _window?.hide();
+  }
+
+  @override
   Future<void> startDragging() async {
     _window?.startDragging();
   }
@@ -166,6 +202,12 @@ class NativeAppWindow implements AppWindow {
   @override
   Future<void> destroy() async {
     _isDestroying = true;
+    try {
+      await _windowChannel.invokeMethod<void>('destroyWindow');
+      return;
+    } on MissingPluginException {
+      // Fall back to window_manager when no custom runner handler is mounted.
+    }
     final window = _window;
     final closed =
         window != null &&

@@ -51,6 +51,8 @@ class SettingsController extends GetxController {
 
   final closeTerminalOnDisconnect = false.obs;
   final savingCloseTerminalOnDisconnect = false.obs;
+  final minimizeToTrayOnClose = false.obs;
+  final savingMinimizeToTrayOnClose = false.obs;
   final isLoaded = false.obs;
   final automaticUpdates = true.obs;
   final savingAutomaticUpdates = false.obs;
@@ -110,6 +112,9 @@ class SettingsController extends GetxController {
       ),
       _repository.readCloseTerminalOnDisconnect().then<void>((saved) {
         if (!isClosed) closeTerminalOnDisconnect.value = saved;
+      }, onError: (Object _) {}),
+      _repository.readMinimizeToTrayOnClose().then<void>((saved) {
+        if (!isClosed) minimizeToTrayOnClose.value = saved;
       }, onError: (Object _) {}),
       _repository.readAutomaticUpdates().then<void>(
         (saved) {
@@ -250,6 +255,19 @@ class SettingsController extends GetxController {
       if (!isClosed) closeTerminalOnDisconnect.value = enabled;
     } finally {
       if (!isClosed) savingCloseTerminalOnDisconnect.value = false;
+    }
+  }
+
+  Future<void> setMinimizeToTrayOnClose(bool enabled) async {
+    if (isClosed || savingMinimizeToTrayOnClose.value) return;
+    savingMinimizeToTrayOnClose.value = true;
+    try {
+      await ready;
+      if (isClosed || minimizeToTrayOnClose.value == enabled) return;
+      await _repository.saveMinimizeToTrayOnClose(enabled);
+      if (!isClosed) minimizeToTrayOnClose.value = enabled;
+    } finally {
+      if (!isClosed) savingMinimizeToTrayOnClose.value = false;
     }
   }
 

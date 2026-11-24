@@ -16,6 +16,7 @@ import 'package:pagashell/application/network/app_connect.dart';
 import 'package:pagashell/application/session/session_controller.dart';
 import 'package:pagashell/application/settings/settings_controller.dart';
 import 'package:pagashell/application/transfer/transfer_controller.dart';
+import 'package:pagashell/application/tray/system_tray_controller.dart';
 import 'package:pagashell/domain/entities/host.dart';
 import 'package:pagashell/domain/entities/sidebar_state.dart';
 import 'package:pagashell/domain/mcp/mcp_server_transport.dart';
@@ -32,6 +33,7 @@ import 'package:pagashell/domain/repositories/local_file_repository.dart';
 import 'package:pagashell/domain/repositories/settings_repository.dart';
 import 'package:pagashell/domain/ssh/host_key.dart';
 import 'package:pagashell/domain/ssh/ssh_engine.dart';
+import 'package:pagashell/domain/tray/system_tray.dart';
 import 'package:pagashell/domain/vault/secret_store.dart';
 import 'package:pagashell/domain/vnc/vnc_engine.dart';
 import 'package:pagashell/domain/window/app_window.dart';
@@ -44,6 +46,7 @@ import 'package:pagashell/infrastructure/db/in_memory_identity_tree_repository.d
 import 'package:pagashell/infrastructure/vault/in_memory_secret_store.dart';
 
 import 'fake_app_window.dart';
+import 'fake_system_tray.dart';
 import 'in_memory_agent_conversation_repository.dart';
 import 'in_memory_ai_settings_repository.dart';
 import 'in_memory_configuration_repository.dart';
@@ -60,10 +63,12 @@ class InMemoryBinding extends Bindings {
     this.knownHosts,
     this.systemProxy,
     AppWindow? appWindow,
+    SystemTray? systemTray,
     LocalFileRepository? localFiles,
     SecretStore? secretStore,
   }) : settingsRepository = settingsRepository ?? InMemorySettingsRepository(),
        appWindow = appWindow ?? FakeAppWindow(),
+       systemTray = systemTray ?? FakeSystemTray(),
        secretStore = secretStore ?? InMemorySecretStore(),
        localFiles = localFiles ?? InMemoryLocalFileRepository();
 
@@ -74,6 +79,7 @@ class InMemoryBinding extends Bindings {
   final KnownHostRepository? knownHosts;
   final SystemProxy? systemProxy;
   final AppWindow appWindow;
+  final SystemTray systemTray;
   final SecretStore secretStore;
   final LocalFileRepository localFiles;
 
@@ -235,7 +241,7 @@ class InMemoryBinding extends Bindings {
         hosts: hosts,
       ),
     );
-    Get.put(
+    final mcp = Get.put(
       McpServerController(
         aiSettings: aiSettings,
         sessions: sessions,
@@ -244,6 +250,15 @@ class InMemoryBinding extends Bindings {
         identities: identities,
         knownHosts: knownHosts,
         serverFactory: const _InMemoryMcpServerFactory(),
+      ),
+    );
+    Get.put<SystemTray>(systemTray);
+    Get.put(
+      SystemTrayController(
+        tray: systemTray,
+        settings: settings,
+        sessions: sessions,
+        mcp: mcp,
       ),
     );
   }

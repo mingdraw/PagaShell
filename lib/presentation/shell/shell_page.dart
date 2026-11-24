@@ -12,6 +12,7 @@ import '../../application/mcp/mcp_server_controller.dart';
 import '../../application/session/session.dart';
 import '../../application/session/session_controller.dart';
 import '../../application/settings/settings_controller.dart';
+import '../../application/tray/system_tray_controller.dart';
 import '../../application/updates/app_update_controller.dart';
 import '../../domain/proxy/system_proxy.dart';
 import '../../domain/window/app_window.dart';
@@ -59,10 +60,13 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
   late final AppLifecycleListener _lifecycle;
   final _monitoringVisible = ValueNotifier(true);
   bool _windowMinimized = false;
+  bool _hiddenInTray = false;
+  bool _hidingToTray = false;
   AppLifecycleState? _lifecycleState;
   Future<bool>? _exitPending;
   bool _allowExit = false;
   bool _destroying = false;
+  SystemTrayController? _tray;
   AppUpdateController? _updates;
   late final Future<bool> Function(Future<void> Function()) _updateExit;
   final _shortcutKeys = <PhysicalKeyboardKey>{};
@@ -76,13 +80,18 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
     _windowChannel.setMethodCallHandler((call) async {
       switch (call.method) {
         case 'showSettings':
+          if (_hiddenInTray) await _showFromTray();
           _openSettings();
         case 'showQuickConnect':
+          if (_hiddenInTray) await _showFromTray();
           _openQuickConnect();
         case 'newService':
+          if (_hiddenInTray) await _showFromTray();
           _newService();
         case 'closeActiveTab':
           _closeActiveTab();
+        case 'windowReopened':
+          _onWindowReopenedFromNative();
         default:
           throw MissingPluginException();
       }
@@ -97,8 +106,11 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
         _lifecycleState = state;
         _updateMonitoringVisibility();
       },
-      onExitRequested: () async =>
-          await _prepareExit() ? AppExitResponse.exit : AppExitResponse.cancel,
+      onExitRequested: () async {
+        if (!await _prepareExit()) return AppExitResponse.cancel;
+        await _tray?.disposeTray();
+        return AppExitResponse.exit;
+      },
     );
     _sessionChanges = everAll([_sessions.sessions, _sessions.activeSessionId], (
       _,
@@ -106,6 +118,18 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
       final id = _fullscreenId;
       if (id != null && !_isDesktopReady(id)) unawaited(_exitFullscreen());
     });
+    if (Get.isRegistered<SystemTrayController>()) {
+      final tray = _tray = Get.find<SystemTrayController>();
+      tray.onShowWindow = _showFromTray;
+      tray.onHideWindow = _hideToTray;
+      tray.onOpenQuickConnect = _openQuickConnectFromTray;
+      tray.onOpenSettings = _openSettingsFromTray;
+      tray.onFocusSession = _focusSessionFromTray;
+      tray.onQuitRequested = _exitApplication;
+      tray.onNoticeSuccess = AppNotice.success;
+      tray.onNoticeError = AppNotice.error;
+      tray.setWindowHiddenInTray(false);
+    }
     if (Get.isRegistered<AppUpdateController>()) {
       final updates = _updates = Get.find<AppUpdateController>();
       _updateExit = (commit) => _exitApplication(beforeDestroy: commit);
@@ -123,7 +147,7 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
     // Delay the prompt until the current form or remote desktop is closed.
     while (mounted &&
         !_destroying &&
-        (Get.isDialogOpen == true || _fullscreenId != null)) {
+        (_hiddenInTray || Get.isDialogOpen == true || _fullscreenId != null)) {
       await Future<void>.delayed(const Duration(milliseconds: 300));
     }
     if (mounted &&
@@ -216,7 +240,83 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
   @override
   void onWindowCloseRequested(AppWindowCloseRequest request) {
     request.cancel();
-    unawaited(_exitApplication());
+    if (_destroying) return;
+    if (_shouldMinimizeToTrayOnClose()) {
+      unawaited(_hideToTray());
+    } else {
+      unawaited(_exitApplication());
+    }
+  }
+
+  bool _shouldMinimizeToTrayOnClose() =>
+      Get.isRegistered<SettingsController>() &&
+      Get.find<SettingsController>().minimizeToTrayOnClose.value;
+
+  Future<void> _hideToTray() async {
+    if (_destroying || _hiddenInTray || _hidingToTray) return;
+    _hidingToTray = true;
+    try {
+      if (_fullscreenId != null) {
+        await _exitFullscreen();
+      } else if (await _window.isFullScreen()) {
+        await _setNativeFullscreen(false);
+      }
+      if (!mounted || _destroying) return;
+      _shortcutKeys.clear();
+      _hiddenInTray = true;
+      _updateMonitoringVisibility();
+      _tray?.setWindowHiddenInTray(true);
+      await _window.hide();
+    } on Object {
+      if (mounted && !_destroying) {
+        _hiddenInTray = false;
+        _updateMonitoringVisibility();
+        _tray?.setWindowHiddenInTray(false);
+      }
+    } finally {
+      _hidingToTray = false;
+    }
+  }
+
+  Future<void> _showFromTray() async {
+    if (_destroying) return;
+    _hiddenInTray = false;
+    _windowMinimized = false;
+    _updateMonitoringVisibility();
+    _tray?.setWindowHiddenInTray(false);
+    await _window.show();
+  }
+
+  void _onWindowReopenedFromNative() {
+    if (_destroying) return;
+    _hiddenInTray = false;
+    _windowMinimized = false;
+    _updateMonitoringVisibility();
+    _tray?.setWindowHiddenInTray(false);
+  }
+
+  Future<void> _focusSessionFromTray(String sessionId) async {
+    await _showFromTray();
+    if (!mounted || _destroying) return;
+    if (_fullscreenId != null && _fullscreenId != sessionId) {
+      await _exitFullscreen();
+    }
+    if (!mounted || _destroying) return;
+    _sessions.activate(sessionId);
+  }
+
+  Future<void> _openQuickConnectFromTray() async {
+    await _showFromTray();
+    if (!mounted || _destroying) return;
+    _openQuickConnect();
+  }
+
+  Future<void> _openSettingsFromTray({bool ai = false}) async {
+    await _showFromTray();
+    if (!mounted || _destroying) return;
+    if (_canRunWorkspaceCommand) {
+      unawaited(showSettingsDialog(ai: ai));
+    }
   }
 
   Future<bool> _exitApplication({
@@ -230,6 +330,7 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
         return false;
       }
       await beforeDestroy?.call();
+      await _tray?.disposeTray();
       if (defaultTargetPlatform == TargetPlatform.windows) {
         // window_manager.destroy() posts WM_QUIT on Windows. The runner must
         // destroy the view/plugins before its message loop and COM shut down.
@@ -254,6 +355,7 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
         final agent = Get.find<AgentController>();
         allow = await agent.prepareForExit();
         if (!allow && mounted) {
+          if (_hiddenInTray) await _revealForExitPrompt();
           allow =
               await AppNavigation.dialog<bool>(
                 AppDialog(
@@ -287,6 +389,7 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
           await _sessions.closeAll();
         } on SystemProxyException catch (error) {
           allow = false;
+          if (_hiddenInTray) await _revealForExitPrompt();
           AppNotice.error(error.message);
         }
       }
@@ -294,6 +397,14 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
       _exitPending = null;
       return allow;
     })();
+  }
+
+  Future<void> _revealForExitPrompt() async {
+    _hiddenInTray = false;
+    _windowMinimized = false;
+    _updateMonitoringVisibility();
+    _tray?.setWindowHiddenInTray(false);
+    await _window.show();
   }
 
   @override
@@ -313,6 +424,24 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
 
   @override
   void dispose() {
+    if (_tray case final tray?) {
+      if (tray.onShowWindow == _showFromTray) tray.onShowWindow = null;
+      if (tray.onHideWindow == _hideToTray) tray.onHideWindow = null;
+      if (tray.onOpenQuickConnect == _openQuickConnectFromTray) {
+        tray.onOpenQuickConnect = null;
+      }
+      if (tray.onOpenSettings == _openSettingsFromTray) {
+        tray.onOpenSettings = null;
+      }
+      if (tray.onFocusSession == _focusSessionFromTray) {
+        tray.onFocusSession = null;
+      }
+      if (tray.onQuitRequested == _exitApplication) tray.onQuitRequested = null;
+      if (tray.onNoticeSuccess == AppNotice.success) {
+        tray.onNoticeSuccess = null;
+      }
+      if (tray.onNoticeError == AppNotice.error) tray.onNoticeError = null;
+    }
     if (_updates != null && identical(_updates!.exitForUpdate, _updateExit)) {
       _updates!.exitForUpdate = null;
     }
@@ -367,11 +496,16 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
   @override
   void onWindowRestored() {
     _windowMinimized = false;
+    if (_hiddenInTray) {
+      _hiddenInTray = false;
+      _tray?.setWindowHiddenInTray(false);
+    }
     _updateMonitoringVisibility();
   }
 
   void _updateMonitoringVisibility() {
     _monitoringVisible.value =
+        !_hiddenInTray &&
         !_windowMinimized &&
         _lifecycleState != AppLifecycleState.hidden &&
         _lifecycleState != AppLifecycleState.paused;

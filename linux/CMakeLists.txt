@@ -132,6 +132,19 @@ install(FILES "runner/resources/app_icon_512.png"
   DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
   RENAME "app_icon.png" COMPONENT Runtime)
 
+foreach(TRAY_ICON IN ITEMS
+  tray_icon_light_24.png
+  tray_icon_light_48.png
+  tray_icon_dark_24.png
+  tray_icon_dark_48.png)
+  install(FILES "runner/resources/${TRAY_ICON}"
+    DESTINATION "${INSTALL_BUNDLE_DATA_DIR}" COMPONENT Runtime)
+endforeach()
+
+install(FILES "runner/resources/pagashell-symbolic.svg"
+  DESTINATION "${CMAKE_INSTALL_PREFIX}/share/icons/hicolor/symbolic/apps"
+  RENAME "${APPLICATION_ID}-symbolic.svg" COMPONENT Runtime)
+
 foreach(ICON_SIZE IN ITEMS 16 24 32 48 64 128 256 512)
   install(FILES "runner/resources/app_icon_${ICON_SIZE}.png"
     DESTINATION "${CMAKE_INSTALL_PREFIX}/share/icons/hicolor/${ICON_SIZE}x${ICON_SIZE}/apps"

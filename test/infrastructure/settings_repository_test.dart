@@ -141,6 +141,29 @@ void main() {
     expect(await settings.readCloseTerminalOnDisconnect(), isFalse);
   });
 
+  test('关闭最小化到托盘默认关闭，保存的选择重开数据库后恢复', () async {
+    final directory = await Directory.systemTemp.createTemp(
+      'pagashell-tray-settings-',
+    );
+    addTearDown(() => directory.delete(recursive: true));
+    final file = File('${directory.path}/test.sqlite');
+    final db = AppDatabase.forTesting(NativeDatabase(file));
+    final repository = DriftSettingsRepository(db);
+    try {
+      expect(await repository.readMinimizeToTrayOnClose(), isFalse);
+      await repository.saveMinimizeToTrayOnClose(true);
+    } finally {
+      await db.close();
+    }
+
+    final reopened = AppDatabase.forTesting(NativeDatabase(file));
+    addTearDown(reopened.close);
+    final settings = DriftSettingsRepository(reopened);
+    expect(await settings.readMinimizeToTrayOnClose(), isTrue);
+    await settings.saveMinimizeToTrayOnClose(false);
+    expect(await settings.readMinimizeToTrayOnClose(), isFalse);
+  });
+
   test('版本 2 升级保留主机和指纹，主题选择关闭重开后恢复', () async {
     final directory = await Directory.systemTemp.createTemp(
       'pagashell-settings-',

@@ -11,6 +11,7 @@
 #include "win32_window.h"
 
 class SystemNetworkProxy;
+class WindowsSystemTray;
 
 // A window that does nothing but host a Flutter view.
 class FlutterWindow : public Win32Window {
@@ -36,6 +37,8 @@ class FlutterWindow : public Win32Window {
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> clipboard_channel_;
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> system_proxy_channel_;
   std::unique_ptr<SystemNetworkProxy> system_proxy_;
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> tray_channel_;
+  std::unique_ptr<WindowsSystemTray> system_tray_;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

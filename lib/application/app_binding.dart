@@ -15,6 +15,7 @@ import '../domain/repositories/known_host_repository.dart';
 import '../domain/repositories/local_file_repository.dart';
 import '../domain/repositories/settings_repository.dart';
 import '../domain/ssh/ssh_engine.dart';
+import '../domain/tray/system_tray.dart';
 import '../domain/vault/secret_store.dart';
 import '../domain/window/app_window.dart';
 import '../infrastructure/db/app_database.dart';
@@ -35,6 +36,7 @@ import '../infrastructure/mcp/local_mcp_http_server.dart';
 import '../infrastructure/proxy/desktop_system_proxy.dart';
 import '../infrastructure/proxy/desktop_system_proxy_lookup.dart';
 import '../infrastructure/ssh/rust_ssh_engine.dart';
+import '../infrastructure/tray/native_system_tray.dart';
 import '../infrastructure/updates/desktop_update_installer.dart';
 import '../infrastructure/vault/encrypted_secret_store.dart';
 import '../infrastructure/vault/encrypted_vault_storage.dart';
@@ -56,6 +58,7 @@ import 'network/app_proxy_resolver.dart';
 import 'session/session_controller.dart';
 import 'settings/settings_controller.dart';
 import 'transfer/transfer_controller.dart';
+import 'tray/system_tray_controller.dart';
 import 'updates/app_update_controller.dart';
 
 /// 全局依赖装配：唯一允许把 infrastructure 实现绑定到 domain 接口的地方。
@@ -279,7 +282,7 @@ class AppBinding extends Bindings {
       ),
       permanent: true,
     );
-    Get.put<McpServerController>(
+    final mcpServer = Get.put<McpServerController>(
       McpServerController(
         aiSettings: aiSettings,
         sessions: sessions,
@@ -288,6 +291,17 @@ class AppBinding extends Bindings {
         identities: identities,
         knownHosts: knownHosts,
         serverFactory: const LocalMcpServerFactory(),
+      ),
+      permanent: true,
+    );
+    final SystemTray systemTray = NativeSystemTray();
+    Get.put<SystemTray>(systemTray, permanent: true);
+    Get.put<SystemTrayController>(
+      SystemTrayController(
+        tray: systemTray,
+        settings: settings,
+        sessions: sessions,
+        mcp: mcpServer,
       ),
       permanent: true,
     );

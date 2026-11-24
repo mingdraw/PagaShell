@@ -29,6 +29,10 @@ abstract interface class AppWindow {
   Future<void> startDragging();
   void showSystemMenu(double x, double y);
 
+  Future<bool> isVisible();
+  Future<void> show();
+  Future<void> hide();
+
   Future<void> close();
   Future<void> destroy();
 }

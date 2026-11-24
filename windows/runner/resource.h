@@ -3,6 +3,8 @@
 // Used by Runner.rc
 //
 #define IDI_APP_ICON                    101
+#define IDI_TRAY_ICON_LIGHT             102
+#define IDI_TRAY_ICON_DARK              103
 
 // Next default values for new objects
 //

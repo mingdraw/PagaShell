@@ -18,6 +18,7 @@ class FakeAppWindow implements AppWindow {
   final fullscreenRequests = <bool>[];
   bool maximized = false;
   bool fullscreen = false;
+  bool visible = true;
   bool emitFullscreenEvents = true;
   bool failEnterFullScreen = false;
   bool failExitFullScreen = false;
@@ -103,6 +104,24 @@ class FakeAppWindow implements AppWindow {
   @override
   Future<void> minimize() async {
     calls.add('minimize');
+  }
+
+  @override
+  Future<bool> isVisible() async {
+    calls.add('isVisible');
+    return visible;
+  }
+
+  @override
+  Future<void> show() async {
+    calls.add('show');
+    visible = true;
+  }
+
+  @override
+  Future<void> hide() async {
+    calls.add('hide');
+    visible = false;
   }
 
   @override

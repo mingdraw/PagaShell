@@ -11,8 +11,11 @@ class MainFlutterWindow: NSWindow {
   private var filesChannel: FlutterMethodChannel?
   private var clipboardChannel: FlutterMethodChannel?
   private var systemProxyChannel: FlutterMethodChannel?
+  private var trayChannel: FlutterMethodChannel?
   private let systemProxy = MacSystemProxy()
+  private var systemTray: MacSystemTray?
   private var headerMouseDownEvent: NSEvent?
+  private(set) var isHiddenInTray = false
 
   override func awakeFromNib() {
     let flutterViewController = FlutterViewController()
@@ -126,6 +129,21 @@ class MainFlutterWindow: NSWindow {
         result(nil)
         return
       }
+      if call.method == "showWindow" {
+        self?.showWindowFromTray()
+        result(nil)
+        return
+      }
+      if call.method == "hideWindow" {
+        self?.hideWindowToTray()
+        result(nil)
+        return
+      }
+      if call.method == "destroyWindow" {
+        self?.destroyWindowForExit()
+        result(nil)
+        return
+      }
       guard call.method == "setTitleBarHeight" else {
         result(FlutterMethodNotImplemented)
         return
@@ -138,6 +156,17 @@ class MainFlutterWindow: NSWindow {
       }
       self?.setTitleBarHeight(CGFloat(height))
       result(nil)
+    }
+
+    let tray = FlutterMethodChannel(
+      name: "pagashell/tray",
+      binaryMessenger: flutterViewController.engine.binaryMessenger
+    )
+    trayChannel = tray
+    let trayManager = MacSystemTray(channel: tray)
+    systemTray = trayManager
+    tray.setMethodCallHandler { [weak trayManager] call, result in
+      trayManager?.handle(call, result: result)
     }
   }
 
@@ -193,6 +222,39 @@ class MainFlutterWindow: NSWindow {
     // performDrag 是应用显式拖窗，不需要重新打开标题栏的自动拖窗。
     headerMouseDownEvent = nil
     performDrag(with: event)
+  }
+
+  func showWindowFromTray() {
+    isHiddenInTray = false
+    if isMiniaturized {
+      deminiaturize(nil)
+    }
+    NSApp.activate(ignoringOtherApps: true)
+    makeKeyAndOrderFront(nil)
+    orderFrontRegardless()
+  }
+
+  func hideWindowToTray() {
+    isHiddenInTray = true
+    orderOut(nil)
+  }
+
+  func destroyWindowForExit() {
+    isHiddenInTray = false
+    cleanupTray()
+    DispatchQueue.main.async {
+      NSApp.terminate(nil)
+    }
+  }
+
+  func reopenFromDock() {
+    showWindowFromTray()
+    windowChannel?.invokeMethod("windowReopened", arguments: nil)
+  }
+
+  func cleanupTray() {
+    isHiddenInTray = false
+    systemTray?.dispose()
   }
 
   private func isCustomHeaderContent(_ point: NSPoint) -> Bool {
@@ -562,5 +624,183 @@ private final class MacSystemProxy {
       if let mapped = mapProxyEntry(proxy, type: type) { return mapped }
     }
     return nil
+  }
+}
+
+/// macOS 菜单栏系统托盘与后台 App Nap 抑制管理。
+private final class MacSystemTray: NSObject, NSMenuDelegate {
+  private weak var channel: FlutterMethodChannel?
+  private var statusItem: NSStatusItem?
+  private var menu = NSMenu()
+  private var menuOpen = false
+  private var pendingItems: [[String: Any]]?
+  private var backgroundActivity: NSObjectProtocol?
+
+  init(channel: FlutterMethodChannel) {
+    self.channel = channel
+    super.init()
+    menu.autoenablesItems = false
+    menu.delegate = self
+  }
+
+  deinit {
+    dispose()
+  }
+
+  func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+    switch call.method {
+    case "initialize":
+      initialize()
+      result(nil)
+    case "update":
+      guard let args = call.arguments as? [String: Any] else {
+        result(FlutterError(code: "tray_invalid", message: "Invalid tray payload", details: nil))
+        return
+      }
+      let tooltip = args["tooltip"] as? String ?? "PagaShell"
+      let items = args["items"] as? [[String: Any]] ?? []
+      update(tooltip: tooltip, items: items)
+      result(nil)
+    case "setBackgroundMode":
+      let args = call.arguments as? [String: Any] ?? [:]
+      let active = args["active"] as? Bool ?? false
+      setBackgroundMode(active)
+      result(nil)
+    case "dispose":
+      dispose()
+      result(nil)
+    default:
+      result(FlutterMethodNotImplemented)
+    }
+  }
+
+  private func initialize() {
+    if statusItem != nil { return }
+    let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    if let button = item.button {
+      button.image = makeTrayIcon()
+      button.imageScaling = .scaleProportionallyDown
+      button.toolTip = "PagaShell"
+    }
+    item.menu = menu
+    statusItem = item
+  }
+
+  private func makeTrayIcon() -> NSImage? {
+    if let template = NSImage(named: NSImage.Name("TrayIcon"))?.copy() as? NSImage {
+      template.size = NSSize(width: 22, height: 18)
+      template.isTemplate = true
+      return template
+    }
+    guard let source = NSImage(named: NSImage.applicationIconName) ?? NSApp.applicationIconImage,
+          let icon = source.copy() as? NSImage else {
+      return nil
+    }
+    icon.size = NSSize(width: 18, height: 18)
+    icon.isTemplate = false
+    return icon
+  }
+
+  private func update(tooltip: String, items: [[String: Any]]) {
+    initialize()
+    statusItem?.button?.toolTip = tooltip
+    if menuOpen {
+      pendingItems = items
+      return
+    }
+    pendingItems = nil
+    rebuildMenu(menu, from: items)
+  }
+
+  private func rebuildMenu(_ target: NSMenu, from items: [[String: Any]]) {
+    target.removeAllItems()
+    for raw in items {
+      target.addItem(buildMenuItem(raw))
+    }
+  }
+
+  private func buildMenuItem(_ raw: [String: Any]) -> NSMenuItem {
+    let kind = raw["kind"] as? String ?? "normal"
+    if kind == "separator" {
+      return NSMenuItem.separator()
+    }
+    let label = raw["label"] as? String ?? ""
+    let enabled = raw["enabled"] as? Bool ?? true
+    let checked = raw["checked"] as? Bool ?? false
+    let id = raw["id"] as? String
+
+    if kind == "submenu" {
+      let item = NSMenuItem(title: label, action: nil, keyEquivalent: "")
+      item.isEnabled = enabled
+      let submenu = NSMenu(title: label)
+      submenu.autoenablesItems = false
+      let children = raw["children"] as? [[String: Any]] ?? []
+      rebuildMenu(submenu, from: children)
+      item.submenu = submenu
+      return item
+    }
+
+    let clickable = enabled && id != nil
+    let item = NSMenuItem(
+      title: label,
+      action: clickable ? #selector(onMenuItemClicked(_:)) : nil,
+      keyEquivalent: ""
+    )
+    item.isEnabled = enabled
+    if kind == "checkbox" {
+      item.state = checked ? .on : .off
+    }
+    if clickable {
+      item.target = self
+      item.representedObject = id
+    }
+    return item
+  }
+
+  @objc private func onMenuItemClicked(_ sender: NSMenuItem) {
+    guard let id = sender.representedObject as? String, !id.isEmpty else { return }
+    channel?.invokeMethod("onMenuItemSelected", arguments: ["id": id])
+  }
+
+  func menuWillOpen(_ menu: NSMenu) {
+    if menu === self.menu {
+      menuOpen = true
+    }
+  }
+
+  func menuDidClose(_ menu: NSMenu) {
+    if menu === self.menu {
+      menuOpen = false
+      if let items = pendingItems {
+        pendingItems = nil
+        rebuildMenu(self.menu, from: items)
+      }
+    }
+  }
+
+  private func setBackgroundMode(_ active: Bool) {
+    if active {
+      if backgroundActivity == nil {
+        backgroundActivity = ProcessInfo.processInfo.beginActivity(
+          options: .userInitiatedAllowingIdleSystemSleep,
+          reason: "Keep PagaShell background services active"
+        )
+      }
+    } else if let activity = backgroundActivity {
+      ProcessInfo.processInfo.endActivity(activity)
+      backgroundActivity = nil
+    }
+  }
+
+  func dispose() {
+    setBackgroundMode(false)
+    pendingItems = nil
+    menuOpen = false
+    if let item = statusItem {
+      item.menu = nil
+      NSStatusBar.system.removeStatusItem(item)
+      statusItem = nil
+    }
+    menu.removeAllItems()
   }
 }

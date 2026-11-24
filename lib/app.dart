@@ -4,6 +4,7 @@ import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import 'application/app_binding.dart';
 import 'application/settings/settings_controller.dart';
+import 'application/tray/system_tray_controller.dart';
 import 'domain/entities/app_theme_mode.dart';
 import 'presentation/localization/app_translations.dart';
 import 'presentation/navigation/app_notice.dart';
@@ -46,7 +47,12 @@ class _PagaShellAppState extends State<PagaShellApp> {
       final savedLocale = AppTranslations.supportedLocales
           .where((locale) => locale.languageCode == languageCode)
           .firstOrNull;
-      if (savedLocale != null) Get.locale = savedLocale;
+      if (savedLocale != null && Get.locale != savedLocale) {
+        Get.locale = savedLocale;
+        if (Get.isRegistered<SystemTrayController>()) {
+          Get.find<SystemTrayController>().refreshMenu();
+        }
+      }
       return shadcn.ShadcnApp(
         title: 'PagaShell',
         debugShowCheckedModeBanner: false,

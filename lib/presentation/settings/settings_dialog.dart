@@ -9,6 +9,7 @@ import '../../application/ai/agent_controller.dart';
 import '../../application/ai/ai_settings_controller.dart';
 import '../../application/mcp/mcp_server_controller.dart';
 import '../../application/settings/settings_controller.dart';
+import '../../application/tray/system_tray_controller.dart';
 import '../../domain/ai/ai_model.dart';
 import '../../domain/entities/app_proxy_settings.dart';
 import '../../domain/entities/app_theme_mode.dart';
@@ -873,6 +874,8 @@ class _GeneralSettings extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final settings = Get.find<SettingsController>();
+    final muted = shadcn.Theme.of(context).colorScheme.mutedForeground;
+    final trayLabel = '关闭时最小化到托盘'.tr;
     return Obx(
       () => Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -930,11 +933,56 @@ class _GeneralSettings extends StatelessWidget {
                         return;
                       }
                       await Get.updateLocale(value);
+                      if (Get.isRegistered<SystemTrayController>()) {
+                        Get.find<SystemTrayController>().refreshMenu();
+                      }
                       onLocaleChanged();
                     } on Object {
                       AppNotice.error('语言设置保存失败，请重试');
                     }
                   },
+          ),
+          const SizedBox(height: 20),
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      trayLabel,
+                      style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      '开启后点击关闭按钮不会退出应用，而是隐藏窗口并在系统托盘保持后台运行（端口转发、动态代理与本地 MCP 服务不受影响）。'
+                          .tr,
+                      style: TextStyle(fontSize: 12, color: muted),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 16),
+              Semantics(
+                label: trayLabel,
+                child: shadcn.Switch(
+                  key: const ValueKey('minimize-to-tray-on-close'),
+                  value: settings.minimizeToTrayOnClose.value,
+                  onChanged: settings.savingMinimizeToTrayOnClose.value
+                      ? null
+                      : (value) async {
+                          try {
+                            await settings.setMinimizeToTrayOnClose(value);
+                          } on Object {
+                            AppNotice.error('保存失败，请重试');
+                          }
+                        },
+                ),
+              ),
+            ],
           ),
         ],
       ),
