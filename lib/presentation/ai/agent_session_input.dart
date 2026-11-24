@@ -533,28 +533,25 @@ class _AgentSessionInputState extends State<AgentSessionInput> {
               footer: Padding(
                 padding: const EdgeInsets.only(top: 8),
                 child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
                     Expanded(
-                      child: Padding(
-                        padding: const EdgeInsets.only(top: 6),
-                        child: Row(
-                          children: [
-                            AppIconButton.text(
-                              key: const ValueKey('agent-add-context'),
-                              density: shadcn.ButtonDensity.compact,
-                              semanticLabel: '添加上下文'.tr,
-                              icon: const AppIcon(AppIcons.plus, size: 16),
-                              onPressed: _composing(value)
-                                  ? null
-                                  : _openMentions,
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(child: widget.modeControls),
-                          ],
-                        ),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          AppIconButton.text(
+                            key: const ValueKey('agent-add-context'),
+                            density: shadcn.ButtonDensity.compact,
+                            semanticLabel: '添加上下文'.tr,
+                            icon: const AppIcon(AppIcons.plus, size: 15),
+                            onPressed: _composing(value) ? null : _openMentions,
+                          ),
+                          const SizedBox(width: 5),
+                          Expanded(child: widget.modeControls),
+                        ],
                       ),
                     ),
-                    const SizedBox(width: 8),
+                    const SizedBox(width: 6),
                     widget.sendButton,
                   ],
                 ),

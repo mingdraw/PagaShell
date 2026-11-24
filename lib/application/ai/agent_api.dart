@@ -2,9 +2,13 @@ part of 'agent_controller.dart';
 
 class _AgentApiState {
   final capabilityRevision = 0.obs;
+  final loadingModels = false.obs;
   final modelLimits = <(String, String), int>{};
   final modelDetails = <(String, String), AiAvailableModel>{};
   String? scope;
+  String? lastModelId;
+  Future<List<String>>? modelsFetch;
+  String? modelsFetchScope;
   AgentStreamReader? activeStream;
 }
 

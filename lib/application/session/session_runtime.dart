@@ -2,9 +2,10 @@ part of 'session_controller.dart';
 
 /// 仅在当前进程保存的会话资源；UI 继续使用不可变的 Session 快照。
 class _SessionRuntime {
-  _SessionRuntime({this.temporary = false});
+  _SessionRuntime({this.temporary = false, this.requireTrustedHostKey = false});
 
   final bool temporary;
+  final bool requireTrustedHostKey;
   SshCredentials? credentials;
   SshGateway? gateway;
   Completer<void>? connectionCancel;

@@ -57,6 +57,15 @@ class IdentityController extends GetxController {
     return null;
   }
 
+  /// 读仓库中的最新凭证，不依赖侧边栏订阅是否已完成首帧刷新。
+  Future<Identity?> findSaved(String? id) async {
+    if (id == null) return null;
+    for (final identity in await _repository.getAll()) {
+      if (identity.id == id) return identity;
+    }
+    return null;
+  }
+
   bool isNameTaken(String name, {String? folderId, String? excludeId}) =>
       identities.any(
         (identity) =>

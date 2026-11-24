@@ -1,10 +1,13 @@
 import 'dart:async';
+import 'dart:math' as math;
 
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
+import '../../application/ai/agent_api_codec.dart';
 import '../../application/ai/agent_controller.dart';
 import '../../application/ai/ai_settings_controller.dart';
 import '../../application/session/session_controller.dart';
@@ -41,6 +44,7 @@ class AgentPanelState extends State<AgentPanel> {
   late final AgentController _agent = Get.find<AgentController>();
   late final Worker _entries;
   final _stickToBottom = ValueNotifier<bool>(true);
+  final _modelPopover = shadcn.OverlayController();
   bool _bottomScheduled = false;
   bool _confirmingFullAccess = false;
 
@@ -97,6 +101,7 @@ class AgentPanelState extends State<AgentPanel> {
     _entries.dispose();
     _scroll.removeListener(_onScroll);
     _stickToBottom.dispose();
+    _modelPopover.dispose();
     _input.dispose();
     _focus.dispose();
     _scroll.dispose();
@@ -172,44 +177,11 @@ class AgentPanelState extends State<AgentPanel> {
               children: [
                 const AppIcon(AppIcons.bot, size: 17),
                 const SizedBox(width: 8),
-                const Text(
-                  'Agent',
-                  style: TextStyle(fontWeight: FontWeight.w600),
+                Text(
+                  'AI助手'.tr,
+                  style: const TextStyle(fontWeight: FontWeight.w600),
                 ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Obx(() {
-                    final model = _agent.currentModel?.model ?? '未选择模型'.tr;
-                    return Align(
-                      alignment: Alignment.centerLeft,
-                      child: shadcn.Tooltip(
-                        tooltip: (_) =>
-                            shadcn.TooltipContainer(child: Text(model)),
-                        child: AppSurfaceAction(
-                          key: const ValueKey('agent-model-trigger'),
-                          borderRadius: BorderRadius.circular(6),
-                          onTap: () => unawaited(showSettingsDialog(ai: true)),
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 6,
-                              vertical: 2,
-                            ),
-                            child: Text(
-                              model,
-                              key: const ValueKey('agent-model-name'),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                fontSize: 11,
-                                color: colors.mutedForeground,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    );
-                  }),
-                ),
+                const Spacer(),
                 AppIconButton(
                   key: const ValueKey('agent-history'),
                   semanticLabel: '历史对话'.tr,
@@ -480,11 +452,14 @@ class AgentPanelState extends State<AgentPanel> {
                       controller: _input,
                       focusNode: _focus,
                       onSend: _send,
-                      modeControls: Wrap(
-                        spacing: 12,
-                        runSpacing: 4,
-                        crossAxisAlignment: WrapCrossAlignment.center,
-                        children: [_reasoningSelector(), _accessSelector()],
+                      modeControls: _ComposerControlsRow(
+                        spacing: 6,
+                        minModelWidth: 36,
+                        children: [
+                          _modelSelector(),
+                          _reasoningSelector(),
+                          _accessSelector(),
+                        ],
                       ),
                       sendButton: ValueListenableBuilder<TextEditingValue>(
                         valueListenable: _input,
@@ -509,6 +484,118 @@ class AgentPanelState extends State<AgentPanel> {
       ),
     );
   }
+
+  Future<void> _selectActiveModel(String modelId) async {
+    _modelPopover.close();
+    try {
+      await _agent.selectActiveModel(modelId);
+    } on Object {
+      if (mounted) AppNotice.error('模型切换保存失败，请重试');
+    }
+  }
+
+  Future<void> _openModelPicker(BuildContext anchorContext) async {
+    final current = _agent.currentModel;
+    if (current == null) {
+      unawaited(showSettingsDialog(ai: true));
+      return;
+    }
+    if (_modelPopover.hasOpenOverlay) {
+      _modelPopover.close();
+      return;
+    }
+    var models = _agent.availableModels;
+    if (current.cachedModels.isEmpty) {
+      try {
+        models = await _agent.ensureCachedModels();
+      } on AgentApiException catch (error) {
+        if (mounted) AppNotice.error(error.message);
+        models = _agent.availableModels;
+      } on Object {
+        if (mounted) AppNotice.error('模型列表获取失败，请检查 API 地址或手动填写模型 ID');
+        models = _agent.availableModels;
+      }
+      if (!mounted || !anchorContext.mounted) return;
+    }
+    final latest = _agent.currentModel;
+    if (latest == null) return;
+    final options = models.isEmpty ? [latest.model] : models;
+    unawaited(
+      _modelPopover.show<void>(
+        anchorContext,
+        const shadcn.PopoverConfiguration(
+          widthConstraint: shadcn.PopoverConstraint.flexible,
+          anchorAlignment: Alignment.topLeft,
+          alignment: Alignment.bottomLeft,
+          offset: Offset(0, -6),
+        ),
+        adaptive: false,
+        builder: (_) => _AgentModelPicker(
+          models: options,
+          selected: latest.model,
+          onSelected: (id) => unawaited(_selectActiveModel(id)),
+          onOpenSettings: () {
+            _modelPopover.close();
+            unawaited(showSettingsDialog(ai: true));
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _modelSelector() => Builder(
+    builder: (anchorContext) => Obx(() {
+      final current = _agent.currentModel;
+      final loading = _agent.loadingModels.value;
+      final colors = shadcn.Theme.of(anchorContext).colorScheme;
+      final modelName = current?.model ?? '未选择模型'.tr;
+      final label = current == null
+          ? '配置 AI 模型'.tr
+          : '${'切换模型'.tr} · ${current.model}';
+      return AppIconButton.text(
+        key: const ValueKey('agent-model-select'),
+        semanticLabel: label,
+        tooltip: current?.model ?? '配置 AI 模型'.tr,
+        density: shadcn.ButtonDensity.compact,
+        onPressed: loading
+            ? null
+            : () => unawaited(_openModelPicker(anchorContext)),
+        icon: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (loading) ...[
+              const SizedBox.square(
+                dimension: 11,
+                child: shadcn.CircularProgressIndicator(),
+              ),
+              const SizedBox(width: 3),
+            ],
+            Flexible(
+              child: Text(
+                modelName,
+                key: const ValueKey('agent-model-name'),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                softWrap: false,
+                style: TextStyle(
+                  fontSize: 11,
+                  color: current == null ? colors.mutedForeground : null,
+                ),
+              ),
+            ),
+            if (current != null && !loading) ...[
+              const SizedBox(width: 1),
+              AppIcon(
+                AppIcons.chevronDown,
+                size: 11,
+                color: colors.mutedForeground,
+              ),
+            ],
+          ],
+        ),
+      );
+    }),
+  );
 
   Widget _reasoningSelector() => Builder(
     builder: (context) => Obx(() {
@@ -536,13 +623,16 @@ class AgentPanelState extends State<AgentPanel> {
         icon: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const AppIcon(AppIcons.brain, size: 14),
-            const SizedBox(width: 4),
-            Text(
-              selected.label.tr,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 11),
+            const AppIcon(AppIcons.brain, size: 13),
+            const SizedBox(width: 2),
+            Flexible(
+              child: Text(
+                selected.label.tr,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                softWrap: false,
+                style: const TextStyle(fontSize: 11),
+              ),
             ),
           ],
         ),
@@ -614,11 +704,13 @@ class AgentPanelState extends State<AgentPanel> {
                 );
               },
         icon: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+          padding: isFull
+              ? const EdgeInsets.symmetric(horizontal: 4, vertical: 1)
+              : EdgeInsets.zero,
           decoration: isFull
               ? BoxDecoration(
                   border: Border.all(color: accent.withValues(alpha: 0.65)),
-                  borderRadius: BorderRadius.circular(6),
+                  borderRadius: BorderRadius.circular(5),
                 )
               : null,
           child: Row(
@@ -626,22 +718,25 @@ class AgentPanelState extends State<AgentPanel> {
             children: [
               AppIcon(
                 isFull ? AppIcons.shieldOff : AppIcons.shieldCheck,
-                size: 14,
+                size: 13,
                 color: isFull ? accent : null,
               ),
-              const SizedBox(width: 4),
-              Text(
-                selected.label.tr,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontSize: 11,
-                  color: isFull
-                      ? accent
-                      : isReadOnly
-                      ? StatusColors.ready
-                      : null,
-                  fontWeight: isFull || isReadOnly ? FontWeight.w600 : null,
+              const SizedBox(width: 2),
+              Flexible(
+                child: Text(
+                  selected.label.tr,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  softWrap: false,
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: isFull
+                        ? accent
+                        : isReadOnly
+                        ? StatusColors.ready
+                        : null,
+                    fontWeight: isFull || isReadOnly ? FontWeight.w600 : null,
+                  ),
                 ),
               ),
             ],
@@ -1173,4 +1268,373 @@ class _AgentActivityItem extends StatelessWidget {
             ),
     );
   });
+}
+
+class _AgentModelPicker extends StatefulWidget {
+  const _AgentModelPicker({
+    required this.models,
+    required this.selected,
+    required this.onSelected,
+    required this.onOpenSettings,
+  });
+
+  final List<String> models;
+  final String selected;
+  final ValueChanged<String> onSelected;
+  final VoidCallback onOpenSettings;
+
+  @override
+  State<_AgentModelPicker> createState() => _AgentModelPickerState();
+}
+
+class _AgentModelPickerState extends State<_AgentModelPicker> {
+  late final TextEditingController _search = TextEditingController();
+  String _query = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _search.addListener(() {
+      final next = _search.text.trim().toLowerCase();
+      if (next != _query) setState(() => _query = next);
+    });
+  }
+
+  @override
+  void dispose() {
+    _search.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = shadcn.Theme.of(context).colorScheme;
+    final filtered = _query.isEmpty
+        ? widget.models
+        : widget.models
+              .where((id) => id.toLowerCase().contains(_query))
+              .toList();
+    return shadcn.WidgetStatesProvider.boundary(
+      child: SizedBox(
+        width: (MediaQuery.sizeOf(context).width - 32).clamp(180.0, 260.0),
+        child: shadcn.SurfaceCard(
+          key: const ValueKey('agent-model-popover'),
+          theme: const shadcn.CardTheme(padding: EdgeInsets.all(6)),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (widget.models.length > 6) ...[
+                shadcn.TextField(
+                  key: const ValueKey('agent-model-search'),
+                  controller: _search,
+                  placeholder: Text(
+                    '搜索模型…'.tr,
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                  style: const TextStyle(fontSize: 12),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 6,
+                  ),
+                ),
+                const SizedBox(height: 6),
+              ],
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 220),
+                child: filtered.isEmpty
+                    ? Padding(
+                        padding: const EdgeInsets.all(8),
+                        child: Text(
+                          '没有匹配的模型'.tr,
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: colors.mutedForeground,
+                          ),
+                        ),
+                      )
+                    : SingleChildScrollView(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            for (final id in filtered)
+                              shadcn.SelectedButton(
+                                key: ValueKey('agent-model-option-$id'),
+                                value: id == widget.selected,
+                                alignment: Alignment.centerLeft,
+                                onChanged: (_) => widget.onSelected(id),
+                                child: Row(
+                                  children: [
+                                    SizedBox.square(
+                                      dimension: 14,
+                                      child: id == widget.selected
+                                          ? const AppIcon(
+                                              AppIcons.check,
+                                              size: 13,
+                                            )
+                                          : null,
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Expanded(
+                                      child: Text(
+                                        id,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(fontSize: 12),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+              ),
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Container(height: 1, color: AppTheme.border(context)),
+              ),
+              shadcn.GhostButton(
+                key: const ValueKey('agent-model-open-settings'),
+                density: shadcn.ButtonDensity.compact,
+                alignment: Alignment.centerLeft,
+                onPressed: widget.onOpenSettings,
+                child: Row(
+                  children: [
+                    AppIcon(
+                      AppIcons.refreshCw,
+                      size: 13,
+                      color: colors.mutedForeground,
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        '在 AI 设置中刷新模型列表'.tr,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: colors.mutedForeground,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ComposerControlsRowParentData
+    extends ContainerBoxParentData<RenderBox> {}
+
+/// 单行紧密排列输入框底部控制项：空间不足时不换行，优先压缩首位模型名称并以省略号显示。
+class _ComposerControlsRow extends MultiChildRenderObjectWidget {
+  const _ComposerControlsRow({
+    required this.spacing,
+    required this.minModelWidth,
+    required super.children,
+  });
+
+  final double spacing;
+  final double minModelWidth;
+
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      _RenderComposerControlsRow(
+        spacing: spacing,
+        minModelWidth: minModelWidth,
+      );
+
+  @override
+  void updateRenderObject(
+    BuildContext context,
+    covariant _RenderComposerControlsRow renderObject,
+  ) {
+    renderObject
+      ..spacing = spacing
+      ..minModelWidth = minModelWidth;
+  }
+}
+
+class _RenderComposerControlsRow extends RenderBox
+    with
+        ContainerRenderObjectMixin<RenderBox, _ComposerControlsRowParentData>,
+        RenderBoxContainerDefaultsMixin<
+          RenderBox,
+          _ComposerControlsRowParentData
+        > {
+  _RenderComposerControlsRow({
+    required this._spacing,
+    required this._minModelWidth,
+  });
+
+  double _spacing;
+  double get spacing => _spacing;
+  set spacing(double value) {
+    if (_spacing == value) return;
+    _spacing = value;
+    markNeedsLayout();
+  }
+
+  double _minModelWidth;
+  double get minModelWidth => _minModelWidth;
+  set minModelWidth(double value) {
+    if (_minModelWidth == value) return;
+    _minModelWidth = value;
+    markNeedsLayout();
+  }
+
+  @override
+  void setupParentData(RenderBox child) {
+    if (child.parentData is! _ComposerControlsRowParentData) {
+      child.parentData = _ComposerControlsRowParentData();
+    }
+  }
+
+  @override
+  double computeMinIntrinsicWidth(double height) => 0;
+
+  @override
+  double computeMaxIntrinsicWidth(double height) {
+    var total = 0.0;
+    var count = 0;
+    var child = firstChild;
+    while (child != null) {
+      total += child.getMaxIntrinsicWidth(height);
+      count++;
+      child = childAfter(child);
+    }
+    if (count > 1) total += spacing * (count - 1);
+    return total;
+  }
+
+  @override
+  double computeMinIntrinsicHeight(double width) {
+    var height = 0.0;
+    var child = firstChild;
+    while (child != null) {
+      height = math.max(height, child.getMinIntrinsicHeight(width));
+      child = childAfter(child);
+    }
+    return height;
+  }
+
+  @override
+  double computeMaxIntrinsicHeight(double width) {
+    var height = 0.0;
+    var child = firstChild;
+    while (child != null) {
+      height = math.max(height, child.getMaxIntrinsicHeight(width));
+      child = childAfter(child);
+    }
+    return height;
+  }
+
+  @override
+  double? computeDistanceToActualBaseline(TextBaseline baseline) =>
+      defaultComputeDistanceToFirstActualBaseline(baseline);
+
+  @override
+  void performLayout() {
+    final items = <RenderBox>[];
+    var child = firstChild;
+    while (child != null) {
+      items.add(child);
+      child = childAfter(child);
+    }
+    if (items.isEmpty) {
+      size = constraints.smallest;
+      return;
+    }
+
+    final maxWidth = constraints.maxWidth;
+    final maxHeight = constraints.maxHeight;
+    final totalSpacing = spacing * (items.length - 1);
+    final available = maxWidth.isFinite
+        ? math.max(0.0, maxWidth - totalSpacing)
+        : double.infinity;
+
+    if (items.length == 1 || !available.isFinite) {
+      final loose = BoxConstraints(maxWidth: available, maxHeight: maxHeight);
+      for (final item in items) {
+        item.layout(loose, parentUsesSize: true);
+      }
+    } else {
+      final model = items.first;
+      final others = items.sublist(1);
+      final loose = BoxConstraints(maxWidth: available, maxHeight: maxHeight);
+      var othersWidth = 0.0;
+      for (final item in others) {
+        item.layout(loose, parentUsesSize: true);
+        othersWidth += item.size.width;
+      }
+      final preferredMinModel = math.min(minModelWidth, available);
+      if (othersWidth + preferredMinModel <= available) {
+        final modelBudget = math.max(0.0, available - othersWidth);
+        model.layout(
+          BoxConstraints(maxWidth: modelBudget, maxHeight: maxHeight),
+          parentUsesSize: true,
+        );
+      } else {
+        final modelBudget = math.min(preferredMinModel, available * 0.34);
+        model.layout(
+          BoxConstraints(maxWidth: modelBudget, maxHeight: maxHeight),
+          parentUsesSize: true,
+        );
+        final othersBudget = math.max(0.0, available - model.size.width);
+        if (othersWidth > 0 && othersWidth > othersBudget) {
+          var remainingBudget = othersBudget;
+          var remainingNatural = othersWidth;
+          for (var i = 0; i < others.length; i++) {
+            final item = others[i];
+            final natural = item.size.width;
+            final share = i == others.length - 1
+                ? remainingBudget
+                : (remainingBudget * (natural / remainingNatural)).clamp(
+                    0.0,
+                    remainingBudget,
+                  );
+            item.layout(
+              BoxConstraints(maxWidth: share, maxHeight: maxHeight),
+              parentUsesSize: true,
+            );
+            remainingBudget = math.max(0.0, remainingBudget - item.size.width);
+            remainingNatural = math.max(0.0, remainingNatural - natural);
+          }
+        }
+      }
+    }
+
+    var rowHeight = 0.0;
+    var totalWidth = 0.0;
+    for (var i = 0; i < items.length; i++) {
+      final itemSize = items[i].size;
+      rowHeight = math.max(rowHeight, itemSize.height);
+      totalWidth += itemSize.width;
+      if (i > 0) totalWidth += spacing;
+    }
+
+    var x = 0.0;
+    for (final item in items) {
+      final data = item.parentData! as _ComposerControlsRowParentData;
+      data.offset = Offset(x, (rowHeight - item.size.height) / 2);
+      x += item.size.width + spacing;
+    }
+
+    size = constraints.constrain(Size(totalWidth, rowHeight));
+  }
+
+  @override
+  bool hitTestChildren(BoxHitTestResult result, {required Offset position}) =>
+      defaultHitTestChildren(result, position: position);
+
+  @override
+  void paint(PaintingContext context, Offset offset) =>
+      defaultPaint(context, offset);
 }

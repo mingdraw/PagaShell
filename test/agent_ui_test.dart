@@ -773,18 +773,27 @@ ss -lntp
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  testWidgets('Agent 标题显示设置模型，无刷新和模型下拉，输入框可选择思考强度', (tester) async {
+  testWidgets('输入框支持切换模型并缓存模型列表，可在 AI 设置重新拉取，并可选择思考强度', (tester) async {
+    var modelFetchCount = 0;
     final connect = FakeAiConnect(
       (_) => openAiReply('OK'),
-      getHandler: (_) => const Response<dynamic>(
-        statusCode: 200,
-        body: {
-          'data': [
-            {'id': 'api-beta'},
-            {'id': 'api-alpha'},
-          ],
-        },
-      ),
+      getHandler: (_) {
+        modelFetchCount++;
+        return Response<dynamic>(
+          statusCode: 200,
+          body: {
+            'data': modelFetchCount == 1
+                ? [
+                    {'id': 'api-beta'},
+                    {'id': 'api-alpha'},
+                  ]
+                : [
+                    {'id': 'api-gamma'},
+                    {'id': 'api-beta'},
+                  ],
+          },
+        );
+      },
     );
     final capture = await pump(tester, connect: connect);
     await configure(tester);
@@ -792,29 +801,141 @@ ss -lntp
     await tester.pumpAndSettle();
     final agent = Get.find<AgentController>();
     expect(agent.currentModel!.model, 'test-model');
-    expect(find.text('test-model').hitTestable(), findsOneWidget);
-    expect(find.byKey(const ValueKey('agent-model-select')), findsNothing);
-    expect(find.byKey(const ValueKey('agent-model-refresh')), findsNothing);
+    expect(modelFetchCount, 0);
+    expect(find.byKey(const ValueKey('agent-model-select')), findsOneWidget);
     expect(find.byKey(const ValueKey('agent-model-name')), findsOneWidget);
-    final title = tester.getRect(find.text('Agent').first);
-    final model = tester.getRect(
-      find.byKey(const ValueKey('agent-model-name')),
+    expect(find.byKey(const ValueKey('agent-model-refresh')), findsNothing);
+    final title = tester.getRect(find.text('AI助手').first);
+    final addContext = find.byKey(const ValueKey('agent-add-context'));
+    final modelSelect = find.byKey(const ValueKey('agent-model-select'));
+    final reasoningSelect = find.byKey(
+      const ValueKey('agent-reasoning-select'),
     );
-    expect(model.left, greaterThan(title.right));
-    expect(model.center.dy, closeTo(title.center.dy, 1));
-    expect(
-      find.byKey(const ValueKey('agent-history')).hitTestable(),
-      findsOneWidget,
-    );
-    expect(
-      Get.find<AiSettingsController>().state.value.apiConfig!.model,
-      'test-model',
-    );
-    final reasoning = find.byKey(const ValueKey('agent-reasoning-select'));
+    final accessSelect = find.byKey(const ValueKey('agent-access-select'));
     final input = find.descendant(
       of: find.byKey(const ValueKey('agent-input')),
       matching: find.byType(shadcn.TextField),
     );
+    expect(
+      tester.getRect(input).contains(tester.getCenter(modelSelect)),
+      isTrue,
+    );
+    expect(tester.getRect(modelSelect).top, greaterThan(title.bottom));
+    // 模型选择器位于「+」与思考模式之间，且整行保持单行紧密排列不换行。
+    final addRect = tester.getRect(addContext);
+    final modelRect = tester.getRect(modelSelect);
+    final reasoningRect = tester.getRect(reasoningSelect);
+    final accessRect = tester.getRect(accessSelect);
+    expect(addRect.right, lessThanOrEqualTo(modelRect.left));
+    expect(modelRect.right, lessThanOrEqualTo(reasoningRect.left));
+    expect(reasoningRect.right, lessThanOrEqualTo(accessRect.left));
+    expect(
+      (addRect.center.dy - modelRect.center.dy).abs(),
+      lessThanOrEqualTo(4),
+    );
+    expect(
+      (modelRect.center.dy - reasoningRect.center.dy).abs(),
+      lessThanOrEqualTo(4),
+    );
+    expect(
+      (reasoningRect.center.dy - accessRect.center.dy).abs(),
+      lessThanOrEqualTo(4),
+    );
+    expect(
+      tester
+          .widget<Text>(find.byKey(const ValueKey('agent-model-name')))
+          .overflow,
+      TextOverflow.ellipsis,
+    );
+    expect(
+      find.byKey(const ValueKey('agent-history')).hitTestable(),
+      findsOneWidget,
+    );
+
+    // 首次点击输入框模型选择器：懒加载一次并缓存，可切换到 api-beta。
+    await tester.tap(modelSelect);
+    await pumpModelOptions(tester);
+    expect(modelFetchCount, 1);
+    expect(find.byKey(const ValueKey('agent-model-popover')), findsOneWidget);
+    expect(find.text('api-alpha').hitTestable(), findsOneWidget);
+    expect(find.text('api-beta').hitTestable(), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('agent-model-option-api-beta')));
+    await tester.pumpAndSettle();
+    expect(agent.currentModel!.model, 'api-beta');
+    expect(
+      Get.find<AiSettingsController>().state.value.apiConfig!.model,
+      'api-beta',
+    );
+    expect(
+      Get.find<AiSettingsController>().state.value.apiConfig!.cachedModels,
+      ['api-alpha', 'api-beta'],
+    );
+
+    // 输入框聚焦状态下再次打开模型选择器：直接读取缓存，且未选中项不继承输入框的悬停底色。
+    final editable = find.descendant(
+      of: input,
+      matching: find.byType(EditableText),
+    );
+    await tester.tap(editable);
+    await tester.pumpAndSettle();
+    expect(tester.widget<EditableText>(editable).focusNode.hasFocus, isTrue);
+    await tester.tap(modelSelect);
+    await pumpModelOptions(tester);
+    expect(modelFetchCount, 1);
+    expect(find.text('api-alpha').hitTestable(), findsOneWidget);
+    final unselectedOption = find.byKey(
+      const ValueKey('agent-model-option-api-alpha'),
+    );
+    final selectedOption = find.byKey(
+      const ValueKey('agent-model-option-api-beta'),
+    );
+    final unselectedStates = shadcn.Data.maybeOf<shadcn.WidgetStatesData>(
+      tester.element(unselectedOption),
+    )?.states;
+    expect(unselectedStates?.contains(WidgetState.hovered) ?? false, isFalse);
+    final unselectedBox = tester.widget<shadcn.OverflowDecoratedBox>(
+      find.descendant(
+        of: unselectedOption,
+        matching: find.byType(shadcn.OverflowDecoratedBox),
+      ),
+    );
+    final selectedBox = tester.widget<shadcn.OverflowDecoratedBox>(
+      find.descendant(
+        of: selectedOption,
+        matching: find.byType(shadcn.OverflowDecoratedBox),
+      ),
+    );
+    final unselectedColor = (unselectedBox.decoration as BoxDecoration).color;
+    final selectedColor = (selectedBox.decoration as BoxDecoration).color;
+    expect(unselectedColor, isNot(selectedColor));
+    expect(unselectedColor?.a ?? 0, 0);
+    expect(selectedColor?.a ?? 0, greaterThan(0));
+
+    // 通过底部入口进入 AI 设置重新拉取模型列表，立即刷新缓存。
+    await tester.tap(find.byKey(const ValueKey('agent-model-open-settings')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('ai-model-refresh')));
+    await pumpModelOptions(tester);
+    expect(modelFetchCount, 2);
+    // 先关闭 AutoComplete 候选层，再关闭设置弹窗（不点击保存，保留刷新后的模型缓存）。
+    await tester.tap(find.text('api-gamma').hitTestable());
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('关闭'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('settings-tabs')), findsNothing);
+
+    // 重新打开输入框模型选择器：已看到新拉取的 api-gamma，且无额外请求。
+    await tester.tap(modelSelect);
+    await pumpModelOptions(tester);
+    expect(modelFetchCount, 2);
+    expect(find.text('api-gamma').hitTestable(), findsOneWidget);
+    await tester.tap(
+      find.byKey(const ValueKey('agent-model-option-api-gamma')),
+    );
+    await tester.pumpAndSettle();
+    expect(agent.currentModel!.model, 'api-gamma');
+
+    final reasoning = find.byKey(const ValueKey('agent-reasoning-select'));
     expect(tester.getRect(input).contains(tester.getCenter(reasoning)), isTrue);
     await tester.tap(reasoning);
     await pumpModelOptions(tester);
@@ -830,9 +951,33 @@ ss -lntp
     await tester.pump();
     await tester.tap(find.byKey(const ValueKey('agent-send')));
     await tester.pumpAndSettle();
-    expect(connect.requests.last.body['model'], 'test-model');
+    expect(connect.requests.last.body['model'], 'api-gamma');
     expect(connect.requests.last.body['reasoning_effort'], 'high');
     await _capture(tester, capture, 'agent-model-reasoning');
+    // 窄窗口 + 超长模型名称时仍单行展示不换行，由模型名称省略号截断。
+    await agent.selectActiveModel(
+      'deepseek-v4.1-flash-ultra-long-preview-edition-20261124',
+    );
+    tester.view.physicalSize = const Size(800, 600);
+    await tester.pumpAndSettle();
+    final narrowAdd = tester.getRect(addContext);
+    final narrowModel = tester.getRect(modelSelect);
+    final narrowReasoning = tester.getRect(reasoningSelect);
+    final narrowAccess = tester.getRect(accessSelect);
+    final narrowSend = tester.getRect(find.byKey(const ValueKey('agent-send')));
+    expect(narrowAdd.right, lessThanOrEqualTo(narrowModel.left));
+    expect(narrowModel.right, lessThanOrEqualTo(narrowReasoning.left));
+    expect(narrowReasoning.right, lessThanOrEqualTo(narrowAccess.left));
+    expect(narrowAccess.right, lessThanOrEqualTo(narrowSend.left));
+    expect(
+      (narrowModel.center.dy - narrowReasoning.center.dy).abs(),
+      lessThanOrEqualTo(4),
+    );
+    expect(
+      (narrowReasoning.center.dy - narrowAccess.center.dy).abs(),
+      lessThanOrEqualTo(4),
+    );
+    expect(narrowModel.width, lessThan(180));
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });

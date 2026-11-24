@@ -7,6 +7,7 @@ import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 import '../../application/ai/agent_api_codec.dart';
 import '../../application/ai/agent_controller.dart';
 import '../../application/ai/ai_settings_controller.dart';
+import '../../application/mcp/mcp_server_controller.dart';
 import '../../application/settings/settings_controller.dart';
 import '../../domain/ai/ai_model.dart';
 import '../../domain/entities/app_proxy_settings.dart';
@@ -22,6 +23,7 @@ import '../navigation/app_navigation.dart';
 import '../navigation/app_notice.dart';
 import '../theme/app_theme.dart';
 import 'about_settings_section.dart';
+import 'mcp_settings_section.dart';
 import 'quick_commands_settings_section.dart';
 import 'terminal_settings_section.dart';
 
@@ -139,6 +141,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
   void _hydrateAi() {
     _config = _settings.state.value.apiConfig;
     _syncAiFields(_config);
+    _models = List.of(_config?.cachedModels ?? const []);
     _aiHydrated = true;
   }
 
@@ -289,6 +292,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
         baseUrl: _url.text,
         defaultModel: _model.text,
         apiKey: _key.text,
+        cachedModels: _models,
       );
       if (!mounted) return;
       _config = _settings.state.value.apiConfig;
@@ -353,9 +357,26 @@ class _SettingsDialogState extends State<SettingsDialog> {
         apiKey: _key.text,
         modelConfigId: _config?.id,
       );
+      final ids = models.map((model) => model.id).toList();
+      if (!mounted || generation != _refreshGeneration) return;
+      final saved = _config;
+      if (saved != null &&
+          _key.text.trim().isEmpty &&
+          saved.format == _format &&
+          AiModelConfig.modelsEndpoint(saved.baseUrl) ==
+              AiModelConfig.modelsEndpoint(_url.text.trim())) {
+        try {
+          await _settings.updateCachedModels(saved.id, ids);
+          if (mounted && generation == _refreshGeneration) {
+            _config = _settings.state.value.apiConfig;
+          }
+        } on Object {
+          // 缓存保存失败不阻断当前表单下拉选择。
+        }
+      }
       if (!mounted || generation != _refreshGeneration) return;
       setState(() {
-        _models = models.map((model) => model.id).toList();
+        _models = ids;
         _showAllModels = true;
         if (_models.isEmpty) _modelsError = '服务商未返回可用模型，可手动填写模型 ID';
       });
@@ -449,7 +470,18 @@ class _SettingsDialogState extends State<SettingsDialog> {
                 ],
               )
             else
-              _aiForm(context, busy: busy),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _aiForm(context, busy: busy),
+                  if (Get.isRegistered<McpServerController>()) ...[
+                    const SizedBox(height: 24),
+                    Container(height: 1, color: AppTheme.border(context)),
+                    const SizedBox(height: 20),
+                    const McpSettingsSection(),
+                  ],
+                ],
+              ),
           ],
         ),
         actions: [

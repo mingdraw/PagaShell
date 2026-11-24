@@ -5,6 +5,7 @@ import 'dart:math';
 import 'package:get/get.dart';
 
 import '../../domain/ai/ai_model.dart';
+import '../../domain/mcp/mcp_models.dart';
 import '../../domain/repositories/ai_settings_repository.dart';
 import '../../domain/vault/secret_store.dart';
 
@@ -82,6 +83,7 @@ class AiSettingsController extends GetxController {
     required String baseUrl,
     required String model,
     String? apiKey,
+    List<String>? cachedModels,
   }) => _queue(
     () => _saveModel(
       id: id,
@@ -90,6 +92,7 @@ class AiSettingsController extends GetxController {
       baseUrl: baseUrl,
       model: model,
       apiKey: apiKey,
+      cachedModels: cachedModels,
     ),
   );
 
@@ -98,6 +101,7 @@ class AiSettingsController extends GetxController {
     required String baseUrl,
     required String defaultModel,
     String? apiKey,
+    List<String>? cachedModels,
   }) => _queue(
     () => _saveModel(
       id: state.value.apiConfig?.id,
@@ -106,6 +110,7 @@ class AiSettingsController extends GetxController {
       baseUrl: baseUrl,
       model: defaultModel,
       apiKey: apiKey,
+      cachedModels: cachedModels,
     ),
   );
 
@@ -116,6 +121,7 @@ class AiSettingsController extends GetxController {
     required String baseUrl,
     required String model,
     String? apiKey,
+    List<String>? cachedModels,
   }) async {
     final old = state.value.models.where((m) => m.id == id).firstOrNull;
     final endpointError = AiModelConfig.validateEndpoint(baseUrl);
@@ -130,6 +136,17 @@ class AiSettingsController extends GetxController {
     }
     final replacingKey = key != null && key.isNotEmpty;
     final ref = replacingKey ? 'ai-api-${_id()}' : old!.secretRef;
+    final sameProvider =
+        old != null &&
+        !replacingKey &&
+        old.format == format &&
+        AiModelConfig.modelsEndpoint(old.baseUrl) ==
+            AiModelConfig.modelsEndpoint(baseUrl);
+    final effectiveCachedModels = cachedModels != null
+        ? AiModelConfig.normalizeModelIds(cachedModels)
+        : sameProvider
+        ? old.cachedModels
+        : const <String>[];
     final config = AiModelConfig(
       id: old?.id ?? _id(),
       name: name.trim(),
@@ -137,6 +154,7 @@ class AiSettingsController extends GetxController {
       baseUrl: baseUrl.trim(),
       model: model.trim(),
       secretRef: ref,
+      cachedModels: effectiveCachedModels,
     );
     if (replacingKey) {
       // 先记录新引用再写密文；后续任一步失败或进程退出后仍可发现并清理。
@@ -200,6 +218,41 @@ class AiSettingsController extends GetxController {
     await _commit(state.value.copyWith(selectedModelId: id));
   });
 
+  /// 切换当前 API 配置所使用的模型 ID，并保留原有密钥与缓存模型目录。
+  Future<void> setActiveModelId(String modelId) => _queue(() async {
+    final trimmed = modelId.trim();
+    final current = state.value.apiConfig;
+    if (trimmed.isEmpty || current == null || current.model == trimmed) return;
+    final models = [...state.value.models];
+    final index = models.indexOf(current);
+    if (index < 0) return;
+    models[index] = current.withModel(trimmed);
+    await _commit(state.value.copyWith(models: List.unmodifiable(models)));
+  });
+
+  /// 更新指定 API 配置的本地缓存模型列表，避免每次切换重复请求服务商。
+  Future<void> updateCachedModels(
+    String configId,
+    Iterable<String> cachedModels,
+  ) => _queue(() async {
+    final normalized = AiModelConfig.normalizeModelIds(cachedModels);
+    final models = [...state.value.models];
+    final index = models.indexWhere((m) => m.id == configId);
+    if (index < 0) return;
+    final existing = models[index];
+    if (_sameList(existing.cachedModels, normalized)) return;
+    models[index] = existing.withCachedModels(normalized);
+    await _commit(state.value.copyWith(models: List.unmodifiable(models)));
+  });
+
+  static bool _sameList(List<String> a, List<String> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
   Future<void> setPanel({bool? visible, double? width}) => _queue(() async {
     await _commit(
       state.value.copyWith(
@@ -221,6 +274,89 @@ class AiSettingsController extends GetxController {
     ),
   );
 
+  Future<void> saveMcpConfig({
+    bool? enabled,
+    int? port,
+    McpAccessMode? accessMode,
+  }) => _queue(() async {
+    if (port != null &&
+        (port < McpServerConfig.minPort || port > McpServerConfig.maxPort)) {
+      throw const AiSettingsException('请输入 1024–65535 之间的有效端口号');
+    }
+    await _commit(
+      state.value.copyWith(
+        mcp: state.value.mcp.copyWith(
+          enabled: enabled,
+          port: port,
+          accessMode: accessMode,
+        ),
+      ),
+    );
+  });
+
+  /// 读取当前已保存的 MCP Bearer 令牌；未生成或密文缺失时返回 null。
+  Future<String?> readMcpToken() async {
+    await ready;
+    final ref = state.value.mcp.tokenSecretRef;
+    if (ref == null || ref.isEmpty) return null;
+    final token = await _secretStore.read(ref);
+    if (token == null || token.trim().isEmpty) return null;
+    return token.trim();
+  }
+
+  /// 确保本地 MCP 服务拥有一个高熵 Bearer 令牌；[rotate] 为 true 时轮换并清理旧密文。
+  Future<String> ensureMcpToken({bool rotate = false}) {
+    String? resultToken;
+    return _queue(() async {
+      final oldRef = state.value.mcp.tokenSecretRef;
+      if (!rotate && oldRef != null && oldRef.isNotEmpty) {
+        final existing = await _secretStore.read(oldRef);
+        if (existing != null && existing.trim().isNotEmpty) {
+          resultToken = existing.trim();
+          return;
+        }
+      }
+      final newRef = 'mcp-token-${_id()}';
+      final newToken = base64UrlEncode(
+        List<int>.generate(32, (_) => Random.secure().nextInt(256)),
+      ).replaceAll('=', '');
+      await _commit(
+        state.value.copyWith(
+          pendingSecretDeletes: [...state.value.pendingSecretDeletes, newRef],
+        ),
+      );
+      try {
+        await _secretStore.put(newRef, newToken);
+      } on Object {
+        await _cleanSecrets();
+        rethrow;
+      }
+      final next = state.value.copyWith(
+        mcp: state.value.mcp.copyWith(tokenSecretRef: newRef),
+        pendingSecretDeletes: [
+          ...state.value.pendingSecretDeletes.where(
+            (pending) => pending != newRef,
+          ),
+          if (oldRef != null && oldRef.isNotEmpty && oldRef != newRef) oldRef,
+        ],
+      );
+      try {
+        await _repository.save(next);
+      } on Object {
+        await _cleanSecrets();
+        rethrow;
+      }
+      if (!isClosed) state.value = next;
+      await _cleanSecrets();
+      resultToken = newToken;
+    }).then((_) {
+      if (resultToken == null) {
+        throw const AiSettingsException('AI 设置保存失败，请重试');
+      }
+      return resultToken!;
+    });
+  }
+
   Future<void> _commit(AiSettings next) async {
     await _repository.save(next);
     if (!isClosed) state.value = next;
@@ -230,7 +366,10 @@ class AiSettingsController extends GetxController {
   Future<void> _cleanSecrets() async {
     final remaining = <String>[];
     for (final ref in state.value.pendingSecretDeletes.toSet()) {
-      if (state.value.models.any((m) => m.secretRef == ref)) continue;
+      if (state.value.models.any((m) => m.secretRef == ref) ||
+          state.value.mcp.tokenSecretRef == ref) {
+        continue;
+      }
       try {
         await _secretStore.delete(ref);
       } on Object {

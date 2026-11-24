@@ -387,7 +387,7 @@ void main() {
     );
     expect(input.controller.text, '排查 SSH 服务或端口异常');
 
-    await tester.tap(find.byKey(const ValueKey('agent-model-trigger')));
+    await tester.tap(find.byKey(const ValueKey('agent-model-select')));
     await tester.pumpAndSettle();
     expect(find.byType(SettingsDialog), findsOneWidget);
     await tester.tap(find.text('关闭'));

@@ -31,6 +31,7 @@ import '../infrastructure/db/drift_known_host_repository.dart';
 import '../infrastructure/db/drift_settings_repository.dart';
 import '../infrastructure/files/io_local_file_repository.dart';
 import '../infrastructure/files/system_clipboard.dart';
+import '../infrastructure/mcp/local_mcp_http_server.dart';
 import '../infrastructure/proxy/desktop_system_proxy.dart';
 import '../infrastructure/proxy/desktop_system_proxy_lookup.dart';
 import '../infrastructure/ssh/rust_ssh_engine.dart';
@@ -49,6 +50,7 @@ import 'hosts/host_tree_controller.dart';
 import 'identities/identity_controller.dart';
 import 'identities/identity_folder_controller.dart';
 import 'identities/identity_tree_controller.dart';
+import 'mcp/mcp_server_controller.dart';
 import 'network/app_connect.dart';
 import 'network/app_proxy_resolver.dart';
 import 'session/session_controller.dart';
@@ -274,6 +276,18 @@ class AppBinding extends Bindings {
         repository: treeRepository,
         folders: folders,
         hosts: hosts,
+      ),
+      permanent: true,
+    );
+    Get.put<McpServerController>(
+      McpServerController(
+        aiSettings: aiSettings,
+        sessions: sessions,
+        hosts: hosts,
+        gateways: gateways,
+        identities: identities,
+        knownHosts: knownHosts,
+        serverFactory: const LocalMcpServerFactory(),
       ),
       permanent: true,
     );

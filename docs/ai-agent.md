@@ -44,6 +44,36 @@ Agent 位于主窗口右侧，可以巡检已连接的 SSH 服务器、后台执
 - 每轮最多执行 24 批工具调用。到达上限可点「继续执行」，在原模型和会话仍有效时保留已完成步骤并接着处理。先发送新消息则使用已有记录开始下一轮。已执行过工具的中断请求请查看记录后再提交指令，避免重复执行。
 - 标题栏可新建对话、搜索并打开历史，或删除不需要的记录。历史在本机加密保存；重新打开历史后，需要重新选择会话引用。
 
+## 本地 MCP 服务（供 Codex 等外部工具调用）
+
+PagaShell 内置纯本地 **MCP Streamable HTTP** 服务，允许本机的 **OpenAI Codex CLI**、**Claude Code**、**Cursor** 等外部工具直接复用 PagaShell 已建立的 SSH 会话和已保存的 SSH 服务进行巡检、命令执行、配置修改与回滚。
+
+### 启用与接入
+
+1. 打开「设置 → AI 设置」，下滑至 **本地 MCP 服务** 区域（无需先配置第三方模型 API Key）。
+2. 开启「启用本地 MCP 服务」（默认关闭）。服务仅监听 `http://127.0.0.1:<端口>/mcp`（默认端口 `47321`），并自动生成高熵 Bearer 令牌存入本机凭据保险库/钥匙串。
+3. 点击「复制 Codex 配置」，粘贴到 `~/.codex/config.toml`：
+
+```toml
+[mcp_servers.pagashell]
+url = "http://127.0.0.1:47321/mcp"
+http_headers = { "Authorization" = "Bearer <token>" }
+```
+
+也可点击「复制 MCP JSON」用于 Claude Code、Cursor 等标准 MCP HTTP 客户端。
+
+### 安全与访问策略
+
+- **回环绑定与防重绑定**：仅绑定 `127.0.0.1`，严格校验 `Host` 与 `Origin` 请求头，强制 `Authorization: Bearer` 常量时间校验；支持随时在设置中重置令牌，旧令牌立即失效。
+- **权限模式**：
+  - **完全放行（默认）**：暴露巡检、按需连接、后台命令、配置编辑、回滚与交互终端发送工具，由 Codex 等外部工具自身流程审批。
+  - **只读模式**：隐藏并拒绝 `edit_remote_file`、`rollback_remote_file`、`send_terminal_command`，`exec_ssh_command` 仅允许白名单只读命令。切换模式后会通过 SSE 推送 `notifications/tools/list_changed`。
+- **凭据与主机指纹保护**：所有工具、资源与审计日志均不返回密码、私钥、口令、API Key 或主机备注，并自动脱敏敏感赋值与私钥块；`connect_host` 仅支持已保存凭据且**主机指纹已在 PagaShell 中确认信任**的 SSH 服务，拒绝未信任或已变更指纹的主机；`edit_remote_file` 始终执行 SHA-256 核对、自动创建时间戳备份并拦截凭据类敏感文件。
+- **能力清单**：
+  - **Tools**：`list_sessions`、`list_hosts`、`connect_host`、`inspect_server_profile`、`get_server_status`、`get_processes`、`get_network_ports`、`get_docker_resources`、`list_remote_dir`、`read_remote_file`、`read_terminal_output`、`read_skill`、`exec_ssh_command`，以及完全放行模式下的 `edit_remote_file`、`rollback_remote_file`、`send_terminal_command`。
+  - **Resources**：`pagashell://sessions`、`pagashell://hosts`、`pagashell://skills/<id>`。
+  - **Prompts**：内置运维手册对应的 `ops_<skill_id>` 提示词模板。
+
 <details>
 <summary>接口、数据范围和开发验证</summary>
 
@@ -68,7 +98,7 @@ Agent 位于主窗口右侧，可以巡检已连接的 SSH 服务器、后台执
 
 刷新按钮位于默认模型 ID 标签行最右侧，输入框与其他字段等高。弹窗底部「测试连接」使用尚未保存的配置发起模型请求；Key 留空时复用已保存的保险库引用。测试不保存配置或 Key、不写入聊天记录，也不执行返回的工具调用。测试期间显示进行状态并禁用重复测试与保存，仍可关闭弹窗；修改连接字段后清除旧测试结果。保存后保留表单，显示结果并清空 Key 输入。旧多配置数据以原先选中项作为当前 API，其他配置和密钥引用保留，继续使用原有密钥提交和清理事务。
 
-Agent 只使用设置中的默认模型 ID，在标题旁显示该 ID；面板不提供模型下拉或刷新入口，展开时不自动拉取目录。模型目录刷新和选择均在 AI 设置中完成。保存新的 API、Key 或默认 ID 后，后续提交的消息使用新配置并沿用思考强度；模型能力缓存随配置更新失效，旧配置的迟到目录结果不污染新配置。
+Agent 输入框底栏显示当前模型并支持直接切换。首次拉取服务商的模型目录后会持久化缓存在本机配置中，后续打开面板或切换模型直接读取缓存、不重复请求；如需更新目录，可在「设置 → AI 设置」点击默认模型旁的刷新按钮重新拉取。保存新的 API 地址、协议或 Key 后，旧服务商的缓存目录与能力缓存随之失效，迟到目录结果不污染新配置。
 
 输入框内可选择思考强度，默认「自动」省略所有思考控制参数。OpenAI Chat Completions 使用 `reasoning_effort`，Responses 使用 `reasoning.effort`。Anthropic 根据模型目录的 `capabilities.effort` 和 `capabilities.thinking.types` 限定档位，自适应模式发送 `thinking.type: adaptive` 与 `output_config.effort`；仅支持旧式 `enabled` 的模型将低/中/高映射为内部预算 1024/8192/32768，且始终小于服务商返回的输出上限，不要求用户配置 Token。未报告能力的兼容服务提供协议档位，由服务商校验；不支持时提示改用自动或其他档位，不猜测模型名称。
 

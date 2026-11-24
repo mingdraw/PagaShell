@@ -59,25 +59,12 @@ class AgentFileChangeProposal {
       );
 }
 
-String _quotePath(String path) => "'${path.replaceAll("'", "'\\''")}'";
+String _quotePath(String path) => quotePosixPath(path);
 
-String _fileError(RemoteFileError error) => switch (error) {
-  RemoteFileError.conflict => '远程文件已变更，请重新读取并对比',
-  RemoteFileError.notFound => '远程文件不存在',
-  RemoteFileError.sudoPasswordRequired => '需要 sudo 密码',
-  RemoteFileError.invalidTarget => '目标不是可安全操作的普通文件',
-  RemoteFileError.sensitive => '凭据或私钥文件不可读取或修改',
-  RemoteFileError.tooLarge => '文本文件不能超过 2 MiB',
-  RemoteFileError.outcomeUnknown => '远程文件操作结果未知，请检查文件和备份',
-  RemoteFileError.failed => '远程文件操作失败，请检查路径与权限',
-};
+String _fileError(RemoteFileError error) => describeRemoteFileError(error);
 
-String _fileToolError(RemoteFileOpsException error, String path) => jsonEncode({
-  'error': error.error.name,
-  'path': path,
-  if (error.isSudoPasswordRequired) 'note': 'This account needs interactive sudo. Ask the user to perform the step in their SSH terminal; never ask them to send a password.',
-  if (error.isConflict || error.error == RemoteFileError.outcomeUnknown) 'note': 'Read the current file and inspect any backups before proposing another change.',
-});
+String _fileToolError(RemoteFileOpsException error, String path) =>
+    encodeRemoteFileToolError(error, path);
 
 extension _AgentFileOperations on AgentController {
   Future<RemoteTextSnapshot?> _readFileSnapshot(
@@ -151,38 +138,15 @@ extension _AgentFileOperations on AgentController {
       if (file == null || !_live(generation)) {
         return 'File read declined or cancelled.';
       }
-      final lines = const LineSplitter().convert(file.text);
-      final start = _boundedInt(
-        call.arguments['start_line'],
-        1,
-        1,
-        lines.length + 1,
+      return jsonEncode(
+        formatRemoteFilePage(
+          target.id,
+          concretePath,
+          file,
+          startLine: call.arguments['start_line'],
+          maxLines: call.arguments['max_lines'],
+        ),
       );
-      final maxLines = _boundedInt(call.arguments['max_lines'], 150, 1, 500);
-      final result = StringBuffer();
-      var end = start - 1;
-      var longLine = false;
-      for (final line in lines.skip(start - 1).take(maxLines)) {
-        final numbered = '${end + 1}: $line';
-        if (result.isNotEmpty && result.length + numbered.length > 14000) break;
-        result.writeln(_truncateToolOutput(numbered, maxChars: 14000));
-        longLine |= numbered.length > 14000;
-        end++;
-      }
-      return jsonEncode({
-        'session_id': target.id,
-        'path': concretePath,
-        'sha256': file.sha256,
-        'sizeBytes': file.sizeBytes,
-        'modifiedUnix': file.modifiedUnix,
-        'usedSudo': file.usedSudo,
-        'totalLines': lines.length,
-        'startLine': start,
-        'endLine': end,
-        if (end < lines.length) 'nextStartLine': end + 1,
-        'lineTruncated': longLine,
-        'content': _scrubAgentOutput(result.toString()),
-      });
     } on RemoteFileOpsException catch (error) {
       return _fileToolError(error, concretePath);
     }
@@ -294,7 +258,7 @@ extension _AgentFileOperations on AgentController {
     }
     if (_containsSensitiveOutput(updated) ||
         (original != null && _containsSensitiveOutput(original.text)) ||
-        _controlCharPattern.hasMatch(updated)) {
+        hasSshControlCharacters(updated)) {
       return 'Possible credentials, private key or nontext content. Nothing written.';
     }
     if (original?.text == updated) {
@@ -338,8 +302,7 @@ extension _AgentFileOperations on AgentController {
     }
     waitingForApproval.value = false;
     activity.value = '正在应用远程配置';
-    final suffix =
-        '${DateTime.now().toUtc().millisecondsSinceEpoch}-${Random.secure().nextInt(1 << 32).toRadixString(16)}';
+    final suffix = generateRemoteBackupSuffix();
     try {
       if (!_live(generation) || _boundSession(target) == null) {
         proposal.state.value = AgentFileChangeState.unavailable;

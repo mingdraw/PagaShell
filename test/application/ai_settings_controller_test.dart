@@ -357,4 +357,51 @@ void main() {
       expect(AiModelConfig.fromJson(model.toJson())!.format, format);
     }
   });
+
+  test('缓存模型列表可持久往返，切换模型保留缓存，更换服务商清空旧缓存', () async {
+    final db = AppDatabase.forTesting(NativeDatabase.memory());
+    addTearDown(db.close);
+    final repo = DriftAiSettingsRepository(db);
+    final store = _Store();
+    final controller = AiSettingsController(
+      repository: repo,
+      secretStore: store,
+    );
+    addTearDown(controller.onClose);
+
+    await controller.saveApi(
+      format: AiApiFormat.openai,
+      baseUrl: 'https://provider.test/v1',
+      defaultModel: 'model-a',
+      apiKey: 'secret-1',
+      cachedModels: const ['model-a', 'model-b', 'model-a'],
+    );
+    expect(controller.state.value.apiConfig!.cachedModels, const [
+      'model-a',
+      'model-b',
+    ]);
+
+    await controller.setActiveModelId('model-b');
+    expect(controller.state.value.apiConfig!.model, 'model-b');
+    expect(controller.state.value.apiConfig!.cachedModels, const [
+      'model-a',
+      'model-b',
+    ]);
+
+    await controller.updateCachedModels(
+      controller.state.value.apiConfig!.id,
+      const ['model-b', 'model-c'],
+    );
+    final reloaded = await repo.read();
+    expect(reloaded.apiConfig!.model, 'model-b');
+    expect(reloaded.apiConfig!.cachedModels, const ['model-b', 'model-c']);
+
+    // 仅更换服务商地址且未传入新列表时清空旧服务商的缓存。
+    await controller.saveApi(
+      format: AiApiFormat.openai,
+      baseUrl: 'https://another.test/v1',
+      defaultModel: 'other-model',
+    );
+    expect(controller.state.value.apiConfig!.cachedModels, isEmpty);
+  });
 }

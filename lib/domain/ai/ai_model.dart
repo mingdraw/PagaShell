@@ -1,3 +1,5 @@
+import '../mcp/mcp_models.dart';
+
 enum AiApiFormat {
   openai,
   openaiResponses,
@@ -92,6 +94,7 @@ class AiModelConfig {
     required this.baseUrl,
     required this.model,
     required this.secretRef,
+    this.cachedModels = const [],
   });
 
   final String id;
@@ -101,7 +104,22 @@ class AiModelConfig {
   final String model;
   final String secretRef;
 
-  /// Agent 临时切换模型，不改写 API 设置里的默认模型。
+  /// 最近一次从服务商拉取并缓存的可用模型 ID 列表（仅非敏感名称）。
+  final List<String> cachedModels;
+
+  static List<String> normalizeModelIds(Iterable<String> values) {
+    final seen = <String>{};
+    final result = <String>[];
+    for (final raw in values) {
+      final id = raw.trim();
+      if (id.isNotEmpty && seen.add(id)) {
+        result.add(id);
+      }
+    }
+    return List.unmodifiable(result);
+  }
+
+  /// Agent 切换模型，保留当前 API 配置与缓存模型目录。
   AiModelConfig withModel(String value) => AiModelConfig(
     id: id,
     name: name,
@@ -109,6 +127,17 @@ class AiModelConfig {
     baseUrl: baseUrl,
     model: value,
     secretRef: secretRef,
+    cachedModels: cachedModels,
+  );
+
+  AiModelConfig withCachedModels(Iterable<String> models) => AiModelConfig(
+    id: id,
+    name: name,
+    format: format,
+    baseUrl: baseUrl,
+    model: model,
+    secretRef: secretRef,
+    cachedModels: normalizeModelIds(models),
   );
 
   /// 接受服务根地址、带 /v1 的地址或完整接口地址。
@@ -163,6 +192,7 @@ class AiModelConfig {
     'baseUrl': baseUrl,
     'model': model,
     'secretRef': secretRef,
+    if (cachedModels.isNotEmpty) 'cachedModels': cachedModels,
   };
 
   static AiModelConfig? fromJson(Object? value) {
@@ -179,6 +209,10 @@ class AiModelConfig {
         validateEndpoint(value['baseUrl'] as String) != null) {
       return null;
     }
+    final rawCached = value['cachedModels'];
+    final cached = rawCached is List
+        ? normalizeModelIds(rawCached.whereType<String>())
+        : const <String>[];
     return AiModelConfig(
       id: value['id'] as String,
       name: value['name'] as String,
@@ -186,6 +220,7 @@ class AiModelConfig {
       baseUrl: value['baseUrl'] as String,
       model: value['model'] as String,
       secretRef: value['secretRef'] as String,
+      cachedModels: cached,
     );
   }
 }
@@ -199,6 +234,7 @@ class AiSettings {
     this.pendingSecretDeletes = const [],
     this.reasoningEffort = AiReasoningEffort.auto,
     this.accessMode = AgentAccessMode.requestApproval,
+    this.mcp = const McpServerConfig(),
   });
 
   final List<AiModelConfig> models;
@@ -208,6 +244,7 @@ class AiSettings {
   final List<String> pendingSecretDeletes;
   final AiReasoningEffort reasoningEffort;
   final AgentAccessMode accessMode;
+  final McpServerConfig mcp;
 
   AiModelConfig? get selectedModel =>
       models.where((m) => m.id == selectedModelId).firstOrNull ??
@@ -224,6 +261,7 @@ class AiSettings {
     List<String>? pendingSecretDeletes,
     AiReasoningEffort? reasoningEffort,
     AgentAccessMode? accessMode,
+    McpServerConfig? mcp,
   }) => AiSettings(
     models: models ?? this.models,
     selectedModelId: selectedModelId ?? this.selectedModelId,
@@ -232,5 +270,6 @@ class AiSettings {
     pendingSecretDeletes: pendingSecretDeletes ?? this.pendingSecretDeletes,
     reasoningEffort: reasoningEffort ?? this.reasoningEffort,
     accessMode: accessMode ?? this.accessMode,
+    mcp: mcp ?? this.mcp,
   );
 }

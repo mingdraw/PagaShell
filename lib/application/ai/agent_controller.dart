@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:get/get.dart';
-import 'package:pagashell/terminal/core.dart';
 
 import '../../domain/ai/agent_conversation.dart';
 import '../../domain/ai/agent_diff.dart';
@@ -12,9 +11,6 @@ import '../../domain/ai/ai_model.dart';
 import '../../domain/ai/command_classifier.dart';
 import '../../domain/repositories/agent_conversation_repository.dart';
 import '../../domain/ssh/agent_ops.dart';
-import '../../domain/ssh/docker_manager.dart';
-import '../../domain/ssh/network_ports.dart';
-import '../../domain/ssh/process_manager.dart';
 import '../../domain/ssh/server_status.dart';
 import '../../domain/vault/secret_store.dart';
 import '../network/app_connect.dart';
@@ -23,6 +19,7 @@ import '../session/session_controller.dart';
 import 'agent_api_codec.dart';
 import 'agent_sse.dart';
 import 'ai_settings_controller.dart';
+import 'ssh_ops_tools.dart';
 
 export '../../domain/ai/agent_conversation.dart'
     show
@@ -168,6 +165,83 @@ class AgentController extends GetxController {
 
   AiModelConfig? get currentModel => _settings.state.value.apiConfig;
 
+  RxBool get loadingModels => _api.loadingModels;
+
+  /// 当前 API 配置可切换的模型列表（优先读本地持久化缓存，始终包含当前模型）。
+  List<String> get availableModels {
+    final model = currentModel;
+    if (model == null) return const [];
+    final cached = model.cachedModels;
+    if (cached.isEmpty) return [model.model];
+    if (cached.contains(model.model)) return cached;
+    return [model.model, ...cached];
+  }
+
+  /// 确保已存在本地模型列表缓存；已有缓存时直接返回，不重复发起网络请求。
+  Future<List<String>> ensureCachedModels() async {
+    await _settings.ready;
+    final api = currentModel;
+    if (api == null) return const [];
+    if (api.cachedModels.isNotEmpty) return availableModels;
+    final scope = _providerScope(api);
+    if (_api.modelsFetch != null && _api.modelsFetchScope == scope) {
+      return _api.modelsFetch!;
+    }
+    _api.loadingModels.value = true;
+    final future = () async {
+      try {
+        final fetched = await fetchModels(
+          format: api.format,
+          baseUrl: api.baseUrl,
+          modelConfigId: api.id,
+        );
+        if (isClosed) return const <String>[];
+        final latest = currentModel;
+        if (latest != null && _providerScope(latest) == scope) {
+          final ids = fetched.map((m) => m.id).toList();
+          if (ids.isNotEmpty) {
+            try {
+              await _settings.updateCachedModels(latest.id, ids);
+            } on Object {
+              // 缓存落库失败不阻断本次模型列表展示。
+            }
+            return AiModelConfig.normalizeModelIds([
+              if (!ids.contains(latest.model)) latest.model,
+              ...ids,
+            ]);
+          }
+        }
+        return availableModels;
+      } finally {
+        if (!isClosed && _api.modelsFetchScope == scope) {
+          _api.modelsFetch = null;
+          _api.modelsFetchScope = null;
+          _api.loadingModels.value = false;
+        }
+      }
+    }();
+    _api.modelsFetch = future;
+    _api.modelsFetchScope = scope;
+    return future;
+  }
+
+  /// 切换当前使用的模型 ID，持久化到当前 API 配置并按需重置不支持的思考强度。
+  Future<void> selectActiveModel(String modelId) async {
+    final trimmed = modelId.trim();
+    final current = currentModel;
+    if (trimmed.isEmpty || current == null || current.model == trimmed) return;
+    await _settings.setActiveModelId(trimmed);
+    if (isClosed) return;
+    if (modesLoaded && !reasoningOptions.contains(reasoningEffort.value)) {
+      _syncModes();
+      reasoningEffort.value = AiReasoningEffort.auto;
+      _saveModes();
+    }
+  }
+
+  String _providerScope(AiModelConfig api) =>
+      '${api.format.name}#${AiModelConfig.modelsEndpoint(api.baseUrl)}#${api.secretRef}#${api.id}';
+
   List<AiReasoningEffort> get reasoningOptions {
     _api.capabilityRevision.value;
     final model = currentModel;
@@ -227,13 +301,18 @@ class AgentController extends GetxController {
   void _syncApi() {
     _syncModes();
     final api = _settings.state.value.apiConfig;
-    final scope = api == null
-        ? null
-        : '${AgentApiCodec.responsesScope(api)}#${api.id}';
+    final scope = api == null ? null : _providerScope(api);
     if (_api.scope != scope) {
       _api.scope = scope;
+      _api.lastModelId = api?.model;
       _api.modelDetails.clear();
       _api.modelLimits.clear();
+      _api.modelsFetch = null;
+      _api.modelsFetchScope = null;
+      _api.loadingModels.value = false;
+      _api.capabilityRevision.value++;
+    } else if (_api.lastModelId != api?.model) {
+      _api.lastModelId = api?.model;
       _api.capabilityRevision.value++;
     }
   }

@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import '../../domain/ai/ai_model.dart';
+import '../../domain/mcp/mcp_models.dart';
 import '../../domain/repositories/ai_settings_repository.dart';
 import 'app_database.dart';
 
@@ -51,6 +52,7 @@ class DriftAiSettingsRepository implements AiSettingsRepository {
               .where((value) => value.name == decoded['accessMode'])
               .firstOrNull ??
           AgentAccessMode.requestApproval,
+      mcp: McpServerConfig.fromJson(decoded['mcp']),
     );
   }
 
@@ -68,6 +70,7 @@ class DriftAiSettingsRepository implements AiSettingsRepository {
             'pendingSecretDeletes': settings.pendingSecretDeletes,
             'reasoningEffort': settings.reasoningEffort.name,
             'accessMode': settings.accessMode.name,
+            'mcp': settings.mcp.toJson(),
           }),
         ),
       );

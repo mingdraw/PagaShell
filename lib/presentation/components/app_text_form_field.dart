@@ -86,12 +86,26 @@ class AppTextFormField extends FormField<String> {
                          ? Border.all(color: colors.destructive)
                          : null,
                      features: [
+                       // shadcn TextField 在聚焦时会向下注入 WidgetState.hovered，
+                       // 用边界隔离避免输入框内按钮及它们打开的弹层全部误显悬停底色。
                        if (decoration.header != null)
-                         shadcn.InputFeature.above(decoration.header!),
+                         shadcn.InputFeature.above(
+                           shadcn.WidgetStatesProvider.boundary(
+                             child: decoration.header!,
+                           ),
+                         ),
                        if (decoration.suffixIcon != null)
-                         shadcn.InputFeature.trailing(decoration.suffixIcon!),
+                         shadcn.InputFeature.trailing(
+                           shadcn.WidgetStatesProvider.boundary(
+                             child: decoration.suffixIcon!,
+                           ),
+                         ),
                        if (decoration.footer != null)
-                         shadcn.InputFeature.below(decoration.footer!),
+                         shadcn.InputFeature.below(
+                           shadcn.WidgetStatesProvider.boundary(
+                             child: decoration.footer!,
+                           ),
+                         ),
                      ],
                    ),
                  ),

@@ -512,12 +512,14 @@ class SessionController extends GetxController {
     SessionKind kind = SessionKind.terminal,
     SshGateway? gateway,
     bool temporary = false,
+    bool requireTrustedHostKey = false,
   }) => _openSession(
     host,
     credentials,
     kind: kind,
     gateway: gateway,
     temporary: temporary,
+    requireTrustedHostKey: requireTrustedHostKey,
   );
 
   /// 复制仍有会话凭据的连接，在独立标签中建立新的连接。
@@ -555,6 +557,7 @@ class SessionController extends GetxController {
     bool splitBefore = false,
     DockerTerminalTarget? dockerTarget,
     bool temporary = false,
+    bool requireTrustedHostKey = false,
   }) async {
     if (kind == SessionKind.portForward || kind == SessionKind.dynamicProxy) {
       throw ArgumentError('请通过端口转发页签手动启动');
@@ -569,7 +572,10 @@ class SessionController extends GetxController {
       kind = SessionKind.remoteDesktop;
     }
     final id = 'ssn-${_nextId++}';
-    _runtimes[id] = _SessionRuntime(temporary: temporary);
+    _runtimes[id] = _SessionRuntime(
+      temporary: temporary,
+      requireTrustedHostKey: requireTrustedHostKey,
+    );
     final session = Session(
       id: id,
       host: host,
@@ -1512,6 +1518,15 @@ class SessionController extends GetxController {
         (!key.isRdp || key.certificateError == null)) {
       _update(id, (s) => s.copyWith(phase: SessionPhase.authenticating));
       return true;
+    }
+    if (_runtimes[id]?.requireTrustedHostKey == true) {
+      if (trusted != null) {
+        throw HostKeyChangedException(
+          HostKeyReview(presented: key, trusted: trusted),
+          '主机指纹已变更，已拒绝连接；请通过可信渠道核验服务器密钥',
+        );
+      }
+      throw const SshEngineException('主机指纹尚未信任，请先在 PagaShell 中手动连接并确认主机指纹');
     }
 
     final review = HostKeyReview(presented: key, trusted: trusted);

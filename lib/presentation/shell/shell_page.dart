@@ -8,6 +8,7 @@ import 'package:get/get.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import '../../application/ai/agent_controller.dart';
+import '../../application/mcp/mcp_server_controller.dart';
 import '../../application/session/session.dart';
 import '../../application/session/session_controller.dart';
 import '../../application/settings/settings_controller.dart';
@@ -275,6 +276,13 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
         }
       }
       if (allow) {
+        if (Get.isRegistered<McpServerController>()) {
+          try {
+            await Get.find<McpServerController>().stopForExit();
+          } on Object {
+            // 退出前尽力释放 MCP 监听，不阻塞关闭。
+          }
+        }
         try {
           await _sessions.closeAll();
         } on SystemProxyException catch (error) {

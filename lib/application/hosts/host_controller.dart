@@ -76,6 +76,8 @@ class HostController extends GetxController {
   }
 
   /// 读仓库中的最新配置，不等待侧边栏列表订阅刷新。
+  Future<List<Host>> loadAll() => _repository.getAll();
+
   Future<Host?> findSaved(String id) async {
     for (final host in await _repository.getAll()) {
       if (host.id == id) return host;

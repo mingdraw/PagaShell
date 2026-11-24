@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:get/get.dart';
 import 'package:pagashell/application/ai/agent_controller.dart';
 import 'package:pagashell/application/ai/ai_settings_controller.dart';
@@ -9,12 +11,14 @@ import 'package:pagashell/application/hosts/host_tree_controller.dart';
 import 'package:pagashell/application/identities/identity_controller.dart';
 import 'package:pagashell/application/identities/identity_folder_controller.dart';
 import 'package:pagashell/application/identities/identity_tree_controller.dart';
+import 'package:pagashell/application/mcp/mcp_server_controller.dart';
 import 'package:pagashell/application/network/app_connect.dart';
 import 'package:pagashell/application/session/session_controller.dart';
 import 'package:pagashell/application/settings/settings_controller.dart';
 import 'package:pagashell/application/transfer/transfer_controller.dart';
 import 'package:pagashell/domain/entities/host.dart';
 import 'package:pagashell/domain/entities/sidebar_state.dart';
+import 'package:pagashell/domain/mcp/mcp_server_transport.dart';
 import 'package:pagashell/domain/proxy/system_proxy.dart';
 import 'package:pagashell/domain/rdp/rdp_engine.dart';
 import 'package:pagashell/domain/repositories/folder_repository.dart';
@@ -231,6 +235,54 @@ class InMemoryBinding extends Bindings {
         hosts: hosts,
       ),
     );
+    Get.put(
+      McpServerController(
+        aiSettings: aiSettings,
+        sessions: sessions,
+        hosts: hosts,
+        gateways: gateways,
+        identities: identities,
+        knownHosts: knownHosts,
+        serverFactory: const _InMemoryMcpServerFactory(),
+      ),
+    );
+  }
+}
+
+class _InMemoryMcpServerFactory implements McpServerFactory {
+  const _InMemoryMcpServerFactory();
+
+  @override
+  Future<McpServerHandle> start({
+    required int port,
+    required String token,
+    required McpServerDelegate delegate,
+  }) async => _InMemoryMcpServerHandle(port);
+}
+
+class _InMemoryMcpServerHandle implements McpServerHandle {
+  _InMemoryMcpServerHandle(this.port);
+
+  @override
+  final int port;
+
+  final _counts = StreamController<int>.broadcast();
+
+  @override
+  int get activeSessionCount => 0;
+
+  @override
+  Stream<int> get activeSessionCountStream => _counts.stream;
+
+  @override
+  void notifyToolsListChanged() {}
+
+  @override
+  void updateToken(String token) {}
+
+  @override
+  Future<void> close() async {
+    await _counts.close();
   }
 }
 
