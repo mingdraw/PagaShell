@@ -70,21 +70,21 @@ class QuickCommandsSettingsSection extends StatefulWidget {
 
 class _QuickCommandsSettingsSectionState
     extends State<QuickCommandsSettingsSection> {
-  final _collapsedGroupIds = <String>{};
+  final _expandedGroupIds = <String>{};
   bool _dialogOpen = false;
   String? _draggingGroupId;
   String? _draggingCommandId;
 
   SettingsController get _settings => Get.find<SettingsController>();
 
-  bool _isExpanded(String groupId) => !_collapsedGroupIds.contains(groupId);
+  bool _isExpanded(String groupId) => _expandedGroupIds.contains(groupId);
 
   void _setGroupExpanded(String groupId, bool expanded) {
     setState(() {
       if (expanded) {
-        _collapsedGroupIds.remove(groupId);
+        _expandedGroupIds.add(groupId);
       } else {
-        _collapsedGroupIds.add(groupId);
+        _expandedGroupIds.remove(groupId);
       }
     });
   }
@@ -96,9 +96,9 @@ class _QuickCommandsSettingsSectionState
     final anyExpanded = groups.any((group) => _isExpanded(group.id));
     setState(() {
       if (anyExpanded) {
-        _collapsedGroupIds.addAll(groups.map((group) => group.id));
+        _expandedGroupIds.clear();
       } else {
-        _collapsedGroupIds.clear();
+        _expandedGroupIds.addAll(groups.map((group) => group.id));
       }
     });
   }
@@ -122,8 +122,7 @@ class _QuickCommandsSettingsSectionState
     );
     if (title == null || !mounted) return;
     try {
-      final created = await _settings.addQuickCommandGroup(title);
-      if (mounted) _setGroupExpanded(created.id, true);
+      await _settings.addQuickCommandGroup(title);
     } on QuickCommandsException catch (e) {
       if (mounted) AppNotice.error(e.message);
     }
@@ -177,7 +176,7 @@ class _QuickCommandsSettingsSectionState
     if (!confirmed || !mounted) return;
     try {
       await _settings.deleteQuickCommandGroup(group.id);
-      _collapsedGroupIds.remove(group.id);
+      _expandedGroupIds.remove(group.id);
     } on QuickCommandsException catch (e) {
       if (mounted) AppNotice.error(e.message);
     }

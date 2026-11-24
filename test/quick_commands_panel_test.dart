@@ -553,8 +553,15 @@ void main() {
     await tester.pumpAndSettle();
     expect(engine.sessions.single.writes, ['kubectl get pods -A']);
 
-    // 再次打开设置删除指令和分组。
+    // 再次打开设置删除指令和分组（分组默认折叠，先展开再删除指令）。
     await tester.tap(find.byKey(const ValueKey('quick-commands-manage')));
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.descendant(
+        of: find.byKey(ValueKey('settings-quick-group-$groupId')),
+        matching: find.text('K8s 运维'),
+      ),
+    );
     await tester.pumpAndSettle();
     await tester.tap(
       find.byKey(ValueKey('settings-quick-cmd-delete-$commandId')),
@@ -637,34 +644,38 @@ void main() {
       findsOneWidget,
     );
 
-    // 验证 Tree 分组折叠与展开：点击分组折叠后子指令高度收起为 0，再次点击展开。
+    // 验证 Tree 分组默认折叠，点击展开后再点击折叠。
     final groupATreeItem = find.byKey(
       ValueKey('settings-quick-group-${groupA.id}'),
     );
     final cmd1TreeItem = find.byKey(ValueKey('settings-quick-cmd-${cmd1.id}'));
-    expect(tester.getSize(cmd1TreeItem).height, greaterThan(0));
-    await tester.tap(
-      find.descendant(of: groupATreeItem, matching: find.text('分组 A')),
-    );
-    await tester.pumpAndSettle();
+    expect(find.text('全部展开'), findsOneWidget);
     expect(tester.getSize(cmd1TreeItem).height, 0);
     await tester.tap(
       find.descendant(of: groupATreeItem, matching: find.text('分组 A')),
     );
     await tester.pumpAndSettle();
     expect(tester.getSize(cmd1TreeItem).height, greaterThan(0));
+    await tester.tap(
+      find.descendant(of: groupATreeItem, matching: find.text('分组 A')),
+    );
+    await tester.pumpAndSettle();
+    expect(tester.getSize(cmd1TreeItem).height, 0);
 
-    // 验证全部折叠 / 全部展开按钮。
+    // 验证全部展开 / 全部折叠按钮，并保持展开以便后续测试拖拽。
     final toggleAll = find.byKey(
       const ValueKey('settings-quick-commands-toggle-all'),
     );
+    await tester.tap(toggleAll);
+    await tester.pumpAndSettle();
+    expect(find.text('全部折叠'), findsOneWidget);
+    expect(tester.getSize(cmd1TreeItem).height, greaterThan(0));
     await tester.tap(toggleAll);
     await tester.pumpAndSettle();
     expect(find.text('全部展开'), findsOneWidget);
     expect(tester.getSize(cmd1TreeItem).height, 0);
     await tester.tap(toggleAll);
     await tester.pumpAndSettle();
-    expect(find.text('全部折叠'), findsOneWidget);
     expect(tester.getSize(cmd1TreeItem).height, greaterThan(0));
 
     Future<void> dragBetween(Offset from, Offset to) async {
