@@ -12,6 +12,7 @@ import 'package:pagashell/app.dart';
 import 'package:pagashell/application/hosts/host_controller.dart';
 import 'package:pagashell/application/session/session.dart';
 import 'package:pagashell/application/session/session_controller.dart';
+import 'package:pagashell/application/settings/settings_controller.dart';
 import 'package:pagashell/domain/entities/host.dart';
 import 'package:pagashell/domain/entities/host_tree_item.dart';
 import 'package:pagashell/domain/entities/identity.dart';
@@ -20,7 +21,9 @@ import 'package:pagashell/presentation/components/app_icon_button.dart';
 import 'package:pagashell/presentation/components/app_text_form_field.dart';
 import 'package:pagashell/presentation/identities/identity_edit_dialog.dart';
 import 'package:pagashell/presentation/localization/app_translations.dart';
+import 'package:pagashell/presentation/shell/command_palette.dart';
 import 'package:pagashell/presentation/shell/shell_page.dart';
+import 'package:pagashell/presentation/theme/app_theme.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import 'support/fixture_terminal.dart';
@@ -367,6 +370,34 @@ void main() {
     await tester.sendKeyEvent(LogicalKeyboardKey.escape);
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('快速连接的最近徽标和地址在较高行距下无溢出', (tester) async {
+    InMemoryBinding().dependencies();
+    final theme = AppTheme.shadcnDark;
+    await tester.pumpWidget(
+      ShadcnTestApp(
+        // 模拟字形行高较大的桌面字体，无需依赖测试机安装的字体。
+        theme: theme.copyWith(
+          typography: () => theme.typography.copyWith(
+            base: () => theme.typography.base.copyWith(height: 1.4),
+          ),
+        ),
+        home: const SizedBox.shrink(),
+      ),
+    );
+    await tester.pumpAndSettle();
+    const host = Host(id: 'recent', name: '开发机', hostname: 'example.test');
+    await Get.find<HostController>().save(host);
+    await Get.find<SettingsController>().recordRecentHost(host.id);
+
+    unawaited(showCommandPalette(tester.element(find.byType(ShadcnTestApp))));
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('最近'.tr).hitTestable(), findsOneWidget);
+    expect(find.text(host.address).hitTestable(), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 
   for (final locale in AppTranslations.supportedLocales) {

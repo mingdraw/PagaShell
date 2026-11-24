@@ -121,6 +121,12 @@ class _CommandPalette extends StatefulWidget {
 }
 
 class _CommandPaletteState extends State<_CommandPalette> {
+  static const _recentBadgeFontSize = 10.0;
+  static const _recentBadgeStyle = shadcn.ButtonStyle.outline(
+    size: shadcn.ButtonSize.small,
+    density: shadcn.ButtonDensity.dense,
+  );
+
   final _scroll = ScrollController();
   final _input = TextEditingController();
   String _query = '';
@@ -442,6 +448,12 @@ class _CommandPaletteState extends State<_CommandPalette> {
     final labelHeight = textScaler.scale(11) * 1.4 + 6;
     final titleHeight = textScaler.scale(13) * 1.4;
     final detailHeight = textScaler.scale(11) * 1.4 + 4;
+    // 徽标与标题并排，行高也要计入徽标的内边距和描边。
+    final recentBadgeHeight =
+        (textScaler.scale(_recentBadgeFontSize) * 1.4).ceilToDouble() +
+        _recentBadgeStyle.padding(context, const {}).vertical +
+        1;
+    final hostTitleHeight = math.max(titleHeight, recentBadgeHeight);
     var top = AppTheme.commandPaletteSectionGap;
     final groups = <_PaletteGroup>[];
     for (var start = 0; start < entries.length;) {
@@ -451,12 +463,15 @@ class _CommandPaletteState extends State<_CommandPalette> {
         end++;
       }
       final headerHeight = labelHeight + (start == 0 ? 0.0 : 8.0);
+      final contentHeight = switch (section) {
+        _PaletteSection.hosts => math.max(26.0, hostTitleHeight + detailHeight),
+        _PaletteSection.tabs => math.max(26.0, titleHeight + detailHeight),
+        _PaletteSection.actions => math.max(18.0, titleHeight),
+      };
       final rowHeight =
           AppTheme.commandPaletteItemPadding.vertical +
           AppTheme.commandPaletteItemGap +
-          (section == _PaletteSection.actions
-              ? math.max(18.0, titleHeight)
-              : math.max(26.0, titleHeight + detailHeight));
+          contentHeight;
       groups.add((
         section: section,
         start: start,
@@ -725,7 +740,11 @@ class _CommandPaletteState extends State<_CommandPalette> {
               ] else if (isRecent) ...[
                 const SizedBox(width: 6),
                 shadcn.OutlineBadge(
-                  child: Text('最近'.tr, style: const TextStyle(fontSize: 10)),
+                  style: _recentBadgeStyle,
+                  child: Text(
+                    '最近'.tr,
+                    style: const TextStyle(fontSize: _recentBadgeFontSize),
+                  ),
                 ),
               ],
             ],
