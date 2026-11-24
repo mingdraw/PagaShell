@@ -72,19 +72,62 @@ void main() {
     );
     final cmd1TreeItem = find.byKey(ValueKey('settings-quick-cmd-${cmd1.id}'));
 
-    // 1) 点击分组折叠与展开。
+    // 1) 验证指令行拖拽手柄、编辑/删除按钮与指令条同一行垂直居中对齐（不随下方备注下移）。
+    final cmd1ChipRect = tester.getRect(
+      find.byKey(ValueKey('settings-quick-cmd-chip-${cmd1.id}')),
+    );
+    final cmd1DragRect = tester.getRect(
+      find.byKey(ValueKey('settings-quick-cmd-drag-${cmd1.id}')),
+    );
+    final cmd1EditRect = tester.getRect(
+      find.byKey(ValueKey('settings-quick-cmd-edit-${cmd1.id}')),
+    );
+    final cmd1DeleteRect = tester.getRect(
+      find.byKey(ValueKey('settings-quick-cmd-delete-${cmd1.id}')),
+    );
+    expect(cmd1DragRect.center.dy, closeTo(cmd1ChipRect.center.dy, 1.5));
+    expect(cmd1EditRect.center.dy, closeTo(cmd1ChipRect.center.dy, 1.5));
+    expect(cmd1DeleteRect.center.dy, closeTo(cmd1ChipRect.center.dy, 1.5));
+
+    // 2) 点击分组折叠与展开，且 TreeItem 的 FocusOutline 颜色透明、不向内部透传焦点外框。
     expect(tester.getSize(cmd1TreeItem).height, greaterThan(0));
+    final treeItemFocusContext = tester.element(
+      find.descendant(
+        of: groupATreeItem,
+        matching: find.byType(shadcn.TreeItem),
+      ),
+    );
+    expect(
+      shadcn.Theme.of(treeItemFocusContext).colorScheme.ring,
+      shadcn.Colors.transparent,
+    );
     await tester.tap(
       find.descendant(of: groupATreeItem, matching: find.text('分组 A')),
     );
     await tester.pumpAndSettle();
     expect(tester.getSize(cmd1TreeItem).height, 0);
+    for (final outline in tester.widgetList<shadcn.FocusOutline>(
+      find.descendant(
+        of: groupATreeItem,
+        matching: find.byType(shadcn.FocusOutline),
+      ),
+    )) {
+      expect(outline.focused, isFalse);
+    }
 
     await tester.tap(
       find.descendant(of: groupATreeItem, matching: find.text('分组 A')),
     );
     await tester.pumpAndSettle();
     expect(tester.getSize(cmd1TreeItem).height, greaterThan(0));
+    for (final outline in tester.widgetList<shadcn.FocusOutline>(
+      find.descendant(
+        of: groupATreeItem,
+        matching: find.byType(shadcn.FocusOutline),
+      ),
+    )) {
+      expect(outline.focused, isFalse);
+    }
 
     // 2) 全部折叠 / 全部展开按钮。
     final toggleAll = find.byKey(

@@ -443,9 +443,7 @@ class _QuickCommandsSettingsSectionState
             )
           else
             shadcn.Card(
-              theme: const shadcn.CardTheme(
-                padding: EdgeInsets.symmetric(horizontal: 4, vertical: 6),
-              ),
+              theme: const shadcn.CardTheme(padding: EdgeInsets.all(8)),
               child: ScrollConfiguration(
                 behavior: ScrollConfiguration.of(context)
                     .copyWith(scrollbars: false),
@@ -522,13 +520,20 @@ class _QuickCommandsSettingsSectionState
             opacity: _draggingGroupId == group.id ? 0.35 : 1,
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 100),
+              margin: const EdgeInsets.symmetric(vertical: 2),
+              padding: const EdgeInsets.symmetric(vertical: 2),
               decoration: BoxDecoration(
                 color: receivingCommand
                     ? colors.primary.withValues(alpha: 0.1)
-                    : null,
+                    : AppTheme.surface(context),
+                border: Border.all(
+                  color: receivingCommand
+                      ? colors.primary.withValues(alpha: 0.5)
+                      : AppTheme.border(context).withValues(alpha: 0.6),
+                ),
                 borderRadius: BorderRadius.circular(6),
               ),
-              child: shadcn.TreeItem(
+              child: _IsolatedTreeItem(
                 key: ValueKey('settings-quick-group-${group.id}'),
                 expandable: true,
                 onExpand: (next) => _setGroupExpanded(group.id, next),
@@ -553,13 +558,14 @@ class _QuickCommandsSettingsSectionState
                     shadcn.OutlineButton(
                       key: ValueKey('settings-quick-group-add-cmd-${group.id}'),
                       size: shadcn.ButtonSize.small,
+                      density: shadcn.ButtonDensity.dense,
                       leading: const AppIcon(AppIcons.plus, size: 13),
                       onPressed: busy
                           ? null
                           : () => unawaited(_addCommand(group)),
                       child: Text('添加指令'.tr),
                     ),
-                    const SizedBox(width: 4),
+                    const SizedBox(width: 6),
                     AppIconButton(
                       key: ValueKey('settings-quick-group-rename-${group.id}'),
                       semanticLabel: '重命名分组'.tr,
@@ -570,6 +576,7 @@ class _QuickCommandsSettingsSectionState
                           : () => unawaited(_renameGroup(group)),
                       icon: const AppIcon(AppIcons.pencil, size: 14),
                     ),
+                    const SizedBox(width: 2),
                     AppIconButton(
                       key: ValueKey('settings-quick-group-delete-${group.id}'),
                       semanticLabel: '删除分组'.tr,
@@ -647,74 +654,89 @@ class _QuickCommandsSettingsSectionState
       ),
       child: Opacity(
         opacity: _draggingCommandId == command.id ? 0.35 : 1,
-        child: shadcn.TreeItem(
+        child: _IsolatedTreeItem(
           key: ValueKey('settings-quick-cmd-${command.id}'),
-          leading: Center(
-            child: _commandDragHandle(context, group, command, busy: busy),
-          ),
-          trailing: Row(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              AppIconButton(
-                key: ValueKey('settings-quick-cmd-edit-${command.id}'),
-                semanticLabel: '编辑指令'.tr,
-                tooltip: '编辑指令'.tr,
-                density: shadcn.ButtonDensity.compact,
-                onPressed: busy
-                    ? null
-                    : () => unawaited(_editCommand(group, command)),
-                icon: const AppIcon(AppIcons.pencil, size: 14),
-              ),
-              AppIconButton(
-                key: ValueKey('settings-quick-cmd-delete-${command.id}'),
-                semanticLabel: '删除指令'.tr,
-                tooltip: '删除指令'.tr,
-                density: shadcn.ButtonDensity.compact,
-                onPressed: busy
-                    ? null
-                    : () => unawaited(_deleteCommand(group, command)),
-                icon: AppIcon(AppIcons.trash2, size: 14, color: dangerColor),
-              ),
-            ],
-          ),
           child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 2),
+            padding: const EdgeInsets.symmetric(vertical: 4),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                DecoratedBox(
-                  decoration: BoxDecoration(
-                    color: AppTheme.surface(context),
-                    border: Border.all(color: AppTheme.border(context)),
-                    borderRadius: BorderRadius.circular(5),
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 4,
-                    ),
-                    child: Text(
-                      command.displayCommand,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: _monoCommandStyle.copyWith(
-                        color: colors.foreground,
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    _commandDragHandle(context, group, command, busy: busy),
+                    const SizedBox(width: 4),
+                    Expanded(
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: DecoratedBox(
+                          key: ValueKey(
+                            'settings-quick-cmd-chip-${command.id}',
+                          ),
+                          decoration: BoxDecoration(
+                            color: AppTheme.surface(context),
+                            border: Border.all(color: AppTheme.border(context)),
+                            borderRadius: BorderRadius.circular(5),
+                          ),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 4,
+                            ),
+                            child: Text(
+                              command.displayCommand,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: _monoCommandStyle.copyWith(
+                                color: colors.foreground,
+                              ),
+                            ),
+                          ),
+                        ),
                       ),
                     ),
-                  ),
+                    const SizedBox(width: 8),
+                    AppIconButton(
+                      key: ValueKey('settings-quick-cmd-edit-${command.id}'),
+                      semanticLabel: '编辑指令'.tr,
+                      tooltip: '编辑指令'.tr,
+                      density: shadcn.ButtonDensity.compact,
+                      onPressed: busy
+                          ? null
+                          : () => unawaited(_editCommand(group, command)),
+                      icon: const AppIcon(AppIcons.pencil, size: 14),
+                    ),
+                    const SizedBox(width: 2),
+                    AppIconButton(
+                      key: ValueKey('settings-quick-cmd-delete-${command.id}'),
+                      semanticLabel: '删除指令'.tr,
+                      tooltip: '删除指令'.tr,
+                      density: shadcn.ButtonDensity.compact,
+                      onPressed: busy
+                          ? null
+                          : () => unawaited(_deleteCommand(group, command)),
+                      icon: AppIcon(
+                        AppIcons.trash2,
+                        size: 14,
+                        color: dangerColor,
+                      ),
+                    ),
+                  ],
                 ),
                 if (command.summary.isNotEmpty) ...[
                   const SizedBox(height: 3),
-                  Text(
-                    command.summary,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: colors.mutedForeground,
-                      height: 1.35,
+                  Padding(
+                    padding: const EdgeInsets.only(left: 26, right: 56),
+                    child: Text(
+                      command.summary,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: colors.mutedForeground,
+                        height: 1.35,
+                      ),
                     ),
                   ),
                 ],
@@ -742,7 +764,7 @@ class _QuickCommandsSettingsSectionState
       ),
       builder: (context, candidate, _) {
         final active = candidate.isNotEmpty;
-        return shadcn.TreeItem(
+        return _IsolatedTreeItem(
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 100),
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
@@ -898,6 +920,66 @@ class _QuickCommandsSettingsSectionState
           ),
         ),
         child: handle,
+      ),
+    );
+  }
+}
+
+/// 阻止 shadcn.TreeItem 将自身焦点/悬停状态透传给内部按钮和徽章，避免出现重叠的焦点外框。
+class _IsolatedTreeItem extends StatefulWidget {
+  const _IsolatedTreeItem({
+    required this.child,
+    this.leading,
+    this.trailing,
+    this.onPressed,
+    this.onExpand,
+    this.expandable,
+    super.key,
+  });
+
+  final Widget child;
+  final Widget? leading;
+  final Widget? trailing;
+  final VoidCallback? onPressed;
+  final ValueChanged<bool>? onExpand;
+  final bool? expandable;
+
+  @override
+  State<_IsolatedTreeItem> createState() => _IsolatedTreeItemState();
+}
+
+class _IsolatedTreeItemState extends State<_IsolatedTreeItem> {
+  final _focusNode = FocusNode(canRequestFocus: false);
+
+  @override
+  void dispose() {
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final parentTheme = shadcn.Theme.of(context);
+    Widget wrapSlot(Widget slot) => shadcn.Theme(
+      data: parentTheme,
+      child: shadcn.WidgetStatesProvider.boundary(child: slot),
+    );
+    // FocusOutline 在 focused=false 时仍会对 width=0 的实线边框执行细线绘制，
+    // 导致圆角行四角出现残留灰角；对 TreeItem 自身屏蔽 ring 颜色并在子槽位恢复。
+    return shadcn.Theme(
+      data: parentTheme.copyWith(
+        colorScheme: () => parentTheme.colorScheme.copyWith(
+          ring: () => shadcn.Colors.transparent,
+        ),
+      ),
+      child: shadcn.TreeItem(
+        focusNode: _focusNode,
+        expandable: widget.expandable,
+        onExpand: widget.onExpand,
+        onPressed: widget.onPressed,
+        leading: widget.leading == null ? null : wrapSlot(widget.leading!),
+        trailing: widget.trailing == null ? null : wrapSlot(widget.trailing!),
+        child: wrapSlot(widget.child),
       ),
     );
   }
