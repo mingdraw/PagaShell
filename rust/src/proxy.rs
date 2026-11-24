@@ -24,7 +24,7 @@ use tokio::io::{
 use tokio::net::{lookup_host, TcpListener, TcpStream};
 use tokio::sync::{watch, Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
-use tokio::time::{timeout, Instant};
+use tokio::time::{timeout, timeout_at, Instant};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -375,7 +375,8 @@ impl Router {
     }
 
     async fn connect(&self, host: &str, port: u16) -> Result<Stream> {
-        let io = timeout(OPEN_TIMEOUT, async {
+        let deadline = Instant::now() + OPEN_TIMEOUT;
+        let io = timeout_at(deadline, async {
             let direct = match self.route(host, port).await? {
                 Route::Gateway => {
                     // A selected gateway failure is never retried using direct access.
@@ -384,7 +385,7 @@ impl Router {
                             crate::api::ssh::desktop_tunnel(*id, host.to_owned(), port).await?,
                         ) as Stream),
                         Gateway::Page(gateway) => {
-                            Ok(Box::new(gateway.connect(host, port).await?) as Stream)
+                            Ok(Box::new(gateway.connect(host, port, deadline).await?) as Stream)
                         }
                     };
                 }

@@ -8,6 +8,8 @@
 
 PagaShell 与 PagaGateway 使用 Page v1 协议。Server 和 Client 需运行 PagaGateway，不能用 frps/frpc 直接替换。
 
+Server 可以先升级，现有 Page v1 Client 继续使用原配置。新版 PagaShell 会区分 Server 连接额度已满、Client 隧道额度已满和工作连接失败。
+
 ```mermaid
 flowchart LR
   P[PagaShell 本机] -->|主动连接 TLS / TCP| S[PagaGateway Server]
@@ -66,6 +68,7 @@ Go 测试覆盖 TLS / 无证书 TCP 的鉴权、目标允许列表、二进制�
 go build -o /tmp/pagagateway ./cmd/pagagateway
 # 在 PagaShell/rust 运行：
 PAGAGATEWAY_BIN=/tmp/pagagateway cargo test --lib page_go_relay -- --ignored
+# 如需替换测试中的 Client，同时设置 PAGAGATEWAY_CLIENT_BIN。
 ```
 
 以上为本机回环测试。真实跨网连接、实际 Windows 桌面登录与长期运行需在部署环境验收；跨平台交叉编译成功也不等同于三种平台均已原生运行验证。

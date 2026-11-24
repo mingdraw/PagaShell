@@ -472,10 +472,11 @@ async fn handshake(
     });
 
     let key = Arc::new(Mutex::new(None));
-    let handle = tokio::time::timeout(Duration::from_secs(15), async {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let handle = tokio::time::timeout_at(deadline, async {
         let handler = PinningHandler { key: key.clone() };
         if let Some(gateway) = page_gateway {
-            let stream = crate::page::connect(gateway, &host, port).await?;
+            let stream = crate::page::connect(gateway, &host, port, deadline).await?;
             client::connect_stream(config, stream, handler)
                 .await
                 .map_err(anyhow::Error::from)
@@ -1505,7 +1506,7 @@ pub struct PortForwardEvent {
 #[derive(Clone)]
 enum ForwardTransport {
     Ssh(Arc<RwLock<Handle<PinningHandler>>>),
-    Page(crate::api::page::PageGateway),
+    Page(Arc<crate::page::PageConnector>),
 }
 
 impl ForwardTransport {
@@ -1520,7 +1521,7 @@ impl ForwardTransport {
 }
 
 struct PageForwardEntry {
-    gateway: crate::api::page::PageGateway,
+    connector: Arc<crate::page::PageConnector>,
     forwards: Option<(watch::Sender<bool>, JoinHandle<()>)>,
 }
 
@@ -1529,12 +1530,12 @@ static PAGE_FORWARD_SESSIONS: LazyLock<Mutex<HashMap<u32, PageForwardEntry>>> =
 
 /// 创建 Page 网关转发句柄。每次接受本地连接时独立鉴权并连接目标 TCP。
 pub async fn page_forward_create(gateway: crate::api::page::PageGateway) -> Result<u32> {
-    crate::page::validate_gateway(&gateway)?;
+    let connector = Arc::new(crate::page::PageConnector::new(gateway)?);
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     PAGE_FORWARD_SESSIONS.lock().await.insert(
         id,
         PageForwardEntry {
-            gateway,
+            connector,
             forwards: None,
         },
     );
@@ -1562,7 +1563,7 @@ async fn start_page_port_forwards(
     }
     entry.forwards = Some(spawn_port_forwards(
         bound,
-        ForwardTransport::Page(entry.gateway.clone()),
+        ForwardTransport::Page(entry.connector.clone()),
         emit,
     ));
     Ok(())
@@ -1713,10 +1714,9 @@ async fn forward_listener(
                                 let mut stream = channel.into_stream();
                                 tokio::io::copy_bidirectional(&mut socket, &mut stream).await?;
                             }
-                            ForwardTransport::Page(gateway) => {
-                                let mut stream = tokio::time::timeout(Duration::from_secs(20),
-                                    crate::page::connect(gateway, &port.target_host, port.target_port))
-                                    .await.context("Page 目标连接超时")??;
+                            ForwardTransport::Page(connector) => {
+                                let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+                                let mut stream = connector.connect(&port.target_host, port.target_port, deadline).await?;
                                 tokio::io::copy_bidirectional(&mut socket, &mut stream).await?;
                             }
                         }

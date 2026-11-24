@@ -189,9 +189,12 @@ pub(crate) async fn connect(
     ssh_gateway: Option<u32>,
     page_gateway: Option<crate::api::page::PageGateway>,
 ) -> Result<u32> {
-    let client = tokio::time::timeout(TIMEOUT, async move {
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    let client = tokio::time::timeout_at(deadline, async move {
         let stream = if let Some(gateway) = page_gateway {
-            Transport::Page(Box::new(crate::page::connect(gateway, &host, port).await?))
+            Transport::Page(Box::new(
+                crate::page::connect(gateway, &host, port, deadline).await?,
+            ))
         } else if let Some(id) = ssh_gateway {
             Transport::Ssh(crate::api::ssh::desktop_tunnel(id, host, port).await?)
         } else {

@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
+use tokio::time::{timeout_at, Instant};
 use tokio_rustls::{client::TlsStream, rustls, TlsConnector};
 
 use crate::api::page::PageGateway;
@@ -67,6 +68,7 @@ struct Open<'a> {
     token: &'a str,
     host: &'a str,
     port: u16,
+    timeout_ms: u32,
 }
 
 #[derive(Deserialize)]
@@ -145,10 +147,6 @@ fn parse_pin(value: &str) -> Result<Vec<u8>> {
         .collect()
 }
 
-pub(crate) fn validate_gateway(gateway: &PageGateway) -> Result<()> {
-    gateway_pin(gateway).map(|_| ())
-}
-
 fn gateway_pin(gateway: &PageGateway) -> Result<Option<Vec<u8>>> {
     if gateway.server_host.trim().is_empty()
         || gateway.server_port == 0
@@ -198,27 +196,40 @@ impl PageConnector {
         Ok(Self { gateway, tls })
     }
 
-    pub async fn connect(&self, host: &str, port: u16) -> Result<PageStream> {
+    pub async fn connect(&self, host: &str, port: u16, deadline: Instant) -> Result<PageStream> {
         let gateway = &self.gateway;
-        let tcp = TcpStream::connect((gateway.server_host.as_str(), gateway.server_port))
-            .await
-            .context("无法连接 Page Server")?;
+        let tcp = timeout_at(
+            deadline,
+            TcpStream::connect((gateway.server_host.as_str(), gateway.server_port)),
+        )
+        .await
+        .context("连接 Page Server 超时")?
+        .context("无法连接 Page Server")?;
         tcp.set_nodelay(true)?;
         let stream = if let Some((connector, name)) = &self.tls {
-            let tls = connector
-                .connect(name.clone(), tcp)
+            let tls = timeout_at(deadline, connector.connect(name.clone(), tcp))
                 .await
+                .context("Page Server TLS 握手超时")?
                 .context("Page Server TLS 握手失败，请核对证书指纹")?;
             PageStream::Tls(Box::new(tls))
         } else {
             PageStream::Tcp(tcp)
         };
-        open_target(gateway, host, port, stream).await
+        timeout_at(deadline, open_target(gateway, host, port, stream, deadline))
+            .await
+            .context("Page 隧道建立超时")?
     }
 }
 
-pub(crate) async fn connect(gateway: PageGateway, host: &str, port: u16) -> Result<PageStream> {
-    PageConnector::new(gateway)?.connect(host, port).await
+pub(crate) async fn connect(
+    gateway: PageGateway,
+    host: &str,
+    port: u16,
+    deadline: Instant,
+) -> Result<PageStream> {
+    PageConnector::new(gateway)?
+        .connect(host, port, deadline)
+        .await
 }
 
 async fn open_target(
@@ -226,19 +237,32 @@ async fn open_target(
     host: &str,
     port: u16,
     mut stream: PageStream,
+    deadline: Instant,
 ) -> Result<PageStream> {
-    let frame = serde_json::to_vec(&Open {
-        version: 1,
-        kind: "open",
-        client_id: &gateway.client_id,
-        token: &gateway.token,
-        host,
-        port,
-    })?;
-    if frame.len() > MAX_FRAME {
+    let remaining = deadline
+        .saturating_duration_since(Instant::now())
+        .as_millis();
+    // Leave time for the Server's outcome to reach the caller.
+    let timeout_ms = remaining.saturating_sub(50).clamp(1, u32::MAX.into()) as u32;
+    let mut frame = Vec::with_capacity(256);
+    frame.extend_from_slice(&[0; 4]);
+    serde_json::to_writer(
+        &mut frame,
+        &Open {
+            version: 1,
+            kind: "open",
+            client_id: &gateway.client_id,
+            token: &gateway.token,
+            host,
+            port,
+            timeout_ms,
+        },
+    )?;
+    let size = frame.len() - 4;
+    if size > MAX_FRAME {
         bail!("Page 请求超限");
     }
-    stream.write_u32(frame.len() as u32).await?;
+    frame[..4].copy_from_slice(&(size as u32).to_be_bytes());
     stream.write_all(&frame).await?;
     stream.flush().await?;
     let size = stream.read_u32().await? as usize;
@@ -255,6 +279,9 @@ async fn open_target(
         bail!(match reply.error.as_str() {
             "unauthorized" => "Page 访问令牌或 Client ID 无效",
             "clientOffline" => "Page Client 未连接中转 Server",
+            "gatewayBusy" => "Page Server 连接额度已满，请稍后重试",
+            "clientBusy" => "Page Client 隧道额度已满，请稍后重试",
+            "workUnavailable" => "Page Client 无法建立到 Server 的工作连接",
             "targetDenied" => "Page Client 未允许此目标地址和端口",
             "targetUnavailable" => "Page Client 无法连接目标服务",
             "targetTimeout" => "Page 目标连接超时",
@@ -292,6 +319,8 @@ impl GoRelay {
         use std::time::{Duration, SystemTime, UNIX_EPOCH};
         let binary = std::env::var("PAGAGATEWAY_BIN")
             .expect("set PAGAGATEWAY_BIN to a built pagagateway binary");
+        let client_binary =
+            std::env::var("PAGAGATEWAY_CLIENT_BIN").unwrap_or_else(|_| binary.clone());
         let directory = std::env::temp_dir().join(format!(
             "pagashell-page-{}-{}",
             std::process::id(),
@@ -328,8 +357,8 @@ impl GoRelay {
         let client_config = serde_json::json!({"server":address.to_string(), "server_fingerprint":fingerprint, "id":"test", "token":"client", "allowed_targets":target_ports.iter().map(|p| format!("127.0.0.1:{p}")).collect::<Vec<_>>()});
         std::fs::write(directory.join("server.json"), server_config.to_string()).unwrap();
         std::fs::write(directory.join("client.json"), client_config.to_string()).unwrap();
-        let spawn = |kind: &str| {
-            Command::new(&binary)
+        let spawn = |binary: &str, kind: &str| {
+            Command::new(binary)
                 .args([kind, "run", "-config"])
                 .arg(directory.join(format!("{kind}.json")))
                 .stdout(Stdio::null())
@@ -337,8 +366,8 @@ impl GoRelay {
                 .spawn()
                 .unwrap()
         };
-        let server = spawn("server");
-        let client = spawn("client");
+        let server = spawn(&binary, "server");
+        let client = spawn(&client_binary, "client");
         let relay = Self {
             gateway: PageGateway {
                 server_host: "127.0.0.1".into(),
@@ -353,13 +382,9 @@ impl GoRelay {
         };
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                let result = tokio::time::timeout(
-                    Duration::from_secs(2),
-                    connect(relay.gateway.clone(), "127.0.0.1", 1),
-                )
-                .await;
-                if matches!(result, Ok(Err(ref e)) if e.to_string().contains("未允许此目标"))
-                {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                let result = connect(relay.gateway.clone(), "127.0.0.1", 1, deadline).await;
+                if matches!(result, Err(ref e) if e.to_string().contains("未允许此目标")) {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(25)).await;
@@ -400,6 +425,7 @@ mod tests {
                 assert_eq!(request["kind"], "open");
                 assert_eq!(request["token"], "test-access");
                 assert_eq!(request["host"], "internal.test");
+                assert!(matches!(request["timeout_ms"].as_u64(), Some(1..=5_000)));
                 let reply = br#"{"version":1,"kind":"ready"}"#;
                 let mut data = (reply.len() as u32).to_be_bytes().to_vec();
                 data.extend_from_slice(reply);
@@ -416,7 +442,10 @@ mod tests {
                 token: "test-access".into(),
                 server_fingerprint: " \t".into(),
             };
-            let mut stream = connect(gateway, "internal.test", 22).await.unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut stream = connect(gateway, "internal.test", 22, deadline)
+                .await
+                .unwrap();
             let mut banner = [0; 10];
             stream.read_exact(&mut banner).await.unwrap();
             assert_eq!(&banner, b"SSH-banner");

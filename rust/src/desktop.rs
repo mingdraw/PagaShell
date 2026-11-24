@@ -125,9 +125,12 @@ pub(crate) async fn prepare_with_page(
     ssh_gateway: Option<u32>,
     page_gateway: Option<crate::api::page::PageGateway>,
 ) -> Result<DesktopHandshake> {
-    let pending = tokio::time::timeout(TIMEOUT, async {
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    let pending = tokio::time::timeout_at(deadline, async {
         let stream = if let Some(gateway) = page_gateway {
-            Transport::Page(Box::new(crate::page::connect(gateway, &host, port).await?))
+            Transport::Page(Box::new(
+                crate::page::connect(gateway, &host, port, deadline).await?,
+            ))
         } else if let Some(id) = ssh_gateway {
             Transport::Ssh(crate::api::ssh::desktop_tunnel(id, host.clone(), port).await?)
         } else {
