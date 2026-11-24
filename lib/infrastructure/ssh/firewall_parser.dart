@@ -62,7 +62,7 @@ const _wellKnownPorts = <String, String>{
 FirewallSnapshot parseFirewallSnapshot(String raw) {
   try {
     final lines = const LineSplitter().convert(raw);
-    if (lines.length < 10 ||
+    if (lines.length < 9 ||
         lines.first != 'PAGA_FIREWALL_V1' ||
         lines.last != 'END_FIREWALL') {
       _invalid();
@@ -83,16 +83,6 @@ FirewallSnapshot parseFirewallSnapshot(String raw) {
     }
 
     final backend = _parseBackend(headers['BACKEND'] ?? '');
-    final available = <FirewallBackend>[];
-    for (final token in (headers['AVAILABLE'] ?? '').split(',')) {
-      final trimmed = token.trim();
-      if (trimmed.isEmpty) continue;
-      final parsed = _tryParseBackend(trimmed);
-      if (parsed != null && !available.contains(parsed)) {
-        available.add(parsed);
-      }
-    }
-    if (!available.contains(backend)) available.insert(0, backend);
 
     final state = switch (headers['STATE']) {
       'active' => FirewallServiceState.active,
@@ -133,7 +123,6 @@ FirewallSnapshot parseFirewallSnapshot(String raw) {
 
     return FirewallSnapshot(
       backend: backend,
-      availableBackends: List.unmodifiable(available),
       state: state,
       version: version,
       zone: zone,

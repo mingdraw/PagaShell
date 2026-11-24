@@ -67,6 +67,36 @@ fw_fail_from_err() {
   exit 75
 }
 
+fw_ipt_wait_mode=
+fw_ipt_run() {
+  fw_ipt_bin=$1
+  shift
+  if [ "$fw_ipt_wait_mode" = w ]; then
+    fw_run "$fw_ipt_bin" -w "$@"
+    return $?
+  elif [ "$fw_ipt_wait_mode" = none ]; then
+    fw_run "$fw_ipt_bin" "$@"
+    return $?
+  fi
+  if fw_run "$fw_ipt_bin" -w 5 "$@"; then
+    fw_ipt_wait_mode=w5
+    return 0
+  fi
+  if grep -qiE 'bad argument|unknown option|unrecognized option|invalid option' "$fw_temp/err" 2>/dev/null; then
+    if fw_run "$fw_ipt_bin" -w "$@"; then
+      fw_ipt_wait_mode=w
+      return 0
+    fi
+    if grep -qiE 'bad argument|unknown option|unrecognized option|invalid option' "$fw_temp/err" 2>/dev/null; then
+      fw_ipt_wait_mode=none
+      fw_run "$fw_ipt_bin" "$@"
+      return $?
+    fi
+    return 1
+  fi
+  return 1
+}
+
 fw_bin_firewalld=$(fw_find_bin firewall-cmd || true)
 fw_bin_ufw=$(fw_find_bin ufw || true)
 fw_bin_nft=$(fw_find_bin nft || true)
@@ -267,15 +297,15 @@ fw_ufw_delete_rule() {
   fi
   fw_resolved=$(
     PAGA_FW_NUM=$fw_expect_num PAGA_FW_BODY=$fw_expect_body awk '
-      /^[[:space:]]*\[[[:space:]]*[0-9]+\][[:space:]]+/ {
+      /^[ \t]*\[[ \t]*[0-9]+\][ \t]+/ {
         line = $0
         sub(/\r$/, "", line)
         idx = line
-        sub(/^[[:space:]]*\[[[:space:]]*/, "", idx)
+        sub(/^[ \t]*\[[ \t]*/, "", idx)
         sub(/\].*$/, "", idx)
         body = line
-        sub(/^[[:space:]]*\[[[:space:]]*[0-9]+\][[:space:]]+/, "", body)
-        gsub(/[[:space:]]+$/, "", body)
+        sub(/^[ \t]*\[[ \t]*[0-9]+\][ \t]+/, "", body)
+        gsub(/[ \t]+$/, "", body)
         if (idx == ENVIRON["PAGA_FW_NUM"] && body == ENVIRON["PAGA_FW_BODY"]) {
           exact = idx
         }
@@ -310,17 +340,17 @@ fw_nft_select_chain() {
   fi
   fw_target=$(
     PAGA_FW_FAM=$fw_req_fam awk '
-      /^table[[:space:]]+(inet|ip|ip6)[[:space:]]+/ {
+      /^table[ \t]+(inet|ip|ip6)[ \t]+/ {
         cur_fam = $2
         cur_tbl = $3
         cur_chn = ""
         next
       }
-      /^[[:space:]]*chain[[:space:]]+[A-Za-z0-9_.-]+[[:space:]]*\{/ {
+      /^[ \t]*chain[ \t]+[A-Za-z0-9_.-]+[ \t]*\{/ {
         cur_chn = $2
         next
       }
-      /type[[:space:]]+filter[[:space:]]+hook[[:space:]]+input/ {
+      /type[ \t]+filter[ \t]+hook[ \t]+input/ {
         if (cur_fam != "" && cur_tbl != "" && cur_chn != "") {
           if (cur_fam == "inet" && inet_hit == "") {
             inet_hit = cur_fam " " cur_tbl " " cur_chn
@@ -365,9 +395,9 @@ fw_nft_catchall_handle() {
       handle = line
       sub(/^.*# handle /, "", handle)
       body = line
-      sub(/[[:space:]]*# handle [0-9]+$/, "", body)
-      sub(/^[[:space:]]+/, "", body)
-      if (body == "drop" || body == "reject" || body ~ /^reject[[:space:]]+with[[:space:]]/ || body ~ /^counter[[:space:]].*[[:space:]](drop|reject)([[:space:]]|$)/) {
+      sub(/[ \t]*# handle [0-9]+$/, "", body)
+      sub(/^[ \t]+/, "", body)
+      if (body == "drop" || body == "reject" || body ~ /^reject[ \t]+with[ \t]/ || body ~ /^counter[ \t].*[ \t](drop|reject)([ \t]|$)/) {
         print handle
         exit
       }
@@ -469,7 +499,7 @@ fw_nft_persist() {
 
 fw_ipt_prepare() {
   [ -n "$fw_bin_iptables" ] || exit 69
-  if ! fw_run "$fw_bin_iptables" -w 5 -S INPUT; then
+  if ! fw_ipt_run "$fw_bin_iptables" -S INPUT; then
     fw_fail_from_err
   fi
 }
@@ -505,19 +535,19 @@ fw_ipt_add_one() {
     set -- "$@" -m comment --comment "$fw_comment"
   fi
   set -- "$@" -j "$fw_target"
-  if fw_run "$fw_bin" -w 5 -C INPUT "$@"; then
+  if fw_ipt_run "$fw_bin" -C INPUT "$@"; then
     return 0
   elif fw_is_perm_err; then
     exit 77
   fi
-  if ! fw_run "$fw_bin" -w 5 -S INPUT; then
+  if ! fw_ipt_run "$fw_bin" -S INPUT; then
     fw_fail_from_err
   fi
   fw_pos=$(fw_ipt_catchall_pos || true)
   if [ -n "$fw_pos" ]; then
-    fw_run "$fw_bin" -w 5 -I INPUT "$fw_pos" "$@" || fw_fail_from_err
+    fw_ipt_run "$fw_bin" -I INPUT "$fw_pos" "$@" || fw_fail_from_err
   else
-    fw_run "$fw_bin" -w 5 -A INPUT "$@" || fw_fail_from_err
+    fw_ipt_run "$fw_bin" -A INPUT "$@" || fw_fail_from_err
   fi
 }
 
@@ -544,7 +574,7 @@ fw_ipt_add_rule() {
         ;;
       any)
         fw_ipt_add_one "$fw_bin_iptables" "$fw_a" "$fw_proto" "$fw_port" "" "$fw_comment"
-        if [ -n "$fw_bin_ip6tables" ] && fw_run "$fw_bin_ip6tables" -w 5 -S INPUT; then
+        if [ -n "$fw_bin_ip6tables" ] && fw_ipt_run "$fw_bin_ip6tables" -S INPUT; then
           fw_ipt_add_one "$fw_bin_ip6tables" "$fw_a" "$fw_proto" "$fw_port" "" "$fw_comment"
         fi
         ;;
@@ -575,7 +605,7 @@ fw_ipt_delete_rule() {
     *) exit 72 ;;
   esac
   [ -n "$fw_expect_num" ] && [ -n "$fw_expect_line" ] || exit 72
-  if ! fw_run "$fw_bin" -w 5 -S INPUT; then
+  if ! fw_ipt_run "$fw_bin" -S INPUT; then
     fw_fail_from_err
   fi
   fw_resolved=$(
@@ -599,7 +629,7 @@ fw_ipt_delete_rule() {
     ' "$fw_temp/out"
   )
   [ -n "$fw_resolved" ] || exit 78
-  if ! fw_run "$fw_bin" -w 5 -D INPUT "$fw_resolved"; then
+  if ! fw_ipt_run "$fw_bin" -D INPUT "$fw_resolved"; then
     fw_fail_from_err
   fi
 }

@@ -8,7 +8,6 @@ import '../../application/session/firewall_controller.dart';
 import '../../domain/ssh/firewall.dart';
 import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
-import '../components/app_menu.dart';
 import '../localization/app_translations.dart';
 import '../navigation/app_navigation.dart';
 import '../shell/workspace_visibility.dart';
@@ -337,7 +336,7 @@ class _FirewallPanelState extends State<FirewallPanel>
               runSpacing: 4,
               crossAxisAlignment: WrapCrossAlignment.center,
               children: [
-                _backendBadge(controller, snapshot, busy: busy),
+                _backendBadge(snapshot),
                 _pill(
                   key: const ValueKey('firewall-state-badge'),
                   text: (active ? '已启用' : '未启用').tr,
@@ -469,12 +468,16 @@ class _FirewallPanelState extends State<FirewallPanel>
     );
   }
 
-  Widget _backendBadge(
-    FirewallController controller,
-    FirewallSnapshot snapshot, {
-    required bool busy,
-  }) {
-    final label = Text(
+  Widget _backendBadge(FirewallSnapshot snapshot) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+    decoration: BoxDecoration(
+      color: AppTheme.serverStatusCpuColor.withValues(alpha: .14),
+      border: Border.all(
+        color: AppTheme.serverStatusCpuColor.withValues(alpha: .35),
+      ),
+      borderRadius: BorderRadius.circular(4),
+    ),
+    child: Text(
       snapshot.backend.displayName,
       key: const ValueKey('firewall-backend-name'),
       style: const TextStyle(
@@ -482,50 +485,8 @@ class _FirewallPanelState extends State<FirewallPanel>
         fontWeight: FontWeight.w600,
         color: AppTheme.serverStatusCpuColor,
       ),
-    );
-    final decoration = BoxDecoration(
-      color: AppTheme.serverStatusCpuColor.withValues(alpha: .14),
-      border: Border.all(
-        color: AppTheme.serverStatusCpuColor.withValues(alpha: .35),
-      ),
-      borderRadius: BorderRadius.circular(4),
-    );
-    if (!snapshot.canSwitchBackend) {
-      return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-        decoration: decoration,
-        child: label,
-      );
-    }
-    return DecoratedBox(
-      decoration: decoration,
-      child: AppMenuButton<FirewallBackend>(
-        key: const ValueKey('firewall-backend-switcher'),
-        density: shadcn.ButtonDensity.compact,
-        tooltip: '切换防火墙后端'.tr,
-        semanticLabel: '切换防火墙后端'.tr,
-        selectedValue: snapshot.backend,
-        enabled: !busy,
-        items: [
-          for (final item in snapshot.availableBackends)
-            (item, item.displayName),
-        ],
-        onSelected: (backend) => unawaited(controller.selectBackend(backend)),
-        icon: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            label,
-            const SizedBox(width: 2),
-            const AppIcon(
-              AppIcons.chevronDown,
-              size: 12,
-              color: AppTheme.serverStatusCpuColor,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
+    ),
+  );
 
   Widget _pill({
     required String text,

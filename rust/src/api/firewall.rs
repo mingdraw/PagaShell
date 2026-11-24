@@ -65,11 +65,8 @@ const FIREWALL_MUTATE_POLICY: ReadOnlyExecPolicy = ReadOnlyExecPolicy {
 };
 
 /// 读取当前 Linux 主机防火墙状态、端口规则及监听端口关联进程。
-pub async fn ssh_read_firewall(
-    session_id: u32,
-    preferred_backend: Option<FirewallBackendKind>,
-) -> Result<String> {
-    let command = firewall_read_command(preferred_backend);
+pub async fn ssh_read_firewall(session_id: u32) -> Result<String> {
+    let command = firewall_read_command();
     let (output, code) =
         read_only_exec(session_id, command, &FIREWALL_READ_POLICY, 4 * 1024 * 1024).await?;
     match code {
@@ -177,13 +174,8 @@ fn service_action_name(action: FirewallServiceActionKind) -> &'static str {
     }
 }
 
-pub(super) fn firewall_read_command(preferred_backend: Option<FirewallBackendKind>) -> String {
-    let preferred = preferred_backend.map(backend_name).unwrap_or("");
-    format!(
-        "{} paga-firewall {}",
-        server_status_command(include_str!("firewall_read.sh")),
-        shell_argument(preferred)
-    )
+pub(super) fn firewall_read_command() -> String {
+    server_status_command(include_str!("firewall_read.sh"))
 }
 
 pub(super) fn firewall_service_command(

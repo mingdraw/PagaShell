@@ -192,12 +192,11 @@ class ServerStatusConnection
   }
 
   @override
-  Future<FirewallSnapshot> readFirewall({FirewallBackend? backend}) =>
-      _firewallCall(
-        (source) => source.readFirewall(backend: backend),
-        timeout: firewallTimeout,
-        timeoutMessage: '防火墙查询超时，请重试',
-      );
+  Future<FirewallSnapshot> readFirewall() => _firewallCall(
+    (source) => source.readFirewall(),
+    timeout: firewallTimeout,
+    timeoutMessage: '防火墙查询超时，请重试',
+  );
 
   @override
   Future<void> addFirewallRules(

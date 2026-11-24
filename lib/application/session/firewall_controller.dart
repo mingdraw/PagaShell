@@ -21,7 +21,6 @@ class FirewallController extends GetxController {
   final Duration mutateTimeout;
 
   final snapshot = Rxn<FirewallSnapshot>();
-  final selectedBackend = Rxn<FirewallBackend>();
   final query = ''.obs;
   final actionFilter = FirewallActionFilter.all.obs;
   final protocolFilter = FirewallProtocolFilter.all.obs;
@@ -76,14 +75,7 @@ class FirewallController extends GetxController {
     }
   }
 
-  Future<void> selectBackend(FirewallBackend backend) async {
-    if (_disposed || busy) return;
-    selectedBackend.value = backend;
-    clearActionFeedback();
-    await refreshFirewall(backend: backend);
-  }
-
-  Future<void> refreshFirewall({FirewallBackend? backend}) async {
+  Future<void> refreshFirewall() async {
     if (_disposed || !_enabled) return;
     if (_inFlight) {
       _queuedRefresh = true;
@@ -92,18 +84,11 @@ class FirewallController extends GetxController {
     _inFlight = true;
     _queuedRefresh = false;
     final generation = _generation;
-    final requestedBackend = backend ?? selectedBackend.value;
     loading.value = true;
     try {
-      final result = await source
-          .readFirewall(backend: requestedBackend)
-          .timeout(queryTimeout);
+      final result = await source.readFirewall().timeout(queryTimeout);
       if (_disposed || !_enabled || generation != _generation) return;
       snapshot.value = result;
-      if (selectedBackend.value != null &&
-          !result.availableBackends.contains(selectedBackend.value)) {
-        selectedBackend.value = null;
-      }
       updatedAt.value = DateTime.now();
       error.value = null;
     } on Object catch (e) {
@@ -139,7 +124,7 @@ class FirewallController extends GetxController {
       if (_disposed) return;
       notice.value = '防火墙规则已创建';
       _expireActionFeedback();
-      await refreshFirewall(backend: current.backend);
+      await refreshFirewall();
     } on TimeoutException {
       throw const SshEngineException('防火墙操作超时，请刷新规则列表确认状态');
     } finally {
@@ -159,7 +144,7 @@ class FirewallController extends GetxController {
       if (_disposed) return;
       notice.value = '防火墙规则已删除';
       _expireActionFeedback();
-      await refreshFirewall(backend: rule.backend);
+      await refreshFirewall();
     } on TimeoutException {
       throw const SshEngineException('防火墙操作超时，请刷新规则列表确认状态');
     } finally {
@@ -188,7 +173,7 @@ class FirewallController extends GetxController {
         FirewallServiceAction.reload => '防火墙规则已重载',
       };
       _expireActionFeedback();
-      await refreshFirewall(backend: current.backend);
+      await refreshFirewall();
     } on TimeoutException {
       throw const SshEngineException('防火墙操作超时，请刷新规则列表确认状态');
     } finally {

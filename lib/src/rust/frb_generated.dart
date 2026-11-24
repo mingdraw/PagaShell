@@ -306,10 +306,7 @@ abstract class RustLibApi extends BaseApi {
     required DockerResourceKind kind,
   });
 
-  Future<String> crateApiFirewallSshReadFirewall({
-    required int sessionId,
-    FirewallBackendKind? preferredBackend,
-  });
+  Future<String> crateApiFirewallSshReadFirewall({required int sessionId});
 
   Future<String> crateApiNetworkPortsSshReadNetworkPorts({
     required int sessionId,
@@ -2032,19 +2029,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<String> crateApiFirewallSshReadFirewall({
-    required int sessionId,
-    FirewallBackendKind? preferredBackend,
-  }) {
+  Future<String> crateApiFirewallSshReadFirewall({required int sessionId}) {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_u_32(sessionId, serializer);
-          sse_encode_opt_box_autoadd_firewall_backend_kind(
-            preferredBackend,
-            serializer,
-          );
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -2057,7 +2047,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_AnyhowException,
         ),
         constMeta: kCrateApiFirewallSshReadFirewallConstMeta,
-        argValues: [sessionId, preferredBackend],
+        argValues: [sessionId],
         apiImpl: this,
       ),
     );
@@ -2066,7 +2056,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiFirewallSshReadFirewallConstMeta =>
       const TaskConstMeta(
         debugName: "ssh_read_firewall",
-        argNames: ["sessionId", "preferredBackend"],
+        argNames: ["sessionId"],
       );
 
   @override
@@ -3090,14 +3080,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  FirewallBackendKind dco_decode_box_autoadd_firewall_backend_kind(
-    dynamic raw,
-  ) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return dco_decode_firewall_backend_kind(raw);
-  }
-
-  @protected
   int dco_decode_box_autoadd_i_16(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as int;
@@ -3402,16 +3384,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   DesktopFrame? dco_decode_opt_box_autoadd_desktop_frame(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_desktop_frame(raw);
-  }
-
-  @protected
-  FirewallBackendKind? dco_decode_opt_box_autoadd_firewall_backend_kind(
-    dynamic raw,
-  ) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return raw == null
-        ? null
-        : dco_decode_box_autoadd_firewall_backend_kind(raw);
   }
 
   @protected
@@ -3765,14 +3737,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_desktop_frame(deserializer));
-  }
-
-  @protected
-  FirewallBackendKind sse_decode_box_autoadd_firewall_backend_kind(
-    SseDeserializer deserializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    return (sse_decode_firewall_backend_kind(deserializer));
   }
 
   @protected
@@ -4202,19 +4166,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
     if (sse_decode_bool(deserializer)) {
       return (sse_decode_box_autoadd_desktop_frame(deserializer));
-    } else {
-      return null;
-    }
-  }
-
-  @protected
-  FirewallBackendKind? sse_decode_opt_box_autoadd_firewall_backend_kind(
-    SseDeserializer deserializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    if (sse_decode_bool(deserializer)) {
-      return (sse_decode_box_autoadd_firewall_backend_kind(deserializer));
     } else {
       return null;
     }
@@ -4669,15 +4620,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_box_autoadd_firewall_backend_kind(
-    FirewallBackendKind self,
-    SseSerializer serializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_firewall_backend_kind(self, serializer);
-  }
-
-  @protected
   void sse_encode_box_autoadd_i_16(int self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_16(self, serializer);
@@ -5066,19 +5008,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self != null, serializer);
     if (self != null) {
       sse_encode_box_autoadd_desktop_frame(self, serializer);
-    }
-  }
-
-  @protected
-  void sse_encode_opt_box_autoadd_firewall_backend_kind(
-    FirewallBackendKind? self,
-    SseSerializer serializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    sse_encode_bool(self != null, serializer);
-    if (self != null) {
-      sse_encode_box_autoadd_firewall_backend_kind(self, serializer);
     }
   }
 

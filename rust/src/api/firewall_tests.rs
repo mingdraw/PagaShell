@@ -299,10 +299,10 @@ esac
 "#,
     );
 
-    let read = fixture.run_script(include_str!("firewall_read.sh"), &[""]);
+    let read = fixture.run_script(include_str!("firewall_read.sh"), &[]);
     assert!(read.status.success());
     let text = String::from_utf8(read.stdout).unwrap();
-    assert!(text.contains("BACKEND ufw\nAVAILABLE ufw\nSTATE active\nVERSION 0.36.2\n"));
+    assert!(text.contains("BACKEND ufw\nSTATE active\nVERSION 0.36.2\n"));
     assert!(text.contains("[ 2] 8080:8089/udp"));
 
     // Expected index was 3, but rule shifted to 2 -> script verifies exact body and deletes 2.
@@ -382,10 +382,10 @@ esac
 "#,
     );
 
-    let read = fixture.run_script(include_str!("firewall_read.sh"), &[""]);
+    let read = fixture.run_script(include_str!("firewall_read.sh"), &[]);
     assert!(read.status.success());
     let text = String::from_utf8(read.stdout).unwrap();
-    assert!(text.contains("BACKEND nftables\nAVAILABLE nftables\nSTATE active\nVERSION 1.0.9\n"));
+    assert!(text.contains("BACKEND nftables\nSTATE active\nVERSION 1.0.9\n"));
 
     let add = fixture.run_script(
         include_str!("firewall_mutate.sh"),
@@ -457,10 +457,12 @@ esac
 "#,
     );
 
-    let read = fixture.run_script(include_str!("firewall_read.sh"), &[""]);
+    let read = fixture.run_script(include_str!("firewall_read.sh"), &[]);
     assert!(read.status.success());
     let text = String::from_utf8(read.stdout).unwrap();
-    assert!(text.contains("BACKEND iptables\nAVAILABLE iptables\nSTATE active\nVERSION 1.8.9 (nf_tables)\nZONE \nPOLICY DROP\n"));
+    assert!(text.contains(
+        "BACKEND iptables\nSTATE active\nVERSION 1.8.9 (nf_tables)\nZONE \nPOLICY DROP\n"
+    ));
 
     // Add for any source -> inserts before catch-all DROP in v4 and appends in v6.
     let add = fixture.run_script(
@@ -569,4 +571,144 @@ esac
     assert_eq!(stale_delete.status.code(), Some(78));
     assert!(!nft_fixture.trace().contains("delete> <rule"));
     nft_fixture.assert_clean();
+}
+
+#[test]
+fn prefers_installed_firewalld_or_ufw_over_iptables_and_nftables() {
+    let fixture = Fixture::new();
+    fixture.linux_root();
+    fixture.install(
+        "firewall-cmd",
+        r#"#!/bin/sh
+case "$*" in
+  '--version') printf '2.4.3\n' ;;
+  '--state') printf 'not running\n' >&2; exit 252 ;;
+esac
+"#,
+    );
+    fixture.install(
+        "nft",
+        "#!/bin/sh\nprintf 'table inet filter {\\n\\tchain input {\\n\\t\\ttype filter hook input priority 0; policy drop;\\n\\t}\\n}\\n'\n",
+    );
+    fixture.install(
+        "iptables",
+        r#"#!/bin/sh
+case "$*" in
+  '--version') printf 'iptables v1.8.9 (nf_tables)\n' ;;
+  '-w 5 -S INPUT')
+    printf '%s\n' '-P INPUT DROP'
+    printf '%s\n' '-A INPUT -p tcp -m tcp --dport 22 -j ACCEPT'
+    ;;
+  *) exit 0 ;;
+esac
+"#,
+    );
+
+    let read = fixture.run_script(include_str!("firewall_read.sh"), &[]);
+    assert!(read.status.success());
+    let text = String::from_utf8(read.stdout).unwrap();
+    assert!(text.contains("BACKEND firewalld\nSTATE inactive\nVERSION 2.4.3\n"));
+    fixture.assert_clean();
+
+    let ufw_host = Fixture::new();
+    ufw_host.linux_root();
+    ufw_host.install(
+        "ufw",
+        r#"#!/bin/sh
+case "$*" in
+  'version') printf 'ufw 0.36.2\n' ;;
+  *) printf 'Status: inactive\n' ;;
+esac
+"#,
+    );
+    ufw_host.install(
+        "iptables",
+        "#!/bin/sh\nprintf '%s\\n' '-P INPUT DROP'\nprintf '%s\\n' '-A INPUT -p tcp --dport 22 -j ACCEPT'\n",
+    );
+    let read_ufw = ufw_host.run_script(include_str!("firewall_read.sh"), &[]);
+    assert!(read_ufw.status.success());
+    let text_ufw = String::from_utf8(read_ufw.stdout).unwrap();
+    assert!(text_ufw.contains("BACKEND ufw\nSTATE inactive\nVERSION 0.36.2\n"));
+    ufw_host.assert_clean();
+}
+
+#[test]
+fn falls_back_to_nftables_or_iptables_only_when_firewalld_and_ufw_are_not_installed() {
+    // 1. Neither firewalld nor ufw installed + native nftables -> nftables.
+    let nft_host = Fixture::new();
+    nft_host.linux_root();
+    nft_host.install(
+        "nft",
+        r#"#!/bin/sh
+case "$*" in
+  '--version') printf 'nftables v1.0.9\n' ;;
+  '-a list ruleset')
+    printf 'table ip filter {\n\tchain input {\n\t\ttype filter hook input priority 0; policy drop;\n\t\ttcp dport 22 accept # handle 3\n\t}\n}\n'
+    ;;
+esac
+"#,
+    );
+    nft_host.install("iptables", "#!/bin/sh\nprintf '%s\\n' '-P INPUT ACCEPT'\n");
+    let out = nft_host.run_script(include_str!("firewall_read.sh"), &[]);
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("BACKEND nftables\nSTATE active\n"));
+    nft_host.assert_clean();
+
+    // 2. Neither firewalld nor ufw installed + iptables-nft compat table & active iptables 1.4.21 -> iptables.
+    let ipt_host = Fixture::new();
+    ipt_host.linux_root();
+    ipt_host.install(
+        "nft",
+        "#!/bin/sh\nprintf 'table ip filter {\\n\\tchain INPUT {\\n\\t\\ttype filter hook input priority filter; policy accept;\\n\\t}\\n}\\n'\n",
+    );
+    ipt_host.install(
+        "iptables",
+        r#"#!/bin/sh
+case "$*" in
+  '--version') printf 'iptables v1.4.21\n' ;;
+  '-w 5 '*) printf "iptables v1.4.21: Bad argument '5'\n" >&2; exit 2 ;;
+  '-w -S INPUT')
+    printf '%s\n' '-P INPUT ACCEPT'
+    printf '%s\n' '-A INPUT -p tcp -m tcp --dport 443 -j ACCEPT'
+    ;;
+  *) exit 0 ;;
+esac
+"#,
+    );
+    let out2 = ipt_host.run_script(include_str!("firewall_read.sh"), &[]);
+    assert!(out2.status.success());
+    let text2 = String::from_utf8(out2.stdout).unwrap();
+    assert!(text2.contains("BACKEND iptables\nSTATE active\nVERSION 1.4.21\n"));
+    assert!(text2.contains("--dport 443 -j ACCEPT"));
+    ipt_host.assert_clean();
+
+    // 3. Neither firewalld nor ufw installed + enabled nftables.service -> nftables (inactive).
+    let enabled_host = Fixture::new();
+    enabled_host.linux_root();
+    enabled_host.install(
+        "systemctl",
+        r#"#!/bin/sh
+case "$*" in
+  'is-enabled --quiet nftables.service') exit 0 ;;
+  'show -p LoadState --value nftables.service') printf 'loaded\n' ;;
+  *) exit 1 ;;
+esac
+"#,
+    );
+    enabled_host.install(
+        "nft",
+        r#"#!/bin/sh
+case "$*" in
+  '--version') printf 'nftables v1.0.9\n' ;;
+  '-a list ruleset') ;;
+esac
+"#,
+    );
+    enabled_host.install("iptables", "#!/bin/sh\nprintf '%s\\n' '-P INPUT ACCEPT'\n");
+    let out3 = enabled_host.run_script(include_str!("firewall_read.sh"), &[]);
+    assert!(out3.status.success());
+    let text3 = String::from_utf8(out3.stdout).unwrap();
+    assert!(text3.contains("BACKEND nftables\nSTATE inactive\n"));
+    enabled_host.assert_clean();
 }

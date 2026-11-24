@@ -12,13 +12,8 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// 读取当前 Linux 主机防火墙状态、端口规则及监听端口关联进程。
-Future<String> sshReadFirewall({
-  required int sessionId,
-  FirewallBackendKind? preferredBackend,
-}) => RustLib.instance.api.crateApiFirewallSshReadFirewall(
-  sessionId: sessionId,
-  preferredBackend: preferredBackend,
-);
+Future<String> sshReadFirewall({required int sessionId}) =>
+    RustLib.instance.api.crateApiFirewallSshReadFirewall(sessionId: sessionId);
 
 /// 批量新增 TCP/UDP 端口规则；所有参数在 Rust 侧严格校验后再执行远端命令。
 Future<void> sshAddFirewallRules({

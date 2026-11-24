@@ -1802,7 +1802,6 @@ class AppTranslations extends Translations {
     '开启': 'Enable',
     '停用': 'Disable',
     '重载': 'Reload',
-    '切换防火墙后端': 'Switch firewall backend',
     '允许': 'Allow',
     '动作': 'Action',
     '协议': 'Protocol',

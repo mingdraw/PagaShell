@@ -20,22 +20,9 @@ class _FakeFirewallSource implements FirewallSource {
   final added = <(FirewallBackend, List<FirewallRuleInput>)>[];
   final deleted = <FirewallRule>[];
   final serviceActions = <(FirewallBackend, FirewallServiceAction)>[];
-  final requestedBackends = <FirewallBackend?>[];
 
   @override
-  Future<FirewallSnapshot> readFirewall({FirewallBackend? backend}) async {
-    requestedBackends.add(backend);
-    if (backend != null && backend != snapshot.backend) {
-      snapshot = FirewallSnapshot(
-        backend: backend,
-        availableBackends: snapshot.availableBackends,
-        state: snapshot.state,
-        version: snapshot.version,
-        rules: snapshot.rules,
-      );
-    }
-    return snapshot;
-  }
+  Future<FirewallSnapshot> readFirewall() async => snapshot;
 
   @override
   Future<void> addFirewallRules(
@@ -45,7 +32,6 @@ class _FakeFirewallSource implements FirewallSource {
     added.add((backend, rules));
     snapshot = FirewallSnapshot(
       backend: snapshot.backend,
-      availableBackends: snapshot.availableBackends,
       state: snapshot.state,
       version: snapshot.version,
       zone: snapshot.zone,
@@ -77,7 +63,6 @@ class _FakeFirewallSource implements FirewallSource {
     deleted.add(rule);
     snapshot = FirewallSnapshot(
       backend: snapshot.backend,
-      availableBackends: snapshot.availableBackends,
       state: snapshot.state,
       version: snapshot.version,
       zone: snapshot.zone,
@@ -96,7 +81,6 @@ class _FakeFirewallSource implements FirewallSource {
     if (action == FirewallServiceAction.disable) {
       snapshot = FirewallSnapshot(
         backend: backend,
-        availableBackends: snapshot.availableBackends,
         state: FirewallServiceState.inactive,
         version: snapshot.version,
         serviceActions: const {FirewallServiceAction.enable},
@@ -104,7 +88,6 @@ class _FakeFirewallSource implements FirewallSource {
     } else if (action == FirewallServiceAction.enable) {
       snapshot = FirewallSnapshot(
         backend: backend,
-        availableBackends: snapshot.availableBackends,
         state: FirewallServiceState.active,
         version: snapshot.version,
         serviceActions: const {
@@ -119,7 +102,6 @@ class _FakeFirewallSource implements FirewallSource {
 
 FirewallSnapshot _sampleFirewalldSnapshot() => const FirewallSnapshot(
   backend: FirewallBackend.firewalld,
-  availableBackends: [FirewallBackend.firewalld, FirewallBackend.nftables],
   state: FirewallServiceState.active,
   version: '2.4.3',
   zone: 'public',
@@ -159,11 +141,11 @@ class _OsSession extends FakeSftpSession implements FirewallSource {
   final _FakeFirewallSource firewall;
 
   @override
-  Future<FirewallSnapshot> readFirewall({FirewallBackend? backend}) async {
+  Future<FirewallSnapshot> readFirewall() async {
     if (system != 'Linux') {
       throw const SshEngineException(firewallUnsupportedSystemMessage);
     }
-    return firewall.readFirewall(backend: backend);
+    return firewall.readFirewall();
   }
 
   @override
@@ -363,7 +345,7 @@ void main() {
     await tester.pumpAndSettle();
   });
 
-  testWidgets('多后端未锁定状态支持切换后端，非 firewalld 显示描述字段并校验输入', (tester) async {
+  testWidgets('自动展示运行中后端且无手动切换下拉，非 firewalld 显示描述字段并校验输入', (tester) async {
     tester.view.physicalSize = const Size(900, 720);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -371,23 +353,23 @@ void main() {
 
     final source = _FakeFirewallSource(
       const FirewallSnapshot(
-        backend: FirewallBackend.nftables,
-        availableBackends: [FirewallBackend.nftables, FirewallBackend.iptables],
+        backend: FirewallBackend.iptables,
         state: FirewallServiceState.active,
-        version: '1.0.9',
+        version: '1.8.9',
         policy: 'DROP',
         rules: [
           FirewallRule(
-            id: 'nft-1',
-            backend: FirewallBackend.nftables,
+            id: 'ipt-1',
+            backend: FirewallBackend.iptables,
             action: FirewallAction.allow,
             protocol: FirewallProtocol.tcp,
             port: '80',
             source: '0.0.0.0/0, ::/0',
             family: FirewallAddressFamily.any,
             comment: 'web http',
-            chain: 'inet/filter/input',
-            rawRule: 'nft:inet|filter|input|6',
+            chain: 'INPUT (IPv4)',
+            rawRule:
+                'iptables:v4:1:-A INPUT -p tcp -m tcp --dport 80 -j ACCEPT',
           ),
         ],
       ),
@@ -407,18 +389,13 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
-    expect(find.text('nftables'), findsOneWidget);
+    expect(find.text('iptables'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('firewall-backend-switcher')),
+      findsNothing,
+    );
     expect(find.text('web http'), findsOneWidget);
     expect(find.text('默认 DROP'), findsOneWidget);
-
-    // Switch backend from nftables -> iptables.
-    await tester.tap(find.byKey(const ValueKey('firewall-backend-switcher')));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 300));
-    await tester.tap(find.text('iptables').last);
-    await tester.pumpAndSettle();
-    expect(source.requestedBackends, contains(FirewallBackend.iptables));
-    expect(find.text('iptables'), findsOneWidget);
 
     // Open create dialog: iptables shows comment field and hides priority field.
     await tester.tap(find.byKey(const ValueKey('firewall-create')));

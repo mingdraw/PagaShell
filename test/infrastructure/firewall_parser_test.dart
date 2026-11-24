@@ -8,7 +8,6 @@ void main() {
     const raw = '''
 PAGA_FIREWALL_V1
 BACKEND firewalld
-AVAILABLE firewalld,nftables,iptables
 STATE active
 VERSION 2.4.3
 ZONE public
@@ -33,13 +32,7 @@ END_FIREWALL
 ''';
     final snapshot = parseFirewallSnapshot(raw);
     expect(snapshot.backend, FirewallBackend.firewalld);
-    expect(snapshot.availableBackends, [
-      FirewallBackend.firewalld,
-      FirewallBackend.nftables,
-      FirewallBackend.iptables,
-    ]);
     expect(snapshot.isActive, isTrue);
-    expect(snapshot.canSwitchBackend, isFalse);
     expect(snapshot.version, '2.4.3');
     expect(snapshot.zone, 'public');
     expect(snapshot.serviceActions, {
@@ -161,7 +154,6 @@ END_FIREWALL
     final snapshot = parseFirewallSnapshot(raw);
     expect(snapshot.backend, FirewallBackend.nftables);
     expect(snapshot.policy, 'DROP');
-    expect(snapshot.canSwitchBackend, isTrue);
     expect(snapshot.rules, hasLength(4));
 
     expect(snapshot.rules[0].port, '22');

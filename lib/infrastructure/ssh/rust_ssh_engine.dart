@@ -998,17 +998,12 @@ class _RustEngineSession
   });
 
   @override
-  Future<FirewallSnapshot> readFirewall({FirewallBackend? backend}) => _guard(
-    () async {
-      if (_closed) throw const SshEngineException('防火墙管理连接已关闭');
-      return parseFirewallSnapshot(
-        await firewall.sshReadFirewall(
-          sessionId: _sessionId,
-          preferredBackend: backend == null ? null : _firewallBackend(backend),
-        ),
-      );
-    },
-  );
+  Future<FirewallSnapshot> readFirewall() => _guard(() async {
+    if (_closed) throw const SshEngineException('防火墙管理连接已关闭');
+    return parseFirewallSnapshot(
+      await firewall.sshReadFirewall(sessionId: _sessionId),
+    );
+  });
 
   @override
   Future<void> addFirewallRules(

@@ -1856,17 +1856,12 @@ fn wire__crate__api__firewall__ssh_read_firewall_impl(
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             let api_session_id = <u32>::sse_decode(&mut deserializer);
-            let api_preferred_backend =
-                <Option<crate::api::firewall::FirewallBackendKind>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
                     (move || async move {
-                        let output_ok = crate::api::firewall::ssh_read_firewall(
-                            api_session_id,
-                            api_preferred_backend,
-                        )
-                        .await?;
+                        let output_ok =
+                            crate::api::firewall::ssh_read_firewall(api_session_id).await?;
                         std::result::Result::Ok(output_ok)
                     })()
                     .await,
@@ -3433,19 +3428,6 @@ impl SseDecode for Option<crate::api::desktop::DesktopFrame> {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         if (<bool>::sse_decode(deserializer)) {
             return Some(<crate::api::desktop::DesktopFrame>::sse_decode(
-                deserializer,
-            ));
-        } else {
-            return None;
-        }
-    }
-}
-
-impl SseDecode for Option<crate::api::firewall::FirewallBackendKind> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        if (<bool>::sse_decode(deserializer)) {
-            return Some(<crate::api::firewall::FirewallBackendKind>::sse_decode(
                 deserializer,
             ));
         } else {
@@ -5109,16 +5091,6 @@ impl SseEncode for Option<crate::api::desktop::DesktopFrame> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <crate::api::desktop::DesktopFrame>::sse_encode(value, serializer);
-        }
-    }
-}
-
-impl SseEncode for Option<crate::api::firewall::FirewallBackendKind> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <bool>::sse_encode(self.is_some(), serializer);
-        if let Some(value) = self {
-            <crate::api::firewall::FirewallBackendKind>::sse_encode(value, serializer);
         }
     }
 }

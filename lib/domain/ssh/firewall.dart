@@ -4,7 +4,7 @@ const firewallUnsupportedSystemMessage = '不支持当前系统的防火墙，�
 
 /// Linux 主机防火墙规则读取与维护接口，支持 firewalld / ufw / nftables / iptables。
 abstract interface class FirewallSource {
-  Future<FirewallSnapshot> readFirewall({FirewallBackend? backend});
+  Future<FirewallSnapshot> readFirewall();
 
   Future<void> addFirewallRules(
     FirewallBackend backend,
@@ -262,7 +262,6 @@ class FirewallRuleInput {
 class FirewallSnapshot {
   const FirewallSnapshot({
     required this.backend,
-    required this.availableBackends,
     required this.state,
     this.version = '',
     this.zone = '',
@@ -272,7 +271,6 @@ class FirewallSnapshot {
   });
 
   final FirewallBackend backend;
-  final List<FirewallBackend> availableBackends;
   final FirewallServiceState state;
   final String version;
   final String zone;
@@ -281,11 +279,4 @@ class FirewallSnapshot {
   final List<FirewallRule> rules;
 
   bool get isActive => state == FirewallServiceState.active;
-
-  /// 当高阶防火墙（firewalld / ufw）未启用且系统存在多个后端时允许切换查看。
-  bool get canSwitchBackend =>
-      availableBackends.length > 1 &&
-      !(isActive &&
-          (backend == FirewallBackend.firewalld ||
-              backend == FirewallBackend.ufw));
 }

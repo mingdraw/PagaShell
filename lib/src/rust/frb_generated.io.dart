@@ -76,9 +76,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DesktopFrame dco_decode_box_autoadd_desktop_frame(dynamic raw);
 
   @protected
-  FirewallBackendKind dco_decode_box_autoadd_firewall_backend_kind(dynamic raw);
-
-  @protected
   int dco_decode_box_autoadd_i_16(dynamic raw);
 
   @protected
@@ -198,11 +195,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DesktopFrame? dco_decode_opt_box_autoadd_desktop_frame(dynamic raw);
-
-  @protected
-  FirewallBackendKind? dco_decode_opt_box_autoadd_firewall_backend_kind(
-    dynamic raw,
-  );
 
   @protected
   int? dco_decode_opt_box_autoadd_i_16(dynamic raw);
@@ -325,11 +317,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DesktopFrame sse_decode_box_autoadd_desktop_frame(
-    SseDeserializer deserializer,
-  );
-
-  @protected
-  FirewallBackendKind sse_decode_box_autoadd_firewall_backend_kind(
     SseDeserializer deserializer,
   );
 
@@ -489,11 +476,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  FirewallBackendKind? sse_decode_opt_box_autoadd_firewall_backend_kind(
-    SseDeserializer deserializer,
-  );
-
-  @protected
   int? sse_decode_opt_box_autoadd_i_16(SseDeserializer deserializer);
 
   @protected
@@ -633,12 +615,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_desktop_frame(
     DesktopFrame self,
-    SseSerializer serializer,
-  );
-
-  @protected
-  void sse_encode_box_autoadd_firewall_backend_kind(
-    FirewallBackendKind self,
     SseSerializer serializer,
   );
 
@@ -837,12 +813,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_box_autoadd_desktop_frame(
     DesktopFrame? self,
-    SseSerializer serializer,
-  );
-
-  @protected
-  void sse_encode_opt_box_autoadd_firewall_backend_kind(
-    FirewallBackendKind? self,
     SseSerializer serializer,
   );
 
