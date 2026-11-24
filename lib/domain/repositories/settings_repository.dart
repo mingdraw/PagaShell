@@ -1,6 +1,7 @@
 import '../entities/app_proxy_settings.dart';
 import '../entities/app_theme_mode.dart';
 import '../entities/sidebar_state.dart';
+import '../terminal/quick_command.dart';
 
 abstract interface class SettingsRepository {
   Future<AppThemeMode> readThemeMode();
@@ -26,4 +27,8 @@ abstract interface class SettingsRepository {
   Future<AppProxySettings> readProxySettings();
 
   Future<void> saveProxySettings(AppProxySettings settings);
+
+  Future<List<QuickCommandCategory>> readCustomQuickCommandGroups();
+
+  Future<void> saveCustomQuickCommandGroups(List<QuickCommandCategory> groups);
 }

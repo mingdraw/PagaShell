@@ -8,10 +8,18 @@ import '../../domain/entities/app_proxy_settings.dart';
 import '../../domain/entities/app_theme_mode.dart';
 import '../../domain/entities/sidebar_state.dart';
 import '../../domain/repositories/settings_repository.dart';
+import '../../domain/terminal/quick_command.dart';
 import '../../domain/vault/secret_store.dart';
 
 class ProxySettingsException implements Exception {
   const ProxySettingsException(this.message);
+  final String message;
+  @override
+  String toString() => message;
+}
+
+class QuickCommandsException implements Exception {
+  const QuickCommandsException(this.message);
   final String message;
   @override
   String toString() => message;
@@ -49,10 +57,14 @@ class SettingsController extends GetxController {
   final proxySettings = const AppProxySettings().obs;
   final proxyLoadFailed = false.obs;
   final savingProxySettings = false.obs;
+  final customQuickCommandGroups = <QuickCommandCategory>[].obs;
+  final quickCommandsLoadFailed = false.obs;
+  final savingQuickCommands = false.obs;
   late final Future<void> ready = _load();
   Future<void> _pendingSave = Future<void>.value();
   Future<void> _pendingSidebarSave = Future<void>.value();
   Future<void> _pendingProxySave = Future<void>.value();
+  Future<void> _pendingQuickCommandsSave = Future<void>.value();
   final _sidebarFolders = <SidebarSection, RxSet<String>>{};
   final _sidebarWorkers = <Worker>[];
 
@@ -114,6 +126,14 @@ class SettingsController extends GetxController {
         },
         onError: (Object _) {
           if (!isClosed) proxyLoadFailed.value = true;
+        },
+      ),
+      _repository.readCustomQuickCommandGroups().then<void>(
+        (saved) {
+          if (!isClosed) customQuickCommandGroups.assignAll(saved);
+        },
+        onError: (Object _) {
+          if (!isClosed) quickCommandsLoadFailed.value = true;
         },
       ),
     ).wait;
@@ -430,6 +450,256 @@ class SettingsController extends GetxController {
         /* 已保存待删引用，重启后重试。 */
       }
     }
+  }
+
+  Future<void> reloadCustomQuickCommandGroups() =>
+      _queueQuickCommands<void>(() async {
+        final saved = await _repository.readCustomQuickCommandGroups();
+        if (isClosed) return;
+        customQuickCommandGroups.assignAll(saved);
+        quickCommandsLoadFailed.value = false;
+      }, allowFailedLoad: true);
+
+  Future<QuickCommandCategory> addQuickCommandGroup(String title) =>
+      _queueQuickCommands<QuickCommandCategory>(() async {
+        final error = QuickCommandCategory.validateTitle(
+          title,
+          existingTitles: [
+            for (final group in customQuickCommandGroups) group.title,
+          ],
+        );
+        if (error != null) throw QuickCommandsException(error);
+        final created = QuickCommandCategory(
+          id: 'qcg-${_randomId()}',
+          title: title.trim(),
+          commands: const [],
+        );
+        final next = [...customQuickCommandGroups, created];
+        await _repository.saveCustomQuickCommandGroups(next);
+        if (!isClosed) customQuickCommandGroups.assignAll(next);
+        return created;
+      });
+
+  Future<void> renameQuickCommandGroup(String groupId, String title) =>
+      _queueQuickCommands<void>(() async {
+        final index = customQuickCommandGroups.indexWhere(
+          (group) => group.id == groupId,
+        );
+        if (index < 0) throw const QuickCommandsException('分组不存在');
+        final error = QuickCommandCategory.validateTitle(
+          title,
+          existingTitles: [
+            for (final group in customQuickCommandGroups)
+              if (group.id != groupId) group.title,
+          ],
+        );
+        if (error != null) throw QuickCommandsException(error);
+        final trimmed = title.trim();
+        if (customQuickCommandGroups[index].title == trimmed) return;
+        final next = [...customQuickCommandGroups];
+        next[index] = next[index].copyWith(title: trimmed);
+        await _repository.saveCustomQuickCommandGroups(next);
+        if (!isClosed) customQuickCommandGroups.assignAll(next);
+      });
+
+  Future<void> deleteQuickCommandGroup(String groupId) =>
+      _queueQuickCommands<void>(() async {
+        final next = customQuickCommandGroups
+            .where((group) => group.id != groupId)
+            .toList(growable: false);
+        if (next.length == customQuickCommandGroups.length) return;
+        await _repository.saveCustomQuickCommandGroups(next);
+        if (!isClosed) customQuickCommandGroups.assignAll(next);
+      });
+
+  Future<QuickCommand> addQuickCommand(
+    String groupId, {
+    required String command,
+    String summary = '',
+  }) => _queueQuickCommands<QuickCommand>(() async {
+    final index = customQuickCommandGroups.indexWhere(
+      (group) => group.id == groupId,
+    );
+    if (index < 0) throw const QuickCommandsException('分组不存在');
+    final commandError = QuickCommand.validateCommand(command);
+    if (commandError != null) throw QuickCommandsException(commandError);
+    final summaryError = QuickCommand.validateSummary(summary);
+    if (summaryError != null) throw QuickCommandsException(summaryError);
+    final created = QuickCommand(
+      id: 'qc-${_randomId()}',
+      command: QuickCommand.normalizeCommand(command),
+      summary: summary.trim(),
+      isBuiltIn: false,
+    );
+    final target = customQuickCommandGroups[index];
+    final next = [...customQuickCommandGroups];
+    next[index] = target.copyWith(commands: [...target.commands, created]);
+    await _repository.saveCustomQuickCommandGroups(next);
+    if (!isClosed) customQuickCommandGroups.assignAll(next);
+    return created;
+  });
+
+  Future<void> updateQuickCommand(
+    String groupId,
+    String commandId, {
+    required String command,
+    String summary = '',
+  }) => _queueQuickCommands<void>(() async {
+    final groupIndex = customQuickCommandGroups.indexWhere(
+      (group) => group.id == groupId,
+    );
+    if (groupIndex < 0) throw const QuickCommandsException('分组不存在');
+    final targetGroup = customQuickCommandGroups[groupIndex];
+    final commandIndex = targetGroup.commands.indexWhere(
+      (item) => item.id == commandId,
+    );
+    if (commandIndex < 0) throw const QuickCommandsException('指令不存在');
+    final commandError = QuickCommand.validateCommand(command);
+    if (commandError != null) throw QuickCommandsException(commandError);
+    final summaryError = QuickCommand.validateSummary(summary);
+    if (summaryError != null) throw QuickCommandsException(summaryError);
+    final updatedCommands = [...targetGroup.commands];
+    updatedCommands[commandIndex] = updatedCommands[commandIndex].copyWith(
+      command: QuickCommand.normalizeCommand(command),
+      summary: summary.trim(),
+      isBuiltIn: false,
+    );
+    final next = [...customQuickCommandGroups];
+    next[groupIndex] = targetGroup.copyWith(commands: updatedCommands);
+    await _repository.saveCustomQuickCommandGroups(next);
+    if (!isClosed) customQuickCommandGroups.assignAll(next);
+  });
+
+  Future<void> deleteQuickCommand(String groupId, String commandId) =>
+      _queueQuickCommands<void>(() async {
+        final groupIndex = customQuickCommandGroups.indexWhere(
+          (group) => group.id == groupId,
+        );
+        if (groupIndex < 0) return;
+        final targetGroup = customQuickCommandGroups[groupIndex];
+        final updatedCommands = targetGroup.commands
+            .where((item) => item.id != commandId)
+            .toList(growable: false);
+        if (updatedCommands.length == targetGroup.commands.length) return;
+        final next = [...customQuickCommandGroups];
+        next[groupIndex] = targetGroup.copyWith(commands: updatedCommands);
+        await _repository.saveCustomQuickCommandGroups(next);
+        if (!isClosed) customQuickCommandGroups.assignAll(next);
+      });
+
+  Future<void> reorderQuickCommandGroup(
+    String draggedGroupId,
+    String targetGroupId, {
+    required bool after,
+  }) => _queueQuickCommands<void>(() async {
+    if (draggedGroupId == targetGroupId) return;
+    final fromIndex = customQuickCommandGroups.indexWhere(
+      (group) => group.id == draggedGroupId,
+    );
+    if (fromIndex < 0) return;
+    if (!customQuickCommandGroups.any((group) => group.id == targetGroupId)) {
+      return;
+    }
+    final next = [...customQuickCommandGroups];
+    final dragged = next.removeAt(fromIndex);
+    final targetIndex = next.indexWhere((group) => group.id == targetGroupId);
+    final insertAt = targetIndex + (after ? 1 : 0);
+    if (insertAt == fromIndex) return;
+    next.insert(insertAt, dragged);
+    await _repository.saveCustomQuickCommandGroups(next);
+    if (!isClosed) customQuickCommandGroups.assignAll(next);
+  });
+
+  Future<void> moveQuickCommand(
+    String fromGroupId,
+    String commandId,
+    String toGroupId, {
+    String? targetCommandId,
+    bool after = false,
+  }) => _queueQuickCommands<void>(() async {
+    if (fromGroupId == toGroupId && targetCommandId == commandId) return;
+    final fromGroupIndex = customQuickCommandGroups.indexWhere(
+      (group) => group.id == fromGroupId,
+    );
+    final toGroupIndex = customQuickCommandGroups.indexWhere(
+      (group) => group.id == toGroupId,
+    );
+    if (fromGroupIndex < 0 || toGroupIndex < 0) return;
+    final fromGroup = customQuickCommandGroups[fromGroupIndex];
+    final fromCommandIndex = fromGroup.commands.indexWhere(
+      (item) => item.id == commandId,
+    );
+    if (fromCommandIndex < 0) return;
+
+    final next = [...customQuickCommandGroups];
+    if (fromGroupId == toGroupId) {
+      final commands = [...fromGroup.commands];
+      final dragged = commands.removeAt(fromCommandIndex);
+      final insertAt = targetCommandId == null
+          ? commands.length
+          : () {
+              final targetIndex = commands.indexWhere(
+                (item) => item.id == targetCommandId,
+              );
+              return targetIndex < 0 ? -1 : targetIndex + (after ? 1 : 0);
+            }();
+      if (insertAt < 0 || insertAt == fromCommandIndex) return;
+      commands.insert(insertAt, dragged);
+      next[fromGroupIndex] = fromGroup.copyWith(commands: commands);
+    } else {
+      final fromCommands = [...fromGroup.commands];
+      final dragged = fromCommands.removeAt(fromCommandIndex);
+      final toGroup = customQuickCommandGroups[toGroupIndex];
+      final toCommands = [...toGroup.commands];
+      if (targetCommandId == null) {
+        toCommands.add(dragged);
+      } else {
+        final targetIndex = toCommands.indexWhere(
+          (item) => item.id == targetCommandId,
+        );
+        if (targetIndex < 0) {
+          toCommands.add(dragged);
+        } else {
+          toCommands.insert(targetIndex + (after ? 1 : 0), dragged);
+        }
+      }
+      next[fromGroupIndex] = fromGroup.copyWith(commands: fromCommands);
+      next[toGroupIndex] = toGroup.copyWith(commands: toCommands);
+    }
+    await _repository.saveCustomQuickCommandGroups(next);
+    if (!isClosed) customQuickCommandGroups.assignAll(next);
+  });
+
+  Future<T> _queueQuickCommands<T>(
+    Future<T> Function() action, {
+    bool allowFailedLoad = false,
+  }) {
+    final result = _pendingQuickCommandsSave.then<T>((_) async {
+      await ready;
+      if (isClosed) {
+        throw const QuickCommandsException('常用指令保存失败，请重试');
+      }
+      savingQuickCommands.value = true;
+      try {
+        if (quickCommandsLoadFailed.value && !allowFailedLoad) {
+          throw const QuickCommandsException('常用指令读取失败，请重试');
+        }
+        try {
+          return await action();
+        } on QuickCommandsException {
+          rethrow;
+        } on Object {
+          throw const QuickCommandsException('常用指令保存失败，请重试');
+        }
+      } finally {
+        if (!isClosed) savingQuickCommands.value = false;
+      }
+    });
+    _pendingQuickCommandsSave = result.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace _) {},
+    );
+    return result;
   }
 
   static String _randomId() => base64UrlEncode(

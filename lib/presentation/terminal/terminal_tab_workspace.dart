@@ -12,9 +12,11 @@ import '../../application/session/session_controller.dart';
 import '../../application/session/session_layout.dart';
 import '../../domain/entities/host.dart';
 import '../../domain/entities/host_tree_item.dart';
+import '../../domain/terminal/quick_command.dart';
 import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
 import '../components/app_menu.dart';
+import '../navigation/app_notice.dart';
 import '../shell/connect_flow.dart';
 import '../shell/widgets/host_tree_drag.dart';
 import '../theme/app_theme.dart';
@@ -22,7 +24,9 @@ import 'docker_manager_panel.dart';
 import 'firewall_panel.dart';
 import 'network_ports_panel.dart';
 import 'process_manager_panel.dart';
+import 'quick_commands_panel.dart';
 import 'server_status_panel.dart';
+import 'terminal_bottom_panel.dart';
 import 'terminal_pane_zoom_intent.dart';
 import 'terminal_side_panel.dart';
 
@@ -33,6 +37,7 @@ class TerminalTabWorkspace extends StatefulWidget {
     required this.sessions,
     required this.active,
     required this.paneBuilder,
+    this.onFocusSession,
     super.key,
   });
 
@@ -41,6 +46,7 @@ class TerminalTabWorkspace extends StatefulWidget {
   final bool active;
   final Widget Function(Session session, bool selected, bool zoomed)
   paneBuilder;
+  final ValueChanged<String>? onFocusSession;
 
   @override
   State<TerminalTabWorkspace> createState() => _TerminalTabWorkspaceState();
@@ -50,6 +56,7 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
   final _splitKeys = <String, GlobalKey>{};
   final _mountedPanels = <(String, TerminalSidePanelKind)>{};
   String? _zoomed;
+  bool _quickCommandsExpanded = false;
 
   @override
   void didUpdateWidget(TerminalTabWorkspace oldWidget) {
@@ -326,6 +333,69 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
     ),
   );
 
+  void _toggleQuickCommands(String selectedSessionId) {
+    final next = !_quickCommandsExpanded;
+    setState(() => _quickCommandsExpanded = next);
+    if (!next) widget.onFocusSession?.call(selectedSessionId);
+  }
+
+  void _insertQuickCommand(
+    SessionController controller,
+    Session selected,
+    QuickCommand command,
+  ) {
+    final result = controller.insertTextToSession(selected.id, command.command);
+    switch (result) {
+      case TerminalInsertResult.inserted:
+        widget.onFocusSession?.call(selected.id);
+      case TerminalInsertResult.unavailable:
+        AppNotice.error('当前终端未就绪，无法填入指令');
+      case TerminalInsertResult.requiresBracketedPaste:
+        AppNotice.error('当前终端未启用括号粘贴，请复制后分行检查并粘贴');
+      case TerminalInsertResult.invalidText:
+        AppNotice.error('文本为空或包含终端控制字符，无法填入');
+    }
+  }
+
+  Widget _quickCommandsButton({
+    required bool canExpand,
+    required String selectedSessionId,
+  }) {
+    final visible = _quickCommandsExpanded && canExpand;
+    return _toolbarButton(
+      name: 'toolbar-quick-commands',
+      label: (visible ? '收起常用指令' : '展开常用指令').tr,
+      tooltip: '常用指令'.tr,
+      selected: visible,
+      onPressed: canExpand
+          ? () => _toggleQuickCommands(selectedSessionId)
+          : null,
+      icon: AppIcons.quickCommands,
+    );
+  }
+
+  Widget _terminalWithBottomPanel(
+    SessionController controller,
+    Session selected,
+    Map<String, Session> sessions,
+    double availableHeight,
+  ) => TerminalBottomPanel(
+    availableHeight: availableHeight,
+    expanded: _quickCommandsExpanded,
+    terminal: _panes(sessions),
+    panelBuilder: (context, visible) => QuickCommandsPanel(
+      targetLabel: widget.sessions.length > 1 ? selected.title : null,
+      onSelectCommand: (command) =>
+          _insertQuickCommand(controller, selected, command),
+      onClose: () {
+        if (_quickCommandsExpanded) {
+          setState(() => _quickCommandsExpanded = false);
+        }
+        widget.onFocusSession?.call(selected.id);
+      },
+    ),
+  );
+
   Widget _buildWorkspace(BuildContext context) {
     final sessions = {
       for (final session in widget.sessions) session.id: session,
@@ -333,11 +403,36 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
     final selected = sessions[widget.tab.selectedSessionId]!;
     final controller = Get.find<SessionController>();
     if (selected.kind == SessionKind.containerTerminal) {
-      return Column(
-        children: [
-          _toolbar(selected, _splitButtons(controller, selected)),
-          Expanded(child: _panes(sessions)),
-        ],
+      return LayoutBuilder(
+        builder: (context, constraints) {
+          final contentHeight = math.max(
+            0.0,
+            constraints.maxHeight - AppTheme.terminalToolbarHeight,
+          );
+          final canExpandBottom = TerminalBottomPanel.canExpandForHeight(
+            contentHeight,
+          );
+          return Column(
+            children: [
+              _toolbar(selected, [
+                ..._splitButtons(controller, selected),
+                _toolbarDivider(),
+                _quickCommandsButton(
+                  canExpand: canExpandBottom,
+                  selectedSessionId: selected.id,
+                ),
+              ]),
+              Expanded(
+                child: _terminalWithBottomPanel(
+                  controller,
+                  selected,
+                  sessions,
+                  contentHeight,
+                ),
+              ),
+            ],
+          );
+        },
       );
     }
     final statusSource = controller.serverStatusSource(widget.tab.id);
@@ -346,117 +441,136 @@ class _TerminalTabWorkspaceState extends State<TerminalTabWorkspace> {
     final portsSource = controller.networkPortsSource(widget.tab.id);
     final firewallSource = controller.firewallSource(widget.tab.id);
     return LayoutBuilder(
-      builder: (context, constraints) => TerminalSidePanel(
-        availableWidth: constraints.maxWidth,
-        availableHeight: math.max(
-          0,
+      builder: (context, constraints) {
+        final contentHeight = math.max(
+          0.0,
           constraints.maxHeight - AppTheme.terminalToolbarHeight,
-        ),
-        panelBuilder: (context, panel, visible) =>
-            _monitoringPanels(controller, selected, panel, visible),
-        toolbarBuilder: (context, panel, canExpand, toggle) => _toolbar(
-          selected,
-          [
-            ..._splitButtons(controller, selected),
-            _toolbarDivider(),
-            _toolbarButton(
-              name: 'open-sftp',
-              label: '文件传输'.tr,
-              onPressed: controller.canOpenFileTransfer(selected.id)
-                  ? () => unawaited(controller.openFileTransfer(selected.id))
-                  : null,
-              icon: AppIcons.folderOpen,
-            ),
-            _toolbarDivider(),
-            _toolbarButton(
-              name: 'toolbar-docker',
-              label:
-                  (panel == TerminalSidePanelKind.docker
-                          ? '折叠 Docker 管理'
-                          : '展开 Docker 管理')
-                      .tr,
-              tooltip: 'Docker 管理'.tr,
-              selected: panel == TerminalSidePanelKind.docker,
-              onPressed:
-                  canExpand &&
-                      (dockerSource != null ||
-                          panel == TerminalSidePanelKind.docker)
-                  ? () => toggle(TerminalSidePanelKind.docker)
-                  : null,
-              icon: AppIcons.container,
-            ),
-            const SizedBox(width: 4),
-            _toolbarButton(
-              name: 'toolbar-processes',
-              label:
-                  (panel == TerminalSidePanelKind.processes
-                          ? '折叠进程管理'
-                          : '展开进程管理')
-                      .tr,
-              tooltip: '进程管理'.tr,
-              selected: panel == TerminalSidePanelKind.processes,
-              onPressed:
-                  canExpand &&
-                      (processSource != null ||
-                          panel == TerminalSidePanelKind.processes)
-                  ? () => toggle(TerminalSidePanelKind.processes)
-                  : null,
-              icon: AppIcons.processes,
-            ),
-            const SizedBox(width: 4),
-            _toolbarButton(
-              name: 'toolbar-network-ports',
-              label:
-                  (panel == TerminalSidePanelKind.networkPorts
-                          ? '折叠网络端口'
-                          : '展开网络端口')
-                      .tr,
-              tooltip: '网络端口'.tr,
-              selected: panel == TerminalSidePanelKind.networkPorts,
-              onPressed:
-                  canExpand &&
-                      (portsSource != null ||
-                          panel == TerminalSidePanelKind.networkPorts)
-                  ? () => toggle(TerminalSidePanelKind.networkPorts)
-                  : null,
-              icon: AppIcons.networkPorts,
-            ),
-            const SizedBox(width: 4),
-            _toolbarButton(
-              name: 'toolbar-firewall',
-              label:
-                  (panel == TerminalSidePanelKind.firewall ? '折叠防火墙' : '展开防火墙')
-                      .tr,
-              tooltip: '防火墙'.tr,
-              selected: panel == TerminalSidePanelKind.firewall,
-              onPressed:
-                  canExpand &&
-                      (firewallSource != null ||
-                          panel == TerminalSidePanelKind.firewall)
-                  ? () => toggle(TerminalSidePanelKind.firewall)
-                  : null,
-              icon: AppIcons.firewall,
-            ),
-            const SizedBox(width: 4),
-            _toolbarButton(
-              name: 'toolbar-status',
-              label:
-                  (panel == TerminalSidePanelKind.status ? '折叠服务状态' : '展开服务状态')
-                      .tr,
-              tooltip: '服务状态'.tr,
-              selected: panel == TerminalSidePanelKind.status,
-              onPressed:
-                  canExpand &&
-                      (statusSource != null ||
-                          panel == TerminalSidePanelKind.status)
-                  ? () => toggle(TerminalSidePanelKind.status)
-                  : null,
-              icon: AppIcons.statusOverview,
-            ),
-          ],
-        ),
-        terminal: _panes(sessions),
-      ),
+        );
+        final canExpandBottom = TerminalBottomPanel.canExpandForHeight(
+          contentHeight,
+        );
+        return TerminalSidePanel(
+          availableWidth: constraints.maxWidth,
+          availableHeight: contentHeight,
+          panelBuilder: (context, panel, visible) =>
+              _monitoringPanels(controller, selected, panel, visible),
+          toolbarBuilder: (context, panel, canExpand, toggle) =>
+              _toolbar(selected, [
+                ..._splitButtons(controller, selected),
+                _toolbarDivider(),
+                _toolbarButton(
+                  name: 'open-sftp',
+                  label: '文件传输'.tr,
+                  onPressed: controller.canOpenFileTransfer(selected.id)
+                      ? () =>
+                            unawaited(controller.openFileTransfer(selected.id))
+                      : null,
+                  icon: AppIcons.folderOpen,
+                ),
+                const SizedBox(width: 4),
+                _quickCommandsButton(
+                  canExpand: canExpandBottom,
+                  selectedSessionId: selected.id,
+                ),
+                _toolbarDivider(),
+                _toolbarButton(
+                  name: 'toolbar-docker',
+                  label:
+                      (panel == TerminalSidePanelKind.docker
+                              ? '折叠 Docker 管理'
+                              : '展开 Docker 管理')
+                          .tr,
+                  tooltip: 'Docker 管理'.tr,
+                  selected: panel == TerminalSidePanelKind.docker,
+                  onPressed:
+                      canExpand &&
+                          (dockerSource != null ||
+                              panel == TerminalSidePanelKind.docker)
+                      ? () => toggle(TerminalSidePanelKind.docker)
+                      : null,
+                  icon: AppIcons.container,
+                ),
+                const SizedBox(width: 4),
+                _toolbarButton(
+                  name: 'toolbar-processes',
+                  label:
+                      (panel == TerminalSidePanelKind.processes
+                              ? '折叠进程管理'
+                              : '展开进程管理')
+                          .tr,
+                  tooltip: '进程管理'.tr,
+                  selected: panel == TerminalSidePanelKind.processes,
+                  onPressed:
+                      canExpand &&
+                          (processSource != null ||
+                              panel == TerminalSidePanelKind.processes)
+                      ? () => toggle(TerminalSidePanelKind.processes)
+                      : null,
+                  icon: AppIcons.processes,
+                ),
+                const SizedBox(width: 4),
+                _toolbarButton(
+                  name: 'toolbar-network-ports',
+                  label:
+                      (panel == TerminalSidePanelKind.networkPorts
+                              ? '折叠网络端口'
+                              : '展开网络端口')
+                          .tr,
+                  tooltip: '网络端口'.tr,
+                  selected: panel == TerminalSidePanelKind.networkPorts,
+                  onPressed:
+                      canExpand &&
+                          (portsSource != null ||
+                              panel == TerminalSidePanelKind.networkPorts)
+                      ? () => toggle(TerminalSidePanelKind.networkPorts)
+                      : null,
+                  icon: AppIcons.networkPorts,
+                ),
+                const SizedBox(width: 4),
+                _toolbarButton(
+                  name: 'toolbar-firewall',
+                  label:
+                      (panel == TerminalSidePanelKind.firewall
+                              ? '折叠防火墙'
+                              : '展开防火墙')
+                          .tr,
+                  tooltip: '防火墙'.tr,
+                  selected: panel == TerminalSidePanelKind.firewall,
+                  onPressed:
+                      canExpand &&
+                          (firewallSource != null ||
+                              panel == TerminalSidePanelKind.firewall)
+                      ? () => toggle(TerminalSidePanelKind.firewall)
+                      : null,
+                  icon: AppIcons.firewall,
+                ),
+                const SizedBox(width: 4),
+                _toolbarButton(
+                  name: 'toolbar-status',
+                  label:
+                      (panel == TerminalSidePanelKind.status
+                              ? '折叠服务状态'
+                              : '展开服务状态')
+                          .tr,
+                  tooltip: '服务状态'.tr,
+                  selected: panel == TerminalSidePanelKind.status,
+                  onPressed:
+                      canExpand &&
+                          (statusSource != null ||
+                              panel == TerminalSidePanelKind.status)
+                      ? () => toggle(TerminalSidePanelKind.status)
+                      : null,
+                  icon: AppIcons.statusOverview,
+                ),
+              ]),
+          terminal: _terminalWithBottomPanel(
+            controller,
+            selected,
+            sessions,
+            contentHeight,
+          ),
+        );
+      },
     );
   }
 

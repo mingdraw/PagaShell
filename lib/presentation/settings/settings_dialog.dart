@@ -22,11 +22,13 @@ import '../navigation/app_navigation.dart';
 import '../navigation/app_notice.dart';
 import '../theme/app_theme.dart';
 import 'about_settings_section.dart';
+import 'quick_commands_settings_section.dart';
 import 'terminal_settings_section.dart';
 
 enum SettingsTab {
   general('通用'),
   terminal('终端'),
+  quickCommands('常用指令'),
   proxy('代理'),
   ai('AI 设置'),
   about('关于');
@@ -36,14 +38,21 @@ enum SettingsTab {
   final String label;
 }
 
-Future<void> showSettingsDialog({bool ai = false, bool proxy = false}) =>
-    AppNavigation.dialog<void>(
-      SettingsDialog(
-        initialTab: ai
-            ? SettingsTab.ai
-            : (proxy ? SettingsTab.proxy : SettingsTab.general),
-      ),
-    );
+Future<void> showSettingsDialog({
+  bool ai = false,
+  bool proxy = false,
+  bool quickCommands = false,
+}) => AppNavigation.dialog<void>(
+  SettingsDialog(
+    initialTab: ai
+        ? SettingsTab.ai
+        : proxy
+        ? SettingsTab.proxy
+        : quickCommands
+        ? SettingsTab.quickCommands
+        : SettingsTab.general,
+  ),
+);
 
 class SettingsDialog extends StatefulWidget {
   const SettingsDialog({this.initialTab = SettingsTab.general, super.key});
@@ -367,14 +376,15 @@ class _SettingsDialogState extends State<SettingsDialog> {
     final aiReady = _aiHydrated && !_settings.loadFailed.value;
     final proxyReady = _proxyHydrated && !_appSettings.proxyLoadFailed.value;
     final savingProxy = _appSettings.savingProxySettings.value;
-    final busy = _saving || _testing || savingProxy;
+    final savingQuickCommands = _appSettings.savingQuickCommands.value;
+    final busy = _saving || _testing || savingProxy || savingQuickCommands;
     final feedback = switch (_tab) {
       SettingsTab.proxy => _feedbackBanner(context, _proxyError, _proxySuccess),
       SettingsTab.ai => _feedbackBanner(context, _error, _success),
       _ => null,
     };
     return PopScope(
-      canPop: !_saving && !savingProxy,
+      canPop: !_saving && !savingProxy && !savingQuickCommands,
       child: AppDialog(
         maxWidth: AppTheme.settingsDialogMaxWidth,
         title: Text('设置'.tr),
@@ -392,7 +402,12 @@ class _SettingsDialogState extends State<SettingsDialog> {
           children: [
             for (final tab in SettingsTab.values)
               shadcn.TabItem(
-                child: Text(tab.label.tr, textAlign: TextAlign.center),
+                child: Text(
+                  tab.label.tr,
+                  textAlign: TextAlign.center,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
               ),
           ],
         ),
@@ -407,6 +422,8 @@ class _SettingsDialogState extends State<SettingsDialog> {
               )
             else if (_tab == SettingsTab.terminal)
               const TerminalSettingsSection()
+            else if (_tab == SettingsTab.quickCommands)
+              const QuickCommandsSettingsSection()
             else if (_tab == SettingsTab.proxy)
               _proxySection(context, busy: busy)
             else if (_tab == SettingsTab.about)
@@ -437,7 +454,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
         ),
         actions: [
           shadcn.OutlineButton(
-            onPressed: _saving || savingProxy
+            onPressed: _saving || savingProxy || savingQuickCommands
                 ? null
                 : AppNavigation.closeDialog<void>,
             child: Text('关闭'.tr),

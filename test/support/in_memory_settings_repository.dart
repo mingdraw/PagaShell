@@ -2,6 +2,7 @@ import 'package:pagashell/domain/entities/app_proxy_settings.dart';
 import 'package:pagashell/domain/entities/app_theme_mode.dart';
 import 'package:pagashell/domain/entities/sidebar_state.dart';
 import 'package:pagashell/domain/repositories/settings_repository.dart';
+import 'package:pagashell/domain/terminal/quick_command.dart';
 
 class InMemorySettingsRepository implements SettingsRepository {
   InMemorySettingsRepository({
@@ -10,6 +11,7 @@ class InMemorySettingsRepository implements SettingsRepository {
     this.automaticUpdates = true,
     this.closeTerminalOnDisconnect = false,
     this.proxySettings = const AppProxySettings(),
+    this.customQuickCommandGroups = const [],
     SidebarState? sidebarState,
   }) : sidebarState = sidebarState ?? SidebarState();
 
@@ -18,6 +20,7 @@ class InMemorySettingsRepository implements SettingsRepository {
   bool automaticUpdates;
   bool closeTerminalOnDisconnect;
   AppProxySettings proxySettings;
+  List<QuickCommandCategory> customQuickCommandGroups;
 
   @override
   Future<bool> readAutomaticUpdates() async => automaticUpdates;
@@ -60,4 +63,13 @@ class InMemorySettingsRepository implements SettingsRepository {
   @override
   Future<void> saveProxySettings(AppProxySettings settings) async =>
       proxySettings = settings;
+
+  @override
+  Future<List<QuickCommandCategory>> readCustomQuickCommandGroups() async =>
+      List.unmodifiable(customQuickCommandGroups);
+
+  @override
+  Future<void> saveCustomQuickCommandGroups(
+    List<QuickCommandCategory> groups,
+  ) async => customQuickCommandGroups = List.unmodifiable(groups);
 }

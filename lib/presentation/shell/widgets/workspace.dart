@@ -65,11 +65,15 @@ class _WorkspaceState extends State<Workspace> {
   >
   _views = {};
   final _paneKeys = <String, GlobalKey>{};
+  final _terminalHostKeys = <String, GlobalKey<_TerminalHostState>>{};
   final _tabViews =
       <
         String,
         ({SessionTab tab, List<Session> sessions, bool active, Widget view})
       >{};
+
+  void _focusTerminal(String sessionId) =>
+      _terminalHostKeys[sessionId]?.currentState?.focusAndReveal();
 
   Widget _viewFor(
     Session session, {
@@ -95,6 +99,10 @@ class _WorkspaceState extends State<Workspace> {
           session: session,
           active: active,
           placement: placement,
+          terminalHostKey: _terminalHostKeys.putIfAbsent(
+            session.id,
+            GlobalKey<_TerminalHostState>.new,
+          ),
         ),
       ),
     );
@@ -124,6 +132,7 @@ class _WorkspaceState extends State<Workspace> {
             tab: tab,
             sessions: sessions,
             active: active,
+            onFocusSession: _focusTerminal,
             paneBuilder: (session, selected, zoomed) => _viewFor(
               session,
               visible: active,
@@ -162,6 +171,7 @@ class _WorkspaceState extends State<Workspace> {
         final ids = {for (final s in sessions) s.id};
         _views.removeWhere((id, _) => !ids.contains(id));
         _paneKeys.removeWhere((id, _) => !ids.contains(id));
+        _terminalHostKeys.removeWhere((id, _) => !ids.contains(id));
         final tabIds = tabs.map((tab) => tab.id).toSet();
         _tabViews.removeWhere((id, _) => !tabIds.contains(id));
         final sessionsById = {
@@ -499,11 +509,13 @@ class _SessionView extends StatelessWidget {
     required this.session,
     required this.active,
     required this.placement,
+    this.terminalHostKey,
   });
 
   final Session session;
   final bool active;
   final _TerminalPlacement? placement;
+  final GlobalKey<_TerminalHostState>? terminalHostKey;
 
   @override
   Widget build(BuildContext context) {
@@ -578,8 +590,13 @@ class _SessionView extends StatelessWidget {
           onError: (message) =>
               Get.find<SessionController>().desktopFailed(session.id, message),
         ),
-      SessionPhase.ready || SessionPhase.closed when session.terminal != null =>
-        _TerminalHost(session: session, active: active, placement: placement),
+      SessionPhase.ready ||
+      SessionPhase.closed when session.terminal != null => _TerminalHost(
+        key: terminalHostKey,
+        session: session,
+        active: active,
+        placement: placement,
+      ),
       _ => _ConnectingView(session: session),
     };
   }
@@ -629,6 +646,7 @@ class _TerminalHost extends StatefulWidget {
     required this.session,
     required this.active,
     required this.placement,
+    super.key,
   });
 
   final Session session;
@@ -641,6 +659,13 @@ class _TerminalHost extends StatefulWidget {
 
 class _TerminalHostState extends State<_TerminalHost> {
   final _focusNode = FocusNode();
+  final _terminalViewKey = GlobalKey<AppTerminalViewState>();
+
+  void focusAndReveal() {
+    if (!mounted || !widget.active) return;
+    _terminalViewKey.currentState?.scrollToBottom();
+    _focusNode.requestFocus();
+  }
 
   @override
   void initState() {
@@ -683,6 +708,7 @@ class _TerminalHostState extends State<_TerminalHost> {
     final zoomed = widget.placement?.zoomed == true;
     final terminalView = AppTerminalView(
       session.terminal!,
+      key: _terminalViewKey,
       focusNode: _focusNode,
       active: widget.active,
       canInput: session.phase == SessionPhase.ready,

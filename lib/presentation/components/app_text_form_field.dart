@@ -33,6 +33,7 @@ class AppTextFormField extends FormField<String> {
                ? AppTheme.inputCompactFontSize
                : AppTheme.inputFontSize;
            final input = Column(
+             mainAxisSize: MainAxisSize.min,
              crossAxisAlignment: CrossAxisAlignment.start,
              children: [
                Semantics(
@@ -139,6 +140,7 @@ class AppTextFormField extends FormField<String> {
              );
            }
            return Column(
+             mainAxisSize: MainAxisSize.min,
              crossAxisAlignment: CrossAxisAlignment.start,
              children: [label, const SizedBox(height: 6), input],
            );

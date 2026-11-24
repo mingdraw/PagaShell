@@ -4,6 +4,7 @@ import '../../domain/entities/app_proxy_settings.dart';
 import '../../domain/entities/app_theme_mode.dart';
 import '../../domain/entities/sidebar_state.dart';
 import '../../domain/repositories/settings_repository.dart';
+import '../../domain/terminal/quick_command.dart';
 import 'app_database.dart';
 
 class DriftSettingsRepository implements SettingsRepository {
@@ -16,6 +17,7 @@ class DriftSettingsRepository implements SettingsRepository {
   static const _closeTerminalOnDisconnectKey = 'close_terminal_on_disconnect';
   static const _automaticUpdatesKey = 'automatic_updates';
   static const _proxySettingsKey = 'proxy_settings';
+  static const _customQuickCommandsKey = 'custom_quick_commands';
 
   @override
   Future<bool> readCloseTerminalOnDisconnect() async {
@@ -206,6 +208,38 @@ class DriftSettingsRepository implements SettingsRepository {
             'passwordSecretRef': settings.passwordSecretRef,
             'pendingSecretDeletes': settings.pendingSecretDeletes,
           }),
+        ),
+      );
+
+  @override
+  Future<List<QuickCommandCategory>> readCustomQuickCommandGroups() async {
+    final row = await (_db.select(
+      _db.appSettings,
+    )..where((s) => s.key.equals(_customQuickCommandsKey))).getSingleOrNull();
+    if (row == null) return const [];
+    final Object? decoded = jsonDecode(row.value);
+    if (decoded is! List) {
+      throw const FormatException('Invalid quick command groups');
+    }
+    final groups = <QuickCommandCategory>[];
+    for (final item in decoded) {
+      if (item is! Map<String, dynamic>) {
+        throw const FormatException('Invalid quick command group');
+      }
+      groups.add(QuickCommandCategory.fromJson(item));
+    }
+    return List.unmodifiable(groups);
+  }
+
+  @override
+  Future<void> saveCustomQuickCommandGroups(
+    List<QuickCommandCategory> groups,
+  ) => _db
+      .into(_db.appSettings)
+      .insertOnConflictUpdate(
+        AppSettingsCompanion.insert(
+          key: _customQuickCommandsKey,
+          value: jsonEncode([for (final group in groups) group.toJson()]),
         ),
       );
 }

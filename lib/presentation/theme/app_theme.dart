@@ -121,6 +121,10 @@ abstract final class AppTheme {
   static const double serverStatusDefaultWidth = 320;
   static const double serverStatusMinWidth = 220;
   static const double serverStatusMaxWidth = 520;
+  static const double terminalQuickCommandsDefaultHeight = 200;
+  static const double terminalQuickCommandsMinHeight = 128;
+  static const double terminalQuickCommandsMaxHeight = 420;
+  static const double terminalQuickCommandsExpandMinHeight = 240;
   static const double fileSizeColumnWidth = 64;
   static const double fileModifiedColumnWidth = 140;
   static const double fileSizeColumnMinPaneWidth = 260;
@@ -154,7 +158,7 @@ abstract final class AppTheme {
   static const double sidebarMaxWidth = 420;
   static const double sidebarResizeWidth = 5;
   static const double sidebarFooterHeight = 40;
-  static const double settingsDialogMaxWidth = 600;
+  static const double settingsDialogMaxWidth = 660;
   static const EdgeInsets settingsTabPadding = EdgeInsets.symmetric(
     horizontal: 8,
     vertical: 6,

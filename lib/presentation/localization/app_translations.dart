@@ -1894,5 +1894,307 @@ class AppTranslations extends Translations {
     '请至少配置一条防火墙规则': 'Configure at least one firewall rule',
     '单次最多创建 64 条防火墙规则': 'You can create at most 64 firewall rules at a time',
     '防火墙规则标识无效，请刷新列表': 'Invalid firewall rule identifier. Refresh the list.',
+    '常用指令': 'Quick Commands',
+    '展开常用指令': 'Expand Quick Commands',
+    '收起常用指令': 'Collapse Quick Commands',
+    '点击填入聚焦终端，悬停查看说明':
+        'Click to insert into the focused terminal, hover for tips',
+    '搜索常用指令': 'Search quick commands',
+    '搜索指令或用途': 'Search command or purpose',
+    '没有匹配的常用指令': 'No matching quick commands',
+    '当前终端未就绪，无法填入指令': 'The terminal is not ready to receive commands',
+    '系统': 'System',
+    '文件与日志': 'Files & Logs',
+    '进程与服务': 'Processes',
+    'Docker': 'Docker',
+    '数据库': 'Database',
+    'Web 与证书': 'Web & TLS',
+    'Git': 'Git',
+    '查看内核版本、主机名与系统架构': 'Show kernel version, hostname, and system architecture',
+    '查看 Linux 发行版与系统版本号': 'Show Linux distribution and OS version',
+    '查看系统运行时间与 1/5/15 分钟平均负载':
+        'Show system uptime and 1/5/15-minute load averages',
+    '查看内存与 Swap 使用情况（自动换算单位）':
+        'Show memory and swap usage in human-readable units',
+    '查看 CPU 架构、核心数与线程信息': 'Show CPU architecture, cores, and thread topology',
+    '查看各磁盘分区容量与挂载点使用率': 'Show disk space usage for mounted filesystems',
+    '统计当前目录下体积最大的前 20 个文件或目录':
+        'List the 20 largest files or directories in the current path',
+    '树形列出所有块设备、分区与挂载关系':
+        'List block devices, partitions, and mount points as a tree',
+    '查看系统时间、时区与 NTP 同步状态': 'Show system clock, timezone, and NTP sync status',
+    '查看最近 50 条带可读时间戳的内核日志':
+        'Show the latest 50 kernel log lines with readable timestamps',
+    '查看当前 Shell 的文件描述符等资源限制':
+        'Show current shell resource limits such as open files',
+    '搜索查看当前生效的内核运行参数': 'Search active kernel runtime parameters',
+    '列出目录内所有文件（含隐藏文件、权限与大小）':
+        'List all files including hidden entries, permissions, and sizes',
+    '按文件名递归查找文件并忽略权限报错':
+        'Recursively search files by name while ignoring permission errors',
+    '查找当前目录下大于 100MB 的大文件':
+        'Find files larger than 100MB under the current directory',
+    '在当前目录递归搜索包含关键词的文本行并显示行号':
+        'Recursively search matching text lines with line numbers',
+    '实时跟踪日志文件末尾最新 100 行输出':
+        'Follow the last 100 lines of a log file in real time',
+    '以可翻页模式实时追踪日志（Ctrl+C 暂停，Shift+F 继续）':
+        'Follow logs in a pager (Ctrl+C to pause, Shift+F to resume)',
+    '将文件或目录打包并用 gzip 压缩': 'Archive and gzip-compress files or directories',
+    '解压 .tar.gz 压缩包到当前目录':
+        'Extract a .tar.gz archive into the current directory',
+    '递归修改目录或文件的读写执行权限': 'Recursively change file or directory permissions',
+    '递归修改目录或文件的所有者与所属组': 'Recursively change file or directory owner and group',
+    '增量同步文件或目录并显示传输进度': 'Incrementally sync files or directories with progress',
+    '创建指向目标路径的软链接': 'Create a symbolic link pointing to a target path',
+    '按 CPU 占用从高到低查看前 20 个进程': 'Show top 20 processes sorted by CPU usage',
+    '按内存占用从高到低查看前 20 个进程': 'Show top 20 processes sorted by memory usage',
+    '按关键词筛选运行中的进程及其 PID': 'Filter running processes and their PIDs by keyword',
+    '动态查看进程资源占用并显示完整启动命令': 'Monitor live process usage with full command lines',
+    '向指定 PID 发送 SIGTERM，通知进程优雅退出':
+        'Send SIGTERM to a PID for graceful shutdown',
+    '向指定 PID 发送 SIGKILL，强制终止无响应进程':
+        'Send SIGKILL to force-terminate an unresponsive process',
+    '查看指定 systemd 服务的运行状态与近期日志':
+        'Show status and recent logs for a systemd service',
+    '重启指定的 systemd 服务': 'Restart a systemd service',
+    '立即启动服务并设置开机自启': 'Start a systemd service immediately and enable on boot',
+    '列出所有启动失败或异常的 systemd 服务': 'List all failed systemd units',
+    '实时查看指定服务的最近 100 条 systemd 日志':
+        'Follow the last 100 journald log lines for a service',
+    '查看当前用户的定时任务列表': 'List scheduled cron jobs for the current user',
+    '查看网卡列表与 IPv4/IPv6 地址配置': 'Show network interfaces and IPv4/IPv6 addresses',
+    '查看系统路由表与默认网关': 'Show kernel routing table and default gateway',
+    '查看所有监听中的 TCP/UDP 端口及对应进程':
+        'Show listening TCP/UDP sockets and owning processes',
+    '查看占用指定端口的进程详情': 'Inspect the process using a specific port',
+    '仅请求并查看目标 URL 的 HTTP 响应头': 'Fetch HTTP response headers only for a URL',
+    '调试 HTTPS 请求，输出握手过程与详细头信息':
+        'Debug HTTPS requests with TLS handshake and verbose headers',
+    '测试目标主机指定 TCP 端口是否连通': 'Check TCP port connectivity to a remote host',
+    '快速查询域名 DNS 解析记录': 'Query concise DNS resolution records for a domain',
+    '追踪数据包到达目标主机的网络路由跳点': 'Trace network route hops to a destination host',
+    '抓取指定端口的网络数据包（不解析主机名与端口名）':
+        'Capture packets on a port without host or port name lookups',
+    '查看 firewalld 当前区域的放行规则': 'List active firewalld zone rules',
+    '查看 ufw 防火墙启用状态与详细规则': 'Show UFW firewall status and detailed rules',
+    '列出所有容器（包含已停止的容器）': 'List all containers including stopped ones',
+    '列出本地所有 Docker 镜像及占用空间': 'List local Docker images and disk sizes',
+    '实时查看容器最近 100 行日志': 'Follow the last 100 log lines of a container',
+    '进入运行中容器的交互式终端': 'Open an interactive shell inside a running container',
+    '获取所有运行中容器的 CPU/内存/网络实时快照':
+        'Show a one-shot CPU, memory, and network stats snapshot',
+    '查看容器、镜像或网络的完整 JSON 元数据':
+        'Inspect full JSON metadata for a container, image, or network',
+    '重启指定容器': 'Restart a container',
+    '查看镜像、容器、数据卷与构建缓存的磁盘占用':
+        'Show Docker disk usage for images, containers, volumes, and cache',
+    '清理未使用的容器、网络与悬空镜像':
+        'Remove unused containers, networks, and dangling images',
+    '查看当前 Compose 项目的服务容器状态':
+        'List container status for the current Compose project',
+    '后台创建并启动 Compose 编排服务':
+        'Create and start Compose services in detached mode',
+    '实时跟踪 Compose 所有服务的最近 100 行日志':
+        'Follow the last 100 log lines across Compose services',
+    '以交互方式登录本地 MySQL / MariaDB':
+        'Connect interactively to local MySQL / MariaDB',
+    '导出指定 MySQL 数据库为 SQL 备份文件': 'Dump a MySQL database to a SQL backup file',
+    '从 SQL 备份文件恢复到指定 MySQL 数据库':
+        'Restore a MySQL database from a SQL backup file',
+    '查看 MySQL 当前活跃连接与正在执行的查询':
+        'Show active MySQL connections and running queries',
+    '登录本地 PostgreSQL 交互命令行': 'Open an interactive PostgreSQL psql session',
+    '以自定义压缩格式备份 PostgreSQL 数据库':
+        'Back up a PostgreSQL database in compressed custom format',
+    '将压缩备份恢复到指定 PostgreSQL 数据库':
+        'Restore a compressed dump into a PostgreSQL database',
+    '检测本地 Redis 服务是否正常响应': 'Check whether the local Redis server responds',
+    '查看 Redis 内存占用与淘汰策略详情': 'Inspect Redis memory usage and eviction stats',
+    '扫描并统计 Redis 中占用空间较大的 Key': 'Scan Redis to find the largest keys by type',
+    '实时监听 Redis 正在执行的命令（生产慎用）':
+        'Stream live Redis commands (use cautiously in production)',
+    '打开 MongoDB Shell 连接本地实例':
+        'Launch MongoDB Shell against the local instance',
+    '检查 Nginx 配置文件语法是否正确': 'Validate Nginx configuration syntax',
+    '平滑重载 Nginx 配置而不中断现有连接':
+        'Gracefully reload Nginx configuration without dropping connections',
+    '输出 Nginx 生效的完整汇总配置': 'Print the full active Nginx configuration',
+    '查看 Nginx 版本号及编译参数与模块列表':
+        'Show Nginx version, build flags, and compiled modules',
+    '实时查看 Nginx 错误日志': 'Follow the Nginx error log in real time',
+    '实时查看 Nginx 访问日志': 'Follow the Nginx access log in real time',
+    '查看远程 HTTPS 站点 SSL 证书的有效期':
+        'Check SSL certificate validity dates for an HTTPS host',
+    '查看本机 Certbot 管理的 SSL 证书与到期时间':
+        'List local Certbot-managed SSL certificates and expiry dates',
+    '以简洁模式查看工作区变更与当前分支状态':
+        'Show compact working tree changes and branch status',
+    '单行显示最近 20 条提交记录': 'Show the last 20 commits in compact one-line format',
+    '查看当前未暂存改动的受影响文件统计': 'Show diff summary stats for unstaged changes',
+    '查看本地分支列表及关联的远程跟踪分支': 'List local branches with upstream tracking info',
+    '拉取远程更新并以变基方式同步当前分支': 'Pull remote changes and rebase the current branch',
+    '拉取所有远程分支并清理已删除的远程引用':
+        'Fetch all remotes and prune deleted remote branches',
+    '暂存当前未提交改动并附带备注说明': 'Stash uncommitted changes with a descriptive message',
+    '查看 HEAD 操作历史，用于误操作回溯恢复': 'Show recent HEAD reflog entries for recovery',
+    '管理常用指令': 'Manage Quick Commands',
+    '自定义分组与运维指令，支持拖拽调整顺序，并显示在终端底部「常用指令」面板中。': 'Create and reorder custom groups and commands shown in the terminal Quick Commands panel.',
+    '拖拽排序分组': 'Drag to reorder group',
+    '拖拽排序指令': 'Drag to reorder command',
+    '松开以将指令移入此分组': 'Drop here to move command into this group',
+    '全部展开': 'Expand All',
+    '全部折叠': 'Collapse All',
+    '新建分组': 'New Group',
+    '重命名分组': 'Rename Group',
+    '删除分组': 'Delete Group',
+    '删除分组「@name」？': 'Delete group “@name”?',
+    '删除后无法恢复。': 'This action cannot be undone.',
+    '该分组包含 @count 条指令，删除后无法恢复。': 'This group contains @count commands and cannot be recovered once deleted.',
+    '还没有自定义指令分组': 'No custom command groups yet',
+    '可按项目或运维场景创建分组（如 Kubernetes、业务发布），添加常用命令与说明提示。': 'Create groups by project or ops workflow (such as Kubernetes or deployments) with commands and hover tips.',
+    '@count 条': '@count items',
+    '添加指令': 'Add Command',
+    '编辑指令': 'Edit Command',
+    '删除指令': 'Delete Command',
+    '删除指令？': 'Delete command?',
+    '该分组暂无指令，点击「添加指令」新增。':
+        'No commands in this group yet. Click “Add Command” to add one.',
+    '分组名称': 'Group Name',
+    '例如：Kubernetes、项目发布': 'e.g., Kubernetes, Deployments',
+    '指令内容': 'Command',
+    '例如：kubectl get pods -A': 'e.g., kubectl get pods -A',
+    '支持保留末尾空格，点击后将填入当前聚焦终端且不会自动执行': 'Trailing spaces are preserved. Clicking inserts into the focused terminal without executing.',
+    '用途说明': 'Description',
+    '悬停时显示的功能介绍（选填）': 'Shown in the hover tooltip (optional)',
+    '请输入分组名称': 'Enter a group name',
+    '分组名称不能超过 40 个字符': 'Group name cannot exceed 40 characters',
+    '分组名称已存在': 'A group with this name already exists',
+    '请输入指令内容': 'Enter a command',
+    '指令不支持换行，请输入单行命令': 'Commands must be single-line without line breaks',
+    '指令不能包含控制字符': 'Commands cannot contain control characters',
+    '指令长度不能超过 1000 个字符': 'Command cannot exceed 1000 characters',
+    '说明长度不能超过 200 个字符': 'Description cannot exceed 200 characters',
+    '分组不存在': 'Group not found',
+    '指令不存在': 'Command not found',
+    '常用指令读取失败，请重试': 'Failed to load quick commands. Try again.',
+    '常用指令保存失败，请重试': 'Failed to save quick commands. Try again.',
+    '当前分组暂无指令': 'No commands in this group yet',
+    '前往管理添加': 'Manage in Settings',
+    'Kubernetes': 'Kubernetes',
+    '包管理与安全': 'Packages & Security',
+    '查看主机名、操作系统与内核概览': 'Show hostname, operating system, and kernel summary',
+    '查看当前登录系统的所有用户会话': 'Show currently logged-in user sessions',
+    '查看最近 20 条系统登录与重启记录': 'Show the latest 20 login and reboot records',
+    '查看各磁盘分区的 inode 使用率（排查小文件耗尽空间）':
+        'Show inode usage per filesystem to diagnose small-file exhaustion',
+    '每秒采样一次 CPU、内存、IO 与上下文切换（共 5 次）':
+        'Sample CPU, memory, I/O, and context switches every second (5 times)',
+    '查看磁盘 I/O 吞吐、延迟与利用率详情':
+        'Show detailed disk I/O throughput, latency, and utilization',
+    '统计文件总行数': 'Count the total number of lines in a file',
+    '查看当前目录下一级子目录的磁盘占用大小':
+        'Show disk usage of immediate subdirectories in the current path',
+    '删除当前目录下 7 天前的 .log 日志文件（慎用）': 'Delete .log files older than 7 days in the current directory (use with care)',
+    '查看文件指定行号范围（第 1 到 100 行）内容':
+        'Print a specific line range (lines 1 to 100) from a file',
+    '按空白分隔提取文本指定列内容':
+        'Extract a specific whitespace-delimited column from text',
+    '静默解压 .zip 压缩包到指定目录':
+        'Quietly extract a .zip archive into a target directory',
+    '启动指定的 systemd 服务': 'Start a systemd service',
+    '停止指定的 systemd 服务': 'Stop a systemd service',
+    '重新加载修改后的 systemd 服务单元配置': 'Reload modified systemd unit files',
+    '查看所有已设置开机自启的系统服务': 'List all systemd services enabled at boot',
+    '查看最近 50 条错误级别及以上的系统日志':
+        'Show the latest 50 system log entries at error level or higher',
+    '以树形结构查看进程父子关系与 PID': 'Display running processes as a tree with PIDs',
+    '汇总查看各协议与状态的 Socket 连接数量统计':
+        'Show socket connection count summary by protocol and state',
+    '发送 4 个 ICMP 探测包测试网络连通性与延迟':
+        'Send 4 ICMP echo requests to test reachability and latency',
+    '结合 ping 与路由追踪输出 10 次丢包与延迟报告':
+        'Run a 10-cycle MTR report combining ping and traceroute',
+    '查询当前服务器的公网出口 IP 地址': 'Query the server’s public egress IP address',
+    '测量目标 URL 的 DNS、建连、首字节与总耗时':
+        'Measure DNS, connect, TTFB, and total request timings for a URL',
+    '查看 iptables 规则链、编号及数据包命中计数':
+        'List iptables chains with rule numbers and packet counters',
+    '以精简表格查看运行中容器的名称、状态与端口映射': 'List running containers in a compact table with names, status, and ports',
+    '优雅停止指定运行中的容器': 'Gracefully stop a running container',
+    '强制删除指定容器': 'Force-remove a container',
+    '删除本地指定 Docker 镜像': 'Remove a local Docker image',
+    '列出所有 Docker 网络': 'List all Docker networks',
+    '列出所有 Docker 数据卷': 'List all Docker volumes',
+    '查看集群所有节点状态、IP 与容器运行时信息':
+        'List cluster nodes with status, IPs, and container runtime info',
+    '查看所有命名空间下的 Pod 运行状态': 'List Pods across all namespaces',
+    '查看当前命名空间 Pod 及所在节点与 Pod IP':
+        'List Pods in the current namespace with node and Pod IP',
+    '查看指定 Pod 的详细配置与事件排查原因':
+        'Inspect detailed Pod configuration and scheduling/runtime events',
+    '实时跟踪指定 Pod 最近 100 行容器日志': 'Follow the latest 100 log lines of a Pod',
+    '进入运行中 Pod 容器的交互式终端': 'Open an interactive shell inside a running Pod',
+    '查看所有命名空间的 Service 与 Ingress 资源':
+        'List Service and Ingress resources across all namespaces',
+    '按时间顺序查看集群近期事件': 'List recent cluster events sorted by timestamp',
+    '查看所有 Pod 的实时 CPU 与内存占用': 'Show live CPU and memory usage for all Pods',
+    '查看集群各节点的实时 CPU 与内存占用': 'Show live CPU and memory usage for cluster nodes',
+    '查看指定 Deployment 的滚动发布进度': 'Watch rollout status of a Deployment',
+    '触发指定 Deployment 无中断滚动重启':
+        'Trigger a zero-downtime rolling restart of a Deployment',
+    '将指定 Deployment 回滚到上一个历史版本':
+        'Roll back a Deployment to the previous revision',
+    '查看本地 kubeconfig 中的所有集群上下文':
+        'List all cluster contexts in local kubeconfig',
+    '指定主机与端口通过 TCP 登录 MySQL':
+        'Connect to MySQL over TCP with explicit host and port',
+    '指定主机与端口登录 PostgreSQL 数据库':
+        'Connect to a PostgreSQL database with explicit host and port',
+    '指定地址、端口与密码连接 Redis': 'Connect to Redis with host, port, and password',
+    '查看 Redis 当前客户端连接数与阻塞连接':
+        'Show Redis connected and blocked client statistics',
+    '列出 SQLite 数据库文件中的所有表': 'List all tables in a SQLite database file',
+    '通过 systemd 平滑重载 Nginx 服务': 'Gracefully reload Nginx via systemd',
+    '统计 Nginx 访问日志中请求量最高的前 20 个来源 IP':
+        'Show the top 20 client IP addresses in the Nginx access log',
+    '统计 Nginx 访问日志中各 HTTP 状态码的分布次数':
+        'Count HTTP status code occurrences in the Nginx access log',
+    '查看本地 PEM 证书的颁发者、域名与有效期信息':
+        'Inspect issuer, subject, and validity of a local PEM certificate',
+    '生成有效期 365 天的本地自签名 TLS 证书':
+        'Generate a 365-day local self-signed TLS certificate',
+    '校验 Caddy 配置文件语法是否正确': 'Validate Caddyfile configuration syntax',
+    '刷新 Debian/Ubuntu 软件包索引并列出可更新包':
+        'Refresh APT package index and list upgradable packages',
+    '在 Debian/Ubuntu 上安装指定软件包': 'Install a package on Debian/Ubuntu with APT',
+    '检查 RHEL/Rocky/CentOS 系统中可用的软件包更新':
+        'Check available package updates on RHEL/Rocky/CentOS with DNF',
+    '在 RHEL/Rocky/CentOS 上安装指定软件包':
+        'Install a package on RHEL/Rocky/CentOS with DNF',
+    '在 Debian/Ubuntu 上搜索已安装的软件包':
+        'Search installed packages on Debian/Ubuntu via dpkg',
+    '在 RHEL/CentOS 上搜索已安装的 RPM 软件包':
+        'Search installed RPM packages on RHEL/CentOS',
+    '生成 Ed25519 算法 SSH 密钥对': 'Generate an Ed25519 SSH key pair',
+    '将本地公钥追加到远程主机实现免密登录':
+        'Copy a local SSH public key to a remote host for passwordless login',
+    '修复 SSH 公钥授权文件权限避免登录被拒':
+        'Fix permissions on ~/.ssh/authorized_keys to prevent SSH rejections',
+    '检查 SSH 服务端配置文件 /etc/ssh/sshd_config 语法':
+        'Validate SSH daemon configuration syntax (/etc/ssh/sshd_config)',
+    '查看 fail2ban 对 SSH 暴力破解的封禁统计':
+        'Show fail2ban SSH brute-force ban status and statistics',
+    '计算文件的 SHA-256 校验哈希值': 'Compute the SHA-256 checksum of a file',
+    '列出系统中允许交互登录的账号': 'List system accounts with interactive login shells',
+    '查看当前用户被授予的 sudo 提权命令范围':
+        'List sudo privileges granted to the current user',
+    '图形化查看最近 20 条分支与合并提交历史':
+        'Show the latest 20 commits as a decorated branch graph',
+    '基于当前提交创建并切换到新分支': 'Create and switch to a new Git branch',
+    '恢复最近一次暂存的改动并从暂存栈移除':
+        'Apply the latest stashed changes and drop them from stash',
+    '按版本号倒序列出最近 20 个 Git 标签':
+        'List the latest 20 Git tags sorted by version descending',
   };
 }

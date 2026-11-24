@@ -55,11 +55,13 @@ class AppTerminalView extends StatefulWidget {
   final List<String> Function()? inputSyncPanes;
 
   @override
-  State<AppTerminalView> createState() => _AppTerminalViewState();
+  State<AppTerminalView> createState() => AppTerminalViewState();
 }
 
-class _AppTerminalViewState extends State<AppTerminalView> {
+class AppTerminalViewState extends State<AppTerminalView> {
   final _paneKey = GlobalKey<TerminalPaneState>();
+
+  void scrollToBottom() => _paneKey.currentState?.scrollToBottom();
   bool _skipMultilinePastePrompt = false;
   bool _pasteConfirming = false;
   final _query = TextEditingController();
