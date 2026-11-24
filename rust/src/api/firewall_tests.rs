@@ -13,6 +13,7 @@ impl Fixture {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
+        std::fs::create_dir(dir.path().join("system-bin")).unwrap();
         std::fs::create_dir(dir.path().join("tmp")).unwrap();
         for name in [
             "awk", "cat", "cp", "grep", "head", "mktemp", "rm", "rmdir", "sed", "tr",
@@ -28,7 +29,11 @@ impl Fixture {
     }
 
     fn install(&self, name: &str, script: &str) {
-        let path = self.dir.path().join("bin").join(name);
+        self.install_in("bin", name, script);
+    }
+
+    fn install_in(&self, directory: &str, name: &str, script: &str) {
+        let path = self.dir.path().join(directory).join(name);
         std::fs::write(&path, script).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
@@ -39,6 +44,14 @@ impl Fixture {
     }
 
     fn run_script(&self, script: &str, args: &[&str]) -> Output {
+        // PATH only controls the first lookup. Give the script a separate
+        // fixture directory for its absolute-path fallback, too.
+        const SYSTEM_LOOKUP: &str = "for fw_dir in /usr/sbin /sbin /usr/bin /bin; do";
+        assert_eq!(script.matches(SYSTEM_LOOKUP).count(), 1);
+        let script = script.replace(
+            SYSTEM_LOOKUP,
+            r#"for fw_dir in "$PAGA_FW_TEST_SYSTEM_BIN"; do"#,
+        );
         let mut command = Command::new("/bin/sh");
         command
             .arg("-c")
@@ -46,6 +59,10 @@ impl Fixture {
             .arg("paga-fw-test")
             .args(args)
             .env("PATH", self.dir.path().join("bin"))
+            .env(
+                "PAGA_FW_TEST_SYSTEM_BIN",
+                self.dir.path().join("system-bin"),
+            )
             .env("TMPDIR", self.dir.path().join("tmp"))
             .env("PAGA_FW_TRACE", self.dir.path().join("trace"));
         command.output().unwrap()
@@ -177,7 +194,8 @@ fn rejects_macos_and_missing_firewall_and_denied_sudo() {
 fn reads_and_mutates_firewalld_rules_with_reload() {
     let fixture = Fixture::new();
     fixture.linux_root();
-    fixture.install(
+    fixture.install_in(
+        "system-bin",
         "firewall-cmd",
         r#"#!/bin/sh
 printf 'firewall-cmd' >> "$PAGA_FW_TRACE"
