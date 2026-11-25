@@ -3,9 +3,9 @@
     .ColorScheme-Text { color: #232629; }
   </style>
   <g class="ColorScheme-Text">
-    <path d="M 3.00 7.10 L 9.60 14.00 L 3.00 20.90" fill="none" stroke="currentColor" stroke-width="2.96" stroke-linecap="round" stroke-linejoin="round"/>
-    <path d="M 9.60 14.00 H 13.80 M 13.80 14.00 V 11.20 A 1.75 1.75 0 0 1 15.55 9.45 H 16.80 M 13.80 14.00 V 16.80 A 1.75 1.75 0 0 0 15.55 18.55 H 16.80" fill="none" stroke="currentColor" stroke-width="1.80" stroke-linecap="round" stroke-linejoin="round"/>
-    <path d="M 18.40 6.30 H 24.40 A 2.00 2.00 0 0 1 26.40 8.30 V 10.60 A 2.00 2.00 0 0 1 24.40 12.60 H 18.40 A 2.00 2.00 0 0 1 16.40 10.60 V 8.30 A 2.00 2.00 0 0 1 18.40 6.30 Z M 24.62 9.45 A 1.22 1.22 0 1 0 22.18 9.45 A 1.22 1.22 0 1 0 24.62 9.45 Z" fill="currentColor" fill-rule="evenodd"/>
-    <path d="M 18.40 15.40 H 24.40 A 2.00 2.00 0 0 1 26.40 17.40 V 19.70 A 2.00 2.00 0 0 1 24.40 21.70 H 18.40 A 2.00 2.00 0 0 1 16.40 19.70 V 17.40 A 2.00 2.00 0 0 1 18.40 15.40 Z M 24.62 18.55 A 1.22 1.22 0 1 0 22.18 18.55 A 1.22 1.22 0 1 0 24.62 18.55 Z" fill="currentColor" fill-rule="evenodd"/>
+    <path d="M 3.20 6.80 L 9.45 14.00 L 3.20 21.20" fill="none" stroke="currentColor" stroke-width="3.18" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M 9.45 14.00 H 14.00 M 14.00 14.00 V 11.20 A 1.80 1.80 0 0 1 15.80 9.40 H 17.00 M 14.00 14.00 V 16.80 A 1.80 1.80 0 0 0 15.80 18.60 H 17.00" fill="none" stroke="currentColor" stroke-width="2.04" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M 18.35 6.30 H 24.40 A 1.85 1.85 0 0 1 26.25 8.15 V 10.65 A 1.85 1.85 0 0 1 24.40 12.50 H 18.35 A 1.85 1.85 0 0 1 16.50 10.65 V 8.15 A 1.85 1.85 0 0 1 18.35 6.30 Z M 24.67 9.40 A 1.32 1.32 0 1 0 22.03 9.40 A 1.32 1.32 0 1 0 24.67 9.40 Z" fill="currentColor" fill-rule="evenodd"/>
+    <path d="M 18.35 15.50 H 24.40 A 1.85 1.85 0 0 1 26.25 17.35 V 19.85 A 1.85 1.85 0 0 1 24.40 21.70 H 18.35 A 1.85 1.85 0 0 1 16.50 19.85 V 17.35 A 1.85 1.85 0 0 1 18.35 15.50 Z M 24.67 18.60 A 1.32 1.32 0 1 0 22.03 18.60 A 1.32 1.32 0 1 0 24.67 18.60 Z" fill="currentColor" fill-rule="evenodd"/>
   </g>
 </svg>

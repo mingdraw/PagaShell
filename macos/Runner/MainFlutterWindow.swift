@@ -629,8 +629,15 @@ private final class MacSystemProxy {
 
 /// macOS 菜单栏系统托盘与后台 App Nap 抑制管理。
 private final class MacSystemTray: NSObject, NSMenuDelegate {
+  private static let iconSize = NSSize(width: 22, height: 18)
+
+  private final class ServiceBadgeView: NSImageView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+  }
+
   private weak var channel: FlutterMethodChannel?
   private var statusItem: NSStatusItem?
+  private weak var serviceBadge: NSImageView?
   private var menu = NSMenu()
   private var menuOpen = false
   private var pendingItems: [[String: Any]]?
@@ -659,7 +666,8 @@ private final class MacSystemTray: NSObject, NSMenuDelegate {
       }
       let tooltip = args["tooltip"] as? String ?? "PagaShell"
       let items = args["items"] as? [[String: Any]] ?? []
-      update(tooltip: tooltip, items: items)
+      let hasActiveServices = args["hasActiveServices"] as? Bool ?? false
+      update(tooltip: tooltip, items: items, hasActiveServices: hasActiveServices)
       result(nil)
     case "setBackgroundMode":
       let args = call.arguments as? [String: Any] ?? [:]
@@ -679,8 +687,10 @@ private final class MacSystemTray: NSObject, NSMenuDelegate {
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     if let button = item.button {
       button.image = makeTrayIcon()
+      button.imagePosition = .imageOnly
       button.imageScaling = .scaleProportionallyDown
       button.toolTip = "PagaShell"
+      installServiceBadge(on: button)
     }
     item.menu = menu
     statusItem = item
@@ -688,7 +698,7 @@ private final class MacSystemTray: NSObject, NSMenuDelegate {
 
   private func makeTrayIcon() -> NSImage? {
     if let template = NSImage(named: NSImage.Name("TrayIcon"))?.copy() as? NSImage {
-      template.size = NSSize(width: 22, height: 18)
+      template.size = Self.iconSize
       template.isTemplate = true
       return template
     }
@@ -701,9 +711,28 @@ private final class MacSystemTray: NSObject, NSMenuDelegate {
     return icon
   }
 
-  private func update(tooltip: String, items: [[String: Any]]) {
+  private func installServiceBadge(on button: NSStatusBarButton) {
+    guard let image = NSImage(named: NSImage.Name("TrayServiceBadge")) else { return }
+    // Keep the mark as a system-tinted template and draw the green dot above it.
+    let badge = ServiceBadgeView(frame: .zero)
+    badge.image = image
+    badge.imageScaling = .scaleNone
+    badge.isHidden = true
+    badge.translatesAutoresizingMaskIntoConstraints = false
+    button.addSubview(badge)
+    NSLayoutConstraint.activate([
+      badge.centerXAnchor.constraint(equalTo: button.centerXAnchor),
+      badge.centerYAnchor.constraint(equalTo: button.centerYAnchor),
+      badge.widthAnchor.constraint(equalToConstant: Self.iconSize.width),
+      badge.heightAnchor.constraint(equalToConstant: Self.iconSize.height),
+    ])
+    serviceBadge = badge
+  }
+
+  private func update(tooltip: String, items: [[String: Any]], hasActiveServices: Bool) {
     initialize()
     statusItem?.button?.toolTip = tooltip
+    serviceBadge?.isHidden = !hasActiveServices
     if menuOpen {
       pendingItems = items
       return
@@ -796,6 +825,7 @@ private final class MacSystemTray: NSObject, NSMenuDelegate {
     setBackgroundMode(false)
     pendingItems = nil
     menuOpen = false
+    serviceBadge = nil
     if let item = statusItem {
       item.menu = nil
       NSStatusBar.system.removeStatusItem(item)

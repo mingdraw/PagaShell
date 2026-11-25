@@ -223,7 +223,14 @@ class SystemTrayController extends GetxController {
       SystemTrayMenuItem.action(id: actionQuit, label: '退出 PagaShell'.tr),
     ];
 
-    return SystemTrayState(tooltip: tooltip, items: List.unmodifiable(items));
+    return SystemTrayState(
+      tooltip: tooltip,
+      items: List.unmodifiable(items),
+      hasActiveServices:
+          mcpRunning ||
+          activeForwards.any((s) => s.phase == SessionPhase.ready) ||
+          activeProxies.any((s) => s.phase == SessionPhase.ready),
+    );
   }
 
   SystemTrayMenuItem _buildForwardMenuItem(List<Session> activeForwards) {

@@ -55,6 +55,8 @@ END
 IDI_APP_ICON            ICON                    "resources\\app_icon.ico"
 IDI_TRAY_ICON_LIGHT     ICON                    "resources\\tray_icon_light.ico"
 IDI_TRAY_ICON_DARK      ICON                    "resources\\tray_icon_dark.ico"
+IDI_TRAY_ICON_LIGHT_ACTIVE ICON                 "resources\\tray_icon_light_active.ico"
+IDI_TRAY_ICON_DARK_ACTIVE  ICON                 "resources\\tray_icon_dark_active.ico"
 
 
 /////////////////////////////////////////////////////////////////////////////

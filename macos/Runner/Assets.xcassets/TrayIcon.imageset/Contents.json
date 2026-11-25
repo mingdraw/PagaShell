@@ -1,14 +1,8 @@
 {
   "images": [
     {
-      "filename": "tray_icon_1x.png",
-      "idiom": "mac",
-      "scale": "1x"
-    },
-    {
-      "filename": "tray_icon_2x.png",
-      "idiom": "mac",
-      "scale": "2x"
+      "filename": "tray_icon.svg",
+      "idiom": "mac"
     }
   ],
   "info": {
@@ -16,6 +10,7 @@
     "version": 1
   },
   "properties": {
+    "preserves-vector-representation": true,
     "template-rendering-intent": "template"
   }
 }

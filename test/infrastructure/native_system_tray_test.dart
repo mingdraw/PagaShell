@@ -35,6 +35,7 @@ void main() {
     await tray.initialize();
     const state = SystemTrayState(
       tooltip: 'PagaShell · MCP :47321',
+      hasActiveServices: true,
       items: [
         SystemTrayMenuItem.action(id: 'window.show', label: '显示 PagaShell'),
         SystemTrayMenuItem.separator(),
@@ -65,6 +66,7 @@ void main() {
     ]);
     final payload = calls[1].arguments as Map<Object?, Object?>;
     expect(payload['tooltip'], 'PagaShell · MCP :47321');
+    expect(payload['hasActiveServices'], isTrue);
     final items = payload['items'] as List<Object?>;
     expect(items, hasLength(3));
     expect((items[0] as Map<Object?, Object?>)['id'], 'window.show');
@@ -93,5 +95,31 @@ void main() {
 
     await tray.dispose();
     expect(calls.last.method, 'dispose');
+  });
+
+  test('菜单内容不变时仍向原生托盘同步绿点的显示和隐藏', () async {
+    final tray = NativeSystemTray(channel: channel);
+    const idle = SystemTrayState(
+      tooltip: 'PagaShell',
+      items: [],
+      hasActiveServices: false,
+    );
+    const active = SystemTrayState(
+      tooltip: 'PagaShell',
+      items: [],
+      hasActiveServices: true,
+    );
+    await tray.update(idle);
+    await tray.update(active);
+    await tray.update(active);
+    await tray.update(idle);
+
+    final badgeStates = [
+      for (final call in calls)
+        if (call.method == 'update')
+          (call.arguments as Map<Object?, Object?>)['hasActiveServices'],
+    ];
+    expect(badgeStates, [false, true, false]);
+    await tray.dispose();
   });
 }

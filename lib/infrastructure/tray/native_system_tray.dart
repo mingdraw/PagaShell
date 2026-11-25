@@ -68,6 +68,7 @@ class NativeSystemTray implements SystemTray {
     try {
       await _channel.invokeMethod<void>('update', {
         'tooltip': state.tooltip,
+        'hasActiveServices': state.hasActiveServices,
         'items': [for (final item in state.items) item.toMap()],
       });
     } on MissingPluginException {

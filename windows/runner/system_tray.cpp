@@ -68,19 +68,25 @@ bool IsSystemTaskbarLight() {
   return status == ERROR_SUCCESS && light_theme != 0;
 }
 
-HICON LoadTrayIcon(bool* owns_icon) {
+HICON LoadTrayIcon(bool has_active_services, bool* owns_icon) {
   const int cx = GetSystemMetrics(SM_CXSMICON);
   const int cy = GetSystemMetrics(SM_CYSMICON);
   const HINSTANCE instance = GetModuleHandleW(nullptr);
-  const WORD resource_id =
-      IsSystemTaskbarLight() ? IDI_TRAY_ICON_DARK : IDI_TRAY_ICON_LIGHT;
-  HICON icon = static_cast<HICON>(LoadImageW(
-      instance, MAKEINTRESOURCEW(resource_id), IMAGE_ICON, cx, cy,
-      LR_DEFAULTCOLOR));
+  const bool light_taskbar = IsSystemTaskbarLight();
+  const auto load = [&](WORD resource_id) {
+    return static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(resource_id),
+                                        IMAGE_ICON, cx, cy, LR_DEFAULTCOLOR));
+  };
+  HICON icon = nullptr;
+  if (has_active_services) {
+    icon = load(light_taskbar ? IDI_TRAY_ICON_DARK_ACTIVE
+                              : IDI_TRAY_ICON_LIGHT_ACTIVE);
+  }
   if (!icon) {
-    icon = static_cast<HICON>(LoadImageW(
-        instance, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, cx, cy,
-        LR_DEFAULTCOLOR));
+    icon = load(light_taskbar ? IDI_TRAY_ICON_DARK : IDI_TRAY_ICON_LIGHT);
+  }
+  if (!icon) {
+    icon = load(IDI_APP_ICON);
   }
   if (icon) {
     *owns_icon = true;
@@ -116,6 +122,12 @@ void WindowsSystemTray::Handle(const flutter::MethodCall<Value>& call,
     if (!initialized_) {
       Initialize();
     }
+    const bool has_active_services =
+        ReadBool(*args, "hasActiveServices", false);
+    if (has_active_services_ != has_active_services) {
+      has_active_services_ = has_active_services;
+      ReloadIcon();
+    }
     UpdateTooltip(ReadString(*args, "tooltip", "PagaShell"));
     const auto* raw_items = FindArgument(*args, "items");
     const auto* item_list =
@@ -149,7 +161,7 @@ bool WindowsSystemTray::Initialize() {
                                 nullptr);
   }
 
-  icon_ = LoadTrayIcon(&owns_icon_);
+  icon_ = LoadTrayIcon(has_active_services_, &owns_icon_);
   ZeroMemory(&nid_, sizeof(nid_));
   nid_.cbSize = sizeof(nid_);
   nid_.hWnd = hwnd_;
@@ -185,18 +197,20 @@ void WindowsSystemTray::UpdateTooltip(const std::string& tooltip) {
 }
 
 void WindowsSystemTray::ReloadIcon() {
-  if (disposed_ || !active_ || !hwnd_) return;
+  if (disposed_ || !initialized_ || !hwnd_) return;
   bool next_owns = false;
-  HICON next_icon = LoadTrayIcon(&next_owns);
+  HICON next_icon = LoadTrayIcon(has_active_services_, &next_owns);
   if (!next_icon) return;
   HICON previous = icon_;
   bool previous_owns = owns_icon_;
   icon_ = next_icon;
   owns_icon_ = next_owns;
   nid_.hIcon = icon_;
-  nid_.uFlags = NIF_ICON;
-  Shell_NotifyIconW(NIM_MODIFY, &nid_);
-  nid_.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+  if (active_) {
+    nid_.uFlags = NIF_ICON;
+    Shell_NotifyIconW(NIM_MODIFY, &nid_);
+    nid_.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+  }
   if (previous && previous_owns) {
     DestroyIcon(previous);
   }

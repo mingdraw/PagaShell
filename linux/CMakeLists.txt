@@ -136,7 +136,11 @@ foreach(TRAY_ICON IN ITEMS
   tray_icon_light_24.png
   tray_icon_light_48.png
   tray_icon_dark_24.png
-  tray_icon_dark_48.png)
+  tray_icon_dark_48.png
+  tray_icon_light_active_24.png
+  tray_icon_light_active_48.png
+  tray_icon_dark_active_24.png
+  tray_icon_dark_active_48.png)
   install(FILES "runner/resources/${TRAY_ICON}"
     DESTINATION "${INSTALL_BUNDLE_DATA_DIR}" COMPONENT Runtime)
 endforeach()

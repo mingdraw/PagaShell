@@ -236,6 +236,39 @@ void main() {
     expect(state.items.last.id, SystemTrayController.actionQuit);
   });
 
+  test('任一后台服务就绪即点亮托盘绿点，最后一项停止后熄灭', () async {
+    const host = Host(id: 'host', name: 'Host', hostname: 'host.test');
+    final liveSessions = sessions.sessions;
+    liveSessions.addAll(const [
+      Session(id: 'ssh', host: host, phase: SessionPhase.ready),
+      Session(id: 'forward', host: host, kind: SessionKind.portForward),
+      Session(id: 'proxy', host: host, kind: SessionKind.dynamicProxy),
+    ]);
+
+    Future<bool> badgeVisible() async {
+      await Future<void>.delayed(Duration.zero);
+      return tray.latestState!.hasActiveServices;
+    }
+
+    expect(await badgeVisible(), isFalse);
+
+    liveSessions[1] = liveSessions[1].copyWith(phase: SessionPhase.ready);
+    expect(await badgeVisible(), isTrue);
+
+    liveSessions[2] = liveSessions[2].copyWith(phase: SessionPhase.ready);
+    await sessions.stopForward('forward');
+    expect(await badgeVisible(), isTrue);
+
+    await sessions.stopProxy('proxy');
+    expect(await badgeVisible(), isFalse);
+
+    await mcp.setEnabled(true);
+    expect(await badgeVisible(), isTrue);
+
+    await mcp.setEnabled(false);
+    expect(await badgeVisible(), isFalse);
+  });
+
   test('后台服务运行中时汇总 Tooltip 并生成端口转发、动态代理、MCP 与会话子菜单', () async {
     sessions.sessions.addAll([
       const Session(

@@ -374,12 +374,13 @@ class LinuxSystemTray : public std::enable_shared_from_this<LinuxSystemTray> {
   void LoadIcons() {
     ClearIcons();
     using_dark_icon_ = ShouldUseDarkTrayIcon();
-    const char* primary[2] = {
-        using_dark_icon_ ? "tray_icon_dark_24.png" : "tray_icon_light_24.png",
-        using_dark_icon_ ? "tray_icon_dark_48.png" : "tray_icon_light_48.png",
-    };
-    for (int i = 0; i < 2; ++i) {
-      const std::string path = ResolveBundleDataPath(primary[i]);
+    const std::string prefix = std::string("tray_icon_") +
+                               (using_dark_icon_ ? "dark" : "light") +
+                               (has_active_services_ ? "_active_" : "_");
+    const int sizes[] = {24, 48};
+    for (const int size : sizes) {
+      const std::string file = prefix + std::to_string(size) + ".png";
+      const std::string path = ResolveBundleDataPath(file.c_str());
       if (path.empty()) continue;
       GdkPixbuf* pb = gdk_pixbuf_new_from_file(path.c_str(), nullptr);
       if (pb) icon_pixbufs_.push_back(pb);
@@ -388,10 +389,9 @@ class LinuxSystemTray : public std::enable_shared_from_this<LinuxSystemTray> {
 
     const std::string fallback = ResolveBundleDataPath("app_icon.png");
     if (fallback.empty()) return;
-    const int sizes[2] = {24, 48};
-    for (int i = 0; i < 2; ++i) {
+    for (const int size : sizes) {
       GdkPixbuf* pb = gdk_pixbuf_new_from_file_at_scale(
-          fallback.c_str(), sizes[i], sizes[i], TRUE, nullptr);
+          fallback.c_str(), size, size, TRUE, nullptr);
       if (pb) icon_pixbufs_.push_back(pb);
     }
   }
@@ -412,13 +412,14 @@ class LinuxSystemTray : public std::enable_shared_from_this<LinuxSystemTray> {
   static void OnThemeSettingChanged(GObject*, GParamSpec*, gpointer data) {
     auto* self = static_cast<LinuxSystemTray*>(data);
     if (!self || self->disposed_) return;
+    if (ShouldUseDarkTrayIcon() == self->using_dark_icon_ &&
+        !self->icon_pixbufs_.empty()) {
+      return;
+    }
     self->ReloadIcons();
   }
 
   void ReloadIcons() {
-    if (ShouldUseDarkTrayIcon() == using_dark_icon_ && !icon_pixbufs_.empty()) {
-      return;
-    }
     LoadIcons();
     EmitSniSignal("NewIcon");
     if (fallback_icon_ && !icon_pixbufs_.empty()) {
@@ -589,6 +590,12 @@ class LinuxSystemTray : public std::enable_shared_from_this<LinuxSystemTray> {
   void UpdateFromArgs(FlValue* args) {
     tooltip_ = ReadStringField(args, "tooltip", "PagaShell");
     if (tooltip_.empty()) tooltip_ = "PagaShell";
+    const bool has_active_services =
+        ReadBoolField(args, "hasActiveServices", false);
+    if (has_active_services_ != has_active_services) {
+      has_active_services_ = has_active_services;
+      ReloadIcons();
+    }
 
     items_.clear();
     node_by_id_.clear();
@@ -1155,6 +1162,7 @@ class LinuxSystemTray : public std::enable_shared_from_this<LinuxSystemTray> {
   bool canonical_watcher_present_ = false;
   bool sni_registered_ = false;
   bool using_dark_icon_ = false;
+  bool has_active_services_ = false;
 
   GDBusConnection* connection_ = nullptr;
   guint sni_registration_id_ = 0;

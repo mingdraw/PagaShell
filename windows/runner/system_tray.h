@@ -55,6 +55,7 @@ class WindowsSystemTray {
   NOTIFYICONDATAW nid_{};
   HICON icon_ = nullptr;
   bool owns_icon_ = false;
+  bool has_active_services_ = false;
   bool initialized_ = false;
   bool active_ = false;
   bool disposed_ = false;

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Generate monochrome system tray icon assets for macOS, Windows, and Linux.
+"""Generate PagaShell's tray mark and service badge for each desktop platform.
 
 The monochrome mark mirrors the foreground silhouette of PagaShell's app icon
 (terminal chevron `>` connected via a rounded fork to two stacked server modules
 with circular status dot cutouts), optically tuned for small menu bar / taskbar
-sizes.
+sizes. The service badge is a separate vector layer on macOS and is composited
+into the active icon variants for Windows and Linux.
 
 Requires Pillow: python3 -m pip install Pillow
 Run from any directory: python3 scripts/generate_tray_icons.py
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Callable
 from pathlib import Path
 
 try:
@@ -24,17 +26,40 @@ except ImportError as error:
 
 ROOT = Path(__file__).resolve().parents[1]
 
-VIEWBOX_W = 28.0
-VIEWBOX_H = 24.0
+VIEWBOX_W = 28
+VIEWBOX_H = 24
+CENTER_Y = VIEWBOX_H / 2
 
-# Monochrome color palettes:
-# - macOS template image uses pure black with alpha (AppKit tints automatically).
+# Shared geometry for the SVG and the native raster exports.
+CHEVRON_X = 3.2
+CHEVRON_TIP_X = 9.45
+CHEVRON_TOP_Y = 4.8
+CHEVRON_BOTTOM_Y = VIEWBOX_H - CHEVRON_TOP_Y
+CHEVRON_HALF_WIDTH = 1.59
+FORK_X = 14.0
+FORK_END_X = 17.0
+FORK_CORNER = 1.8
+FORK_HALF_WIDTH = 1.02
+SERVER_X = 16.5
+SERVER_WIDTH = 9.75
+SERVER_HEIGHT = 6.2
+SERVER_CORNER = 1.85
+SERVER_ROWS = (7.4, 16.6)
+SERVER_CUTOUT_X = 23.35
+SERVER_CUTOUT_RADIUS = 1.32
+BADGE_X = 24.75
+BADGE_Y = 20.8
+BADGE_RADIUS = 2.95
+BADGE_FILL_RADIUS = 2.33
+
 # - Light foreground (#FFFFFF) is rendered on dark taskbars / panels.
 # - Dark foreground (#1A1A1A) is rendered on light taskbars / panels.
-MAC_TEMPLATE_COLOR = (0, 0, 0)
 LIGHT_FG_COLOR = (255, 255, 255)
 DARK_FG_COLOR = (26, 26, 26)
+BADGE_BORDER_COLOR = (17, 113, 58)
+BADGE_FILL_COLOR = (52, 211, 110)
 
+MAC_ICON_SIZE = (22, 18)
 WINDOWS_ICO_SIZES = (16, 20, 24, 32, 48, 64)
 LINUX_PNG_SIZES = (24, 48)
 
@@ -131,39 +156,52 @@ def pagashell_tray_sdf(x: float, y: float) -> float:
     # Bold '>' command chevron extending slightly above/below the server stack.
     d_chevron = (
         min(
-            _dist_segment(x, y, 3.0, 5.1, 9.6, 12.0),
-            _dist_segment(x, y, 3.0, 18.9, 9.6, 12.0),
+            _dist_segment(x, y, CHEVRON_X, CHEVRON_TOP_Y, CHEVRON_TIP_X, CENTER_Y),
+            _dist_segment(x, y, CHEVRON_X, CHEVRON_BOTTOM_Y, CHEVRON_TIP_X, CENTER_Y),
         )
-        - 1.48
+        - CHEVRON_HALF_WIDTH
     )
     # Sleek rounded-corner fork connecting chevron apex to the two server modules.
     d_fork = (
         _dist_fork(
             x,
             y,
-            x_start=9.6,
-            x_vert=13.8,
-            x_end=16.8,
-            y_mid=12.0,
-            y_top=7.45,
-            y_bot=16.55,
-            corner_r=1.75,
+            x_start=CHEVRON_TIP_X,
+            x_vert=FORK_X,
+            x_end=FORK_END_X,
+            y_mid=CENTER_Y,
+            y_top=SERVER_ROWS[0],
+            y_bot=SERVER_ROWS[1],
+            corner_r=FORK_CORNER,
         )
-        - 0.90
+        - FORK_HALF_WIDTH
     )
     # Two stacked rounded-rectangle server modules with circular status cutouts.
-    d_srv_top = _dist_round_rect(x, y, 16.4, 4.3, 26.4, 10.6, 2.0)
-    d_srv_bot = _dist_round_rect(x, y, 16.4, 13.4, 26.4, 19.7, 2.0)
-    d_dot_top = math.hypot(x - 23.4, y - 7.45) - 1.22
-    d_dot_bot = math.hypot(x - 23.4, y - 16.55) - 1.22
-    d_servers = max(min(d_srv_top, d_srv_bot), -min(d_dot_top, d_dot_bot))
+    d_servers = min(
+        max(
+            _dist_round_rect(
+                x,
+                y,
+                SERVER_X,
+                row - SERVER_HEIGHT / 2,
+                SERVER_X + SERVER_WIDTH,
+                row + SERVER_HEIGHT / 2,
+                SERVER_CORNER,
+            ),
+            SERVER_CUTOUT_RADIUS - math.hypot(x - SERVER_CUTOUT_X, y - row),
+        )
+        for row in SERVER_ROWS
+    )
     return min(d_chevron, d_fork, d_servers)
 
 
-def render_tray_icon(
-    width: int, height: int, color: tuple[int, int, int]
+def _render_shape(
+    width: int,
+    height: int,
+    color: tuple[int, int, int],
+    distance: Callable[[float, float], float],
 ) -> Image.Image:
-    """Render the monochrome mark with analytic subpixel anti-aliasing."""
+    """Render a shape with analytic subpixel anti-aliasing."""
     image = Image.new('RGBA', (width, height), (0, 0, 0, 0))
     pixels = image.load()
     scale = min(width / VIEWBOX_W, height / VIEWBOX_H)
@@ -180,12 +218,32 @@ def render_tray_icon(
             for dx, dy in offsets:
                 x = (ix + 0.5 + dx - ox_px) * inv_scale
                 y = (iy + 0.5 + dy - oy_px) * inv_scale
-                d = pagashell_tray_sdf(x, y)
+                d = distance(x, y)
                 coverage += max(0.0, min(1.0, 0.5 - d / (2.0 * aa_radius)))
             alpha = int(round(coverage * 0.25 * 255.0))
             if alpha > 0:
                 pixels[ix, iy] = (r, g, b, alpha)
     return image
+
+
+def render_tray_icon(
+    width: int, height: int, color: tuple[int, int, int], *, active: bool = False
+) -> Image.Image:
+    icon = _render_shape(width, height, color, pagashell_tray_sdf)
+    if active:
+        for radius, badge_color in (
+            (BADGE_RADIUS, BADGE_BORDER_COLOR),
+            (BADGE_FILL_RADIUS, BADGE_FILL_COLOR),
+        ):
+            icon.alpha_composite(
+                _render_shape(
+                    width,
+                    height,
+                    badge_color,
+                    lambda x, y, r=radius: math.hypot(x - BADGE_X, y - BADGE_Y) - r,
+                )
+            )
+    return icon
 
 
 def _rounded_rect_with_dot_path(
@@ -207,10 +265,24 @@ def _rounded_rect_with_dot_path(
     )
 
 
-def build_svg(*, square: bool, symbolic: bool) -> str:
+def _svg_document(content: str, viewbox_height: int, size: tuple[int, int]) -> str:
+    width, height = size
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {VIEWBOX_W} '
+        f'{viewbox_height}" width="{width}" height="{height}">\n'
+        f'{content}'
+        f'</svg>\n'
+    )
+
+
+def build_svg(
+    *, square: bool = False, symbolic: bool = False, size: tuple[int, int] | None = None
+) -> str:
     """Build matching monochrome SVG markup using pure fill/stroke & evenodd."""
-    vb_h = 28 if square else 24
-    y_offset = 2.0 if square else 0.0
+    vb_h = VIEWBOX_W if square else VIEWBOX_H
+    y_offset = (vb_h - VIEWBOX_H) / 2
+    mid_y = CENTER_Y + y_offset
+    top_y, bottom_y = (row + y_offset for row in SERVER_ROWS)
     style_block = (
         '  <style id="current-color-scheme" type="text/css">\n'
         '    .ColorScheme-Text { color: #232629; }\n'
@@ -218,60 +290,67 @@ def build_svg(*, square: bool, symbolic: bool) -> str:
         if symbolic
         else ''
     )
-    group_attrs = (
-        'class="ColorScheme-Text"'
-        if symbolic
-        else 'style="color:#000000"'
+    group_attrs = ' class="ColorScheme-Text"' if symbolic else ''
+    color = 'currentColor' if symbolic else '#000000'
+    top_srv, bottom_srv = (
+        _rounded_rect_with_dot_path(
+            SERVER_X,
+            row - SERVER_HEIGHT / 2,
+            SERVER_WIDTH,
+            SERVER_HEIGHT,
+            SERVER_CORNER,
+            SERVER_CUTOUT_X,
+            row,
+            SERVER_CUTOUT_RADIUS,
+        )
+        for row in (top_y, bottom_y)
     )
-    top_srv = _rounded_rect_with_dot_path(
-        16.4, 4.3 + y_offset, 10.0, 6.3, 2.0, 23.4, 7.45 + y_offset, 1.22
-    )
-    bot_srv = _rounded_rect_with_dot_path(
-        16.4, 13.4 + y_offset, 10.0, 6.3, 2.0, 23.4, 16.55 + y_offset, 1.22
-    )
-    return (
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 {vb_h}" '
-        f'width="28" height="{vb_h}">\n'
+    arc = f'A {FORK_CORNER:.2f} {FORK_CORNER:.2f} 0 0'
+    content = (
         f'{style_block}'
-        f'  <g {group_attrs}>\n'
-        f'    <path d="M 3.00 {5.10 + y_offset:.2f} L 9.60 {12.00 + y_offset:.2f} '
-        f'L 3.00 {18.90 + y_offset:.2f}" '
-        f'fill="none" stroke="currentColor" stroke-width="2.96" '
+        f'  <g{group_attrs}>\n'
+        f'    <path d="M {CHEVRON_X:.2f} {CHEVRON_TOP_Y + y_offset:.2f} '
+        f'L {CHEVRON_TIP_X:.2f} {mid_y:.2f} '
+        f'L {CHEVRON_X:.2f} {CHEVRON_BOTTOM_Y + y_offset:.2f}" '
+        f'fill="none" stroke="{color}" stroke-width="{2 * CHEVRON_HALF_WIDTH:.2f}" '
         f'stroke-linecap="round" stroke-linejoin="round"/>\n'
-        f'    <path d="M 9.60 {12.00 + y_offset:.2f} H 13.80 '
-        f'M 13.80 {12.00 + y_offset:.2f} V {9.20 + y_offset:.2f} '
-        f'A 1.75 1.75 0 0 1 15.55 {7.45 + y_offset:.2f} H 16.80 '
-        f'M 13.80 {12.00 + y_offset:.2f} V {14.80 + y_offset:.2f} '
-        f'A 1.75 1.75 0 0 0 15.55 {16.55 + y_offset:.2f} H 16.80" '
-        f'fill="none" stroke="currentColor" stroke-width="1.80" '
+        f'    <path d="M {CHEVRON_TIP_X:.2f} {mid_y:.2f} H {FORK_X:.2f} '
+        f'M {FORK_X:.2f} {mid_y:.2f} V {top_y + FORK_CORNER:.2f} '
+        f'{arc} 1 {FORK_X + FORK_CORNER:.2f} {top_y:.2f} H {FORK_END_X:.2f} '
+        f'M {FORK_X:.2f} {mid_y:.2f} V {bottom_y - FORK_CORNER:.2f} '
+        f'{arc} 0 {FORK_X + FORK_CORNER:.2f} {bottom_y:.2f} H {FORK_END_X:.2f}" '
+        f'fill="none" stroke="{color}" stroke-width="{2 * FORK_HALF_WIDTH:.2f}" '
         f'stroke-linecap="round" stroke-linejoin="round"/>\n'
-        f'    <path d="{top_srv}" fill="currentColor" fill-rule="evenodd"/>\n'
-        f'    <path d="{bot_srv}" fill="currentColor" fill-rule="evenodd"/>\n'
-        f'  </g>\n'
-        f'</svg>\n'
+        f'    <path d="{top_srv}" fill="{color}" fill-rule="evenodd"/>\n'
+        f'    <path d="{bottom_srv}" fill="{color}" fill-rule="evenodd"/>\n'
+        '  </g>\n'
     )
+    return _svg_document(content, vb_h, size or (VIEWBOX_W, vb_h))
 
 
-def export_macos_template_imageset() -> None:
-    imageset = ROOT / 'macos/Runner/Assets.xcassets/TrayIcon.imageset'
+def build_badge_svg(size: tuple[int, int]) -> str:
+    circles = ''.join(
+        f'  <circle cx="{BADGE_X:.2f}" cy="{BADGE_Y:.2f}" r="{radius:.2f}" '
+        f'fill="{"#%02x%02x%02x" % color}"/>\n'
+        for radius, color in (
+            (BADGE_RADIUS, BADGE_BORDER_COLOR),
+            (BADGE_FILL_RADIUS, BADGE_FILL_COLOR),
+        )
+    )
+    return _svg_document(circles, VIEWBOX_H, size)
+
+
+def export_macos_imageset(
+    name: str, filename: str, svg: str, *, template: bool
+) -> None:
+    imageset = ROOT / 'macos/Runner/Assets.xcassets' / f'{name}.imageset'
     imageset.mkdir(parents=True, exist_ok=True)
-    render_tray_icon(22, 18, MAC_TEMPLATE_COLOR).save(
-        imageset / 'tray_icon_1x.png', optimize=True
-    )
-    render_tray_icon(44, 36, MAC_TEMPLATE_COLOR).save(
-        imageset / 'tray_icon_2x.png', optimize=True
-    )
+    (imageset / filename).write_text(svg, encoding='utf-8')
     contents = {
         'images': [
             {
-                'filename': 'tray_icon_1x.png',
+                'filename': filename,
                 'idiom': 'mac',
-                'scale': '1x',
-            },
-            {
-                'filename': 'tray_icon_2x.png',
-                'idiom': 'mac',
-                'scale': '2x',
             },
         ],
         'info': {
@@ -279,7 +358,8 @@ def export_macos_template_imageset() -> None:
             'version': 1,
         },
         'properties': {
-            'template-rendering-intent': 'template',
+            'preserves-vector-representation': True,
+            'template-rendering-intent': 'template' if template else 'original',
         },
     }
     (imageset / 'Contents.json').write_text(
@@ -287,9 +367,13 @@ def export_macos_template_imageset() -> None:
     )
 
 
-def export_windows_ico(path: Path, color: tuple[int, int, int]) -> None:
+def export_windows_ico(
+    path: Path, color: tuple[int, int, int], *, active: bool
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    frames = [render_tray_icon(size, size, color) for size in WINDOWS_ICO_SIZES]
+    frames = [
+        render_tray_icon(size, size, color, active=active) for size in WINDOWS_ICO_SIZES
+    ]
     # Save largest frame first with individually SDF-rendered smaller frames
     # so 16/20/24/32px sizes stay razor sharp without downscaling blur.
     frames[-1].save(
@@ -303,36 +387,45 @@ def export_windows_ico(path: Path, color: tuple[int, int, int]) -> None:
 def export_linux_resources() -> None:
     directory = ROOT / 'linux/runner/resources'
     directory.mkdir(parents=True, exist_ok=True)
-    for size in LINUX_PNG_SIZES:
-        render_tray_icon(size, size, LIGHT_FG_COLOR).save(
-            directory / f'tray_icon_light_{size}.png', optimize=True
-        )
-        render_tray_icon(size, size, DARK_FG_COLOR).save(
-            directory / f'tray_icon_dark_{size}.png', optimize=True
-        )
+    for variant, color, active in icon_variants():
+        for size in LINUX_PNG_SIZES:
+            render_tray_icon(size, size, color, active=active).save(
+                directory / f'tray_icon_{variant}_{size}.png', optimize=True
+            )
     (directory / 'pagashell-symbolic.svg').write_text(
         build_svg(square=True, symbolic=True), encoding='utf-8'
     )
 
 
+def icon_variants():
+    for theme, color in (('light', LIGHT_FG_COLOR), ('dark', DARK_FG_COLOR)):
+        yield theme, color, False
+        yield f'{theme}_active', color, True
+
+
 def main() -> None:
     branding_svg = ROOT / 'assets/branding/pagashell-tray-icon.svg'
     branding_svg.parent.mkdir(parents=True, exist_ok=True)
-    branding_svg.write_text(
-        build_svg(square=False, symbolic=False), encoding='utf-8'
-    )
+    branding_svg.write_text(build_svg(), encoding='utf-8')
 
-    export_macos_template_imageset()
-    export_windows_ico(
-        ROOT / 'windows/runner/resources/tray_icon_light.ico', LIGHT_FG_COLOR
+    export_macos_imageset(
+        'TrayIcon', 'tray_icon.svg', build_svg(size=MAC_ICON_SIZE), template=True
     )
-    export_windows_ico(
-        ROOT / 'windows/runner/resources/tray_icon_dark.ico', DARK_FG_COLOR
+    export_macos_imageset(
+        'TrayServiceBadge',
+        'tray_service_badge.svg',
+        build_badge_svg(MAC_ICON_SIZE),
+        template=False,
     )
+    for variant, color, active in icon_variants():
+        export_windows_ico(
+            ROOT / 'windows/runner/resources' / f'tray_icon_{variant}.ico',
+            color,
+            active=active,
+        )
     export_linux_resources()
     print(
-        'Generated monochrome tray icons for macOS (Template), '
-        'Windows (light/dark ICO), and Linux (light/dark PNG + symbolic SVG).'
+        'Generated tray icons and service badge variants for macOS, Windows, and Linux.'
     )
 
 

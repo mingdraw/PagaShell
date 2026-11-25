@@ -17,3 +17,9 @@ python3 scripts/generate_app_icons.py
 - Linux：`linux/runner/resources/app_icon_*.png`，16–512px。CMake 将窗口图标放入 bundle 的 `data/app_icon.png`，并将桌面入口和多尺寸图标放入 `share/applications/`、`share/icons/hicolor/`。
 
 Linux 直接运行 bundle 时从可执行文件所在目录加载窗口图标。桌面应用列表和启动器使用应用 ID `io.github.zhongxuming.pagashell` 匹配图标；发行安装时需将 bundle 的 `share` 资源安装到对应 XDG 数据目录，并保证 `pagashell` 命令在 `PATH` 中。
+
+## 托盘图标
+
+`pagashell-tray-icon.svg` 沿用应用图标的终端箭头、分叉线和服务器轮廓，为托盘尺寸调整了线宽。任一端口转发、动态代理或本地 MCP 服务运行时，图标右下角会显示绿点。
+
+修改托盘图标后，运行 `python3 scripts/generate_tray_icons.py` 更新矢量图和各平台资源。macOS 使用单色矢量模板和单独的彩色绿点；Windows 和 Linux 使用同一图形导出的浅色、深色及运行状态资源。

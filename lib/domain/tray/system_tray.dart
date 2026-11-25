@@ -82,21 +82,28 @@ class SystemTrayMenuItem {
       Object.hash(id, label, kind, enabled, checked, Object.hashAll(children));
 }
 
-/// 托盘图标提示文案与上下文菜单快照。
+/// 托盘图标、提示文案与上下文菜单快照。
 class SystemTrayState {
-  const SystemTrayState({required this.tooltip, required this.items});
+  const SystemTrayState({
+    required this.tooltip,
+    required this.items,
+    required this.hasActiveServices,
+  });
 
   final String tooltip;
   final List<SystemTrayMenuItem> items;
+  final bool hasActiveServices;
 
   @override
   bool operator ==(Object other) =>
       other is SystemTrayState &&
       other.tooltip == tooltip &&
+      other.hasActiveServices == hasActiveServices &&
       _listEquals(other.items, items);
 
   @override
-  int get hashCode => Object.hash(tooltip, Object.hashAll(items));
+  int get hashCode =>
+      Object.hash(tooltip, hasActiveServices, Object.hashAll(items));
 }
 
 bool _listEquals<T>(List<T> a, List<T> b) {
