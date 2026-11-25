@@ -9,20 +9,15 @@
 #include <optional>
 #include <string>
 
+#include "system_proxy_settings.h"
+
 class SystemNetworkProxy {
  public:
   void Handle(const flutter::MethodCall<flutter::EncodableValue>& call,
               std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
 
  private:
-  struct Settings {
-    DWORD flags = 0;
-    std::wstring server, bypass, pac;
-    bool operator==(const Settings& other) const {
-      return flags == other.flags && server == other.server &&
-             bypass == other.bypass && pac == other.pac;
-    }
-  };
+  using Settings = windows_proxy::Settings;
   static bool Read(Settings* settings);
   static bool Write(const Settings& settings);
   std::string owner_;

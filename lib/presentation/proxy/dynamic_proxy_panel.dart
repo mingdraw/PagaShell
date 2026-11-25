@@ -8,6 +8,7 @@ import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import '../../application/gateways/gateway_controller.dart';
 import '../../application/proxy/clash_extension_script.dart';
+import '../../application/proxy/v2ray_extension_config.dart';
 import '../../application/session/session.dart';
 import '../../application/session/session_controller.dart';
 import '../../domain/entities/host.dart';
@@ -27,6 +28,7 @@ import '../theme/app_theme.dart';
 import 'clash_extension_dialog.dart';
 import 'proxy_rule_preview_dialog.dart';
 import 'proxy_traffic_status.dart';
+import 'v2ray_extension_dialog.dart';
 
 class DynamicProxyPanel extends StatefulWidget {
   const DynamicProxyPanel({
@@ -263,16 +265,11 @@ class _DynamicProxyPanelState extends State<DynamicProxyPanel> {
     }
   }
 
-  void _showClashScript() {
+  void _showProxyExport(Widget Function(Host, ProxyConfig) buildDialog) {
     if (_autoSystemProxy || !(_form.currentState?.validate() ?? false)) return;
     try {
-      final script = ClashExtensionScript.fromConfig(
-        widget.session.host,
-        _read(),
-      );
-      unawaited(
-        AppNavigation.dialog<void>(ClashExtensionDialog(script: script)),
-      );
+      final dialog = buildDialog(widget.session.host, _read());
+      unawaited(AppNavigation.dialog<void>(dialog));
     } on StateError catch (e) {
       setState(() => _error = e.message.toString());
     }
@@ -827,18 +824,32 @@ class _DynamicProxyPanelState extends State<DynamicProxyPanel> {
                   if (!_autoSystemProxy)
                     shadcn.OutlineButton(
                       key: const ValueKey('proxy-clash-script'),
-                      onPressed: _showClashScript,
+                      onPressed: () => _showProxyExport(
+                        (host, config) => ClashExtensionDialog(
+                          script: ClashExtensionScript.fromConfig(host, config),
+                        ),
+                      ),
                       leading: const AppIcon(AppIcons.code, size: 16),
                       child: Text('Clash 扩展脚本'.tr),
+                    ),
+                  if (!_autoSystemProxy)
+                    shadcn.OutlineButton(
+                      key: const ValueKey('proxy-v2ray-config'),
+                      onPressed: () => _showProxyExport(
+                        (host, config) => V2RayExtensionDialog(
+                          config: V2RayExtensionConfig(host, config),
+                        ),
+                      ),
+                      leading: const AppIcon(AppIcons.code, size: 16),
+                      child: Text('V2Ray 扩展配置'.tr),
                     ),
                   if (error != null)
                     Text(error, style: TextStyle(color: colors.destructive)),
                 ],
               );
-              return Wrap(
-                spacing: 16,
-                runSpacing: 12,
-                crossAxisAlignment: WrapCrossAlignment.center,
+              return Column(
+                spacing: 12,
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [autoSystemProxy, actions],
               );
             },

@@ -32,6 +32,14 @@ enum TerminalInsertResult {
   invalidText,
 }
 
+enum SessionCloseStep {
+  systemProxy,
+  dynamicProxy,
+  portForward,
+  fileTransfer,
+  connection,
+}
+
 typedef HostSessionActivity = ({
   bool active,
   int count,
@@ -354,6 +362,17 @@ class SessionController extends GetxController {
   }
 
   final Map<String, _SessionRuntime> _runtimes = {};
+  final _pendingCloses = <String, _PendingSessionClose>{};
+
+  Set<SessionCloseStep> get pendingCloseSteps => {
+    for (final close in _pendingCloses.values) close.step,
+    if (_runtimes.values.any((runtime) => runtime.systemProxyLease != null))
+      SessionCloseStep.systemProxy,
+  };
+
+  String? get systemProxyRestoreError => sessions
+      .firstWhereOrNull((session) => proxyNeedsCleanup(session.id))
+      ?.error;
   final Map<(String, String), ServerStatusConnection> _serverStatusConnections =
       {};
   // 跨标签共享的网关清理队列；重新启动必须等旧监听端口释放。
@@ -1915,7 +1934,33 @@ class SessionController extends GetxController {
     _ => false,
   };
 
-  Future<void> close(String id) async {
+  Future<void> close(String id) {
+    final session = _find(id);
+    if (session == null) return Future<void>.value();
+    if (_pendingCloses[id] case final pending?) return pending.result.future;
+    final pending = _PendingSessionClose(switch (session.kind) {
+      SessionKind.dynamicProxy =>
+        _runtimes[id]?.systemProxyLease != null
+            ? SessionCloseStep.systemProxy
+            : SessionCloseStep.dynamicProxy,
+      SessionKind.portForward => SessionCloseStep.portForward,
+      SessionKind.fileTransfer => SessionCloseStep.fileTransfer,
+      _ => SessionCloseStep.connection,
+    });
+    _pendingCloses[id] = pending;
+    pending.result.complete(
+      _close(id).whenComplete(() {
+        _pendingCloses.remove(id);
+      }),
+    );
+    return pending.result.future;
+  }
+
+  void _markCloseStep(String id, SessionCloseStep step) {
+    if (_pendingCloses[id] case final pending?) pending.step = step;
+  }
+
+  Future<void> _close(String id) async {
     final current = _find(id);
     if (current?.kind == SessionKind.dynamicProxy &&
         (current!.host.proxyConfig.autoSystemProxy ||
@@ -1968,6 +2013,7 @@ class SessionController extends GetxController {
         _transfers?.clearFinished(sessionId: id);
       }
     } finally {
+      if (statusClose != null) _markCloseStep(id, SessionCloseStep.connection);
       await statusClose;
       _forgetClosedRuntime(id);
     }
@@ -2005,7 +2051,11 @@ class SessionController extends GetxController {
       await _releaseProxyResources(session.id);
     }
     // 先停止传输并释放文件句柄，再断开连接；保留目标端已写入文件。
-    await _transfers?.cancelSession(session.id);
+    if (_transfers case final transfers?) {
+      _markCloseStep(session.id, SessionCloseStep.fileTransfer);
+      await transfers.cancelSession(session.id);
+    }
+    _markCloseStep(session.id, SessionCloseStep.connection);
     // 原生输出或 async* 转发流可能需要断开连接后才结束；先发起取消，
     // 同时断开连接，再一起等待，避免取消与断开互相等待。
     final outputCancellation = _runtimes[session.id]
@@ -2029,9 +2079,13 @@ class SessionController extends GetxController {
 
   Future<void> _releaseProxyResources(String id) async {
     // Restore first: a failed restore must not leave the system pointing at a dead listener.
-    await _runtimes[id]?.systemProxyLease?.restore();
+    if (_runtimes[id]?.systemProxyLease case final lease?) {
+      _markCloseStep(id, SessionCloseStep.systemProxy);
+      await lease.restore();
+    }
     _runtimes[id]?.systemProxyLease = null;
     _runtimes[id]?.proxyRestoreFailed = false;
+    _markCloseStep(id, SessionCloseStep.dynamicProxy);
     final proxy = _runtimes[id]?.proxyHandle;
     if (proxy != null) {
       try {
@@ -2067,11 +2121,19 @@ class SessionController extends GetxController {
 
   /// 按快照关闭所有标签，沿用单个会话的取消和资源释放流程。
   Future<void> closeAll() async {
-    final ids = sessions.map((s) => s.id).toList();
+    final ids = sessions.map((session) => session.id).toList();
     await Future.wait(ids.map(close));
     if (_runtimes.values.any((runtime) => runtime.systemProxyLease != null)) {
-      throw const SystemProxyException('恢复系统代理失败，请重试停止代理');
+      throw SystemProxyException(systemProxyRestoreError ?? '恢复系统代理失败，请重试停止代理');
     }
+  }
+
+  /// 退出时也等待已移除页签的清理，包括取消上一次退出后仍在进行的任务。
+  Future<void> closeForExit() async {
+    await Future.wait([
+      for (final pending in _pendingCloses.values) pending.result.future,
+      closeAll(),
+    ]);
   }
 
   @override

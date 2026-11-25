@@ -164,7 +164,7 @@ abstract final class AppTheme {
     vertical: 6,
   );
   static const double proxyModeCardWidth = 320;
-  static const double clashScriptDialogMaxWidth = 840;
+  static const double proxyExportDialogMaxWidth = 840;
   static const double agentMinWidth = 300;
   static const double agentMaxWidth = 640;
   static const double agentMinWorkspaceWidth = 540;

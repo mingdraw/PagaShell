@@ -501,20 +501,29 @@ void main() {
     }, variant: TargetPlatformVariant.only(platform));
   }
 
-  testWidgets('代理恢复失败时更新退出不提交，也不销毁窗口', (tester) async {
-    final events = <String>[];
-    final sessions = _ExitSessions(events)..restoreFails = true;
-    final binding = _UpdateBinding(sessions: sessions);
-    await pump(tester, binding);
-    expect(
-      await binding.updates.exitForUpdate!(() async {
+  for (final confirm in [false, true]) {
+    testWidgets('代理恢复失败时更新退出等待确认，确认：$confirm', (tester) async {
+      final events = <String>[];
+      final sessions = _ExitSessions(events)..restoreFails = true;
+      final appWindow = FakeAppWindow();
+      final binding = _UpdateBinding(sessions: sessions, appWindow: appWindow);
+      await pump(tester, binding);
+      final exit = binding.updates.exitForUpdate!(() async {
         events.add('commit');
-      }),
-      isFalse,
-    );
-    await tester.pump();
-    expect(events, ['close-sessions']);
-    await tester.pump(const Duration(seconds: 6));
-    await tester.pumpAndSettle();
-  });
+      });
+      await tester.pumpAndSettle();
+      expect(events, ['close-sessions']);
+      expect(appWindow.calls, isEmpty);
+      expect(find.text('恢复系统代理失败，请重试停止代理'), findsOneWidget);
+      await tester.tap(
+        confirm
+            ? find.byKey(const ValueKey('exit-with-incomplete-cleanup'))
+            : find.text('取消'),
+      );
+      await tester.pumpAndSettle();
+      expect(await exit, confirm);
+      expect(events, ['close-sessions', if (confirm) 'commit']);
+      expect(appWindow.calls, [if (confirm) 'destroy']);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+  }
 }

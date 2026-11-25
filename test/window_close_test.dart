@@ -58,14 +58,9 @@ class _UnusedEngine extends Fake implements SshEngine {}
 class _ProxyRestoreSessions extends SessionController {
   _ProxyRestoreSessions() : super(engine: _UnusedEngine());
 
-  bool restoreFails = true;
-
   @override
   Future<void> closeAll() async {
-    if (restoreFails) {
-      throw const SystemProxyException('恢复系统代理失败，请重试停止代理');
-    }
-    await super.closeAll();
+    throw const SystemProxyException('恢复系统代理失败，请重试停止代理');
   }
 }
 
@@ -192,7 +187,7 @@ void main() {
     expect(tester.takeException(), isNull);
   }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
 
-  testWidgets('系统代理恢复失败保留窗口，恢复后可重新关闭', (tester) async {
+  testWidgets('系统代理恢复失败时说明联网后果，可取消或仍然退出', (tester) async {
     final sessions = _ProxyRestoreSessions();
     await pump(
       tester,
@@ -202,14 +197,58 @@ void main() {
     await tester.pumpAndSettle();
     expect(calls, isEmpty);
     expect(find.text('恢复系统代理失败，请重试停止代理'), findsOneWidget);
+    expect(find.textContaining('浏览器等应用无法联网'), findsOneWidget);
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect(calls, isEmpty);
 
-    sessions.restoreFails = false;
     await requestClose(tester);
+    await tester.pumpAndSettle();
+    expect(calls, isEmpty);
+    await tester.tap(
+      find.byKey(const ValueKey('exit-with-incomplete-cleanup')),
+    );
     await tester.pumpAndSettle();
     expect(calls, ['native:destroy']);
     expect(tester.takeException(), isNull);
-    await tester.pump(const Duration(seconds: 6));
+  }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
+
+  testWidgets('会话关闭超时可退出，取消再试不会重复断开同一个连接', (tester) async {
+    await pump(tester);
+    final engine = _EngineSession();
+    Get.find<SessionController>().sessions.add(
+      Session(
+        id: 'closing',
+        host: const Host(id: 'closing', name: 'Server', hostname: 'test'),
+        phase: SessionPhase.ready,
+        engineSession: engine,
+        terminal: Terminal(),
+      ),
+    );
+
+    Future<void> waitForExitPrompt() async {
+      await requestClose(tester);
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pumpAndSettle();
+      expect(find.text('关闭会话：等待超时'), findsOneWidget);
+      expect(find.textContaining('远程会话会中断'), findsOneWidget);
+      expect(engine.closeCalls, 1);
+      expect(calls, isEmpty);
+    }
+
+    await waitForExitPrompt();
+    await tester.tap(find.text('取消'));
     await tester.pumpAndSettle();
+    await waitForExitPrompt();
+    await tester.tap(
+      find.byKey(const ValueKey('exit-with-incomplete-cleanup')),
+    );
+    await tester.pumpAndSettle();
+    expect(calls, ['native:destroy']);
+    engine.closing.complete();
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
   }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
 
   for (final platform in [TargetPlatform.macOS, TargetPlatform.linux]) {

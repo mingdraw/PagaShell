@@ -45,14 +45,9 @@ class _FailingExitAgent extends AgentController {
 class _ProxyRestoreFailSessions extends SessionController {
   _ProxyRestoreFailSessions() : super(engine: _StubEngine());
 
-  bool fail = true;
-
   @override
   Future<void> closeAll() async {
-    if (fail) {
-      throw const SystemProxyException('恢复系统代理失败，请重试停止代理');
-    }
-    await super.closeAll();
+    throw const SystemProxyException('恢复系统代理失败，请重试停止代理');
   }
 }
 
@@ -258,7 +253,7 @@ void main() {
     expect(systemTray.disposed, isTrue);
   });
 
-  testWidgets('后台托盘态退出遇系统代理恢复失败时自动唤起窗口并展示错误提示', (tester) async {
+  testWidgets('后台托盘态退出遇系统代理恢复失败时唤起窗口，确认后可退出', (tester) async {
     final repo = InMemorySettingsRepository(minimizeToTrayOnClose: true);
     final sessions = _ProxyRestoreFailSessions();
     await pumpShell(
@@ -277,14 +272,15 @@ void main() {
 
     expect(appWindow.visible, isTrue);
     expect(find.text('恢复系统代理失败，请重试停止代理'), findsOneWidget);
+    expect(find.textContaining('浏览器等应用无法联网'), findsOneWidget);
     expect(appWindow.calls, isNot(contains('destroy')));
 
-    sessions.fail = false;
-    systemTray.emitMenuItemSelected(SystemTrayController.actionQuit);
+    await tester.tap(
+      find.byKey(const ValueKey('exit-with-incomplete-cleanup')),
+    );
     await tester.pumpAndSettle();
     expect(appWindow.calls, contains('destroy'));
-    await tester.pump(const Duration(seconds: 6));
-    await tester.pumpAndSettle();
+    expect(systemTray.disposed, isTrue);
   });
 
   testWidgets('macOS Dock 重开事件同步恢复后台托盘状态', (tester) async {

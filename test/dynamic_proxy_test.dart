@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' as ui;
 
@@ -25,6 +26,7 @@ import 'package:pagashell/presentation/components/app_text_form_field.dart';
 import 'package:pagashell/presentation/localization/app_translations.dart';
 import 'package:pagashell/presentation/proxy/clash_extension_dialog.dart';
 import 'package:pagashell/presentation/proxy/dynamic_proxy_panel.dart';
+import 'package:pagashell/presentation/proxy/v2ray_extension_dialog.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import 'support/in_memory_binding.dart';
@@ -858,6 +860,64 @@ void main() {
     await tester.pumpAndSettle();
   });
 
+  testWidgets('V2Ray 配置使用未启动的当前草稿，在窄屏可复制', (tester) async {
+    final host = _gateway.copyWith(
+      proxyConfig: const ProxyConfig(
+        mode: ProxyMode.rule,
+        rules: [
+          ProxyRule(type: ProxyRuleType.domainSuffix, value: 'corp.internal'),
+        ],
+      ),
+    );
+    final (engine, secrets, sessions) = await pump(tester, host: host);
+    tester.view.physicalSize = const Size(800, 680);
+    sessions.openProxy(host);
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const ValueKey('proxy-HTTP(S)-port')),
+      '28080',
+    );
+    final button = find.byKey(const ValueKey('proxy-v2ray-config'));
+    await tester.ensureVisible(button);
+    await tester.tap(button);
+    await tester.pumpAndSettle();
+    expect(find.byType(V2RayExtensionDialog), findsOneWidget);
+    expect(find.byKey(const ValueKey('v2ray-extension-code')), findsOneWidget);
+    expect(secrets.reads, 0);
+    expect(engine.proxies, isEmpty);
+
+    String? clipboard;
+    final messenger = tester.binding.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+      if (call.method == 'Clipboard.setData') {
+        clipboard = (call.arguments as Map<dynamic, dynamic>)['text'] as String;
+      }
+      return null;
+    });
+    addTearDown(
+      () => messenger.setMockMethodCallHandler(SystemChannels.platform, null),
+    );
+    await tester.tap(find.byKey(const ValueKey('v2ray-extension-copy')));
+    await tester.pumpAndSettle();
+    expect(clipboard, isNotNull);
+    final json = jsonDecode(clipboard!) as Map<String, Object?>;
+    expect((json['outbounds'] as List<Object?>).last, {
+      'tag': 'pagashell-${_gateway.id}',
+      'protocol': 'http',
+      'settings': {
+        'servers': [
+          {'address': '127.0.0.1', 'port': 28080},
+        ],
+      },
+    });
+    expect(clipboard, contains('domain:corp.internal'));
+    expect(find.text('已复制'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.tap(find.text('关闭'));
+    await tester.pumpAndSettle();
+    await sessions.closeAll();
+  });
+
   testWidgets('自动系统代理默认关闭，勾选自动保存且运行时不可修改', (tester) async {
     final backend = _SystemBackend();
     final (engine, _, sessions) = await pump(
@@ -868,7 +928,9 @@ void main() {
     await tester.pumpAndSettle();
     final checkbox = find.byKey(const ValueKey('proxy-auto-system'));
     final clashScript = find.byKey(const ValueKey('proxy-clash-script'));
+    final v2rayConfig = find.byKey(const ValueKey('proxy-v2ray-config'));
     expect(clashScript, findsOneWidget);
+    expect(v2rayConfig, findsOneWidget);
     expect(
       tester.widget<shadcn.Checkbox>(checkbox).state,
       shadcn.CheckboxState.unchecked,
@@ -877,6 +939,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
     await tester.pumpAndSettle();
     expect(clashScript, findsNothing);
+    expect(v2rayConfig, findsNothing);
     expect(
       (await Get.find<GatewayController>().findSaved(_gateway.id))!
           .proxyConfig
@@ -895,6 +958,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
     await tester.pumpAndSettle();
     expect(clashScript, findsOneWidget);
+    expect(v2rayConfig, findsOneWidget);
     await sessions.closeAll();
     await tester.pumpAndSettle();
   });
@@ -1132,6 +1196,37 @@ void main() {
     expect(await exit, ui.AppExitResponse.exit);
     expect(engine.proxies.single.closed, isTrue);
     expect(backend.owner, isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('系统代理恢复超时后，系统退出请求可经用户确认继续', (tester) async {
+    final backend = _SystemBackend()..restoreGate = Completer<void>();
+    final (engine, _, sessions) = await pump(
+      tester,
+      host: autoHost,
+      systemProxy: DesktopSystemProxy(backend: backend),
+    );
+    final id = sessions.openProxy(autoHost);
+    await sessions.startProxy(id, autoHost, gateway: route(autoHost));
+    await tester.pumpAndSettle();
+
+    final exit = tester.binding.handleRequestAppExit();
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
+    expect(find.text('恢复系统代理：等待超时'), findsOneWidget);
+    expect(find.textContaining('系统代理可能仍指向已停止的 PagaShell'), findsOneWidget);
+    await tester.tap(
+      find.byKey(const ValueKey('exit-with-incomplete-cleanup')),
+    );
+    await tester.pumpAndSettle();
+    expect(await exit, ui.AppExitResponse.exit);
+    expect(engine.proxies.single.closed, isFalse);
+
+    backend.restoreGate!.complete();
+    await tester.pumpAndSettle();
+    expect(engine.proxies.single.closed, isTrue);
+    expect(backend.events, ['enable', 'restore']);
     await tester.pumpWidget(const SizedBox.shrink());
   });
 

@@ -33,6 +33,10 @@ import 'widgets/window_controls.dart';
 import 'widgets/workspace.dart';
 import 'workspace_visibility.dart';
 
+enum _ExitCleanup { agent, mcp, tray }
+
+typedef _ExitIssue = ({String? reason, String consequence});
+
 /// 应用主框架：左侧服务栏、中间会话工作区和独立 Agent 右栏。
 ///
 /// 全局快捷键：
@@ -51,6 +55,7 @@ class ShellPage extends StatefulWidget {
 
 class _ShellPageState extends State<ShellPage> with AppWindowListener {
   static const _windowChannel = MethodChannel('pagashell/window');
+  static const _exitCleanupTimeout = Duration(seconds: 5);
 
   String? _fullscreenId;
   bool _fullscreenBusy = false;
@@ -63,9 +68,10 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
   bool _hiddenInTray = false;
   bool _hidingToTray = false;
   AppLifecycleState? _lifecycleState;
-  Future<bool>? _exitPending;
+  final _exitCleanups = <_ExitCleanup, Future<void>>{};
   bool _allowExit = false;
   bool _destroying = false;
+  bool _trayDisposing = false;
   SystemTrayController? _tray;
   AppUpdateController? _updates;
   late final Future<bool> Function(Future<void> Function()) _updateExit;
@@ -107,9 +113,10 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
         _updateMonitoringVisibility();
       },
       onExitRequested: () async {
-        if (!await _prepareExit()) return AppExitResponse.cancel;
-        await _tray?.disposeTray();
-        return AppExitResponse.exit;
+        if (_allowExit || await _exitApplication(fromSystem: true)) {
+          return AppExitResponse.exit;
+        }
+        return AppExitResponse.cancel;
       },
     );
     _sessionChanges = everAll([_sessions.sessions, _sessions.activeSessionId], (
@@ -249,11 +256,12 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
   }
 
   bool _shouldMinimizeToTrayOnClose() =>
+      !_trayDisposing &&
       Get.isRegistered<SettingsController>() &&
       Get.find<SettingsController>().minimizeToTrayOnClose.value;
 
   Future<void> _hideToTray() async {
-    if (_destroying || _hiddenInTray || _hidingToTray) return;
+    if (_destroying || _trayDisposing || _hiddenInTray || _hidingToTray) return;
     _hidingToTray = true;
     try {
       if (_fullscreenId != null) {
@@ -321,16 +329,15 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
 
   Future<bool> _exitApplication({
     Future<void> Function()? beforeDestroy,
+    bool fromSystem = false,
   }) async {
     if (_destroying) return false;
     _destroying = true;
     try {
-      if (!await _prepareExit()) {
-        _destroying = false;
-        return false;
-      }
+      if (!await _prepareExit()) return false;
       await beforeDestroy?.call();
-      await _tray?.disposeTray();
+      _allowExit = true;
+      if (fromSystem) return true;
       if (defaultTargetPlatform == TargetPlatform.windows) {
         // window_manager.destroy() posts WM_QUIT on Windows. The runner must
         // destroy the view/plugins before its message loop and COM shut down.
@@ -340,63 +347,179 @@ class _ShellPageState extends State<ShellPage> with AppWindowListener {
       }
       return true;
     } on Object {
-      _destroying = false;
       _allowExit = false;
       rethrow;
+    } finally {
+      if (!_allowExit) _destroying = false;
     }
   }
 
-  Future<bool> _prepareExit() {
-    if (_allowExit) return Future.value(true);
-    return _exitPending ??= (() async {
-      var allow = true;
-      if (Get.isRegistered<AgentController>() &&
-          !Get.isPrepared<AgentController>()) {
-        final agent = Get.find<AgentController>();
-        allow = await agent.prepareForExit();
-        if (!allow && mounted) {
-          if (_hiddenInTray) await _revealForExitPrompt();
-          allow =
-              await AppNavigation.dialog<bool>(
-                AppDialog(
-                  title: Text('Agent 数据尚未保存'.tr),
-                  content: Text('本地保存失败，可取消退出后重试。仍然退出将丢失尚未保存的记录和偏好设置。'.tr),
-                  actions: [
-                    shadcn.OutlineButton(
-                      onPressed: () => AppNavigation.closeDialog(result: false),
-                      child: Text('取消'.tr),
-                    ),
-                    shadcn.DestructiveButton(
-                      key: const ValueKey('agent-exit-without-saving'),
-                      onPressed: () => AppNavigation.closeDialog(result: true),
-                      child: Text('仍然退出'.tr),
-                    ),
-                  ],
+  Future<bool> _prepareExit() async {
+    if (Get.isRegistered<AgentController>() &&
+        !Get.isPrepared<AgentController>()) {
+      final agent = Get.find<AgentController>();
+      final failure = await _runExitCleanup(_ExitCleanup.agent, () async {
+        if (!await agent.prepareForExit()) {
+          throw StateError('Agent save failed');
+        }
+      });
+      if (failure != null &&
+          !await _confirmExit([
+            (
+              reason: null,
+              consequence: failure is TimeoutException
+                  ? '等待保存 Agent 数据超时。继续退出可能丢失尚未保存的记录和偏好设置。'.tr
+                  : '本地保存失败，可取消退出后重试。仍然退出将丢失尚未保存的记录和偏好设置。'.tr,
+            ),
+          ], agentSave: true)) {
+        return false;
+      }
+    }
+
+    if (Get.isRegistered<McpServerController>()) {
+      final failure = await _runExitCleanup(
+        _ExitCleanup.mcp,
+        Get.find<McpServerController>().stopForExit,
+      );
+      if (failure != null &&
+          !await _confirmExit([
+            _cleanupIssue('停止本地 MCP 服务', '正在通过 MCP 执行的请求可能被中断。', failure),
+          ])) {
+        return false;
+      }
+    }
+
+    // Take a fresh snapshot after a canceled exit; individual session closes
+    // are shared by the controller if their earlier cleanup is still running.
+    final failure = await _waitForExitCleanup(
+      Future<void>.sync(_sessions.closeForExit),
+    );
+    if (failure != null && !await _confirmExit(_sessionExitIssues(failure))) {
+      return false;
+    }
+
+    if (_tray case final tray?) {
+      _trayDisposing = true;
+      final failure = await _runExitCleanup(
+        _ExitCleanup.tray,
+        tray.disposeTray,
+      );
+      if (failure != null &&
+          !await _confirmExit([
+            _cleanupIssue('清理系统托盘', '系统托盘可能暂时保留一个无效的 PagaShell 图标。', failure),
+          ])) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  Future<Object?> _runExitCleanup(
+    _ExitCleanup step,
+    Future<void> Function() cleanup,
+  ) => _waitForExitCleanup(
+    _exitCleanups[step] ??= Future<void>.sync(cleanup).whenComplete(() {
+      _exitCleanups.remove(step);
+    }),
+  );
+
+  Future<Object?> _waitForExitCleanup(Future<void> cleanup) async {
+    try {
+      await cleanup.timeout(_exitCleanupTimeout);
+      return null;
+    } on Object catch (failure) {
+      return failure;
+    }
+  }
+
+  String _cleanupReason(String step, Object failure) =>
+      (failure is TimeoutException ? '@step：等待超时' : '@step：失败').trParams({
+        'step': step.tr,
+      });
+
+  _ExitIssue _cleanupIssue(String step, String consequence, Object failure) =>
+      (reason: _cleanupReason(step, failure), consequence: consequence.tr);
+
+  List<_ExitIssue> _sessionExitIssues(Object failure) {
+    final steps = _sessions.pendingCloseSteps;
+    final proxyError = failure is SystemProxyException
+        ? failure.message
+        : _sessions.systemProxyRestoreError;
+    if (proxyError != null) steps.add(SessionCloseStep.systemProxy);
+    if (steps.isEmpty) steps.add(SessionCloseStep.connection);
+    return [
+      for (final step in SessionCloseStep.values.where(steps.contains))
+        switch (step) {
+          SessionCloseStep.systemProxy => (
+            reason: proxyError?.tr ?? _cleanupReason('恢复系统代理', failure),
+            consequence:
+                '系统代理可能仍指向已停止的 PagaShell，导致浏览器等应用无法联网。可在系统设置中移除 PagaShell 的代理。'
+                    .tr,
+          ),
+          SessionCloseStep.dynamicProxy => _cleanupIssue(
+            '停止动态代理',
+            '仍在使用动态代理的连接会中断。',
+            failure,
+          ),
+          SessionCloseStep.portForward => _cleanupIssue(
+            '停止端口转发',
+            '通过端口转发的连接会中断。',
+            failure,
+          ),
+          SessionCloseStep.fileTransfer => _cleanupIssue(
+            '停止文件传输',
+            '传输会中断，目标端可能留下未传完的文件。',
+            failure,
+          ),
+          SessionCloseStep.connection => _cleanupIssue(
+            '关闭会话',
+            '远程会话会中断，未完成的任务或传输可能受影响。',
+            failure,
+          ),
+        },
+    ];
+  }
+
+  Future<bool> _confirmExit(
+    List<_ExitIssue> issues, {
+    bool agentSave = false,
+  }) async {
+    if (!mounted) return false;
+    if (_hiddenInTray || _windowMinimized) await _revealForExitPrompt();
+    if (!mounted) return false;
+    return await AppNavigation.dialog<bool>(
+          AppDialog(
+            title: Text((agentSave ? 'Agent 数据尚未保存' : '退出前有步骤未完成').tr),
+            scrollable: true,
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              spacing: 8,
+              children: [
+                for (final issue in issues) ...[
+                  if (issue.reason case final reason?) Text(reason),
+                  Text(issue.consequence),
+                ],
+              ],
+            ),
+            actions: [
+              shadcn.OutlineButton(
+                onPressed: () => AppNavigation.closeDialog(result: false),
+                child: Text('取消'.tr),
+              ),
+              shadcn.DestructiveButton(
+                key: ValueKey(
+                  agentSave
+                      ? 'agent-exit-without-saving'
+                      : 'exit-with-incomplete-cleanup',
                 ),
-              ) ==
-              true;
-        }
-      }
-      if (allow) {
-        if (Get.isRegistered<McpServerController>()) {
-          try {
-            await Get.find<McpServerController>().stopForExit();
-          } on Object {
-            // 退出前尽力释放 MCP 监听，不阻塞关闭。
-          }
-        }
-        try {
-          await _sessions.closeAll();
-        } on SystemProxyException catch (error) {
-          allow = false;
-          if (_hiddenInTray) await _revealForExitPrompt();
-          AppNotice.error(error.message);
-        }
-      }
-      _allowExit = allow;
-      _exitPending = null;
-      return allow;
-    })();
+                onPressed: () => AppNavigation.closeDialog(result: true),
+                child: Text('仍然退出'.tr),
+              ),
+            ],
+          ),
+        ) ==
+        true;
   }
 
   Future<void> _revealForExitPrompt() async {

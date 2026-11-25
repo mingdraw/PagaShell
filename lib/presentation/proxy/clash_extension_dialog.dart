@@ -10,6 +10,7 @@ import '../components/app_icon.dart';
 import '../navigation/app_navigation.dart';
 import '../navigation/app_notice.dart';
 import '../theme/app_theme.dart';
+import 'proxy_export_code.dart';
 
 class ClashExtensionDialog extends StatefulWidget {
   const ClashExtensionDialog({required this.script, super.key});
@@ -35,7 +36,7 @@ class _ClashExtensionDialogState extends State<ClashExtensionDialog> {
   @override
   Widget build(BuildContext context) => AppDialog(
     title: Text('Clash 扩展脚本'.tr),
-    maxWidth: AppTheme.clashScriptDialogMaxWidth,
+    maxWidth: AppTheme.proxyExportDialogMaxWidth,
     scrollable: true,
     content: Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -51,25 +52,9 @@ class _ClashExtensionDialogState extends State<ClashExtensionDialog> {
               .tr,
         ),
         const SizedBox(height: 16),
-        Container(
-          decoration: BoxDecoration(
-            color: AppTheme.surface(context),
-            border: Border.all(color: AppTheme.border(context)),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.all(12),
-            child: shadcn.SelectableText(
-              widget.script.source,
-              key: const ValueKey('clash-extension-code'),
-              style: const TextStyle(
-                fontFamily: 'FiraCode Nerd Font Mono',
-                fontSize: 12,
-                height: 1.6,
-              ),
-            ),
-          ),
+        ProxyExportCode(
+          widget.script.source,
+          codeKey: const ValueKey('clash-extension-code'),
         ),
       ],
     ),
