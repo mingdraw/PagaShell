@@ -15,6 +15,7 @@ import zipfile
 
 REPO = Path(__file__).resolve().parents[1]
 WINDOWS = sys.platform == "win32"
+WATCHER_START_TIMEOUT = 60 if WINDOWS else 15
 
 
 class UpdaterHelperTests(unittest.TestCase):
@@ -30,7 +31,7 @@ class UpdaterHelperTests(unittest.TestCase):
         (self.target / "version").write_text("old", encoding="utf-8")
         (self.source / "version").write_text("new", encoding="utf-8")
         # A long-lived disposable process represents the running application.
-        self.parent = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(90)"])
+        self.parent = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
         self.children = []
         self.config = self.work / "install.json"
         self.archive = self.work / "package.zip"
@@ -85,22 +86,29 @@ class UpdaterHelperTests(unittest.TestCase):
         return result
 
     def start_watcher(self, platform="linux"):
+        started = time.monotonic()
         with (self.work / "watcher.log").open("wb") as log:
             child = subprocess.Popen(self.command("Watch", platform), stdout=log, stderr=subprocess.STDOUT)
         self.children.append(child)
-        self.wait_for(self.work / "ready")
+        # The first Windows PowerShell startup on a hosted runner can be slow.
+        self.wait_for(self.work / "ready", timeout=WATCHER_START_TIMEOUT, child=child)
+        elapsed = time.monotonic() - started
+        if WINDOWS and elapsed >= 15:
+            print(f"Update helper ready after {elapsed:.1f}s", flush=True)
         return child
 
     def watcher_log(self):
         return "\n".join(file.read_text(encoding="utf-8", errors="replace")
                          for file in [self.work / "watcher.log", self.work / "helper.log"] if file.exists())
 
-    def wait_for(self, file):
-        deadline = time.monotonic() + 15
+    def wait_for(self, file, *, timeout=15, child=None):
+        deadline = time.monotonic() + timeout
         while not file.exists():
-            if time.monotonic() > deadline:
-                log = self.work / "helper.log"
-                self.fail(f"Missing {file.name}: {log.read_text() if log.exists() else ''}")
+            exit_code = child.poll() if child is not None else None
+            if exit_code is not None:
+                self.fail(f"Watcher exited with {exit_code} while waiting for {file.name}\n{self.watcher_log()}")
+            if time.monotonic() >= deadline:
+                self.fail(f"Missing {file.name} after {timeout}s\n{self.watcher_log()}")
             time.sleep(0.05)
 
     @property
