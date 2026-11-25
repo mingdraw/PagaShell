@@ -28,6 +28,15 @@ Future<String?> proxyWait({required int proxyId}) =>
 Future<ProxyTraffic?> proxyTraffic({required int proxyId}) =>
     RustLib.instance.api.crateApiProxyProxyTraffic(proxyId: proxyId);
 
+/// Hot-reloads routing mode and rules for a running proxy without touching listeners.
+Future<void> proxyUpdateRules({
+  required int proxyId,
+  required String configJson,
+}) => RustLib.instance.api.crateApiProxyProxyUpdateRules(
+  proxyId: proxyId,
+  configJson: configJson,
+);
+
 /// Cancels negotiations, tunnels and HTTP drivers, then releases every listener.
 Future<void> proxyStop({required int proxyId}) =>
     RustLib.instance.api.crateApiProxyProxyStop(proxyId: proxyId);

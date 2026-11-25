@@ -132,9 +132,10 @@ abstract interface class PortForwardSession {
 }
 
 class PortForwardEvent {
-  const PortForwardEvent({required this.kind, this.localPort});
+  const PortForwardEvent({required this.kind, this.localPort, this.message});
   final String kind;
   final int? localPort;
+  final String? message;
 }
 
 /// SFTP 传输进度（domain 层数据结构）。

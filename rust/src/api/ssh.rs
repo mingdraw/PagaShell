@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
@@ -21,7 +21,7 @@ use russh_sftp::client::{Config as SftpConfig, RawSftpSession, SftpSession};
 use russh_sftp::protocol::{FileAttributes, OpenFlags, StatusCode};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, watch, Mutex, Notify, RwLock};
+use tokio::sync::{mpsc, watch, Mutex, Notify, RwLock, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
@@ -432,12 +432,36 @@ pub async fn ssh_handshake_via_page(
     handshake(host, port, None, Some(gateway)).await
 }
 
-/// Only authenticated registry entries can open a desktop tunnel.
-pub(crate) async fn desktop_tunnel(
-    gateway_id: u32,
-    host: String,
-    port: u16,
-) -> Result<russh::ChannelStream<client::Msg>> {
+#[flutter_rust_bridge::frb(ignore)]
+#[derive(Clone)]
+pub(crate) struct SshGatewayHandle {
+    handle: Arc<RwLock<Handle<PinningHandler>>>,
+}
+
+impl SshGatewayHandle {
+    pub(crate) fn is_closed(&self) -> bool {
+        self.handle
+            .try_read()
+            .map(|guard| guard.is_closed())
+            .unwrap_or(false)
+    }
+
+    pub(crate) async fn open_direct_tcpip(
+        &self,
+        host: String,
+        port: u16,
+    ) -> Result<russh::ChannelStream<client::Msg>> {
+        let guard = self.handle.read().await;
+        anyhow::ensure!(!guard.is_closed(), "网关连接不存在或已关闭");
+        let channel = guard
+            .channel_open_direct_tcpip(host, u32::from(port), "127.0.0.1", 0)
+            .await?;
+        Ok(channel.into_stream())
+    }
+}
+
+#[flutter_rust_bridge::frb(ignore)]
+pub(crate) async fn ssh_gateway_handle(gateway_id: u32) -> Result<SshGatewayHandle> {
     let handle = SESSIONS
         .lock()
         .await
@@ -445,16 +469,24 @@ pub(crate) async fn desktop_tunnel(
         .context("网关连接不存在或已关闭")?
         .handle
         .clone();
-    let channel = tokio::time::timeout(Duration::from_secs(15), async {
-        handle
-            .read()
-            .await
-            .channel_open_direct_tcpip(host, u32::from(port), "127.0.0.1", 0)
-            .await
-    })
+    let gateway = SshGatewayHandle { handle };
+    anyhow::ensure!(!gateway.is_closed(), "网关连接不存在或已关闭");
+    Ok(gateway)
+}
+
+/// Only authenticated registry entries can open a desktop tunnel.
+pub(crate) async fn desktop_tunnel(
+    gateway_id: u32,
+    host: String,
+    port: u16,
+) -> Result<russh::ChannelStream<client::Msg>> {
+    let gateway = ssh_gateway_handle(gateway_id).await?;
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        gateway.open_direct_tcpip(host, port),
+    )
     .await
-    .context("网关隧道连接超时")??;
-    Ok(channel.into_stream())
+    .context("网关隧道连接超时")?
 }
 
 async fn handshake(
@@ -1489,18 +1521,25 @@ pub async fn ssh_disconnect(session_id: u32) -> Result<()> {
     Ok(())
 }
 
-/// 本地监听固定绑定所有 IPv4 网卡（*）。
+const FORWARD_BUFFER: usize = 64 * 1024;
+const MAX_FORWARD_CONNECTIONS: usize = 256;
+const FORWARD_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// 本地监听支持仅本机（127.0.0.1）或所有 IPv4 网卡（0.0.0.0）。
 #[derive(Clone)]
 pub struct ForwardPortSpec {
     pub local_port: u16,
     pub target_host: String,
     pub target_port: u16,
+    pub bind_host: String,
 }
 
 pub struct PortForwardEvent {
-    /// ready: 所有端口已监听；connectionError: 单次目标连接失败；closed: 隧道结束。
+    /// ready: 所有端口已监听；connectionRecovered: 失败端口后续建连成功；
+    /// connectionError: 单次目标连接建立失败；closed: 隧道结束。
     pub kind: String,
     pub local_port: Option<u16>,
+    pub message: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1510,6 +1549,10 @@ enum ForwardTransport {
 }
 
 impl ForwardTransport {
+    fn monitors_connection(&self) -> bool {
+        matches!(self, Self::Ssh(_))
+    }
+
     fn is_closed(&self) -> bool {
         if let Self::Ssh(handle) = self {
             if let Ok(guard) = handle.try_read() {
@@ -1518,6 +1561,11 @@ impl ForwardTransport {
         }
         false
     }
+}
+
+enum ForwardStream {
+    Ssh(russh::ChannelStream<client::Msg>),
+    Page(crate::page::PageStream),
 }
 
 struct PageForwardEntry {
@@ -1634,7 +1682,12 @@ async fn bind_forward_ports(
         if !seen.insert(port.local_port) {
             return Err(anyhow!("本地端口不能重复"));
         }
-        let listener = TcpListener::bind(("0.0.0.0", port.local_port))
+        let bind_host = match port.bind_host.trim() {
+            "" | "127.0.0.1" => "127.0.0.1",
+            "0.0.0.0" => "0.0.0.0",
+            _ => return Err(anyhow!("请填写有效的本地监听地址")),
+        };
+        let listener = TcpListener::bind((bind_host, port.local_port))
             .await
             .map_err(|_| anyhow!("无法监听本地端口 {}，请检查端口占用或权限", port.local_port))?;
         bound.push((listener, port));
@@ -1650,27 +1703,41 @@ fn spawn_port_forwards(
     let (cancel, mut cancelled) = watch::channel(false);
     let stop = cancel.clone();
     let emit = Arc::new(emit);
+    let slots = Arc::new(Semaphore::new(MAX_FORWARD_CONNECTIONS));
     let task = tokio::spawn(async move {
         let mut listeners = JoinSet::new();
         for (listener, port) in bound {
             let transport = transport.clone();
             let emit = emit.clone();
             let cancelled = cancelled.clone();
-            listeners.spawn(forward_listener(listener, port, transport, cancelled, emit));
+            let slots = slots.clone();
+            listeners.spawn(forward_listener(
+                listener, port, transport, cancelled, slots, emit,
+            ));
         }
         if emit(PortForwardEvent {
             kind: "ready".into(),
             local_port: None,
+            message: None,
         }) {
-            let mut tick = tokio::time::interval(Duration::from_millis(250));
-            loop {
-                tokio::select! {
-                    _ = cancelled.changed() => break,
-                    _ = listeners.join_next() => break,
-                    _ = tick.tick() => {
-                        if transport.is_closed() { break; }
+            let monitor = async {
+                if transport.monitors_connection() {
+                    let mut tick = tokio::time::interval(Duration::from_millis(250));
+                    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    loop {
+                        tick.tick().await;
+                        if transport.is_closed() {
+                            break;
+                        }
                     }
+                } else {
+                    std::future::pending::<()>().await;
                 }
+            };
+            tokio::select! {
+                _ = cancelled.changed() => {},
+                _ = listeners.join_next() => {},
+                _ = monitor => {},
             }
         }
         let _ = stop.send(true);
@@ -1678,6 +1745,7 @@ fn spawn_port_forwards(
         emit(PortForwardEvent {
             kind: "closed".into(),
             local_port: None,
+            message: None,
         });
     });
     (cancel, task)
@@ -1688,49 +1756,130 @@ async fn forward_listener(
     port: ForwardPortSpec,
     transport: ForwardTransport,
     mut cancelled: watch::Receiver<bool>,
+    slots: Arc<Semaphore>,
     emit: Arc<impl Fn(PortForwardEvent) -> bool + Send + Sync + 'static>,
 ) {
     let mut connections = JoinSet::new();
+    let has_error = Arc::new(AtomicBool::new(false));
     while !*cancelled.borrow() {
         tokio::select! {
             _ = cancelled.changed() => break,
             _ = connections.join_next(), if !connections.is_empty() => {},
             accepted = listener.accept() => {
-                let Ok((mut socket, peer)) = accepted else { break; };
+                let (mut socket, peer) = match accepted {
+                    Ok(accepted) => accepted,
+                    Err(error) if crate::proxy::is_transient_accept_error(&error) => {
+                        tokio::select! {
+                            biased;
+                            _ = cancelled.changed() => break,
+                            _ = tokio::time::sleep(crate::proxy::ACCEPT_RETRY_DELAY) => continue,
+                        }
+                    }
+                    Err(_) => break,
+                };
+                let Ok(permit) = slots.clone().try_acquire_owned() else {
+                    has_error.store(true, Ordering::Release);
+                    emit(PortForwardEvent {
+                        kind: "connectionError".into(),
+                        local_port: Some(port.local_port),
+                        message: Some("端口转发并发连接数已达上限".into()),
+                    });
+                    continue;
+                };
+                let _ = socket.set_nodelay(true);
                 let transport = transport.clone();
                 let port = port.clone();
                 let emit = emit.clone();
                 let mut cancelled = cancelled.clone();
+                let has_error = has_error.clone();
                 connections.spawn(async move {
-                    let connection = async {
+                    let _permit = permit;
+                    let connect = async {
                         match transport {
                             ForwardTransport::Ssh(handle) => {
-                                let channel = tokio::time::timeout(Duration::from_secs(10), async {
-                                    handle.read().await.channel_open_direct_tcpip(
-                                        port.target_host, u32::from(port.target_port),
-                                        peer.ip().to_string(), u32::from(peer.port()),
-                                    ).await
-                                }).await.map_err(|_| anyhow!("目标端口连接超时"))??;
-                                let mut stream = channel.into_stream();
-                                tokio::io::copy_bidirectional(&mut socket, &mut stream).await?;
+                                let channel = tokio::time::timeout(FORWARD_OPEN_TIMEOUT, async {
+                                    let guard = handle.read().await;
+                                    if guard.is_closed() {
+                                        return Err(anyhow!("网关连接不存在或已关闭"));
+                                    }
+                                    guard
+                                        .channel_open_direct_tcpip(
+                                            port.target_host,
+                                            u32::from(port.target_port),
+                                            peer.ip().to_string(),
+                                            u32::from(peer.port()),
+                                        )
+                                        .await
+                                        .map_err(|_| anyhow!("无法通过网关建立隧道，请检查网关转发权限和目标地址"))
+                                })
+                                .await
+                                .map_err(|_| anyhow!("目标端口连接超时"))??;
+                                Ok::<_, anyhow::Error>(ForwardStream::Ssh(channel.into_stream()))
                             }
                             ForwardTransport::Page(connector) => {
-                                let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-                                let mut stream = connector.connect(&port.target_host, port.target_port, deadline).await?;
-                                tokio::io::copy_bidirectional(&mut socket, &mut stream).await?;
+                                let deadline = tokio::time::Instant::now() + FORWARD_OPEN_TIMEOUT;
+                                let stream = connector
+                                    .connect(&port.target_host, port.target_port, deadline)
+                                    .await?;
+                                Ok(ForwardStream::Page(stream))
                             }
                         }
-                        Ok::<(), anyhow::Error>(())
+                    };
+                    let mut stream = tokio::select! {
+                        biased;
+                        _ = cancelled.changed() => return,
+                        result = connect => match result {
+                            Ok(stream) => {
+                                if has_error.swap(false, Ordering::AcqRel) {
+                                    emit(PortForwardEvent {
+                                        kind: "connectionRecovered".into(),
+                                        local_port: Some(port.local_port),
+                                        message: None,
+                                    });
+                                }
+                                stream
+                            }
+                            Err(error) => {
+                                if !*cancelled.borrow() {
+                                    has_error.store(true, Ordering::Release);
+                                    let detail = error.to_string();
+                                    let first_line = detail.lines().next().unwrap_or(&detail).to_owned();
+                                    emit(PortForwardEvent {
+                                        kind: "connectionError".into(),
+                                        local_port: Some(port.local_port),
+                                        message: Some(first_line),
+                                    });
+                                }
+                                return;
+                            }
+                        },
+                    };
+                    let relay = async {
+                        match &mut stream {
+                            ForwardStream::Ssh(remote) => {
+                                let _ = tokio::io::copy_bidirectional_with_sizes(
+                                    &mut socket,
+                                    remote,
+                                    FORWARD_BUFFER,
+                                    FORWARD_BUFFER,
+                                )
+                                .await;
+                            }
+                            ForwardStream::Page(remote) => {
+                                let _ = tokio::io::copy_bidirectional_with_sizes(
+                                    &mut socket,
+                                    remote,
+                                    FORWARD_BUFFER,
+                                    FORWARD_BUFFER,
+                                )
+                                .await;
+                            }
+                        }
                     };
                     tokio::select! {
+                        biased;
                         _ = cancelled.changed() => {},
-                        result = connection => {
-                            if result.is_err() {
-                                emit(PortForwardEvent {
-                                    kind: "connectionError".into(), local_port: Some(port.local_port),
-                                });
-                            }
-                        }
+                        _ = relay => {},
                     }
                 });
             }
@@ -2893,6 +3042,79 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
     }
 
     #[tokio::test]
+    async fn dynamic_proxy_stops_and_releases_listener_when_ssh_gateway_disconnects() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpStream;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let target_port = listener.local_addr().unwrap().port();
+        let echo = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let (mut reader, mut writer) = socket.split();
+            let _ = tokio::io::copy(&mut reader, &mut writer).await;
+        });
+        let (gateway_port, _requests, shutdown) = forwarding_service(true).await;
+        let key = ssh_handshake("127.0.0.1".into(), gateway_port)
+            .await
+            .unwrap();
+        let gateway_id = ssh_authenticate(
+            key.session_id,
+            key.fingerprint,
+            "gateway-user".into(),
+            "test-only".into(),
+        )
+        .await
+        .unwrap();
+        let proxy_port = free_forward_port().await;
+        let proxy_id = crate::api::proxy::proxy_start(
+            serde_json::json!({
+                "mode": "global",
+                "httpPort": proxy_port,
+                "httpsPort": proxy_port,
+            })
+            .to_string(),
+            Some(gateway_id),
+            None,
+        )
+        .await
+        .unwrap();
+        let waiting = tokio::spawn(crate::api::proxy::proxy_wait(proxy_id));
+        let mut client = TcpStream::connect(("127.0.0.1", proxy_port)).await.unwrap();
+        client
+            .write_all(
+                format!(
+                    "CONNECT db.internal.test:{target_port} HTTP/1.1\r\nHost: db.internal.test\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        while !response.ends_with(b"\r\n\r\n") {
+            response.push(client.read_u8().await.unwrap());
+        }
+        assert!(response.starts_with(b"HTTP/1.1 200"));
+
+        let _ = shutdown.send(());
+        let reason = tokio::time::timeout(Duration::from_secs(3), waiting)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(reason.as_deref(), Some("SSH 网关连接已断开"));
+        let mut byte = [0];
+        let ended = tokio::time::timeout(Duration::from_secs(2), client.read(&mut byte))
+            .await
+            .unwrap();
+        assert!(ended.is_err() || ended.unwrap() == 0);
+        assert!(TcpListener::bind(("127.0.0.1", proxy_port)).await.is_ok());
+
+        crate::api::proxy::proxy_stop(proxy_id).await.unwrap();
+        ssh_disconnect(gateway_id).await.unwrap();
+        echo.abort();
+    }
+
+    #[tokio::test]
     async fn multiple_local_ports_forward_through_gateway_and_stop_releases_everything() {
         let echo = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let target_port = echo.local_addr().unwrap().port();
@@ -2942,6 +3164,7 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
                     local_port: *port,
                     target_host: "database.internal.test".into(),
                     target_port,
+                    bind_host: "0.0.0.0".into(),
                 })
                 .collect(),
             move |event| events.send(event).is_ok(),
@@ -3008,6 +3231,7 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
             local_port,
             target_host: "127.0.0.1".into(),
             target_port: 3306,
+            bind_host: "127.0.0.1".into(),
         };
         assert!(
             start_port_forwards(pending.session_id, vec![mapping.clone()], |_| true)
@@ -3022,7 +3246,7 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
         )
         .await
         .unwrap();
-        let occupied = TcpListener::bind(("0.0.0.0", 0)).await.unwrap();
+        let occupied = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let blocked = occupied.local_addr().unwrap().port();
         let result = start_port_forwards(
             session_id,
@@ -3040,6 +3264,30 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
             .unwrap_err()
             .to_string()
             .contains(&blocked.to_string()));
+        assert!(TcpListener::bind(("127.0.0.1", local_port)).await.is_ok());
+
+        let occupied_any = TcpListener::bind(("0.0.0.0", 0)).await.unwrap();
+        let blocked_any = occupied_any.local_addr().unwrap().port();
+        let any_result = start_port_forwards(
+            session_id,
+            vec![
+                ForwardPortSpec {
+                    bind_host: "0.0.0.0".into(),
+                    ..mapping.clone()
+                },
+                ForwardPortSpec {
+                    local_port: blocked_any,
+                    bind_host: "0.0.0.0".into(),
+                    ..mapping.clone()
+                },
+            ],
+            |_| true,
+        )
+        .await;
+        assert!(any_result
+            .unwrap_err()
+            .to_string()
+            .contains(&blocked_any.to_string()));
         assert!(TcpListener::bind(("0.0.0.0", local_port)).await.is_ok());
         assert!(SESSIONS
             .lock()
@@ -3053,6 +3301,20 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
                 .await
                 .is_err()
         );
+        assert!(start_port_forwards(
+            session_id,
+            vec![ForwardPortSpec {
+                local_port,
+                target_host: "127.0.0.1".into(),
+                target_port: 3306,
+                bind_host: "192.0.2.1".into(),
+            }],
+            |_| true,
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("请填写有效的本地监听地址"));
         ssh_disconnect(session_id).await.unwrap();
     }
 
@@ -3076,6 +3338,7 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
                 local_port,
                 target_host: "db.internal".into(),
                 target_port: 3306,
+                bind_host: "127.0.0.1".into(),
             }],
             move |event| events.send(event).is_ok(),
         )
@@ -3092,6 +3355,10 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
             .unwrap();
         assert_eq!(event.kind, "connectionError");
         assert_eq!(event.local_port, Some(local_port));
+        assert_eq!(
+            event.message.as_deref(),
+            Some("无法通过网关建立隧道，请检查网关转发权限和目标地址")
+        );
         shutdown.send(()).unwrap();
         let closed = tokio::time::timeout(Duration::from_secs(3), received.recv())
             .await
@@ -3100,6 +3367,110 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
         assert_eq!(closed.kind, "closed");
         assert!(TcpListener::bind(("127.0.0.1", local_port)).await.is_ok());
         ssh_disconnect(id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn page_forward_reports_specific_error_recovers_and_ignores_client_reset() {
+        let relay = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let relay_port = relay.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            // 1. 首次连接返回明确 ACL 拒绝错误。
+            let (mut first, _) = relay.accept().await.unwrap();
+            let size = first.read_u32().await.unwrap() as usize;
+            let mut buf = vec![0; size];
+            first.read_exact(&mut buf).await.unwrap();
+            let denied = br#"{"version":1,"kind":"error","error":"targetDenied"}"#;
+            first
+                .write_all(&(denied.len() as u32).to_be_bytes())
+                .await
+                .unwrap();
+            first.write_all(denied).await.unwrap();
+            drop(first);
+
+            // 2. 第二次连接建连成功后对端突然断开（模拟转发期客户端 reset）。
+            let (mut second, _) = relay.accept().await.unwrap();
+            let size = second.read_u32().await.unwrap() as usize;
+            let mut buf = vec![0; size];
+            second.read_exact(&mut buf).await.unwrap();
+            let ready = br#"{"version":1,"kind":"ready"}"#;
+            second
+                .write_all(&(ready.len() as u32).to_be_bytes())
+                .await
+                .unwrap();
+            second.write_all(ready).await.unwrap();
+            let mut ping = [0; 4];
+            second.read_exact(&mut ping).await.unwrap();
+            second.write_all(&ping).await.unwrap();
+            let _ = second.read(&mut [0; 16]).await;
+        });
+
+        let gateway = crate::api::page::PageGateway {
+            server_host: "127.0.0.1".into(),
+            server_port: relay_port,
+            client_id: "test".into(),
+            token: "access".into(),
+            server_fingerprint: String::new(),
+        };
+        let id = page_forward_create(gateway).await.unwrap();
+        let local_port = free_forward_port().await;
+        let (events, mut received) = mpsc::unbounded_channel();
+        start_page_port_forwards(
+            id,
+            vec![ForwardPortSpec {
+                local_port,
+                target_host: "10.0.0.8".into(),
+                target_port: 5432,
+                bind_host: "127.0.0.1".into(),
+            }],
+            move |event| events.send(event).is_ok(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(received.recv().await.unwrap().kind, "ready");
+
+        let mut first = tokio::net::TcpStream::connect(("127.0.0.1", local_port))
+            .await
+            .unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(3), received.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(error.kind, "connectionError");
+        assert_eq!(error.local_port, Some(local_port));
+        assert_eq!(
+            error.message.as_deref(),
+            Some("Page Client 未允许此目标地址和端口")
+        );
+        let mut byte = [0];
+        assert_eq!(first.read(&mut byte).await.unwrap(), 0);
+
+        let mut second = tokio::net::TcpStream::connect(("127.0.0.1", local_port))
+            .await
+            .unwrap();
+        second.write_all(b"ping").await.unwrap();
+        let mut echoed = [0; 4];
+        second.read_exact(&mut echoed).await.unwrap();
+        assert_eq!(&echoed, b"ping");
+        let recovered = tokio::time::timeout(Duration::from_secs(3), received.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.kind, "connectionRecovered");
+        assert_eq!(recovered.local_port, Some(local_port));
+        assert_eq!(recovered.message, None);
+
+        // 模拟本地客户端异常 RST 断开，不能触发 connectionError。
+        let _ = second.set_zero_linger();
+        drop(second);
+        server.await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), received.recv())
+                .await
+                .is_err()
+        );
+
+        page_forward_disconnect(id).await.unwrap();
+        assert_eq!(received.recv().await.unwrap().kind, "closed");
     }
 
     #[tokio::test]
@@ -3121,6 +3492,7 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
             local_port,
             target_host: "10.20.30.40".into(),
             target_port: 3306,
+            bind_host: "0.0.0.0".into(),
         };
         let occupied = TcpListener::bind(("0.0.0.0", 0)).await.unwrap();
         let blocked = occupied.local_addr().unwrap().port();
@@ -3207,12 +3579,14 @@ Private-MAC: 52fd00d4ef47ebc506e4e709486c0c6bc0606e24fe2c6cb1b3d168f4da238a66\n"
                         local_port: ports[0],
                         target_host: "127.0.0.1".into(),
                         target_port,
+                        bind_host: "127.0.0.1".into(),
                     },
                     // 实际目标可从本机直连，Page ACL 拒绝时必须报错，不能回退直连。
                     ForwardPortSpec {
                         local_port: ports[1],
                         target_host: "localhost".into(),
                         target_port,
+                        bind_host: "0.0.0.0".into(),
                     },
                 ],
                 move |event| events.send(event).is_ok(),

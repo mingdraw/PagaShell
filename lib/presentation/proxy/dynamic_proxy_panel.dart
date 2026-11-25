@@ -14,6 +14,7 @@ import '../../application/session/session_controller.dart';
 import '../../domain/entities/host.dart';
 import '../../domain/entities/proxy_config.dart';
 import '../../domain/proxy/dynamic_proxy_engine.dart';
+import '../../domain/ssh/ssh_engine.dart';
 import '../components/app_copy_button.dart';
 import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
@@ -109,7 +110,13 @@ class _DynamicProxyPanelState extends State<DynamicProxyPanel> {
   @override
   void dispose() {
     _timer?.cancel();
-    if (_dirty && !widget.session.phase.isAlive) {
+    final controller = Get.isRegistered<SessionController>()
+        ? Get.find<SessionController>()
+        : null;
+    final canSaveOnDispose =
+        !widget.session.phase.isAlive ||
+        (controller?.canHotReloadProxy(widget.session.id) ?? false);
+    if (_dirty && canSaveOnDispose) {
       try {
         unawaited(_persist(_read()));
       } on StateError {
@@ -197,7 +204,11 @@ class _DynamicProxyPanelState extends State<DynamicProxyPanel> {
 
   Future<Host?> _save({bool forStart = false}) async {
     _timer?.cancel();
-    if (!mounted || !(_form.currentState?.validate() ?? false)) return null;
+    if (!mounted ||
+        widget.session.phase == SessionPhase.stopping ||
+        !(_form.currentState?.validate() ?? false)) {
+      return null;
+    }
     try {
       final config = _read();
       config.validate(forStart: forStart);
@@ -233,7 +244,11 @@ class _DynamicProxyPanelState extends State<DynamicProxyPanel> {
       } on Object catch (e) {
         if (mounted && _revision == revision) {
           setState(
-            () => _error = e is StateError ? e.message.toString() : '保存失败，请重试',
+            () => _error = switch (e) {
+              StateError() => e.message.toString(),
+              SshEngineException(:final message) => message,
+              _ => '保存失败，请重试',
+            },
           );
         }
         return null;
@@ -262,6 +277,14 @@ class _DynamicProxyPanelState extends State<DynamicProxyPanel> {
       );
     } finally {
       if (mounted) setState(() => _starting = false);
+    }
+  }
+
+  Future<void> _clearHostKeyAndRetry() async {
+    if (_starting || widget.session.phase.isBusy) return;
+    final controller = Get.find<SessionController>();
+    if (await controller.clearGatewayHostKey(widget.session.id) && mounted) {
+      await _start();
     }
   }
 
@@ -567,9 +590,11 @@ class _DynamicProxyPanelState extends State<DynamicProxyPanel> {
   @override
   Widget build(BuildContext context) {
     final session = widget.session;
-    final editable = !session.phase.isAlive && !_starting;
-    final busy = session.phase.isBusy || _starting;
     final controller = Get.find<SessionController>();
+    final listenerEditable = !session.phase.isAlive && !_starting;
+    final canHotReload = controller.canHotReloadProxy(session.id);
+    final routingEditable = (listenerEditable || canHotReload) && !_starting;
+    final busy = session.phase.isBusy || _starting;
     final colors = shadcn.Theme.of(context).colorScheme;
     final (status, statusColor) = controller.proxyNeedsCleanup(session.id)
         ? ('系统代理待恢复', StatusColors.failed)
@@ -642,7 +667,10 @@ class _DynamicProxyPanelState extends State<DynamicProxyPanel> {
           if (session.phase == SessionPhase.ready) ...[
             const SizedBox(height: 4),
             Text(
-              '运行中配置已锁定，停止代理后可修改'.tr,
+              (canHotReload
+                      ? '运行中协议端口与系统代理已锁定，代理模式与规则支持热更新'
+                      : '运行中配置已锁定，停止代理后可修改')
+                  .tr,
               key: const ValueKey('proxy-locked-hint'),
               style: TextStyle(fontSize: 12, color: colors.mutedForeground),
             ),
@@ -683,7 +711,7 @@ class _DynamicProxyPanelState extends State<DynamicProxyPanel> {
                       ),
                     ),
                     const SizedBox(height: 8),
-                    _modes(editable),
+                    _modes(routingEditable),
                     const SizedBox(height: 16),
                     Text(
                       '协议端口'.tr,
@@ -693,7 +721,7 @@ class _DynamicProxyPanelState extends State<DynamicProxyPanel> {
                       ),
                     ),
                     const SizedBox(height: 8),
-                    _protocols(editable),
+                    _protocols(listenerEditable),
                     if (_mode == ProxyMode.rule) ...[
                       const SizedBox(height: 24),
                       Wrap(
@@ -726,11 +754,11 @@ class _DynamicProxyPanelState extends State<DynamicProxyPanel> {
                             ),
                           ),
                         ),
-                      for (final row in _rules) _rule(row, editable),
+                      for (final row in _rules) _rule(row, routingEditable),
                       Align(
                         alignment: Alignment.centerLeft,
                         child: shadcn.OutlineButton(
-                          onPressed: editable
+                          onPressed: routingEditable
                               ? () {
                                   setState(
                                     () => _rules.add(
@@ -762,7 +790,7 @@ class _DynamicProxyPanelState extends State<DynamicProxyPanel> {
                 state: _autoSystemProxy
                     ? shadcn.CheckboxState.checked
                     : shadcn.CheckboxState.unchecked,
-                onChanged: editable
+                onChanged: listenerEditable
                     ? (state) {
                         setState(
                           () => _autoSystemProxy =
@@ -809,6 +837,15 @@ class _DynamicProxyPanelState extends State<DynamicProxyPanel> {
                 crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
                   action,
+                  if (!needsCleanup &&
+                      session.phase == SessionPhase.failed &&
+                      session.hostKeyFailure?.hasChanged == true)
+                    shadcn.OutlineButton(
+                      key: const ValueKey('clear-host-key-and-retry'),
+                      onPressed: busy ? null : _clearHostKeyAndRetry,
+                      leading: const AppIcon(AppIcons.trash2, size: 16),
+                      child: Text('清除指纹并重试'.tr),
+                    ),
                   if (envCommand != null)
                     shadcn.OutlineButton(
                       key: const ValueKey('proxy-copy-env'),

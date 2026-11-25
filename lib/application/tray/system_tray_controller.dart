@@ -393,9 +393,13 @@ class SystemTrayController extends GetxController {
   };
 
   String? _summarizeForwardPorts(List<ForwardPort> ports) {
-    if (ports.isEmpty) return null;
-    final shown = ports.take(3).map((p) => ':${p.localPort}').join(', ');
-    final extra = ports.length - 3;
+    final active = [
+      for (final port in ports)
+        if (port.enabled) port,
+    ];
+    if (active.isEmpty) return null;
+    final shown = active.take(3).map((p) => ':${p.localPort}').join(', ');
+    final extra = active.length - 3;
     return extra > 0 ? '$shown +$extra' : shown;
   }
 

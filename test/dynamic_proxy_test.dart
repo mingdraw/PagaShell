@@ -17,6 +17,7 @@ import 'package:pagashell/domain/entities/host.dart';
 import 'package:pagashell/domain/entities/proxy_config.dart';
 import 'package:pagashell/domain/proxy/dynamic_proxy_engine.dart';
 import 'package:pagashell/domain/proxy/system_proxy.dart';
+import 'package:pagashell/domain/repositories/known_host_repository.dart';
 import 'package:pagashell/domain/ssh/host_key.dart';
 import 'package:pagashell/domain/ssh/ssh_engine.dart';
 import 'package:pagashell/infrastructure/proxy/desktop_system_proxy.dart';
@@ -40,14 +41,22 @@ class _Secrets extends InMemorySecretStore {
   }
 }
 
-class _Proxy implements DynamicProxySession {
+class _Proxy implements DynamicProxySession, DynamicProxyHotReload {
   final ended = Completer<void>();
   Completer<void>? closeGate;
   bool closed = false;
   bool reportDoneOnClose = true;
   Future<void>? _closing;
+  final reloadedConfigs = <ProxyConfig>[];
+  Object? reloadError;
   @override
   Future<void> get done => ended.future;
+  @override
+  Future<void> updateRouting(ProxyConfig config) async {
+    if (reloadError != null) throw reloadError!;
+    reloadedConfigs.add(config);
+  }
+
   @override
   Future<void> close() => _closing ??= () async {
     await closeGate?.future;
@@ -75,6 +84,7 @@ class _Engine implements SshEngine, DynamicProxyEngine {
   final configs = <ProxyConfig>[];
   Completer<void>? startGate;
   _Proxy Function() createProxy = _Proxy.new;
+  SshHostKey? hostKey;
   bool cancelled = false;
   Object? failure;
 
@@ -88,6 +98,12 @@ class _Engine implements SshEngine, DynamicProxyEngine {
     configs.add(config);
     gateways.add(gateway);
     unawaited(cancelled?.then((_) => this.cancelled = true));
+    if (hostKey case final key?) {
+      final accepted = await verifyHostKey!(key);
+      if (!accepted) {
+        throw const SshEngineException('主机密钥未获信任，已取消连接');
+      }
+    }
     final proxy = createProxy();
     proxies.add(proxy);
     await startGate?.future;
@@ -167,6 +183,7 @@ void main() {
     WidgetTester tester, {
     Host host = _gateway,
     SystemProxy? systemProxy,
+    KnownHostRepository? knownHosts,
   }) async {
     tester.view.physicalSize = const Size(1360, 1000);
     tester.view.devicePixelRatio = 1;
@@ -182,6 +199,7 @@ void main() {
             sshEngine: engine,
             secretStore: secrets,
             systemProxy: systemProxy,
+            knownHosts: knownHosts,
           ),
           platform: TargetPlatform.macOS,
         ),
@@ -280,7 +298,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('规则模式使用网关凭据，运行时禁止切换模式，停止后可重新启动', (tester) async {
+  testWidgets('规则模式使用网关凭据，运行时可热更新模式与规则且锁定端口与系统代理，停止后可重启', (tester) async {
     final host = _gateway.copyWith(
       proxyConfig: const ProxyConfig(mode: ProxyMode.rule),
     );
@@ -298,17 +316,7 @@ void main() {
             find.byType(shadcn.RadioGroup<ProxyMode>),
           )
           .enabled,
-      isFalse,
-    );
-    await tester.tap(find.byKey(const ValueKey('proxy-mode-global')));
-    await tester.pumpAndSettle();
-    expect(
-      tester
-          .widget<shadcn.RadioGroup<ProxyMode>>(
-            find.byType(shadcn.RadioGroup<ProxyMode>),
-          )
-          .value,
-      ProxyMode.rule,
+      isTrue,
     );
     expect(
       tester
@@ -318,6 +326,68 @@ void main() {
           .enabled,
       isFalse,
     );
+    expect(
+      tester
+          .widget<shadcn.Checkbox>(
+            find.byKey(const ValueKey('proxy-auto-system')),
+          )
+          .onChanged,
+      isNull,
+    );
+
+    // 运行中不能修改协议端口或系统代理开关。
+    final gateways = Get.find<GatewayController>();
+    await expectLater(
+      gateways.saveProxyConfig(
+        host.id,
+        const ProxyConfig(mode: ProxyMode.rule, httpPort: 28080),
+      ),
+      throwsStateError,
+    );
+
+    // 运行中新增规则热更新，不重建代理实例也不重新读取凭据。
+    await tester.ensureVisible(find.text('添加规则'));
+    await tester.tap(find.text('添加规则'));
+    await tester.pumpAndSettle();
+    final ruleValue = find.byKey(const ValueKey('proxy-rule-value'));
+    await tester.ensureVisible(ruleValue);
+    await tester.enterText(ruleValue, 'corp.internal');
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pumpAndSettle();
+    expect(engine.proxies, hasLength(1));
+    expect(engine.proxies.single.closed, isFalse);
+    expect(engine.proxies.single.reloadedConfigs, hasLength(1));
+    expect(
+      engine.proxies.single.reloadedConfigs.last.rules.single.value,
+      'corp.internal',
+    );
+    expect(
+      (await gateways.findSaved(host.id))!.proxyConfig.rules.single.value,
+      'corp.internal',
+    );
+
+    // 运行中切换至全局模式同样热更新。
+    final globalCard = find.byKey(const ValueKey('proxy-mode-global'));
+    await tester.ensureVisible(globalCard);
+    await tester.tap(globalCard);
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<shadcn.RadioGroup<ProxyMode>>(
+            find.byType(shadcn.RadioGroup<ProxyMode>),
+          )
+          .value,
+      ProxyMode.global,
+    );
+    expect(engine.proxies, hasLength(1));
+    expect(engine.proxies.single.reloadedConfigs.last.mode, ProxyMode.global);
+    expect(
+      (await gateways.findSaved(host.id))!.proxyConfig.mode,
+      ProxyMode.global,
+    );
+    expect(secrets.reads, 1);
+
     await tester.tap(find.text('停止代理'));
     await tester.pumpAndSettle();
     expect(engine.proxies.single.closed, isTrue);
@@ -325,10 +395,54 @@ void main() {
     await tester.tap(find.text('启动代理'));
     await tester.pumpAndSettle();
     expect(engine.proxies, hasLength(2));
+    expect(engine.configs.last.mode, ProxyMode.global);
     expect(secrets.reads, 2);
     await sessions.closeAll();
     await tester.pumpAndSettle();
     expect(engine.proxies.every((p) => p.closed), isTrue);
+  });
+
+  testWidgets('开启自动系统代理时热更新模式与规则不重复设置系统代理，热更新失败显示错误', (tester) async {
+    final backend = _SystemBackend();
+    final host = _gateway.copyWith(
+      proxyConfig: const ProxyConfig(
+        mode: ProxyMode.rule,
+        autoSystemProxy: true,
+      ),
+    );
+    final (engine, _, sessions) = await pump(
+      tester,
+      host: host,
+      systemProxy: DesktopSystemProxy(backend: backend),
+    );
+    sessions.openProxy(host);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('启动代理'));
+    await tester.pumpAndSettle();
+    expect(backend.events, ['enable']);
+
+    await tester.tap(find.byKey(const ValueKey('proxy-mode-global')));
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pumpAndSettle();
+    expect(backend.events, ['enable']);
+    expect(engine.proxies.single.reloadedConfigs.single.mode, ProxyMode.global);
+
+    // 引擎拒绝热更新时，保留已保存配置并显示错误。
+    engine.proxies.single.reloadError = const SshEngineException('动态代理未运行');
+    await tester.tap(find.byKey(const ValueKey('proxy-mode-rule')));
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pumpAndSettle();
+    expect(find.text('动态代理未运行'), findsOneWidget);
+    expect(
+      (await Get.find<GatewayController>().findSaved(host.id))!
+          .proxyConfig
+          .mode,
+      ProxyMode.global,
+    );
+
+    await sessions.closeAll();
+    await tester.pumpAndSettle();
+    expect(backend.events, ['enable', 'restore']);
   });
 
   testWidgets('Page 使用已保存的最新端点、协议端口和令牌；删除网关清理代理', (tester) async {
@@ -1282,4 +1396,99 @@ void main() {
     await sessions.closeAll();
     sessions.onClose();
   });
+
+  testWidgets('SSH 网关指纹变更后可清除旧指纹并重新确认启动代理', (tester) async {
+    const oldKey = SshHostKey(
+      hostname: 'jump.test',
+      port: 22,
+      keyType: 'ssh-ed25519',
+      fingerprint: 'SHA256:old-proxy-gateway',
+    );
+    const newKey = SshHostKey(
+      hostname: 'jump.test',
+      port: 22,
+      keyType: 'ssh-ed25519',
+      fingerprint: 'SHA256:new-proxy-gateway',
+    );
+    final known = _ProxyKnownHosts(oldKey);
+    final (engine, _, sessions) = await pump(tester, knownHosts: known);
+    engine.hostKey = newKey;
+    sessions.openProxy(_gateway);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('启动代理'));
+    await tester.pumpAndSettle();
+    expect(sessions.sessions.single.phase, SessionPhase.hostKeyPending);
+    expect(find.text('主机指纹已变更，连接已阻止'), findsOneWidget);
+
+    await tester.tap(find.text('拒绝连接'));
+    await tester.pumpAndSettle();
+    expect(sessions.sessions.single.phase, SessionPhase.failed);
+    final clear = find.byKey(const ValueKey('clear-host-key-and-retry'));
+    expect(clear, findsOneWidget);
+    expect(engine.proxies, isEmpty);
+
+    // 清除失败时保留错误和旧记录，不启动代理。
+    known.failToRemove = true;
+    await tester.tap(clear);
+    await tester.pumpAndSettle();
+    expect(sessions.sessions.single.phase, SessionPhase.failed);
+    expect(find.text('无法清除主机指纹，请重试'), findsOneWidget);
+    expect(known.stored, same(oldKey));
+    expect(engine.proxies, isEmpty);
+
+    // 恢复后清除旧指纹并重新核验。
+    known.failToRemove = false;
+    await tester.tap(clear);
+    await tester.pumpAndSettle();
+    expect(known.stored, isNull);
+    expect(sessions.sessions.single.phase, SessionPhase.hostKeyPending);
+    expect(find.text('首次连接：确认主机指纹'), findsOneWidget);
+
+    await tester.tap(find.text('信任并连接'));
+    await tester.pumpAndSettle();
+    expect(sessions.sessions.single.phase, SessionPhase.ready);
+    expect(known.stored, same(newKey));
+    expect(engine.proxies, hasLength(1));
+    await sessions.closeAll();
+    await tester.pumpAndSettle();
+  });
+}
+
+class _ProxyKnownHosts implements KnownHostRepository {
+  _ProxyKnownHosts(this.stored);
+  SshHostKey? stored;
+  bool failToRemove = false;
+
+  @override
+  Future<SshHostKey?> find(
+    String hostname,
+    int port, {
+    ServerIdentityProtocol protocol = ServerIdentityProtocol.ssh,
+  }) async {
+    final current = stored;
+    if (current != null &&
+        current.hostname == hostname &&
+        current.port == port &&
+        current.protocol == protocol) {
+      return current;
+    }
+    return null;
+  }
+
+  @override
+  Future<bool> trustIfAbsent(SshHostKey key) async {
+    if (stored != null) return false;
+    stored = key;
+    return true;
+  }
+
+  @override
+  Future<bool> removeIfMatches(SshHostKey key) async {
+    if (failToRemove) throw StateError('db error');
+    final current = stored;
+    if (current == null || !current.matches(key)) return false;
+    stored = null;
+    return true;
+  }
 }

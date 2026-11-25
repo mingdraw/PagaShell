@@ -963,12 +963,17 @@ class _RustEngineSession
           for (final port in ports)
             rust.ForwardPortSpec(
               localPort: port.localPort,
+              bindHost: port.bindHost,
               targetHost: port.targetHost,
               targetPort: port.targetPort,
             ),
         ],
       )) {
-        yield PortForwardEvent(kind: event.kind, localPort: event.localPort);
+        yield PortForwardEvent(
+          kind: event.kind,
+          localPort: event.localPort,
+          message: event.message,
+        );
       }
     } on AnyhowException catch (e) {
       throw SshEngineException(e.message.split('\n').first, e);
@@ -1514,7 +1519,10 @@ class _RustDockerLogSession implements DockerLogSession {
 }
 
 class _RustProxySession
-    implements DynamicProxySession, DynamicProxyTrafficSource {
+    implements
+        DynamicProxySession,
+        DynamicProxyTrafficSource,
+        DynamicProxyHotReload {
   _RustProxySession(this.id, this.gateway) {
     done = proxy.proxyWait(proxyId: id).then((error) {
       if (error != null) throw SshEngineException(error);
@@ -1531,6 +1539,19 @@ class _RustProxySession
     final traffic = await proxy.proxyTraffic(proxyId: id);
     if (traffic == null) return null;
     return (sent: traffic.sent.toInt(), received: traffic.received.toInt());
+  }
+
+  @override
+  Future<void> updateRouting(ProxyConfig config) async {
+    config.validate();
+    try {
+      await proxy.proxyUpdateRules(
+        proxyId: id,
+        configJson: jsonEncode(config.toEngineJson()),
+      );
+    } on AnyhowException catch (e) {
+      throw SshEngineException(e.message.split('\n').first, e);
+    }
   }
 
   @override
@@ -1558,12 +1579,17 @@ class _RustPageForwardSession implements PortForwardSession {
           for (final port in ports)
             rust.ForwardPortSpec(
               localPort: port.localPort,
+              bindHost: port.bindHost,
               targetHost: port.targetHost,
               targetPort: port.targetPort,
             ),
         ],
       )) {
-        yield PortForwardEvent(kind: event.kind, localPort: event.localPort);
+        yield PortForwardEvent(
+          kind: event.kind,
+          localPort: event.localPort,
+          message: event.message,
+        );
       }
     } on AnyhowException catch (e) {
       throw SshEngineException(e.message.split('\n').first, e);

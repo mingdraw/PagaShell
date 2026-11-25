@@ -13,6 +13,7 @@ import '../../domain/entities/host.dart';
 import '../components/app_copy_button.dart';
 import '../components/app_icon.dart';
 import '../components/app_icon_button.dart';
+import '../components/app_select_field.dart';
 import '../components/app_text_form_field.dart';
 import '../localization/app_translations.dart';
 import '../shell/connect_flow.dart';
@@ -31,11 +32,17 @@ class _PortEditors {
   _PortEditors(ForwardPort? port)
     : local = TextEditingController(text: port?.localPort.toString() ?? ''),
       host = TextEditingController(text: port?.targetHost ?? '127.0.0.1'),
-      target = TextEditingController(text: port?.targetPort.toString() ?? '');
+      target = TextEditingController(text: port?.targetPort.toString() ?? ''),
+      note = TextEditingController(text: port?.note ?? ''),
+      bindHost = port?.bindHost ?? ForwardPort.loopbackBindHost,
+      enabled = port?.enabled ?? true;
   final key = UniqueKey();
   final TextEditingController local;
   final TextEditingController host;
   final TextEditingController target;
+  final TextEditingController note;
+  String bindHost;
+  bool enabled;
 
   bool get isBlank => local.text.trim().isEmpty && target.text.trim().isEmpty;
 
@@ -43,6 +50,7 @@ class _PortEditors {
     local.dispose();
     host.dispose();
     target.dispose();
+    note.dispose();
   }
 }
 
@@ -129,8 +137,11 @@ class _ForwardSessionPanelState extends State<ForwardSessionPanel> {
       ports.add(
         ForwardPort(
           localPort: local,
+          bindHost: row.bindHost,
           targetHost: row.host.text.trim(),
           targetPort: target,
+          enabled: row.enabled,
+          note: row.note.text.trim(),
         ),
       );
     }
@@ -209,7 +220,15 @@ class _ForwardSessionPanelState extends State<ForwardSessionPanel> {
     }
   }
 
-  Widget _mapping(_PortEditors row, {required bool editable}) {
+  Future<void> _clearHostKeyAndRetry() async {
+    if (_starting || widget.session.phase.isBusy) return;
+    final controller = Get.find<SessionController>();
+    if (await controller.clearGatewayHostKey(widget.session.id) && mounted) {
+      await _start();
+    }
+  }
+
+  Widget _mapping(_PortEditors row, int index, {required bool editable}) {
     return Padding(
       key: row.key,
       padding: const EdgeInsets.only(bottom: 12),
@@ -260,64 +279,153 @@ class _ForwardSessionPanelState extends State<ForwardSessionPanel> {
                   ? null
                   : '请填写有效的目标地址'.tr,
             );
-            return Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Expanded(
-                  child: constraints.maxWidth < 720
-                      ? Column(
-                          children: [
-                            local,
-                            const SizedBox(height: 12),
-                            host,
-                            const SizedBox(height: 12),
-                            target,
-                          ],
-                        )
-                      : Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Expanded(child: local),
-                            const Padding(
-                              padding: EdgeInsets.fromLTRB(12, 9, 12, 0),
-                              child: AppIcon(AppIcons.arrowRight, size: 16),
-                            ),
-                            Expanded(flex: 2, child: host),
-                            const SizedBox(width: 12),
-                            Expanded(child: target),
-                          ],
-                        ),
+            final bindHost = AppSelectField<String>(
+              key: ValueKey('forward-bind-$index'),
+              initialValue: row.bindHost,
+              label: '监听地址'.tr,
+              inlineLabel: true,
+              items: [
+                AppSelectOption(
+                  value: ForwardPort.loopbackBindHost,
+                  child: Text('仅本机 (127.0.0.1)'.tr),
                 ),
-                const SizedBox(width: 8),
-                ValueListenableBuilder<TextEditingValue>(
-                  valueListenable: row.local,
-                  builder: (context, value, _) {
-                    final port = int.tryParse(value.text.trim());
-                    if (port == null || port < 1 || port > 65535) {
-                      return const SizedBox.shrink();
+                AppSelectOption(
+                  value: ForwardPort.anyBindHost,
+                  child: Text('所有网卡 (0.0.0.0)'.tr),
+                ),
+              ],
+              onChanged: editable
+                  ? (value) {
+                      if (value == null) return;
+                      setState(() => row.bindHost = value);
+                      _changed();
                     }
-                    return AppCopyButton(
-                      key: ValueKey('forward-copy-$port'),
-                      text: '127.0.0.1:$port',
-                      size: 15,
-                      semanticLabel: '复制本地地址'.tr,
-                    );
-                  },
-                ),
-                const SizedBox(width: 4),
-                AppIconButton(
-                  icon: const AppIcon(AppIcons.trash2, size: 16),
-                  semanticLabel: '移除映射'.tr,
-                  onPressed: editable
-                      ? () {
-                          setState(() {
-                            _ports.remove(row);
-                            _retired.add(row);
-                          });
-                          _changed();
+                  : null,
+            );
+            final note = AppTextFormField(
+              key: ValueKey('forward-note-$index'),
+              controller: row.note,
+              enabled: editable,
+              decoration: AppInputDecoration(
+                labelText: '备注'.tr,
+                inlineLabel: true,
+                hintText: '可选，例如数据库或管理后台'.tr,
+              ),
+              validator: (value) {
+                if (row.isBlank || value == null) return null;
+                final trimmed = value.trim();
+                if (trimmed.length > 200 ||
+                    trimmed.contains('\n') ||
+                    trimmed.contains('\r')) {
+                  return '备注长度不能超过 200 个字符'.tr;
+                }
+                return null;
+              },
+            );
+            final compact = constraints.maxWidth < 720;
+            final primaryFields = compact
+                ? Column(
+                    children: [
+                      local,
+                      const SizedBox(height: 12),
+                      host,
+                      const SizedBox(height: 12),
+                      target,
+                    ],
+                  )
+                : Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(child: local),
+                      const Padding(
+                        padding: EdgeInsets.fromLTRB(12, 9, 12, 0),
+                        child: AppIcon(AppIcons.arrowRight, size: 16),
+                      ),
+                      Expanded(flex: 2, child: host),
+                      const SizedBox(width: 12),
+                      Expanded(child: target),
+                    ],
+                  );
+            final secondaryFields = compact
+                ? Column(children: [bindHost, const SizedBox(height: 12), note])
+                : Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(flex: 2, child: bindHost),
+                      const SizedBox(width: 12),
+                      Expanded(flex: 3, child: note),
+                    ],
+                  );
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Semantics(
+                        label: '启用映射'.tr,
+                        checked: row.enabled,
+                        enabled: editable,
+                        child: shadcn.Checkbox(
+                          key: ValueKey('forward-enabled-$index'),
+                          state: row.enabled
+                              ? shadcn.CheckboxState.checked
+                              : shadcn.CheckboxState.unchecked,
+                          onChanged: editable
+                              ? (state) {
+                                  setState(
+                                    () => row.enabled =
+                                        state == shadcn.CheckboxState.checked,
+                                  );
+                                  _changed();
+                                }
+                              : null,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Opacity(
+                        opacity: row.enabled ? 1 : 0.6,
+                        child: primaryFields,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    ValueListenableBuilder<TextEditingValue>(
+                      valueListenable: row.local,
+                      builder: (context, value, _) {
+                        final port = int.tryParse(value.text.trim());
+                        if (port == null || port < 1 || port > 65535) {
+                          return const SizedBox.shrink();
                         }
-                      : null,
+                        return AppCopyButton(
+                          key: ValueKey('forward-copy-$port'),
+                          text: '127.0.0.1:$port',
+                          size: 15,
+                          semanticLabel: '复制本地地址'.tr,
+                        );
+                      },
+                    ),
+                    const SizedBox(width: 4),
+                    AppIconButton(
+                      icon: const AppIcon(AppIcons.trash2, size: 16),
+                      semanticLabel: '移除映射'.tr,
+                      onPressed: editable
+                          ? () {
+                              setState(() {
+                                _ports.remove(row);
+                                _retired.add(row);
+                              });
+                              _changed();
+                            }
+                          : null,
+                    ),
+                  ],
                 ),
+                const SizedBox(height: 10),
+                Opacity(opacity: row.enabled ? 1 : 0.6, child: secondaryFields),
               ],
             );
           },
@@ -437,7 +545,8 @@ class _ForwardSessionPanelState extends State<ForwardSessionPanel> {
                           style: TextStyle(color: colors.mutedForeground),
                         ),
                       ),
-                    for (final row in _ports) _mapping(row, editable: editable),
+                    for (var i = 0; i < _ports.length; i++)
+                      _mapping(_ports[i], i, editable: editable),
                   ],
                 ),
               ),
@@ -464,6 +573,14 @@ class _ForwardSessionPanelState extends State<ForwardSessionPanel> {
                     : null,
                 child: Text('添加映射'.tr),
               ),
+              if (session.phase == SessionPhase.failed &&
+                  session.hostKeyFailure?.hasChanged == true)
+                shadcn.OutlineButton(
+                  key: const ValueKey('clear-host-key-and-retry'),
+                  onPressed: busy ? null : _clearHostKeyAndRetry,
+                  leading: const AppIcon(AppIcons.trash2, size: 16),
+                  child: Text('清除指纹并重试'.tr),
+                ),
               if (connecting)
                 shadcn.OutlineButton(
                   key: const ValueKey('forward-cancel-connect'),

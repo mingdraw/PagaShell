@@ -59,6 +59,44 @@ class _UntrustedHosts implements KnownHostRepository {
   Future<bool> removeIfMatches(SshHostKey key) async => false;
 }
 
+class _StoredKnownHosts implements KnownHostRepository {
+  _StoredKnownHosts(this.stored);
+  SshHostKey? stored;
+  bool failToRemove = false;
+
+  @override
+  Future<SshHostKey?> find(
+    String hostname,
+    int port, {
+    ServerIdentityProtocol protocol = ServerIdentityProtocol.ssh,
+  }) async {
+    final current = stored;
+    if (current != null &&
+        current.hostname == hostname &&
+        current.port == port &&
+        current.protocol == protocol) {
+      return current;
+    }
+    return null;
+  }
+
+  @override
+  Future<bool> trustIfAbsent(SshHostKey key) async {
+    if (stored != null) return false;
+    stored = key;
+    return true;
+  }
+
+  @override
+  Future<bool> removeIfMatches(SshHostKey key) async {
+    if (failToRemove) throw StateError('db error');
+    final current = stored;
+    if (current == null || !current.matches(key)) return false;
+    stored = null;
+    return true;
+  }
+}
+
 class _ForwardSession
     implements SshEngineSession, PortForwardSession, TerminalScreenSource {
   bool closed = false;
@@ -223,6 +261,7 @@ void main() {
   Future<(_ForwardEngine, _Secrets)> pump(
     WidgetTester tester, {
     Host gateway = _gateway,
+    KnownHostRepository? knownHosts,
   }) async {
     tester.view.physicalSize = const Size(1280, 900);
     tester.view.devicePixelRatio = 1;
@@ -237,7 +276,7 @@ void main() {
           binding: InMemoryBinding(
             sshEngine: engine,
             secretStore: secrets,
-            knownHosts: _UntrustedHosts(),
+            knownHosts: knownHosts ?? _UntrustedHosts(),
           ),
           platform: TargetPlatform.macOS,
         ),
@@ -1071,6 +1110,153 @@ void main() {
     expect(find.text('Save configuration'), findsNothing);
     expect(find.text('Start forwarding').hitTestable(), findsOneWidget);
     await capture(tester, 'service-forward-english-small');
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('目标连接失败显示具体原因，支持英文翻译，后续恢复后清除错误', (tester) async {
+    final (engine, _) = await pump(tester);
+    await open(tester);
+    await start(tester);
+    final sessions = Get.find<SessionController>();
+    final forward = engine.sessions.single;
+
+    forward.events.add(
+      const PortForwardEvent(
+        kind: 'connectionError',
+        localPort: 13306,
+        message: 'Page Client 未允许此目标地址和端口',
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.text('本地端口 13306 的目标连接失败：Page Client 未允许此目标地址和端口'),
+      findsOneWidget,
+    );
+
+    await tester.runAsync(() async {
+      unawaited(Get.updateLocale(AppTranslations.englishLocale));
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    });
+    await tester.pumpAndSettle();
+    expect(
+      find.text(
+        'Target connection on local port 13306 failed: Page Client does not allow this target address and port',
+      ),
+      findsOneWidget,
+    );
+
+    // 其他端口恢复不能误清当前报错端口的提示。
+    forward.events.add(
+      const PortForwardEvent(kind: 'connectionRecovered', localPort: 16379),
+    );
+    await tester.pumpAndSettle();
+    expect(sessions.sessions.single.error, isNotNull);
+
+    forward.events.add(
+      const PortForwardEvent(kind: 'connectionRecovered', localPort: 13306),
+    );
+    await tester.pumpAndSettle();
+    expect(sessions.sessions.single.error, isNull);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('SSH 网关指纹变更后可清除旧指纹并重新确认启动转发', (tester) async {
+    const oldKey = SshHostKey(
+      hostname: 'jump.example.test',
+      port: 22,
+      keyType: 'ssh-ed25519',
+      fingerprint: 'SHA256:old-gateway-key',
+    );
+    const newKey = SshHostKey(
+      hostname: 'jump.example.test',
+      port: 22,
+      keyType: 'ssh-ed25519',
+      fingerprint: 'SHA256:new-gateway-key',
+    );
+    final known = _StoredKnownHosts(oldKey);
+    final (engine, _) = await pump(tester, knownHosts: known);
+    engine.hostKey = newKey;
+    final sessions = Get.find<SessionController>();
+    await open(tester);
+
+    await tester.tap(find.text('启动转发'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(sessions.sessions.single.phase, SessionPhase.hostKeyPending);
+    expect(find.text('主机指纹已变更，连接已阻止'), findsOneWidget);
+
+    await tester.tap(find.text('拒绝连接'));
+    await tester.pumpAndSettle();
+    expect(sessions.sessions.single.phase, SessionPhase.failed);
+    expect(sessions.sessions.single.hostKeyFailure?.hasChanged, isTrue);
+    final clear = find.byKey(const ValueKey('clear-host-key-and-retry'));
+    expect(clear, findsOneWidget);
+    expect(known.stored, same(oldKey));
+    expect(engine.sessions, isEmpty);
+
+    await tester.tap(clear);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(known.stored, isNull);
+    expect(sessions.sessions.single.phase, SessionPhase.hostKeyPending);
+    expect(find.text('首次连接：确认主机指纹'), findsOneWidget);
+
+    await tester.tap(find.text('信任并连接'));
+    await tester.pumpAndSettle();
+    expect(sessions.sessions.single.phase, SessionPhase.ready);
+    expect(known.stored, same(newKey));
+    expect(engine.sessions, hasLength(1));
+    await sessions.closeAll();
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('映射支持单条启停、监听地址切换与备注保存，仅启动已启用项且全禁用阻止启动', (tester) async {
+    final (engine, _) = await pump(tester);
+    final gateways = Get.find<GatewayController>();
+    final sessions = Get.find<SessionController>();
+    await open(tester);
+
+    // 禁用第一条映射，启动时仅将启用项传给引擎。
+    await tester.tap(find.byKey(const ValueKey('forward-enabled-0')));
+    await autoSave(tester);
+    expect(gateways.hosts.single.forwardPorts.first.enabled, isFalse);
+    expect(gateways.hosts.single.forwardPorts.last.enabled, isTrue);
+
+    await start(tester);
+    expect(engine.sessions.single.ports, [_ports.last]);
+    await tester.tap(find.text('停止转发'));
+    await settleCleanup(tester);
+
+    // 全部禁用时阻止启动并提示。
+    await tester.tap(find.byKey(const ValueKey('forward-enabled-1')));
+    await autoSave(tester);
+    await start(tester);
+    expect(find.text('请至少启用一组端口映射'), findsOneWidget);
+    expect(engine.sessions, hasLength(1));
+
+    // 重新启用第一条，切换监听地址为 0.0.0.0 并填写备注。
+    await tester.tap(find.byKey(const ValueKey('forward-enabled-0')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('forward-bind-0')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('所有网卡 (0.0.0.0)').last);
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const ValueKey('forward-note-0')),
+      '主库只读',
+    );
+    await autoSave(tester);
+
+    final savedFirst = gateways.hosts.single.forwardPorts.first;
+    expect(savedFirst.enabled, isTrue);
+    expect(savedFirst.bindHost, ForwardPort.anyBindHost);
+    expect(savedFirst.note, '主库只读');
+
+    await start(tester);
+    expect(engine.sessions, hasLength(2));
+    expect(engine.sessions.last.ports, [savedFirst]);
+    await sessions.closeAll();
+    await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
   });
 }

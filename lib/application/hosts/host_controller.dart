@@ -102,13 +102,34 @@ class HostController extends GetxController {
   }
 
   Future<Host> saveProxyConfig(String id, ProxyConfig config) async {
+    config.validate();
     final session = _sessions?.findByHost(id, kind: SessionKind.dynamicProxy);
-    if (session?.phase.isAlive ?? false) {
-      throw StateError('请先停止动态代理再编辑配置');
+    final hotReload = session != null && session.phase.isAlive;
+    if (hotReload) {
+      if (session.phase != SessionPhase.ready ||
+          _sessions!.proxyNeedsCleanup(session.id) ||
+          !session.host.proxyConfig.sameListenerSettings(config)) {
+        throw StateError('请先停止动态代理再编辑配置');
+      }
+      await _sessions.applyLiveProxyRouting(session.id, config);
     }
-    final saved = await _treeRepository.saveProxyConfig(id, config);
-    _sessions?.updateProxyHost(saved);
-    return saved;
+    try {
+      final saved = await _treeRepository.saveProxyConfig(id, config);
+      _sessions?.updateProxyHost(saved, allowReady: hotReload);
+      return saved;
+    } on Object {
+      if (hotReload) {
+        try {
+          await _sessions!.applyLiveProxyRouting(
+            session.id,
+            session.host.proxyConfig,
+          );
+        } on Object {
+          // 尽力回滚内存中的热更新规则。
+        }
+      }
+      rethrow;
+    }
   }
 
   /// 把主机移动到 [folderId]（null 表示根级/未分组）。

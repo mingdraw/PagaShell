@@ -84,6 +84,16 @@ async fn port() -> u16 {
         .port()
 }
 
+fn unavailable_page(server_port: u16) -> PageGateway {
+    PageGateway {
+        server_host: "127.0.0.1".into(),
+        server_port,
+        client_id: "test".into(),
+        token: "test-only".into(),
+        server_fingerprint: String::new(),
+    }
+}
+
 fn config(port: u16, mode: &str, rules: Value) -> String {
     json!({"mode":mode, "httpEnabled":true, "httpPort":port,
         "httpsEnabled":true, "httpsPort":port, "socks5Enabled":true,
@@ -222,7 +232,7 @@ async fn proxy_rules_cover_ipv4_ipv6_cidr_and_domain_boundaries() {
         "api-evil.test",
         "sub.exact.internal",
     ] {
-        assert!(!router.rules.domain_matches(host));
+        assert!(!router.current_routing().rules.domain_matches(host));
     }
     for value in ["10.0.0.0/33", "::/129", "256.0.0.1", "10.1/8", "::1%lo0"] {
         assert!(Rule::parse(RuleSpec {
@@ -254,12 +264,10 @@ async fn direct_proxy_dials_the_same_addresses_it_used_for_ip_rules() {
         ],
         None,
     );
-    router.dns.lock().await.insert(
-        ("direct.invalid".into(), address.port()),
-        DnsEntry {
-            addresses: Arc::new([address]),
-            expires: Instant::now() + DNS_TTL,
-        },
+    router.dns.put(
+        "direct.invalid".into(),
+        Arc::new([address.ip()]),
+        Instant::now() + DNS_TTL,
     );
     // Only the cached addresses can reach this server. Resolving the original
     // host again would fail rather than connecting to the listener.
@@ -272,6 +280,13 @@ async fn direct_proxy_dials_the_same_addresses_it_used_for_ip_rules() {
     let mut bytes = [0; 2];
     peer.read_exact(&mut bytes).await.unwrap();
     assert_eq!(&bytes, b"OK");
+    // Cache is keyed by hostname only, so querying another port reuses the same IP.
+    let other_port = address.port().wrapping_add(1).max(1);
+    let reused = router.resolve("DIRECT.INVALID.", other_port).await.unwrap();
+    assert_eq!(
+        reused.as_ref(),
+        &[SocketAddr::new(address.ip(), other_port)]
+    );
     assert!(matches!(
         router
             .route("device.gateway.invalid", address.port())
@@ -299,9 +314,13 @@ async fn proxy_modes_require_a_gateway_and_legacy_direct_uses_rules() {
 async fn proxy_http_streams_chunked_uploads_preserves_host_and_keepalive() {
     let (origin, mut requests) = origin().await;
     let port = port().await;
-    let proxy = start(&config(port, "rule", json!([])), Some(u32::MAX), None)
-        .await
-        .unwrap();
+    let proxy = start(
+        &config(port, "rule", json!([])),
+        None,
+        Some(unavailable_page(1)),
+    )
+    .await
+    .unwrap();
     let mut socket = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
         .await
         .unwrap();
@@ -330,9 +349,13 @@ async fn proxy_http_streams_chunked_uploads_preserves_host_and_keepalive() {
 async fn proxy_connect_preserves_early_tls_bytes_and_half_close() {
     let (echo, _) = echo(false).await;
     let port = port().await;
-    let proxy = start(&config(port, "rule", json!([])), Some(u32::MAX), None)
-        .await
-        .unwrap();
+    let proxy = start(
+        &config(port, "rule", json!([])),
+        None,
+        Some(unavailable_page(1)),
+    )
+    .await
+    .unwrap();
     let mut socket = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
         .await
         .unwrap();
@@ -360,9 +383,13 @@ async fn proxy_socks_accepts_domain_ipv4_ipv6_and_rejects_unsupported_commands()
     let (v4, _) = echo(false).await;
     let (v6, _) = echo(true).await;
     let port = port().await;
-    let proxy = start(&config(port, "rule", json!([])), Some(u32::MAX), None)
-        .await
-        .unwrap();
+    let proxy = start(
+        &config(port, "rule", json!([])),
+        None,
+        Some(unavailable_page(1)),
+    )
+    .await
+    .unwrap();
     for (host, target) in [
         ("127.0.0.1", v4.address.port()),
         ("localhost", v4.address.port()),
@@ -397,15 +424,20 @@ async fn proxy_socks_accepts_domain_ipv4_ipv6_and_rejects_unsupported_commands()
 #[tokio::test]
 async fn proxy_global_and_matching_rules_never_fallback_to_direct() {
     let (echo, mut connections) = echo(false).await;
-    let port = port().await;
+    let proxy_port = port().await;
+    let closed_relay_port = port().await;
     for (mode, rules) in [
         ("global", json!([])),
         ("rule", json!([{"type":"ip", "value":"127.0.0.0/8"}])),
     ] {
-        let proxy = start(&config(port, mode, rules), Some(u32::MAX), None)
-            .await
-            .unwrap();
-        assert!(http_request(port, &echo.address.to_string())
+        let proxy = start(
+            &config(proxy_port, mode, rules),
+            None,
+            Some(unavailable_page(closed_relay_port)),
+        )
+        .await
+        .unwrap();
+        assert!(http_request(proxy_port, &echo.address.to_string())
             .await
             .starts_with("HTTP/1.1 502"));
         assert!(connections.try_recv().is_err());
@@ -415,10 +447,14 @@ async fn proxy_global_and_matching_rules_never_fallback_to_direct() {
         ("rule", json!([])),
         ("rule", json!([{"type":"ip", "value":"10.0.0.0/8"}])),
     ] {
-        let proxy = start(&config(port, mode, rules), Some(u32::MAX), None)
-            .await
-            .unwrap();
-        let mut socket = tunnel(port, &echo.address.to_string()).await;
+        let proxy = start(
+            &config(proxy_port, mode, rules),
+            None,
+            Some(unavailable_page(closed_relay_port)),
+        )
+        .await
+        .unwrap();
+        let mut socket = tunnel(proxy_port, &echo.address.to_string()).await;
         echo_bytes(&mut socket).await;
         assert!(connections.recv().await.is_some());
         proxy.stop().await;
@@ -438,9 +474,11 @@ async fn proxy_bind_failure_rolls_back_and_stop_cancels_active_and_pending_conne
     let busy_port = busy.local_addr().unwrap().port();
     drop(free);
     let settings = json!({"mode":"rule", "httpPort":free_port, "httpsPort":busy_port});
-    assert!(start(&settings.to_string(), Some(u32::MAX), None)
-        .await
-        .is_err());
+    assert!(
+        start(&settings.to_string(), None, Some(unavailable_page(1)))
+            .await
+            .is_err()
+    );
     drop(
         TcpListener::bind((Ipv4Addr::LOCALHOST, free_port))
             .await
@@ -449,9 +487,13 @@ async fn proxy_bind_failure_rolls_back_and_stop_cancels_active_and_pending_conne
     drop(busy);
 
     let (echo, _) = echo(false).await;
-    let proxy = start(&config(free_port, "rule", json!([])), Some(u32::MAX), None)
-        .await
-        .unwrap();
+    let proxy = start(
+        &config(free_port, "rule", json!([])),
+        None,
+        Some(unavailable_page(1)),
+    )
+    .await
+    .unwrap();
     let mut active = tunnel(free_port, &echo.address.to_string()).await;
     let mut pending = TcpStream::connect((Ipv4Addr::LOCALHOST, free_port))
         .await
@@ -505,7 +547,7 @@ async fn proxy_protocol_toggles_and_destination_validation_are_enforced() {
     let port = port().await;
     let settings =
         json!({"mode":"rule", "httpEnabled":false, "httpsEnabled":true, "httpsPort":port});
-    let proxy = start(&settings.to_string(), Some(u32::MAX), None)
+    let proxy = start(&settings.to_string(), None, Some(unavailable_page(1)))
         .await
         .unwrap();
     assert!(http_request(port, "127.0.0.1:1")
@@ -513,7 +555,7 @@ async fn proxy_protocol_toggles_and_destination_validation_are_enforced() {
         .starts_with("HTTP/1.1 403"));
     proxy.stop().await;
     let settings = json!({"mode":"rule", "httpPort":port, "httpsEnabled":false});
-    let proxy = start(&settings.to_string(), Some(u32::MAX), None)
+    let proxy = start(&settings.to_string(), None, Some(unavailable_page(1)))
         .await
         .unwrap();
     let mut socket = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
@@ -537,9 +579,13 @@ async fn proxy_protocol_toggles_and_destination_validation_are_enforced() {
 #[tokio::test]
 async fn proxy_api_wait_and_stop_release_registry_and_ports() {
     let port = port().await;
-    let id = crate::api::proxy::proxy_start(config(port, "rule", json!([])), Some(u32::MAX), None)
-        .await
-        .unwrap();
+    let id = crate::api::proxy::proxy_start(
+        config(port, "rule", json!([])),
+        None,
+        Some(unavailable_page(1)),
+    )
+    .await
+    .unwrap();
     let waiting = tokio::spawn(crate::api::proxy::proxy_wait(id));
     crate::api::proxy::proxy_stop(id).await.unwrap();
     assert!(waiting.await.unwrap().unwrap().is_none());
@@ -558,13 +604,17 @@ async fn proxy_traffic_is_isolated_and_restarts_at_zero() {
     let (echo, _) = echo(false).await;
     let first_port = port().await;
     let settings = config(first_port, "rule", json!([]));
-    let first = proxy_start(settings.clone(), Some(u32::MAX), None)
+    let first = proxy_start(settings.clone(), None, Some(unavailable_page(1)))
         .await
         .unwrap();
     let other_port = port().await;
-    let other = proxy_start(config(other_port, "rule", json!([])), Some(u32::MAX), None)
-        .await
-        .unwrap();
+    let other = proxy_start(
+        config(other_port, "rule", json!([])),
+        None,
+        Some(unavailable_page(1)),
+    )
+    .await
+    .unwrap();
 
     let mut socket = tunnel(first_port, &echo.address.to_string()).await;
     echo_bytes(&mut socket).await;
@@ -575,11 +625,311 @@ async fn proxy_traffic_is_isolated_and_restarts_at_zero() {
 
     proxy_stop(first).await.unwrap();
     assert!(proxy_traffic(first).await.is_none());
-    let restarted = proxy_start(settings, Some(u32::MAX), None).await.unwrap();
+    let restarted = proxy_start(settings, None, Some(unavailable_page(1)))
+        .await
+        .unwrap();
     let fresh = proxy_traffic(restarted).await.unwrap();
     assert_eq!((fresh.sent, fresh.received), (0, 0));
     proxy_stop(restarted).await.unwrap();
     proxy_stop(other).await.unwrap();
+}
+
+#[tokio::test]
+async fn proxy_rejects_missing_ssh_gateway_and_classifies_transient_accept_errors() {
+    let port = port().await;
+    let err = start(&config(port, "rule", json!([])), Some(u32::MAX), None)
+        .await
+        .err()
+        .unwrap();
+    assert!(err.to_string().contains("网关连接不存在或已关闭"));
+    for kind in [
+        std::io::ErrorKind::ConnectionAborted,
+        std::io::ErrorKind::ConnectionReset,
+        std::io::ErrorKind::Interrupted,
+        std::io::ErrorKind::WouldBlock,
+        std::io::ErrorKind::TimedOut,
+    ] {
+        assert!(is_transient_accept_error(&std::io::Error::from(kind)));
+    }
+    assert!(!is_transient_accept_error(&std::io::Error::from(
+        std::io::ErrorKind::PermissionDenied,
+    )));
+    assert!(!is_transient_accept_error(&std::io::Error::from(
+        std::io::ErrorKind::InvalidInput,
+    )));
+}
+
+#[tokio::test]
+async fn dns_cache_is_port_agnostic_evicts_lru_and_deduplicates_in_flight() {
+    let cache = DnsCache::default();
+    let expires = Instant::now() + DNS_TTL;
+    for i in 0..DNS_CACHE_LIMIT {
+        cache.put(
+            format!("host-{i}.invalid"),
+            Arc::new([IpAddr::V4(Ipv4Addr::new(192, 0, 2, (i % 250) as u8))]),
+            expires,
+        );
+    }
+    // Touch host-0 so host-1 becomes the least recently used entry.
+    let touched = cache.resolve("HOST-0.INVALID.", 8080).await.unwrap();
+    assert_eq!(
+        touched.as_ref(),
+        &[SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 0)),
+            8080
+        )]
+    );
+    let other_port = cache.resolve("host-0.invalid", 9090).await.unwrap();
+    assert_eq!(
+        other_port.as_ref(),
+        &[SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 0)),
+            9090
+        )]
+    );
+
+    cache.put(
+        "newest.invalid".into(),
+        Arc::new([IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1))]),
+        expires,
+    );
+    {
+        let state = cache.state.lock().unwrap();
+        assert_eq!(state.entries.len(), DNS_CACHE_LIMIT);
+        assert!(state.entries.contains_key("host-0.invalid"));
+        assert!(!state.entries.contains_key("host-1.invalid"));
+        assert!(state.entries.contains_key("newest.invalid"));
+    }
+
+    let (first, second) = tokio::join!(
+        cache.resolve("localhost", 80),
+        cache.resolve("LOCALHOST.", 443),
+    );
+    let first = first.unwrap();
+    let second = second.unwrap();
+    assert!(!first.is_empty());
+    assert_eq!(first.len(), second.len());
+    assert!(first.iter().all(|addr| addr.port() == 80));
+    assert!(second.iter().all(|addr| addr.port() == 443));
+    assert_eq!(
+        first.iter().map(SocketAddr::ip).collect::<Vec<_>>(),
+        second.iter().map(SocketAddr::ip).collect::<Vec<_>>(),
+    );
+}
+
+#[tokio::test]
+async fn happy_eyeballs_interleaves_families_and_falls_back_to_reachable_address() {
+    let v6_a: SocketAddr = "[2001:db8::1]:443".parse().unwrap();
+    let v6_b: SocketAddr = "[2001:db8::2]:443".parse().unwrap();
+    let v4_a: SocketAddr = "192.0.2.1:443".parse().unwrap();
+    let v4_b: SocketAddr = "192.0.2.2:443".parse().unwrap();
+    assert_eq!(
+        interleave_addresses(&[v6_a, v6_b, v4_a, v4_b]),
+        vec![v6_a, v4_a, v6_b, v4_b]
+    );
+    assert_eq!(
+        interleave_addresses(&[v4_a, v4_b, v6_a]),
+        vec![v4_a, v6_a, v4_b]
+    );
+
+    let closed_port = port().await;
+    let dead = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), closed_port);
+    let (echo, _) = echo(false).await;
+    let mut stream = connect_happy_eyeballs(&[dead, echo.address]).await.unwrap();
+    echo_bytes(&mut stream).await;
+}
+
+async fn http_get_status_and_body(port: u16, target: &str, path: &str) -> (String, String) {
+    let mut socket = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+        .await
+        .unwrap();
+    socket
+        .write_all(
+            format!(
+                "GET http://{target}{path} HTTP/1.1\r\nHost: {target}\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let headers = header(&mut socket).await;
+    let mut body = Vec::new();
+    timeout(Duration::from_secs(3), socket.read_to_end(&mut body))
+        .await
+        .unwrap()
+        .unwrap();
+    (headers, String::from_utf8(body).unwrap())
+}
+
+#[tokio::test]
+async fn proxy_hot_reload_updates_mode_and_rules_without_dropping_active_tunnels() {
+    use crate::api::proxy::{proxy_start, proxy_stop, proxy_update_rules};
+
+    let (echo, _) = echo(false).await;
+    let (origin, _requests) = origin().await;
+    let proxy_port = port().await;
+    let closed_relay_port = port().await;
+
+    let id = proxy_start(
+        config(proxy_port, "rule", json!([])),
+        None,
+        Some(unavailable_page(closed_relay_port)),
+    )
+    .await
+    .unwrap();
+
+    // Establish an active CONNECT tunnel before hot-reloading.
+    let mut active_tunnel = tunnel(proxy_port, &echo.address.to_string()).await;
+    echo_bytes(&mut active_tunnel).await;
+
+    // Direct HTTP succeeds and populates the upstream HTTP pool.
+    let (status, body) =
+        http_get_status_and_body(proxy_port, &origin.address.to_string(), "/before").await;
+    assert!(status.starts_with("HTTP/1.1 200"));
+    assert_eq!(body, "origin response");
+
+    // Hot-reload rule matching loopback -> new requests must go via unavailable gateway (502)
+    // and must NOT reuse the old direct pooled HTTP connection.
+    proxy_update_rules(
+        id,
+        config(
+            proxy_port,
+            "rule",
+            json!([{"type":"ip", "value":"127.0.0.0/8"}]),
+        ),
+    )
+    .await
+    .unwrap();
+    echo_bytes(&mut active_tunnel).await;
+    assert!(http_request(proxy_port, &origin.address.to_string())
+        .await
+        .starts_with("HTTP/1.1 502"));
+
+    // Invalid rule update fails without breaking active routing.
+    assert!(proxy_update_rules(
+        id,
+        config(
+            proxy_port,
+            "rule",
+            json!([{"type":"ip", "value":"999.0.0.1"}])
+        ),
+    )
+    .await
+    .is_err());
+    assert!(http_request(proxy_port, &origin.address.to_string())
+        .await
+        .starts_with("HTTP/1.1 502"));
+
+    // Switch to global mode -> still routes to gateway.
+    proxy_update_rules(id, config(proxy_port, "global", json!([])))
+        .await
+        .unwrap();
+    assert!(http_request(proxy_port, &origin.address.to_string())
+        .await
+        .starts_with("HTTP/1.1 502"));
+
+    // Switch back to empty rule mode -> direct HTTP succeeds again, active tunnel still alive.
+    proxy_update_rules(id, config(proxy_port, "rule", json!([])))
+        .await
+        .unwrap();
+    echo_bytes(&mut active_tunnel).await;
+    let (status, body) =
+        http_get_status_and_body(proxy_port, &origin.address.to_string(), "/after").await;
+    assert!(status.starts_with("HTTP/1.1 200"));
+    assert_eq!(body, "origin response");
+
+    proxy_stop(id).await.unwrap();
+    assert!(
+        proxy_update_rules(id, config(proxy_port, "global", json!([])))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn proxy_http_pool_reuses_keepalive_upstream_and_respects_connection_close() {
+    use std::sync::atomic::AtomicUsize;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin_addr = listener.local_addr().unwrap();
+    let accepts = Arc::new(AtomicUsize::new(0));
+    let accepts_counter = accepts.clone();
+    let server = tokio::spawn(async move {
+        let mut connections = JoinSet::new();
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (socket, _) = accepted.unwrap();
+                    accepts_counter.fetch_add(1, Ordering::SeqCst);
+                    connections.spawn(async move {
+                        let _ = hyper::server::conn::http1::Builder::new()
+                            .keep_alive(true)
+                            .serve_connection(
+                                TokioIo::new(socket),
+                                service_fn(|req: Request<Incoming>| async move {
+                                    let close = req.uri().path() == "/close";
+                                    let mut builder = Response::builder();
+                                    if close {
+                                        builder = builder.header("connection", "close");
+                                    }
+                                    Ok::<_, Infallible>(
+                                        builder
+                                            .body(Full::new(Bytes::from_static(b"pooled ok")))
+                                            .unwrap(),
+                                    )
+                                }),
+                            )
+                            .await;
+                    });
+                }
+                _ = connections.join_next(), if !connections.is_empty() => {}
+            }
+        }
+    });
+
+    let proxy_port = port().await;
+    let proxy = start(
+        &config(proxy_port, "rule", json!([])),
+        None,
+        Some(unavailable_page(1)),
+    )
+    .await
+    .unwrap();
+
+    // Three sequential client requests reuse a single keep-alive upstream TCP connection.
+    for path in ["/one", "/two", "/three"] {
+        let (headers, body) =
+            http_get_status_and_body(proxy_port, &origin_addr.to_string(), path).await;
+        assert!(headers.starts_with("HTTP/1.1 200"));
+        assert_eq!(body, "pooled ok");
+    }
+    assert_eq!(accepts.load(Ordering::SeqCst), 1);
+
+    // An upstream response with Connection: close is not recycled.
+    let (headers, body) =
+        http_get_status_and_body(proxy_port, &origin_addr.to_string(), "/close").await;
+    assert!(headers.starts_with("HTTP/1.1 200"));
+    assert_eq!(body, "pooled ok");
+    assert_eq!(accepts.load(Ordering::SeqCst), 1);
+
+    let (headers, body) =
+        http_get_status_and_body(proxy_port, &origin_addr.to_string(), "/fresh").await;
+    assert!(headers.starts_with("HTTP/1.1 200"));
+    assert_eq!(body, "pooled ok");
+    assert_eq!(accepts.load(Ordering::SeqCst), 2);
+
+    // Routing hot-reload clears idle pooled connections.
+    proxy
+        .update_routing(&config(proxy_port, "rule", json!([])))
+        .unwrap();
+    let (headers, body) =
+        http_get_status_and_body(proxy_port, &origin_addr.to_string(), "/after-reload").await;
+    assert!(headers.starts_with("HTTP/1.1 200"));
+    assert_eq!(body, "pooled ok");
+    assert_eq!(accepts.load(Ordering::SeqCst), 3);
+
+    proxy.stop().await;
+    server.abort();
 }
 
 #[tokio::test]

@@ -24,6 +24,7 @@ class _SessionRuntime {
   StreamSubscription<PortForwardEvent>? forwardSubscription;
   Completer<void>? forwardStarting;
   Future<void>? forwardCleanup;
+  int? forwardErrorPort;
   Future<void>? proxyCleanup;
   Completer<void>? proxyStarting;
   DynamicProxySession? proxyHandle;

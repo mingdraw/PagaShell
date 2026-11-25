@@ -41,6 +41,14 @@ class AppTranslations extends Translations {
     if (bind != null) {
       return '无法监听本地端口 @port，请检查端口占用或权限'.trParams({'port': bind[1]!});
     }
+    final forwardDetail = RegExp(r'^本地端口 (\d+) 的目标连接失败：(.+)$')
+        .firstMatch(message);
+    if (forwardDetail != null) {
+      return '本地端口 @port 的目标连接失败：@reason'.trParams({
+        'port': forwardDetail[1]!,
+        'reason': error(forwardDetail[2]!),
+      });
+    }
     final forward = RegExp(r'^本地端口 (\d+) 的目标连接失败，请检查目标地址、端口和网关转发权限$')
         .firstMatch(message);
     if (forward != null) {
@@ -145,27 +153,24 @@ class AppTranslations extends Translations {
     '尚未配置代理规则，脚本仅添加节点。可先在规则模式下添加规则，再重新生成。': 'No proxy rules are configured, so this script only adds a node. Add rules in Rule mode, then generate the script again.',
     '规则模式：命中已配置规则的请求通过 PagaShell 网关，其余流量沿用 Clash 原有分流。': 'Rule mode: Requests matching configured rules use the PagaShell gateway. Other traffic follows existing Clash routes.',
     'V2Ray 扩展配置': 'V2Ray extension config',
-    '将 JSON 导入 v2rayN 的「自定义配置」，选择 Xray 内核；也可供 V2Ray 直接加载。使用时，请先启动 PagaShell 动态代理。':
-        'Import the JSON into v2rayN as a custom configuration with the Xray core, or load it directly in V2Ray. Start the PagaShell dynamic proxy before use.',
-    '全局模式：现有规则未匹配的 TCP 流量通过 PagaShell 网关。':
-        'Global mode: TCP traffic that does not match existing rules uses the PagaShell gateway.',
-    '规则模式：命中的 TCP 流量通过 PagaShell 网关，其余沿用现有分流；独立配置默认直连。':
-        'Rule mode: Matching TCP traffic uses the PagaShell gateway. Other traffic follows existing routes or connects directly in a standalone config.',
-    '尚未配置代理规则，JSON 仅添加 PagaShell 出站，不改变分流。':
-        'No rules are configured. The JSON adds a PagaShell outbound without changing routing.',
+    '将 JSON 导入 v2rayN 的「自定义配置」，选择 Xray 内核；也可供 V2Ray 直接加载。使用时，请先启动 PagaShell 动态代理。': 'Import the JSON into v2rayN as a custom configuration with the Xray core, or load it directly in V2Ray. Start the PagaShell dynamic proxy before use.',
+    '全局模式：现有规则未匹配的 TCP 流量通过 PagaShell 网关。': 'Global mode: TCP traffic that does not match existing rules uses the PagaShell gateway.',
+    '规则模式：命中的 TCP 流量通过 PagaShell 网关，其余沿用现有分流；独立配置默认直连。': 'Rule mode: Matching TCP traffic uses the PagaShell gateway. Other traffic follows existing routes or connects directly in a standalone config.',
+    '尚未配置代理规则，JSON 仅添加 PagaShell 出站，不改变分流。': 'No rules are configured. The JSON adds a PagaShell outbound without changing routing.',
     '合并现有 JSON': 'Merge existing JSON',
     '恢复独立配置': 'Use standalone config',
-    '本机入口：SOCKS5 @socks / HTTP(S) @http': 'Local ports: SOCKS5 @socks / HTTP(S) @http',
+    '本机入口：SOCKS5 @socks / HTTP(S) @http':
+        'Local ports: SOCKS5 @socks / HTTP(S) @http',
     '已合并，原文件未修改': 'Merged. The source file was not changed.',
     '另存为 JSON': 'Save as JSON',
     '复制 JSON': 'Copy JSON',
-    '请选择完整的 V2Ray 或 Xray JSON 配置': 'Select a complete V2Ray or Xray JSON configuration.',
-    '现有配置已监听 PagaShell 代理端口 @port，请先修改其中一个端口':
-        'The existing config already listens on PagaShell proxy port @port. Change one of the ports first.',
-    '现有配置使用了路由脚本，无法自动合并分流规则':
-        'Routing rules cannot be merged automatically because the existing config uses a routing script.',
+    '请选择完整的 V2Ray 或 Xray JSON 配置':
+        'Select a complete V2Ray or Xray JSON configuration.',
+    '现有配置已监听 PagaShell 代理端口 @port，请先修改其中一个端口': 'The existing config already listens on PagaShell proxy port @port. Change one of the ports first.',
+    '现有配置使用了路由脚本，无法自动合并分流规则': 'Routing rules cannot be merged automatically because the existing config uses a routing script.',
     'V2Ray 配置文件不能超过 8 MiB': 'The V2Ray config file must be 8 MiB or smaller.',
-    '读取 V2Ray 配置失败，请检查文件后重试': 'Could not read the V2Ray config. Check the file and try again.',
+    '读取 V2Ray 配置失败，请检查文件后重试':
+        'Could not read the V2Ray config. Check the file and try again.',
     '已保存 V2Ray 配置': 'V2Ray config saved.',
     '保存 V2Ray 配置失败，请重试': 'Could not save the V2Ray config. Try again.',
     '代理模式': 'Proxy mode',
@@ -206,7 +211,9 @@ class AppTranslations extends Translations {
     '请至少启用一种代理协议': 'Enable at least one proxy protocol.',
     '请先停止动态代理再编辑配置': 'Stop the dynamic proxy before editing its configuration.',
     '当前引擎不支持动态代理': 'This engine does not support dynamic proxies.',
+    '动态代理未运行': 'Dynamic proxy is not running.',
     '动态代理监听已断开': 'The dynamic proxy listener has stopped.',
+    'SSH 网关连接已断开': 'SSH gateway disconnected',
     '无法监听本地代理端口 @port，请检查端口占用或权限':
         'Cannot listen on proxy port @port. Check port usage and permissions.',
     '代理配置无效': 'Invalid proxy configuration.',
@@ -252,26 +259,26 @@ class AppTranslations extends Translations {
     '添加上下文': 'Add context',
     '会话': 'Sessions',
     '本地保存失败，可取消退出后重试。仍然退出将丢失尚未保存的记录和偏好设置。': 'Local saving failed. Cancel to retry, or exit and lose unsaved history and preferences.',
-    '等待保存 Agent 数据超时。继续退出可能丢失尚未保存的记录和偏好设置。':
-        'Saving Agent data timed out. Exiting may lose unsaved history and preferences.',
+    '等待保存 Agent 数据超时。继续退出可能丢失尚未保存的记录和偏好设置。': 'Saving Agent data timed out. Exiting may lose unsaved history and preferences.',
     '退出前有步骤未完成': 'Some steps are still incomplete',
     '@step：等待超时': '@step: Timed out',
     '@step：失败': '@step: Failed',
     '恢复系统代理': 'Restore system proxy',
-    '系统代理可能仍指向已停止的 PagaShell，导致浏览器等应用无法联网。可在系统设置中移除 PagaShell 的代理。':
-        'Your system proxy may still point to PagaShell after it stops, leaving browsers and other apps unable to connect. Remove the PagaShell proxy in your system settings.',
+    '系统代理可能仍指向已停止的 PagaShell，导致浏览器等应用无法联网。可在系统设置中移除 PagaShell 的代理。': 'Your system proxy may still point to PagaShell after it stops, leaving browsers and other apps unable to connect. Remove the PagaShell proxy in your system settings.',
     '停止动态代理': 'Stop dynamic proxy',
-    '仍在使用动态代理的连接会中断。': 'Connections still using the dynamic proxy will be interrupted.',
+    '仍在使用动态代理的连接会中断。':
+        'Connections still using the dynamic proxy will be interrupted.',
     '停止端口转发': 'Stop port forwarding',
     '通过端口转发的连接会中断。': 'Connections using port forwarding will be interrupted.',
     '停止文件传输': 'Stop file transfers',
     '传输会中断，目标端可能留下未传完的文件。': 'Transfers will stop and may leave incomplete files at the destination.',
     '关闭会话': 'Close sessions',
-    '远程会话会中断，未完成的任务或传输可能受影响。':
-        'Remote sessions will disconnect. Unfinished tasks or transfers may be affected.',
-    '正在通过 MCP 执行的请求可能被中断。': 'MCP requests still in progress may be interrupted.',
+    '远程会话会中断，未完成的任务或传输可能受影响。': 'Remote sessions will disconnect. Unfinished tasks or transfers may be affected.',
+    '正在通过 MCP 执行的请求可能被中断。':
+        'MCP requests still in progress may be interrupted.',
     '清理系统托盘': 'Remove the tray icon',
-    '系统托盘可能暂时保留一个无效的 PagaShell 图标。': 'An inactive PagaShell icon may remain in the system tray temporarily.',
+    '系统托盘可能暂时保留一个无效的 PagaShell 图标。':
+        'An inactive PagaShell icon may remain in the system tray temporarily.',
     '仍然退出': 'Exit anyway',
     '未选择模型': 'No model selected',
     '切换 AI 模型': 'Switch AI model',
@@ -626,6 +633,14 @@ class AppTranslations extends Translations {
         'No port mappings. Add one to start forwarding manually.',
     '所选服务已不存在': 'The selected service no longer exists',
     '本地端口不能重复': 'Local ports must be unique',
+    '请至少启用一组端口映射': 'Enable at least one port mapping',
+    '请填写有效的本地监听地址': 'Enter a valid local listen address',
+    '备注长度不能超过 200 个字符': 'Notes must be 200 characters or fewer',
+    '启用映射': 'Enable mapping',
+    '监听地址': 'Listen address',
+    '仅本机 (127.0.0.1)': 'Local only (127.0.0.1)',
+    '所有网卡 (0.0.0.0)': 'All interfaces (0.0.0.0)',
+    '可选，例如数据库或管理后台': 'Optional, e.g. database or admin console',
     '请添加至少一组端口映射': 'Add at least one port mapping',
     '请填写有效的端口（1-65535）': 'Enter valid ports (1–65535)',
     '请配置至少一组端口映射': 'Add at least one port mapping',
@@ -637,6 +652,9 @@ class AppTranslations extends Translations {
     '会话已关闭': 'The session is closed',
     '无法监听本地端口 @port，请检查端口占用或权限': 'Unable to listen on local port @port. Check port usage and permissions.',
     '本地端口 @port 的目标连接失败，请检查目标地址、端口和网关转发权限': 'The target for local port @port could not be reached. Check the target address, port, and gateway forwarding permissions.',
+    '本地端口 @port 的目标连接失败：@reason':
+        'Target connection on local port @port failed: @reason',
+    '端口转发并发连接数已达上限': 'Port forwarding concurrency limit reached',
     '设置': 'Settings',
     '隐藏侧边栏': 'Hide sidebar',
     '显示侧边栏': 'Show sidebar',
@@ -669,6 +687,12 @@ class AppTranslations extends Translations {
     'Page 访问令牌或 Client ID 无效': 'Invalid Page access token or Client ID',
     'Page Client 未连接中转 Server':
         'Page Client is not connected to the relay server',
+    'Page Server 连接额度已满，请稍后重试':
+        'Page Server connection limit reached. Try again later.',
+    'Page Client 隧道额度已满，请稍后重试':
+        'Page Client tunnel limit reached. Try again later.',
+    'Page Client 无法建立到 Server 的工作连接':
+        'Page Client could not open a work connection to the server',
     'Page Client 未允许此目标地址和端口':
         'Page Client does not allow this target address and port',
     'Page Client 无法连接目标服务': 'Page Client cannot reach the target service',
@@ -677,6 +701,9 @@ class AppTranslations extends Translations {
     'Page Server 证书指纹无效': 'Invalid Page Server certificate fingerprint',
     'Page Server 证书指纹不匹配': 'Page Server certificate fingerprint mismatch',
     '无法连接 Page Server': 'Unable to connect to Page Server',
+    '连接 Page Server 超时': 'Connecting to Page Server timed out',
+    'Page Server TLS 握手超时': 'Page Server TLS handshake timed out',
+    'Page 隧道建立超时': 'Page tunnel setup timed out',
     'Page Server TLS 握手失败，请核对证书指纹':
         'Page Server TLS handshake failed. Check the certificate fingerprint.',
     'Page Server 地址无效': 'Invalid Page Server address',
@@ -1757,6 +1784,7 @@ class AppTranslations extends Translations {
     '复制代理地址': 'Copy proxy address',
     '运行中配置已锁定，停止代理后可修改':
         'Configuration is locked while running. Stop the proxy to edit.',
+    '运行中协议端口与系统代理已锁定，代理模式与规则支持热更新': 'Protocol ports and system proxy are locked while running. Proxy mode and rules update live.',
     '当前无匹配规则，所有流量将直连':
         'No matching rules configured. All traffic will connect directly.',
     '重试恢复系统代理': 'Retry restoring system proxy',

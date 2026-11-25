@@ -59,15 +59,30 @@ class _Store {
 }
 
 void main() {
-  test('映射序列化和相等比较包含目标地址，旧空地址默认回环', () {
+  test('映射序列化和相等比较包含目标地址、监听地址、启用状态与备注，旧 JSON 使用默认值', () {
     expect(ForwardPort.fromJson(_ports.first.toJson()), _ports.first);
-    expect(
-      ForwardPort.fromJson({'localPort': 8080, 'targetPort': 80}).targetHost,
-      '127.0.0.1',
+    final legacy = ForwardPort.fromJson({'localPort': 8080, 'targetPort': 80});
+    expect(legacy.targetHost, '127.0.0.1');
+    expect(legacy.bindHost, ForwardPort.loopbackBindHost);
+    expect(legacy.enabled, isTrue);
+    expect(legacy.note, '');
+    final rich = const ForwardPort(
+      localPort: 15432,
+      bindHost: ForwardPort.anyBindHost,
+      targetHost: 'pg.internal',
+      targetPort: 5432,
+      enabled: false,
+      note: 'PostgreSQL 只读',
     );
+    expect(ForwardPort.fromJson(rich.toJson()), rich);
+    expect(rich.copyWith(enabled: true), isNot(rich));
     expect(
       const ForwardPort(localPort: 13306, targetPort: 3306),
       isNot(_ports.first),
+    );
+    expect(
+      () => ForwardPort.validateAll([rich], allowEmpty: false),
+      throwsStateError,
     );
   });
 
@@ -160,6 +175,16 @@ void main() {
           [_ports.first, const ForwardPort(localPort: 13306, targetPort: 6379)],
           for (final host in ['', ' ', 'http://db.test', 'db test', r'db\test'])
             [ForwardPort(localPort: 13306, targetHost: host, targetPort: 3306)],
+          for (final bind in ['', '192.168.1.1', '::', 'localhost'])
+            [ForwardPort(localPort: 13306, bindHost: bind, targetPort: 3306)],
+          [ForwardPort(localPort: 13306, targetPort: 3306, note: 'a' * 201)],
+          [
+            const ForwardPort(
+              localPort: 13306,
+              targetPort: 3306,
+              note: 'line1\nline2',
+            ),
+          ],
         ]) {
           await expectLater(
             store.tree.saveForwardPorts('gateway', invalid),

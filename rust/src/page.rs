@@ -1,19 +1,22 @@
 //! PagaGateway Page v1: optional pinned TLS and a bounded opening frame, then TCP.
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context as TaskContext, Poll};
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
-use tokio::net::TcpStream;
+use tokio::net::{lookup_host, TcpStream};
 use tokio::time::{timeout_at, Instant};
 use tokio_rustls::{client::TlsStream, rustls, TlsConnector};
 
 use crate::api::page::PageGateway;
 
 const MAX_FRAME: usize = 8192;
+const SERVER_DNS_TTL: Duration = Duration::from_secs(30);
 
 pub(crate) enum PageStream {
     Tcp(TcpStream),
@@ -167,9 +170,15 @@ fn gateway_pin(gateway: &PageGateway) -> Result<Option<Vec<u8>>> {
     }
 }
 
+enum ServerEndpoint {
+    Fixed(SocketAddr),
+    CachedDns(Mutex<Option<(Arc<[SocketAddr]>, Instant)>>),
+}
+
 pub(crate) struct PageConnector {
     gateway: PageGateway,
     tls: Option<(TlsConnector, rustls::pki_types::ServerName<'static>)>,
+    endpoint: ServerEndpoint,
 }
 
 impl PageConnector {
@@ -193,18 +202,70 @@ impl PageConnector {
         } else {
             None
         };
-        Ok(Self { gateway, tls })
+        let endpoint = match gateway.server_host.trim().parse::<IpAddr>() {
+            Ok(ip) => ServerEndpoint::Fixed(SocketAddr::new(ip, gateway.server_port)),
+            Err(_) => ServerEndpoint::CachedDns(Mutex::new(None)),
+        };
+        Ok(Self {
+            gateway,
+            tls,
+            endpoint,
+        })
+    }
+
+    async fn dial_server(&self, deadline: Instant) -> Result<TcpStream> {
+        let gateway = &self.gateway;
+        match &self.endpoint {
+            ServerEndpoint::Fixed(addr) => timeout_at(deadline, TcpStream::connect(*addr))
+                .await
+                .context("连接 Page Server 超时")?
+                .context("无法连接 Page Server"),
+            ServerEndpoint::CachedDns(cache) => {
+                let cached = cache
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .filter(|(_, expires)| *expires > Instant::now())
+                    .map(|(addrs, _)| addrs.clone());
+                let (addresses, from_cache) = if let Some(addrs) = cached {
+                    (addrs, true)
+                } else {
+                    let addrs: Arc<[SocketAddr]> = timeout_at(
+                        deadline,
+                        lookup_host((gateway.server_host.as_str(), gateway.server_port)),
+                    )
+                    .await
+                    .context("连接 Page Server 超时")?
+                    .context("无法连接 Page Server")?
+                    .collect();
+                    if addrs.is_empty() {
+                        bail!("无法连接 Page Server");
+                    }
+                    *cache.lock().unwrap() = Some((addrs.clone(), Instant::now() + SERVER_DNS_TTL));
+                    (addrs, false)
+                };
+                match timeout_at(deadline, crate::proxy::connect_happy_eyeballs(&addresses)).await {
+                    Ok(Ok(stream)) => Ok(stream),
+                    Ok(Err(err)) => {
+                        if from_cache {
+                            *cache.lock().unwrap() = None;
+                        }
+                        Err(err).context("无法连接 Page Server")
+                    }
+                    Err(err) => {
+                        if from_cache {
+                            *cache.lock().unwrap() = None;
+                        }
+                        Err(err).context("连接 Page Server 超时")
+                    }
+                }
+            }
+        }
     }
 
     pub async fn connect(&self, host: &str, port: u16, deadline: Instant) -> Result<PageStream> {
         let gateway = &self.gateway;
-        let tcp = timeout_at(
-            deadline,
-            TcpStream::connect((gateway.server_host.as_str(), gateway.server_port)),
-        )
-        .await
-        .context("连接 Page Server 超时")?
-        .context("无法连接 Page Server")?;
+        let tcp = self.dial_server(deadline).await?;
         tcp.set_nodelay(true)?;
         let stream = if let Some((connector, name)) = &self.tls {
             let tls = timeout_at(deadline, connector.connect(name.clone(), tcp))
@@ -316,14 +377,17 @@ impl Drop for GoRelay {
 impl GoRelay {
     pub async fn start(target_ports: &[u16], use_tls: bool) -> Self {
         use std::process::{Command, Stdio};
+        use std::sync::atomic::{AtomicU64, Ordering};
         use std::time::{Duration, SystemTime, UNIX_EPOCH};
+        static NEXT_DIR: AtomicU64 = AtomicU64::new(1);
         let binary = std::env::var("PAGAGATEWAY_BIN")
             .expect("set PAGAGATEWAY_BIN to a built pagagateway binary");
         let client_binary =
             std::env::var("PAGAGATEWAY_CLIENT_BIN").unwrap_or_else(|_| binary.clone());
         let directory = std::env::temp_dir().join(format!(
-            "pagashell-page-{}-{}",
+            "pagashell-page-{}-{}-{}",
             std::process::id(),
+            NEXT_DIR.fetch_add(1, Ordering::Relaxed),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()

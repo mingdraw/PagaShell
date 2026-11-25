@@ -5,6 +5,7 @@ import 'package:pagashell/terminal/core.dart';
 
 import '../../domain/entities/forward_port.dart';
 import '../../domain/entities/host.dart';
+import '../../domain/entities/proxy_config.dart';
 import '../../domain/proxy/dynamic_proxy_engine.dart';
 import '../../domain/proxy/system_proxy.dart';
 import '../../domain/rdp/rdp_engine.dart';
@@ -671,6 +672,7 @@ class SessionController extends GetxController {
     final starting = runtime.forwardStarting = Completer<void>();
     runtime.credentials = credentials;
     runtime.gateway = null;
+    runtime.forwardErrorPort = null;
     _update(
       id,
       (s) => Session(
@@ -724,11 +726,44 @@ class SessionController extends GetxController {
     return id;
   }
 
-  void updateProxyHost(Host host) {
+  void updateProxyHost(Host host, {bool allowReady = false}) {
     final session = findByHost(host.id, kind: SessionKind.dynamicProxy);
-    if (session != null && !session.phase.isAlive) {
+    if (session != null &&
+        (!session.phase.isAlive ||
+            (allowReady && session.phase == SessionPhase.ready))) {
       _update(session.id, (s) => s.copyWith(host: host));
     }
+  }
+
+  bool canHotReloadProxy(String id) {
+    final session = _find(id);
+    if (_disposed ||
+        session == null ||
+        session.kind != SessionKind.dynamicProxy ||
+        session.phase != SessionPhase.ready ||
+        proxyNeedsCleanup(id)) {
+      return false;
+    }
+    final handle = _runtimes[id]?.proxyHandle ?? session.proxySession;
+    return handle is DynamicProxyHotReload;
+  }
+
+  /// 热更新运行中动态代理的模式与规则，不触碰本地监听端口和系统代理。
+  Future<void> applyLiveProxyRouting(String id, ProxyConfig config) async {
+    final session = _find(id);
+    if (_disposed ||
+        session == null ||
+        session.kind != SessionKind.dynamicProxy ||
+        session.phase != SessionPhase.ready ||
+        proxyNeedsCleanup(id)) {
+      throw StateError('请先停止动态代理再编辑配置');
+    }
+    final handle = _runtimes[id]?.proxyHandle ?? session.proxySession;
+    if (handle case final DynamicProxyHotReload reloader) {
+      await reloader.updateRouting(config);
+      return;
+    }
+    throw StateError('请先停止动态代理再编辑配置');
   }
 
   Future<void> startProxy(String id, Host host, {SshGateway? gateway}) async {
@@ -1213,6 +1248,70 @@ class SessionController extends GetxController {
     );
   }
 
+  /// 仅清除失败网关转发或动态代理会话涉及的旧 SSH 指纹；调用方随后按最新配置重新启动。
+  Future<bool> clearGatewayHostKey(String id) async {
+    final session = _find(id);
+    final review = session?.hostKeyFailure;
+    final trusted = review?.trusted;
+    final repository = _knownHosts;
+    if (_disposed ||
+        session == null ||
+        !session.kind.usesGatewayEndpoint ||
+        session.phase != SessionPhase.failed ||
+        review == null ||
+        !review.hasChanged ||
+        review.presented.isRdp ||
+        trusted == null ||
+        repository == null) {
+      return false;
+    }
+    _update(
+      id,
+      (s) => Session(
+        id: s.id,
+        host: s.host,
+        kind: s.kind,
+        phase: SessionPhase.reconnecting,
+        loginUsername: s.loginUsername,
+      ),
+    );
+    try {
+      if (!await repository.removeIfMatches(trusted) &&
+          await repository.find(
+                trusted.hostname,
+                trusted.port,
+                protocol: trusted.protocol,
+              ) !=
+              null) {
+        throw const SshEngineException('指纹记录已更新，请重试连接');
+      }
+    } on Object catch (e) {
+      if (!_disposed) {
+        _update(
+          id,
+          (s) => s.copyWith(
+            phase: SessionPhase.failed,
+            error: e is SshEngineException ? e.message : '无法清除主机指纹，请重试',
+            hostKeyFailure: review,
+          ),
+        );
+      }
+      return false;
+    }
+    if (_disposed || _find(id) == null) return false;
+    _update(
+      id,
+      (s) => Session(
+        id: s.id,
+        host: s.host,
+        kind: s.kind,
+        phase: SessionPhase.closed,
+        loginUsername: s.loginUsername,
+      ),
+    );
+    return true;
+  }
+
   Future<void> _connect(
     String id,
     Host host,
@@ -1369,20 +1468,40 @@ class SessionController extends GetxController {
           await forwarder.close();
           return null;
         }
+        final enabledPorts = [
+          for (final port in host.forwardPorts)
+            if (port.enabled) port,
+        ];
+        if (enabledPorts.isEmpty) {
+          throw const SshEngineException('请至少启用一组端口映射');
+        }
         _update(id, (s) => s.copyWith(forwardSession: forwarder));
         _runtimes[id]?.forwardSubscription = forwarder
-            .startPortForwards(host.forwardPorts)
+            .startPortForwards(enabledPorts)
             .listen(
               (event) {
                 if (!identical(_find(id)?.forwardSession, forwarder)) return;
                 if (event.kind == 'ready') {
-                  _update(id, (s) => s.copyWith(phase: SessionPhase.ready));
+                  _runtimes[id]?.forwardErrorPort = null;
+                  _update(
+                    id,
+                    (s) =>
+                        s.copyWith(phase: SessionPhase.ready, clearError: true),
+                  );
+                } else if (event.kind == 'connectionRecovered') {
+                  if (_runtimes[id]?.forwardErrorPort == event.localPort) {
+                    _runtimes[id]?.forwardErrorPort = null;
+                    _update(id, (s) => s.copyWith(clearError: true));
+                  }
                 } else if (event.kind == 'connectionError') {
+                  _runtimes[id]?.forwardErrorPort = event.localPort;
+                  final detail = event.message?.trim();
                   _update(
                     id,
                     (s) => s.copyWith(
-                      error:
-                          '本地端口 ${event.localPort} 的目标连接失败，请检查目标地址、端口和网关转发权限',
+                      error: detail != null && detail.isNotEmpty
+                          ? '本地端口 ${event.localPort} 的目标连接失败：$detail'
+                          : '本地端口 ${event.localPort} 的目标连接失败，请检查目标地址、端口和网关转发权限',
                     ),
                   );
                 } else if (event.kind == 'closed') {
@@ -1493,7 +1612,11 @@ class SessionController extends GetxController {
     } on Object catch (e) {
       final message = _displayFailure(e, '连接失败，请检查连接配置和网络后重试');
       if (_find(id)?.kind == SessionKind.portForward) {
-        await _forwardFailed(id, message);
+        await _forwardFailed(
+          id,
+          message,
+          hostKeyFailure: e is HostKeyChangedException ? e.review : null,
+        );
       } else if (_find(id) case final session?
           when session.dockerTarget != null && session.terminal != null) {
         _onDockerShellFailed(id, session.terminal!, e);
@@ -1739,13 +1862,18 @@ class SessionController extends GetxController {
     sessions.assignAll(reordered);
   }
 
-  Future<void> _forwardFailed(String id, String message) async {
+  Future<void> _forwardFailed(
+    String id,
+    String message, {
+    HostKeyReview? hostKeyFailure,
+  }) async {
     final session = _find(id);
     if (session == null ||
         !session.phase.isAlive ||
         session.phase == SessionPhase.stopping) {
       return;
     }
+    _runtimes[id]?.forwardErrorPort = null;
     _update(
       id,
       (s) => Session(
@@ -1755,6 +1883,7 @@ class SessionController extends GetxController {
         phase: SessionPhase.failed,
         error: message,
         loginUsername: s.loginUsername,
+        hostKeyFailure: hostKeyFailure,
       ),
     );
     await _cleanupForward(session);

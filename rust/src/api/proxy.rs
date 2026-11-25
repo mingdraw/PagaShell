@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::LazyLock;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio::sync::Mutex;
 
 use crate::api::page::PageGateway;
@@ -60,6 +60,17 @@ pub async fn proxy_traffic(proxy_id: u32) -> Option<ProxyTraffic> {
         let (sent, received) = running.traffic();
         ProxyTraffic { sent, received }
     })
+}
+
+/// Hot-reloads routing mode and rules for a running proxy without touching listeners.
+pub async fn proxy_update_rules(proxy_id: u32, config_json: String) -> Result<()> {
+    let router = PROXIES
+        .lock()
+        .await
+        .get(&proxy_id)
+        .map(|running| running.router.clone())
+        .context("动态代理未运行")?;
+    proxy::update_routing(&router, &config_json)
 }
 
 /// Cancels negotiations, tunnels and HTTP drivers, then releases every listener.

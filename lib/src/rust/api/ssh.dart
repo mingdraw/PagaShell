@@ -10,9 +10,9 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'page.dart';
 import 'terminal.dart';
 
-// These functions are ignored because they are not marked as `pub`: `accepts_input`, `ack`, `attempted`, `authenticate_inner`, `authenticate`, `begin_frame`, `bind_forward_ports`, `check_text_bytes`, `checked_text_metadata`, `defer_sudo_probe`, `desktop_tunnel`, `disconnect_handle`, `docker_api_channel`, `download_inner`, `due`, `expire_sync`, `feed`, `finish`, `flush`, `forward_listener`, `handshake`, `is_closed`, `is_missing_remote_file`, `load_private_key`, `local_changed`, `merge`, `new_sftp_session`, `new`, `new`, `new`, `open_agent_channel`, `open_sftp`, `parse_chunk_size`, `pending`, `plan`, `process_exec`, `process_target_command`, `read_only_exec`, `read_range`, `read_small_text_bytes`, `read_small_text`, `read`, `register_transfer`, `remote_changed`, `remove_dir_recursive`, `resize`, `resume_mismatch`, `save_small_text`, `server_status_command`, `sftp_channel_failed`, `sftp_client_config`, `shell_tx`, `should_probe_sudo`, `spawn_port_forwards`, `start_docker_terminal_output`, `start_page_port_forwards`, `start_port_forwards`, `start_shell_output_with_command`, `start_shell_output`, `status_sample_command`, `status_sections`, `terminate_process_command`, `transfer_cleanup`, `transfer_download`, `transfer_io`, `transfer_upload`, `unregister_transfer`, `upload_inner`, `verify_resume_prefix`, `with_metadata_sftp`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Credentials`, `DownloadSftp`, `ForwardTransport`, `FrameAckRegistration`, `FrameAcks`, `FramePacer`, `PageForwardEntry`, `PendingSession`, `PinningHandler`, `ReadOnlyExecPolicy`, `SessionEntry`, `ShellCmd`, `ShellOutput`, `StatusSampleCache`, `SudoProbe`, `TransferTimeout`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `check_server_key`, `clone`, `clone`, `clone`, `drop`, `fmt`, `fmt`
+// These functions are ignored because they are not marked as `pub`: `accepts_input`, `ack`, `attempted`, `authenticate_inner`, `authenticate`, `begin_frame`, `bind_forward_ports`, `check_text_bytes`, `checked_text_metadata`, `defer_sudo_probe`, `desktop_tunnel`, `disconnect_handle`, `docker_api_channel`, `download_inner`, `due`, `expire_sync`, `feed`, `finish`, `flush`, `forward_listener`, `handshake`, `is_closed`, `is_closed`, `is_missing_remote_file`, `load_private_key`, `local_changed`, `merge`, `monitors_connection`, `new_sftp_session`, `new`, `new`, `new`, `open_agent_channel`, `open_direct_tcpip`, `open_sftp`, `parse_chunk_size`, `pending`, `plan`, `process_exec`, `process_target_command`, `read_only_exec`, `read_range`, `read_small_text_bytes`, `read_small_text`, `read`, `register_transfer`, `remote_changed`, `remove_dir_recursive`, `resize`, `resume_mismatch`, `save_small_text`, `server_status_command`, `sftp_channel_failed`, `sftp_client_config`, `shell_tx`, `should_probe_sudo`, `spawn_port_forwards`, `ssh_gateway_handle`, `start_docker_terminal_output`, `start_page_port_forwards`, `start_port_forwards`, `start_shell_output_with_command`, `start_shell_output`, `status_sample_command`, `status_sections`, `terminate_process_command`, `transfer_cleanup`, `transfer_download`, `transfer_io`, `transfer_upload`, `unregister_transfer`, `upload_inner`, `verify_resume_prefix`, `with_metadata_sftp`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Credentials`, `DownloadSftp`, `ForwardStream`, `ForwardTransport`, `FrameAckRegistration`, `FrameAcks`, `FramePacer`, `PageForwardEntry`, `PendingSession`, `PinningHandler`, `ReadOnlyExecPolicy`, `SessionEntry`, `ShellCmd`, `ShellOutput`, `SshGatewayHandle`, `StatusSampleCache`, `SudoProbe`, `TransferTimeout`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `check_server_key`, `clone`, `clone`, `clone`, `clone`, `drop`, `fmt`, `fmt`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`, `default`
 
 Future<SftpTextFile> sftpReadText({
@@ -292,21 +292,26 @@ Stream<TransferProgress> sftpUpload({
   resume: resume,
 );
 
-/// 本地监听固定绑定所有 IPv4 网卡（*）。
+/// 本地监听支持仅本机（127.0.0.1）或所有 IPv4 网卡（0.0.0.0）。
 class ForwardPortSpec {
   final int localPort;
   final String targetHost;
   final int targetPort;
+  final String bindHost;
 
   const ForwardPortSpec({
     required this.localPort,
     required this.targetHost,
     required this.targetPort,
+    required this.bindHost,
   });
 
   @override
   int get hashCode =>
-      localPort.hashCode ^ targetHost.hashCode ^ targetPort.hashCode;
+      localPort.hashCode ^
+      targetHost.hashCode ^
+      targetPort.hashCode ^
+      bindHost.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -315,18 +320,21 @@ class ForwardPortSpec {
           runtimeType == other.runtimeType &&
           localPort == other.localPort &&
           targetHost == other.targetHost &&
-          targetPort == other.targetPort;
+          targetPort == other.targetPort &&
+          bindHost == other.bindHost;
 }
 
 class PortForwardEvent {
-  /// ready: 所有端口已监听；connectionError: 单次目标连接失败；closed: 隧道结束。
+  /// ready: 所有端口已监听；connectionRecovered: 失败端口后续建连成功；
+  /// connectionError: 单次目标连接建立失败；closed: 隧道结束。
   final String kind;
   final int? localPort;
+  final String? message;
 
-  const PortForwardEvent({required this.kind, this.localPort});
+  const PortForwardEvent({required this.kind, this.localPort, this.message});
 
   @override
-  int get hashCode => kind.hashCode ^ localPort.hashCode;
+  int get hashCode => kind.hashCode ^ localPort.hashCode ^ message.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -334,7 +342,8 @@ class PortForwardEvent {
       other is PortForwardEvent &&
           runtimeType == other.runtimeType &&
           kind == other.kind &&
-          localPort == other.localPort;
+          localPort == other.localPort &&
+          message == other.message;
 }
 
 /// SFTP 目录条目（跨 FFI 的普通数据结构）。

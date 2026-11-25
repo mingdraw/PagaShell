@@ -282,6 +282,7 @@ void main() {
             ForwardPort(localPort: 6379, targetPort: 6379),
             ForwardPort(localPort: 5432, targetPort: 5432),
             ForwardPort(localPort: 9200, targetPort: 9200),
+            ForwardPort(localPort: 19999, targetPort: 9999, enabled: false),
           ],
         ),
         kind: SessionKind.portForward,

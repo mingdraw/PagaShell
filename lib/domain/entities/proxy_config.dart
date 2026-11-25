@@ -81,6 +81,15 @@ class ProxyConfig {
     }
   }
 
+  bool sameListenerSettings(ProxyConfig other) =>
+      httpEnabled == other.httpEnabled &&
+      httpPort == other.httpPort &&
+      httpsEnabled == other.httpsEnabled &&
+      httpsPort == other.httpsPort &&
+      socks5Enabled == other.socks5Enabled &&
+      socks5Port == other.socks5Port &&
+      autoSystemProxy == other.autoSystemProxy;
+
   /// Only listener/routing settings cross the strict Rust configuration boundary.
   Map<String, Object?> toEngineJson() => {
     'mode': mode.name,
