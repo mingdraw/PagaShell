@@ -490,6 +490,15 @@ class AppTranslations extends Translations {
     'RDP 服务器结束了会话：@value': 'The RDP server ended the session: @value',
     'RDP 会话处理异常，请重新连接':
         'The RDP session encountered an error. Reconnect to continue.',
+    '无法启动 Windows RDP 会话进程': 'Could not start the Windows RDP session process',
+    '无法隔离 Windows RDP 会话进程': 'Could not isolate the Windows RDP session process',
+    'RDP 会话进程已退出，请重新连接':
+        'The RDP session process exited. Reconnect to continue.',
+    'RDP 会话进程无响应，请重新连接':
+        'The RDP session process stopped responding. Reconnect to continue.',
+    'RDP 会话进程通信失败，请重新连接':
+        'Communication with the RDP session process failed. Reconnect to continue.',
+    'RDP 会话进程协议版本不兼容': 'The RDP session process uses an incompatible protocol version',
     'RDP TCP 连接失败': 'The RDP TCP connection failed',
     'RDP TLS 握手失败': 'The RDP TLS handshake failed',
     'RDP 服务器未提供证书': 'The RDP server did not provide a certificate',

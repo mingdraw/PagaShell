@@ -1,11 +1,11 @@
 use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
-use crate::api::desktop::{DesktopCursor, DesktopFrame, DesktopHandshake};
+use crate::api::desktop::{DesktopCursor, DesktopFrame, DesktopHandshake, DesktopInputEvent};
 use crate::desktop_clipboard::{Clipboard, Command as ClipboardCommand};
 use crate::desktop_display::{DisplayControl, ResizeRequest};
 use crate::desktop_frame::{FrameEncoder, FrameRequest};
@@ -17,13 +17,15 @@ use ironrdp::dvc::DrdynvcClient;
 use ironrdp::pdu::input::fast_path::{FastPathInputEvent, KeyboardFlags};
 use ironrdp::pdu::input::mouse::{MousePdu, PointerFlags};
 use ironrdp::session::{ActiveStageBuilder, ActiveStageOutput};
-use ironrdp_egfx::client::{GraphicsPipelineClient, GraphicsPipelineHandler};
+use ironrdp_egfx::client::{BitmapUpdate, GraphicsPipelineClient, GraphicsPipelineHandler};
 use ironrdp_egfx::decode::{H264Decoder, OpenH264Decoder};
+use ironrdp_egfx::pdu::{CacheToSurfacePdu, SolidFillPdu, SurfaceToSurfacePdu};
 use ironrdp_tokio::{FramedWrite, TokioFramed};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
+use tokio::time::Instant;
 use tokio_rustls::{client::TlsStream, rustls, TlsConnector};
 use x509_cert::der::Decode;
 
@@ -74,8 +76,15 @@ impl AsyncWrite for Transport {
 }
 type Framed = TokioFramed<TlsStream<Transport>>;
 const TIMEOUT: Duration = Duration::from_secs(30);
+const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+const REDRAW_INTERVAL: Duration = Duration::from_secs(2);
 static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 static SESSIONS: LazyLock<Mutex<HashMap<u32, Arc<Desktop>>>> = LazyLock::new(Default::default);
+
+pub(crate) fn reserve_session_id() -> u32 {
+    NEXT_ID.fetch_add(1, Ordering::Relaxed)
+}
+
 struct Pending {
     connector: ClientConnector,
     upgraded: ironrdp_tokio::Upgraded,
@@ -84,6 +93,7 @@ struct Pending {
     host: String,
     display: DisplayControl,
     clipboard: Clipboard,
+    graphics: GraphicsEvents,
 }
 struct Desktop {
     fingerprint: String,
@@ -99,16 +109,132 @@ struct Desktop {
     clipboard: Clipboard,
 }
 
-struct GraphicsHandler;
-impl GraphicsPipelineHandler for GraphicsHandler {}
+const GRAPHICS_RESET: u8 = 1 << 0;
+const GRAPHICS_CONTENT: u8 = 1 << 1;
+const GRAPHICS_COMMITTED: u8 = 1 << 2;
+const GRAPHICS_CLOSED: u8 = 1 << 3;
 
-fn graphics_pipeline() -> GraphicsPipelineClient {
+#[derive(Clone, Default)]
+struct GraphicsEvents(Arc<AtomicU8>);
+
+impl GraphicsEvents {
+    fn take_transitions(&self) -> u8 {
+        // Callbacks run inline in stage.process; only the session drains them.
+        let clear = GRAPHICS_RESET | GRAPHICS_CLOSED;
+        let state = self.0.load(Ordering::Relaxed);
+        if state & clear != 0 {
+            self.0.fetch_and(!clear, Ordering::Relaxed);
+        }
+        state
+    }
+
+    fn content(&self) {
+        if self.0.load(Ordering::Relaxed) & GRAPHICS_CONTENT == 0 {
+            self.0.fetch_or(GRAPHICS_CONTENT, Ordering::Relaxed);
+        }
+    }
+}
+
+impl GraphicsPipelineHandler for GraphicsEvents {
+    fn on_reset_graphics(&mut self, _: u32, _: u32) {
+        self.0.store(GRAPHICS_RESET, Ordering::Relaxed);
+    }
+
+    fn on_bitmap_updated(&mut self, update: &BitmapUpdate) {
+        if !update.data.is_empty() {
+            self.content();
+        }
+    }
+
+    fn on_solid_fill(&mut self, fill: &SolidFillPdu) {
+        if !fill.rectangles.is_empty() {
+            self.content();
+        }
+    }
+
+    fn on_surface_to_surface(&mut self, copy: &SurfaceToSurfacePdu) {
+        if !copy.destination_points.is_empty() {
+            self.content();
+        }
+    }
+
+    fn on_cache_to_surface(&mut self, copy: &CacheToSurfacePdu) {
+        if !copy.destination_points.is_empty() {
+            self.content();
+        }
+    }
+
+    fn on_frame_complete(&mut self, _: u32) {
+        let state = self.0.load(Ordering::Relaxed);
+        if state & GRAPHICS_CONTENT != 0 && state & GRAPHICS_COMMITTED == 0 {
+            self.0.fetch_or(GRAPHICS_COMMITTED, Ordering::Relaxed);
+        }
+    }
+
+    fn on_close(&mut self) {
+        self.0.fetch_or(GRAPHICS_CLOSED, Ordering::Relaxed);
+    }
+}
+
+#[derive(Default)]
+struct FrameAvailability {
+    ready: bool,
+    awaiting_egfx_content: bool,
+}
+
+impl FrameAvailability {
+    fn update(&mut self, transitions: u8, has_damage: bool) {
+        if transitions & GRAPHICS_RESET != 0 {
+            self.ready = false;
+            self.awaiting_egfx_content = true;
+        }
+        if transitions & (GRAPHICS_COMMITTED | GRAPHICS_CLOSED) != 0 {
+            self.awaiting_egfx_content = false;
+        }
+        // MapSurfaceToOutput can dirty a zero-filled surface on its own. Only
+        // resume presenting after a pixel update is committed to the output.
+        self.ready |= has_damage && !self.awaiting_egfx_content;
+    }
+}
+
+struct RedrawRecovery {
+    pending: bool,
+    next_at: Instant,
+    egfx_drops: u64,
+    refresh_rect: bool,
+    suppress_output: bool,
+}
+
+impl RedrawRecovery {
+    fn new(refresh_rect: bool, suppress_output: bool) -> Self {
+        Self {
+            pending: false,
+            next_at: Instant::now(),
+            egfx_drops: 0,
+            refresh_rect,
+            suppress_output,
+        }
+    }
+
+    fn observe(&mut self, bitmap_discarded: bool, egfx_drops: u64) {
+        self.pending |= (self.refresh_rect || self.suppress_output)
+            && (bitmap_discarded || egfx_drops > self.egfx_drops);
+        self.egfx_drops = egfx_drops;
+    }
+
+    fn sent(&mut self) {
+        self.pending = false;
+        self.next_at = Instant::now() + REDRAW_INTERVAL;
+    }
+}
+
+fn graphics_pipeline(graphics: GraphicsEvents) -> GraphicsPipelineClient {
     // Only advertise the AVC420 decoder we can actually construct. The upstream
     // handler keeps V8/non-AVC fallback and deliberately omits unsupported AVC444.
     let decoder = OpenH264Decoder::new()
         .ok()
         .map(|decoder| Box::new(decoder) as Box<dyn H264Decoder>);
-    GraphicsPipelineClient::new(Box::new(GraphicsHandler), decoder)
+    GraphicsPipelineClient::new(Box::new(graphics), decoder)
 }
 
 pub(crate) async fn prepare(
@@ -159,10 +285,11 @@ pub(crate) async fn prepare_with_page(
         let mut connector = ClientConnector::new(config, "0.0.0.0:0".parse()?);
         let display = DisplayControl::default();
         let clipboard = Clipboard::new();
+        let graphics = GraphicsEvents::default();
         connector.attach_static_channel(clipboard.client());
         connector.attach_static_channel(
             DrdynvcClient::new()
-                .with_dynamic_channel(graphics_pipeline())
+                .with_dynamic_channel(graphics_pipeline(graphics.clone()))
                 .with_dynamic_channel(display.client()),
         );
         let mut framed = TokioFramed::new(stream);
@@ -216,6 +343,7 @@ pub(crate) async fn prepare_with_page(
                 host,
                 display,
                 clipboard,
+                graphics,
             },
             fingerprint,
             verifier.certificate_error(),
@@ -224,7 +352,7 @@ pub(crate) async fn prepare_with_page(
     .await
     .map_err(|_| anyhow!("RDP 服务连接超时"))?
     .map_err(|error| anyhow!("RDP 服务连接失败：{error:#}"))?;
-    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let id = reserve_session_id();
     let (commands, receiver) = mpsc::channel(256);
     let (frames, requests) = mpsc::channel(4);
     let (resizes, resize_receiver) = mpsc::channel(4);
@@ -301,19 +429,20 @@ pub(crate) async fn authenticate(
             host,
             display,
             clipboard,
+            graphics,
         } = pending;
         connector.config.credentials = Credentials::UsernamePassword { username, password };
         connector.config.domain = (!domain.is_empty()).then_some(domain);
         let result =
             crate::rdp_connection::finalize(upgraded, connector, &mut framed, host, public_key)
                 .await?;
-        Ok::<_, anyhow::Error>((result, framed, display, clipboard))
+        Ok::<_, anyhow::Error>((result, framed, display, clipboard, graphics))
     };
     let result = tokio::select! { biased;
         _ = cancel.changed() => Err(anyhow!("连接已取消")),
         result = task => result,
     };
-    let (result, framed, display, clipboard) = match result {
+    let (result, framed, display, clipboard, graphics) = match result {
         Ok(value) => value,
         Err(error) => {
             disconnect(id).await;
@@ -346,7 +475,7 @@ pub(crate) async fn authenticate(
             commands,
             cancel,
             requests,
-            (display, clipboard),
+            (display, clipboard, graphics),
             resizes,
         ),
     );
@@ -451,8 +580,23 @@ pub(crate) async fn input(
     y: u16,
     text: String,
 ) -> Result<()> {
-    let entry = session(id).await?;
     let events = input_events(kind, code, flags, x, y, text)?;
+    send_inputs(id, events).await
+}
+
+pub(crate) async fn input_batch(id: u32, events: Vec<DesktopInputEvent>) -> Result<()> {
+    if events.is_empty() || events.len() > 32 {
+        bail!("无效的 RDP 输入");
+    }
+    let events = events
+        .into_iter()
+        .map(|event| input_event(event.pointer, event.code, event.flags, event.x, event.y))
+        .collect::<Result<Vec<_>>>()?;
+    send_inputs(id, events).await
+}
+
+async fn send_inputs(id: u32, events: Vec<FastPathInputEvent>) -> Result<()> {
+    let entry = session(id).await?;
     // Never drop a key/button release. Backpressure is bounded by a timeout.
     tokio::select! {
         biased;
@@ -474,30 +618,7 @@ fn input_events(
     text: String,
 ) -> Result<Vec<FastPathInputEvent>> {
     Ok(match kind {
-        0 => {
-            if code > 255 || flags & !7 != 0 {
-                bail!("无效的 RDP 按键");
-            }
-            vec![FastPathInputEvent::KeyboardEvent(
-                KeyboardFlags::from_bits_retain(flags as u8),
-                code as u8,
-            )]
-        }
-        1 => {
-            let flags = PointerFlags::from_bits(flags).context("无效的 RDP 鼠标事件")?;
-            let wheel = code.min(255) as i16;
-            let wheel = if flags.contains(PointerFlags::WHEEL_NEGATIVE) {
-                -wheel
-            } else {
-                wheel
-            };
-            vec![FastPathInputEvent::MouseEvent(MousePdu {
-                x_position: x,
-                y_position: y,
-                flags,
-                number_of_wheel_rotation_units: wheel,
-            })]
-        }
+        0 | 1 => vec![input_event(kind == 1, code, flags, x, y)?],
         2 => {
             if text.len() > 8192 {
                 bail!("RDP 文本过长");
@@ -527,6 +648,30 @@ fn input_events(
         _ => bail!("无效的 RDP 输入"),
     })
 }
+
+fn input_event(pointer: bool, code: u16, flags: u16, x: u16, y: u16) -> Result<FastPathInputEvent> {
+    if !pointer {
+        if code > 255 || flags & !7 != 0 {
+            bail!("无效的 RDP 按键");
+        }
+        return Ok(FastPathInputEvent::KeyboardEvent(
+            KeyboardFlags::from_bits_retain(flags as u8),
+            code as u8,
+        ));
+    }
+    let flags = PointerFlags::from_bits(flags).context("无效的 RDP 鼠标事件")?;
+    let wheel = code.min(255) as i16;
+    Ok(FastPathInputEvent::MouseEvent(MousePdu {
+        x_position: x,
+        y_position: y,
+        flags,
+        number_of_wheel_rotation_units: if flags.contains(PointerFlags::WHEEL_NEGATIVE) {
+            -wheel
+        } else {
+            wheel
+        },
+    }))
+}
 pub(crate) async fn disconnect(id: u32) {
     let entry = SESSIONS.lock().await.remove(&id);
     if let Some(entry) = entry {
@@ -536,6 +681,35 @@ pub(crate) async fn disconnect(id: u32) {
         entry.receiver.lock().await.take();
         entry.requests.lock().await.take();
         entry.resize_receiver.lock().await.take();
+    }
+}
+
+#[cfg(windows)]
+pub(crate) async fn disconnect_worker(id: u32) {
+    let Ok(entry) = session(id).await else {
+        return;
+    };
+    let active = entry.receiver.lock().await.is_none();
+    let mut finished = entry.finished.subscribe();
+    disconnect(id).await;
+    if active {
+        // Allow the active loop to send its held-key/button releases.
+        let _ = tokio::time::timeout(
+            Duration::from_millis(650),
+            finished.wait_for(Option::is_some),
+        )
+        .await;
+    }
+}
+
+#[cfg(any(windows, test))]
+pub(crate) async fn probe(id: u32) -> Result<()> {
+    let entry = session(id).await?;
+    let barrier = entry.clipboard.barrier()?;
+    tokio::select! {
+        biased;
+        error = session_end(&entry) => Err(error),
+        result = barrier => result.context("RDP 会话已结束"),
     }
 }
 
@@ -577,15 +751,17 @@ async fn run(
     mut commands: mpsc::Receiver<Vec<FastPathInputEvent>>,
     mut cancel: watch::Receiver<bool>,
     mut requests: mpsc::Receiver<FrameRequest>,
-    controls: (DisplayControl, Clipboard),
+    controls: (DisplayControl, Clipboard, GraphicsEvents),
     mut resizes: mpsc::Receiver<ResizeRequest>,
 ) -> Result<()> {
-    let (display, clipboard) = controls;
+    let (display, clipboard, graphics) = controls;
     let mut clipboard_commands = clipboard.receiver();
     let mut clipboard_tick = tokio::time::interval(Duration::from_secs(5));
     clipboard_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let activation_factory = result.activation_factory;
     let mut image = crate::rdp::new_image(result.desktop_size)?;
+    let mut recovery =
+        RedrawRecovery::new(result.refresh_rect_support, result.suppress_output_support);
     let mut stage = ActiveStageBuilder {
         static_channels: result.static_channels,
         user_channel_id: result.user_channel_id,
@@ -597,14 +773,15 @@ async fn run(
         pointer_software_rendering: false,
     }
     .build();
-    let mut tick = tokio::time::interval(Duration::from_millis(16));
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut encoder = FrameEncoder::new(image.width(), image.height());
+    let mut availability = FrameAvailability::default();
+    let mut next_frame_at = Instant::now();
     let mut waiting: VecDeque<FrameRequest> = VecDeque::new();
     let mut held = HeldInputs::default();
     let diagnostics = crate::desktop_diagnostics::GraphicsDiagnostics::new();
     let mut pending_resize: Option<ResizeRequest> = None;
-    let mut resize_deadline = tokio::time::Instant::now();
+    let mut resize_deadline = Instant::now();
+    let mut check_input = false;
     loop {
         if *cancel.borrow() {
             break;
@@ -631,63 +808,103 @@ async fn run(
             }
         }
         waiting.retain(|request| !request.reply.is_closed());
-        let can_render = waiting
-            .front()
-            .is_some_and(|request| encoder.ready(request.after));
-        // Fair polling keeps both sustained graphics and input traffic moving.
-        let outputs = tokio::select! {
-            _ = cancel.changed() => break,
-            command = clipboard_commands.recv() => {
-                match command {
-                    Some(ClipboardCommand::Protocol(message)) => clipboard.process(&mut stage, message),
-                    Some(ClipboardCommand::Publish(local)) => clipboard.publish(&mut stage, local),
-                    Some(ClipboardCommand::Barrier(reply)) => { let _ = reply.send(()); continue; }
-                    None => break,
+        let can_render = availability.ready
+            && waiting
+                .front()
+                .is_some_and(|request| encoder.ready(request.after));
+        let mut transitions = 0;
+        // Give waiting input a turn after decoding a packet. Limit priority to
+        // one batch, then return to fair polling so graphics cannot starve.
+        let ready_input = std::mem::take(&mut check_input)
+            .then(|| commands.try_recv().ok())
+            .flatten();
+        let outputs = if let Some(events) = ready_input {
+            process_input(&mut stage, &mut image, &mut held, &events)?
+        } else {
+            tokio::select! {
+                _ = cancel.changed() => break,
+                command = clipboard_commands.recv() => {
+                    match command {
+                        Some(ClipboardCommand::Protocol(message)) => clipboard.process(&mut stage, message),
+                        Some(ClipboardCommand::Publish(local)) => clipboard.publish(&mut stage, local),
+                        Some(ClipboardCommand::Barrier(reply)) => { let _ = reply.send(()); continue; }
+                        None => break,
+                    }
                 }
-            }
-            _ = clipboard_tick.tick() => clipboard.timeouts(&mut stage),
-            request = resizes.recv(), if pending_resize.is_none() => {
-                let Some(request) = request else { break; };
-                pending_resize = Some(request);
-                resize_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-                continue;
-            }
-            _ = tokio::time::sleep_until(resize_deadline), if pending_resize.is_some() => {
-                let request = pending_resize.take().unwrap();
-                let _ = request.reply.send(Ok(false));
-                continue;
-            }
-            events = commands.recv() => {
-                let Some(events) = events else { break; };
-                let outputs = stage.process_fastpath_input(&mut image, &events)?;
-                held.record(&events);
-                outputs
-            }
-            _ = tick.tick(), if can_render => {
-                let request = waiting.pop_front().unwrap();
-                if !request.reply.is_closed() {
-                    let _ = request.reply.send(encoder.snapshot(&image, request.after));
+                _ = clipboard_tick.tick() => clipboard.timeouts(&mut stage),
+                request = resizes.recv(), if pending_resize.is_none() => {
+                    let Some(request) = request else { break; };
+                    pending_resize = Some(request);
+                    resize_deadline = Instant::now() + Duration::from_secs(3);
+                    continue;
                 }
-                continue;
-            }
-            request = requests.recv(), if waiting.len() < 4 => {
-                let Some(request) = request else { return Ok(()); };
-                waiting.push_back(request);
-                continue;
-            }
-            _ = tokio::time::sleep(Duration::from_millis(500)), if !waiting.is_empty() => continue,
-            packet = framed.read_pdu() => {
-                let (action, bytes) = packet.context("RDP 数据接收失败")?;
-                diagnostics.process(|| stage.process(&mut image, action, &bytes))?
+                _ = tokio::time::sleep_until(resize_deadline), if pending_resize.is_some() => {
+                    let request = pending_resize.take().unwrap();
+                    let _ = request.reply.send(Ok(false));
+                    continue;
+                }
+                events = commands.recv() => {
+                    let Some(events) = events else { break; };
+                    process_input(&mut stage, &mut image, &mut held, &events)?
+                }
+                _ = async {
+                    if next_frame_at > Instant::now() {
+                        tokio::time::sleep_until(next_frame_at).await;
+                    }
+                }, if can_render => {
+                    let request = waiting.pop_front().unwrap();
+                    if !request.reply.is_closed() {
+                        next_frame_at = Instant::now() + FRAME_INTERVAL;
+                        let _ = request.reply.send(encoder.snapshot(&image, request.after));
+                    }
+                    continue;
+                }
+                request = requests.recv(), if waiting.len() < 4 => {
+                    let Some(request) = request else { return Ok(()); };
+                    waiting.push_back(request);
+                    continue;
+                }
+                _ = async { waiting.front_mut().unwrap().reply.closed().await }, if !waiting.is_empty() => continue,
+                _ = tokio::time::sleep_until(recovery.next_at), if recovery.pending => {
+                    let redraw = stage.request_full_redraw(
+                        image.width(), image.height(), recovery.refresh_rect, recovery.suppress_output,
+                    ).context("RDP 无法请求重绘")?;
+                    tokio::time::timeout(TIMEOUT, async {
+                        for frame in redraw {
+                            framed.write_all(&frame).await?;
+                        }
+                        Ok::<_, std::io::Error>(())
+                    }).await.context("RDP 重绘请求发送超时")?.context("RDP 重绘请求发送失败")?;
+                    recovery.sent();
+                    continue;
+                }
+                packet = framed.read_pdu() => {
+                    let (action, bytes) = packet.context("RDP 数据接收失败")?;
+                    let outputs = diagnostics.process(|| stage.process(&mut image, action, &bytes))?;
+                    transitions = graphics.take_transitions();
+                    let drops = stage.get_dvc::<GraphicsPipelineClient>()
+                        .map_or(0, |channel| channel.processor().dropped_updates());
+                    recovery.observe(stage.take_bitmap_recovery_request(), drops);
+                    check_input = true;
+                    outputs
+                }
             }
         };
         // EGFX may resize independently of connection reactivation. Enforce the
         // same pixel budget as the initial framebuffer and Flutter consumer.
         crate::rdp::validate_desktop_size(image.width(), image.height())?;
+        if transitions & GRAPHICS_RESET != 0 {
+            encoder.invalidate(image.width(), image.height());
+        }
         // EGFX reports a bounding rectangle in GraphicsUpdate and preserves the
         // exact regions separately. Keep those regions separate through to Dart.
         let damage = stage.take_damage_regions();
         let exact_damage = !damage.is_empty();
+        let has_damage = exact_damage
+            || outputs
+                .iter()
+                .any(|output| matches!(output, ActiveStageOutput::GraphicsUpdate(_)));
+        availability.update(transitions, has_damage);
         for rect in damage {
             encoder.damage(rect);
         }
@@ -755,6 +972,8 @@ async fn run(
                                 enable_server_pointer,
                                 pointer_software_rendering,
                                 static_channel_chunk_size,
+                                refresh_rect_support,
+                                suppress_output_support,
                                 ..
                             } = activation.connection_activation_state()
                             {
@@ -769,7 +988,12 @@ async fn run(
                                 ) {
                                     bail!("RDP 通道重新激活失败");
                                 }
-                                encoder = FrameEncoder::new(image.width(), image.height());
+                                encoder.invalidate(image.width(), image.height());
+                                availability = FrameAvailability::default();
+                                next_frame_at = Instant::now();
+                                recovery.refresh_rect = refresh_rect_support;
+                                recovery.suppress_output = suppress_output_support;
+                                recovery.pending = false;
                                 break;
                             }
                         }
@@ -799,6 +1023,17 @@ async fn run(
     Ok(())
 }
 
+fn process_input(
+    stage: &mut ironrdp::session::ActiveStage,
+    image: &mut ironrdp::session::image::DecodedImage,
+    held: &mut HeldInputs,
+    events: &[FastPathInputEvent],
+) -> Result<Vec<ActiveStageOutput>> {
+    let outputs = stage.process_fastpath_input(image, events)?;
+    held.record(events);
+    Ok(outputs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -823,7 +1058,10 @@ mod tests {
         use openh264::encoder::Encoder;
         use openh264::formats::{RgbSliceU8, YUVBuffer};
 
-        let mut client = graphics_pipeline();
+        let graphics = GraphicsEvents::default();
+        let mut client = graphics_pipeline(graphics.clone());
+        let mut availability = FrameAvailability::default();
+        assert!(!availability.ready);
         let advertised = client.start(1).unwrap();
         let GfxPdu::CapabilitiesAdvertise(advertised) =
             decode::<GfxPdu>(&encode_vec(advertised[0].as_ref()).unwrap()).unwrap()
@@ -845,7 +1083,7 @@ mod tests {
         let yuv = YUVBuffer::from_rgb_source(RgbSliceU8::new(&rgb, (64, 64)));
         let mut encoder = Encoder::new().unwrap();
         let h264 = encoder.encode(&yuv).unwrap().to_vec();
-        let pdus = [
+        let headers = [
             GfxPdu::CapabilitiesConfirm(CapabilitiesConfirmPdu(advertised.0[0].clone())),
             GfxPdu::ResetGraphics(ResetGraphicsPdu {
                 width: 64,
@@ -863,6 +1101,23 @@ mod tests {
                 output_origin_x: 0,
                 output_origin_y: 0,
             }),
+            GfxPdu::EndFrame(EndFramePdu { frame_id: 6 }),
+        ];
+        let bytes: Vec<_> = headers
+            .iter()
+            .flat_map(|pdu| encode_vec(pdu).unwrap())
+            .collect();
+        client.process(1, &wrap_uncompressed(&bytes)).unwrap();
+        assert_eq!(client.take_output_reset(), Some((64, 64)));
+        let mapped = client.drain_output();
+        assert!(!mapped.is_empty(), "mapping can dirty a blank surface");
+        availability.update(graphics.take_transitions(), !mapped.is_empty());
+        assert!(
+            !availability.ready,
+            "a mapped but empty surface must stay hidden"
+        );
+
+        let pdus = [
             GfxPdu::WireToSurface1(WireToSurface1Pdu {
                 surface_id: 1,
                 codec_id: Codec1Type::Avc420,
@@ -887,9 +1142,10 @@ mod tests {
         let responses = client.process(1, &wrap_uncompressed(&bytes)).unwrap();
         assert!(client.codec_capabilities().avc420);
         assert!(!client.codec_capabilities().avc444);
-        assert_eq!(client.take_output_reset(), Some((64, 64)));
         let updates = client.drain_output();
         assert_eq!(updates.len(), 1);
+        availability.update(graphics.take_transitions(), true);
+        assert!(availability.ready);
         assert_eq!(updates[0].data.len(), 64 * 64 * 4);
         for pixel in updates[0].data.as_chunks::<4>().0 {
             for (actual, expected) in pixel.iter().zip([64, 128, 192, 255]) {
@@ -901,7 +1157,17 @@ mod tests {
             GfxPdu::FrameAcknowledge(ack) if ack.frame_id == 7
         )));
 
-        let mut fallback = GraphicsPipelineClient::new(Box::new(GraphicsHandler), None);
+        client
+            .process(1, &wrap_uncompressed(&encode_vec(&headers[1]).unwrap()))
+            .unwrap();
+        assert_eq!(client.take_output_reset(), Some((64, 64)));
+        availability.update(graphics.take_transitions(), false);
+        assert!(
+            !availability.ready,
+            "a same-size reset must hide the new base until painted"
+        );
+
+        let mut fallback = GraphicsPipelineClient::new(Box::<GraphicsEvents>::default(), None);
         let advertised = fallback.start(1).unwrap();
         let GfxPdu::CapabilitiesAdvertise(advertised) =
             decode::<GfxPdu>(&encode_vec(advertised[0].as_ref()).unwrap()).unwrap()
@@ -910,6 +1176,30 @@ mod tests {
         };
         assert_eq!(advertised.0.len(), 1);
         assert_eq!(advertised.0[0].version, CapabilityVersion::V8);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn redraw_recovery_coalesces_graphics_failures_and_respects_capabilities() {
+        let mut unsupported = RedrawRecovery::new(false, false);
+        unsupported.observe(true, 1);
+        assert!(!unsupported.pending);
+
+        let mut recovery = RedrawRecovery::new(true, false);
+        recovery.observe(false, 1);
+        assert!(recovery.pending && recovery.next_at <= Instant::now());
+        recovery.sent();
+        recovery.observe(false, 1);
+        assert!(
+            !recovery.pending,
+            "an old drop must not cause repeated redraws"
+        );
+        recovery.observe(false, 2);
+        recovery.observe(true, 3);
+        assert!(recovery.pending && recovery.next_at > Instant::now());
+        tokio::time::advance(REDRAW_INTERVAL).await;
+        assert!(recovery.pending && recovery.next_at <= Instant::now());
+        recovery.sent();
+        assert!(!recovery.pending);
     }
 
     #[test]
@@ -1193,6 +1483,82 @@ mod tests {
         assert!(session(id).await.is_err());
         assert!(*entry.cancel.borrow());
         assert!(entry.receiver.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn batched_keyboard_and_pointer_edges_share_one_ordered_fast_path_pdu() {
+        use ironrdp::pdu::input::fast_path::FastPathInput;
+
+        let (id, entry) = test_session().await;
+        let mut receiver = entry.receiver.lock().await.take().unwrap();
+        let key = |flags| DesktopInputEvent {
+            pointer: false,
+            code: 0x1d,
+            flags,
+            x: 0,
+            y: 0,
+        };
+        let click = |flags| DesktopInputEvent {
+            pointer: true,
+            code: 0,
+            flags,
+            x: 9,
+            y: 10,
+        };
+        input_batch(id, vec![key(2), click(0x9000), click(0x1000), key(3)])
+            .await
+            .unwrap();
+        disconnect(id).await;
+        let events = receiver.try_recv().unwrap();
+        assert!(receiver.try_recv().is_err());
+
+        let mut stage = ActiveStageBuilder {
+            static_channels: Default::default(),
+            user_channel_id: 1001,
+            io_channel_id: 1003,
+            message_channel_id: None,
+            share_id: 0,
+            compression_type: None,
+            enable_server_pointer: true,
+            pointer_software_rendering: false,
+        }
+        .build();
+        let mut image = crate::rdp::new_image(connector::DesktopSize {
+            width: 64,
+            height: 64,
+        })
+        .unwrap();
+        let mut held = HeldInputs::default();
+        let outputs = process_input(&mut stage, &mut image, &mut held, &events).unwrap();
+        let [ActiveStageOutput::ResponseFrame(bytes)] = outputs.as_slice() else {
+            panic!("expected one Fast-Path input PDU");
+        };
+        let input = decode::<FastPathInput>(bytes).unwrap();
+        assert!(matches!(input.input_events(), [
+            FastPathInputEvent::KeyboardEvent(KeyboardFlags::EXTENDED, 0x1d),
+            FastPathInputEvent::MouseEvent(down),
+            FastPathInputEvent::MouseEvent(up),
+            FastPathInputEvent::KeyboardEvent(release, 0x1d),
+        ] if down.flags == PointerFlags::LEFT_BUTTON | PointerFlags::DOWN
+            && up.flags == PointerFlags::LEFT_BUTTON
+            && (down.x_position, down.y_position) == (9, 10)
+            && *release == KeyboardFlags::EXTENDED | KeyboardFlags::RELEASE
+        ));
+        assert!(held.releases().is_empty());
+    }
+
+    #[tokio::test]
+    async fn worker_probe_requires_the_active_loop_to_ack_even_on_a_static_desktop() {
+        let (id, entry) = test_session().await;
+        let mut commands = entry.clipboard.receiver();
+        let awaiting = tokio::spawn(probe(id));
+        let Some(ClipboardCommand::Barrier(reply)) = commands.recv().await else {
+            panic!("the active loop must receive the probe");
+        };
+        assert!(!awaiting.is_finished());
+        reply.send(()).unwrap();
+        assert!(awaiting.await.unwrap().is_ok());
+        disconnect(id).await;
     }
 
     #[tokio::test]

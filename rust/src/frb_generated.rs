@@ -39,7 +39,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.13.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 724382544;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1979830763;
 
 // Section: executor
 
@@ -352,13 +352,20 @@ fn wire__crate__api__desktop__desktop_frame_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             let api_session_id = <u32>::sse_decode(&mut deserializer);
             let api_after_sequence = <u32>::sse_decode(&mut deserializer);
+            let api_sink = <StreamSink<
+                Option<crate::api::desktop::DesktopFrame>,
+                flutter_rust_bridge::for_generated::DcoCodec,
+            >>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
                     (move || async move {
-                        let output_ok =
-                            crate::api::desktop::desktop_frame(api_session_id, api_after_sequence)
-                                .await?;
+                        let output_ok = crate::api::desktop::desktop_frame(
+                            api_session_id,
+                            api_after_sequence,
+                            api_sink,
+                        )
+                        .await?;
                         std::result::Result::Ok(output_ok)
                     })()
                     .await,
@@ -504,6 +511,46 @@ fn wire__crate__api__desktop__desktop_input_impl(
         },
     )
 }
+fn wire__crate__api__desktop__desktop_input_batch_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "desktop_input_batch",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_session_id = <u32>::sse_decode(&mut deserializer);
+            let api_events =
+                <Vec<crate::api::desktop::DesktopInputEvent>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || async move {
+                        let output_ok =
+                            crate::api::desktop::desktop_input_batch(api_session_id, api_events)
+                                .await?;
+                        std::result::Result::Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__desktop__desktop_resize_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -539,6 +586,84 @@ fn wire__crate__api__desktop__desktop_resize_impl(
                             api_height,
                         )
                         .await?;
+                        std::result::Result::Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__desktop__desktop_worker_handshake_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "desktop_worker_handshake",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_session_id = <u32>::sse_decode(&mut deserializer);
+            let api_host = <String>::sse_decode(&mut deserializer);
+            let api_port = <u16>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || async move {
+                        let output_ok = crate::api::desktop::desktop_worker_handshake(
+                            api_session_id,
+                            api_host,
+                            api_port,
+                        )
+                        .await?;
+                        std::result::Result::Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__desktop__desktop_worker_open_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "desktop_worker_open",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || async move {
+                        let output_ok = crate::api::desktop::desktop_worker_open().await?;
                         std::result::Result::Ok(output_ok)
                     })()
                     .await,
@@ -2909,12 +3034,20 @@ fn wire__crate__api__vnc__vnc_frame_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             let api_session_id = <u32>::sse_decode(&mut deserializer);
             let api_after_sequence = <u32>::sse_decode(&mut deserializer);
+            let api_sink = <StreamSink<
+                Option<crate::api::desktop::DesktopFrame>,
+                flutter_rust_bridge::for_generated::DcoCodec,
+            >>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
                     (move || async move {
-                        let output_ok =
-                            crate::api::vnc::vnc_frame(api_session_id, api_after_sequence).await?;
+                        let output_ok = crate::api::vnc::vnc_frame(
+                            api_session_id,
+                            api_after_sequence,
+                            api_sink,
+                        )
+                        .await?;
                         std::result::Result::Ok(output_ok)
                     })()
                     .await,
@@ -2986,6 +3119,19 @@ impl SseDecode for flutter_rust_bridge::for_generated::anyhow::Error {
 }
 
 impl SseDecode for StreamSink<Vec<u8>, flutter_rust_bridge::for_generated::SseCodec> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <String>::sse_decode(deserializer);
+        return StreamSink::deserialize(inner);
+    }
+}
+
+impl SseDecode
+    for StreamSink<
+        Option<crate::api::desktop::DesktopFrame>,
+        flutter_rust_bridge::for_generated::DcoCodec,
+    >
+{
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut inner = <String>::sse_decode(deserializer);
@@ -3134,6 +3280,24 @@ impl SseDecode for crate::api::desktop::DesktopHandshake {
     }
 }
 
+impl SseDecode for crate::api::desktop::DesktopInputEvent {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_pointer = <bool>::sse_decode(deserializer);
+        let mut var_code = <u16>::sse_decode(deserializer);
+        let mut var_flags = <u16>::sse_decode(deserializer);
+        let mut var_x = <u16>::sse_decode(deserializer);
+        let mut var_y = <u16>::sse_decode(deserializer);
+        return crate::api::desktop::DesktopInputEvent {
+            pointer: var_pointer,
+            code: var_code,
+            flags: var_flags,
+            x: var_x,
+            y: var_y,
+        };
+    }
+}
+
 impl SseDecode for crate::api::desktop::DesktopTile {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -3150,6 +3314,18 @@ impl SseDecode for crate::api::desktop::DesktopTile {
             height: var_height,
             source_x: var_sourceX,
             source_y: var_sourceY,
+        };
+    }
+}
+
+impl SseDecode for crate::api::desktop::DesktopWorkerStarted {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_sessionId = <u32>::sse_decode(deserializer);
+        let mut var_processId = <u32>::sse_decode(deserializer);
+        return crate::api::desktop::DesktopWorkerStarted {
+            session_id: var_sessionId,
+            process_id: var_processId,
         };
     }
 }
@@ -3320,6 +3496,20 @@ impl SseDecode for Vec<String> {
         let mut ans_ = Vec::with_capacity(len_ as usize);
         for idx_ in 0..len_ {
             ans_.push(<String>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::desktop::DesktopInputEvent> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::desktop::DesktopInputEvent>::sse_decode(
+                deserializer,
+            ));
         }
         return ans_;
     }
@@ -3869,154 +4059,166 @@ fn pde_ffi_dispatcher_primary_impl(
             data_len,
         ),
         11 => wire__crate__api__desktop__desktop_input_impl(port, ptr, rust_vec_len, data_len),
-        12 => wire__crate__api__desktop__desktop_resize_impl(port, ptr, rust_vec_len, data_len),
-        13 => wire__crate__api__ssh__page_forward_create_impl(port, ptr, rust_vec_len, data_len),
-        14 => {
+        12 => {
+            wire__crate__api__desktop__desktop_input_batch_impl(port, ptr, rust_vec_len, data_len)
+        }
+        13 => wire__crate__api__desktop__desktop_resize_impl(port, ptr, rust_vec_len, data_len),
+        14 => wire__crate__api__desktop__desktop_worker_handshake_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        15 => {
+            wire__crate__api__desktop__desktop_worker_open_impl(port, ptr, rust_vec_len, data_len)
+        }
+        16 => wire__crate__api__ssh__page_forward_create_impl(port, ptr, rust_vec_len, data_len),
+        17 => {
             wire__crate__api__ssh__page_forward_disconnect_impl(port, ptr, rust_vec_len, data_len)
         }
-        15 => {
+        18 => {
             wire__crate__api__ssh__page_start_port_forwards_impl(port, ptr, rust_vec_len, data_len)
         }
-        16 => wire__crate__api__proxy__proxy_start_impl(port, ptr, rust_vec_len, data_len),
-        17 => wire__crate__api__proxy__proxy_stop_impl(port, ptr, rust_vec_len, data_len),
-        18 => wire__crate__api__proxy__proxy_traffic_impl(port, ptr, rust_vec_len, data_len),
-        19 => wire__crate__api__proxy__proxy_update_rules_impl(port, ptr, rust_vec_len, data_len),
-        20 => wire__crate__api__proxy__proxy_wait_impl(port, ptr, rust_vec_len, data_len),
-        21 => wire__crate__api__ssh__sftp_cancel_transfer_impl(port, ptr, rust_vec_len, data_len),
-        22 => wire__crate__api__ssh__sftp_canonicalize_impl(port, ptr, rust_vec_len, data_len),
-        23 => wire__crate__api__ssh__sftp_download_impl(port, ptr, rust_vec_len, data_len),
-        24 => wire__crate__api__ssh__sftp_list_dir_impl(port, ptr, rust_vec_len, data_len),
-        25 => wire__crate__api__ssh__sftp_mkdir_impl(port, ptr, rust_vec_len, data_len),
-        26 => wire__crate__api__ssh__sftp_read_text_impl(port, ptr, rust_vec_len, data_len),
-        27 => wire__crate__api__ssh__sftp_remove_impl(port, ptr, rust_vec_len, data_len),
-        28 => wire__crate__api__ssh__sftp_rename_impl(port, ptr, rust_vec_len, data_len),
-        29 => wire__crate__api__ssh__sftp_save_text_impl(port, ptr, rust_vec_len, data_len),
-        30 => wire__crate__api__ssh__sftp_upload_impl(port, ptr, rust_vec_len, data_len),
-        31 => wire__crate__api__firewall__ssh_add_firewall_rules_impl(
+        19 => wire__crate__api__proxy__proxy_start_impl(port, ptr, rust_vec_len, data_len),
+        20 => wire__crate__api__proxy__proxy_stop_impl(port, ptr, rust_vec_len, data_len),
+        21 => wire__crate__api__proxy__proxy_traffic_impl(port, ptr, rust_vec_len, data_len),
+        22 => wire__crate__api__proxy__proxy_update_rules_impl(port, ptr, rust_vec_len, data_len),
+        23 => wire__crate__api__proxy__proxy_wait_impl(port, ptr, rust_vec_len, data_len),
+        24 => wire__crate__api__ssh__sftp_cancel_transfer_impl(port, ptr, rust_vec_len, data_len),
+        25 => wire__crate__api__ssh__sftp_canonicalize_impl(port, ptr, rust_vec_len, data_len),
+        26 => wire__crate__api__ssh__sftp_download_impl(port, ptr, rust_vec_len, data_len),
+        27 => wire__crate__api__ssh__sftp_list_dir_impl(port, ptr, rust_vec_len, data_len),
+        28 => wire__crate__api__ssh__sftp_mkdir_impl(port, ptr, rust_vec_len, data_len),
+        29 => wire__crate__api__ssh__sftp_read_text_impl(port, ptr, rust_vec_len, data_len),
+        30 => wire__crate__api__ssh__sftp_remove_impl(port, ptr, rust_vec_len, data_len),
+        31 => wire__crate__api__ssh__sftp_rename_impl(port, ptr, rust_vec_len, data_len),
+        32 => wire__crate__api__ssh__sftp_save_text_impl(port, ptr, rust_vec_len, data_len),
+        33 => wire__crate__api__ssh__sftp_upload_impl(port, ptr, rust_vec_len, data_len),
+        34 => wire__crate__api__firewall__ssh_add_firewall_rules_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        32 => wire__crate__api__ssh__ssh_authenticate_impl(port, ptr, rust_vec_len, data_len),
-        33 => wire__crate__api__ssh__ssh_authenticate_private_key_impl(
+        35 => wire__crate__api__ssh__ssh_authenticate_impl(port, ptr, rust_vec_len, data_len),
+        36 => wire__crate__api__ssh__ssh_authenticate_private_key_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        34 => {
+        37 => {
             wire__crate__api__docker__ssh_close_docker_logs_impl(port, ptr, rust_vec_len, data_len)
         }
-        35 => wire__crate__api__firewall__ssh_delete_firewall_rule_impl(
+        38 => wire__crate__api__firewall__ssh_delete_firewall_rule_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        36 => wire__crate__api__ssh__ssh_disconnect_impl(port, ptr, rust_vec_len, data_len),
-        37 => wire__crate__api__agent_ops__ssh_exec_cancel_impl(port, ptr, rust_vec_len, data_len),
-        38 => wire__crate__api__agent_ops__ssh_exec_stream_impl(port, ptr, rust_vec_len, data_len),
-        39 => wire__crate__api__ssh__ssh_handshake_impl(port, ptr, rust_vec_len, data_len),
-        40 => {
+        39 => wire__crate__api__ssh__ssh_disconnect_impl(port, ptr, rust_vec_len, data_len),
+        40 => wire__crate__api__agent_ops__ssh_exec_cancel_impl(port, ptr, rust_vec_len, data_len),
+        41 => wire__crate__api__agent_ops__ssh_exec_stream_impl(port, ptr, rust_vec_len, data_len),
+        42 => wire__crate__api__ssh__ssh_handshake_impl(port, ptr, rust_vec_len, data_len),
+        43 => {
             wire__crate__api__ssh__ssh_handshake_via_gateway_impl(port, ptr, rust_vec_len, data_len)
         }
-        41 => wire__crate__api__ssh__ssh_handshake_via_page_impl(port, ptr, rust_vec_len, data_len),
-        42 => {
+        44 => wire__crate__api__ssh__ssh_handshake_via_page_impl(port, ptr, rust_vec_len, data_len),
+        45 => {
             wire__crate__api__docker__ssh_open_docker_logs_impl(port, ptr, rust_vec_len, data_len)
         }
-        43 => wire__crate__api__docker__ssh_read_docker_details_impl(
+        46 => wire__crate__api__docker__ssh_read_docker_details_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        44 => wire__crate__api__docker__ssh_read_docker_resources_impl(
+        47 => wire__crate__api__docker__ssh_read_docker_resources_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        45 => wire__crate__api__firewall__ssh_read_firewall_impl(port, ptr, rust_vec_len, data_len),
-        46 => wire__crate__api__network_ports__ssh_read_network_ports_impl(
+        48 => wire__crate__api__firewall__ssh_read_firewall_impl(port, ptr, rust_vec_len, data_len),
+        49 => wire__crate__api__network_ports__ssh_read_network_ports_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        47 => {
+        50 => {
             wire__crate__api__ssh__ssh_read_process_details_impl(port, ptr, rust_vec_len, data_len)
         }
-        48 => wire__crate__api__ssh__ssh_read_processes_impl(port, ptr, rust_vec_len, data_len),
-        49 => wire__crate__api__agent_ops__ssh_read_remote_text_impl(
+        51 => wire__crate__api__ssh__ssh_read_processes_impl(port, ptr, rust_vec_len, data_len),
+        52 => wire__crate__api__agent_ops__ssh_read_remote_text_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        50 => wire__crate__api__agent_ops__ssh_read_server_profile_impl(
+        53 => wire__crate__api__agent_ops__ssh_read_server_profile_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        51 => wire__crate__api__ssh__ssh_read_server_status_impl(port, ptr, rust_vec_len, data_len),
-        52 => wire__crate__api__ssh__ssh_resize_impl(port, ptr, rust_vec_len, data_len),
-        53 => wire__crate__api__agent_ops__ssh_restore_remote_backup_impl(
+        54 => wire__crate__api__ssh__ssh_read_server_status_impl(port, ptr, rust_vec_len, data_len),
+        55 => wire__crate__api__ssh__ssh_resize_impl(port, ptr, rust_vec_len, data_len),
+        56 => wire__crate__api__agent_ops__ssh_restore_remote_backup_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        54 => wire__crate__api__docker__ssh_run_docker_compose_action_impl(
+        57 => wire__crate__api__docker__ssh_run_docker_compose_action_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        55 => wire__crate__api__docker__ssh_run_docker_container_action_impl(
+        58 => wire__crate__api__docker__ssh_run_docker_container_action_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        56 => wire__crate__api__docker__ssh_run_docker_image_action_impl(
+        59 => wire__crate__api__docker__ssh_run_docker_image_action_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        57 => wire__crate__api__firewall__ssh_run_firewall_service_action_impl(
+        60 => wire__crate__api__firewall__ssh_run_firewall_service_action_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        58 => {
+        61 => {
             wire__crate__api__ssh__ssh_start_docker_terminal_impl(port, ptr, rust_vec_len, data_len)
         }
-        59 => {
+        62 => {
             wire__crate__api__ssh__ssh_start_port_forwards_impl(port, ptr, rust_vec_len, data_len)
         }
-        60 => wire__crate__api__ssh__ssh_start_terminal_impl(port, ptr, rust_vec_len, data_len),
-        61 => {
+        63 => wire__crate__api__ssh__ssh_start_terminal_impl(port, ptr, rust_vec_len, data_len),
+        64 => {
             wire__crate__api__docker__ssh_stream_docker_logs_impl(port, ptr, rust_vec_len, data_len)
         }
-        63 => wire__crate__api__ssh__ssh_terminate_process_impl(port, ptr, rust_vec_len, data_len),
-        64 => {
+        66 => wire__crate__api__ssh__ssh_terminate_process_impl(port, ptr, rust_vec_len, data_len),
+        67 => {
             wire__crate__api__ssh__ssh_validate_private_key_impl(port, ptr, rust_vec_len, data_len)
         }
-        65 => wire__crate__api__ssh__ssh_write_impl(port, ptr, rust_vec_len, data_len),
-        66 => wire__crate__api__agent_ops__ssh_write_remote_text_impl(
+        68 => wire__crate__api__ssh__ssh_write_impl(port, ptr, rust_vec_len, data_len),
+        69 => wire__crate__api__agent_ops__ssh_write_remote_text_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        67 => wire__crate__api__vnc__vnc_connect_impl(port, ptr, rust_vec_len, data_len),
-        68 => wire__crate__api__vnc__vnc_disconnect_impl(port, ptr, rust_vec_len, data_len),
-        69 => wire__crate__api__vnc__vnc_frame_impl(port, ptr, rust_vec_len, data_len),
-        70 => wire__crate__api__vnc__vnc_input_impl(port, ptr, rust_vec_len, data_len),
+        70 => wire__crate__api__vnc__vnc_connect_impl(port, ptr, rust_vec_len, data_len),
+        71 => wire__crate__api__vnc__vnc_disconnect_impl(port, ptr, rust_vec_len, data_len),
+        72 => wire__crate__api__vnc__vnc_frame_impl(port, ptr, rust_vec_len, data_len),
+        73 => wire__crate__api__vnc__vnc_input_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -4029,7 +4231,7 @@ fn pde_ffi_dispatcher_sync_impl(
 ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
-        62 => wire__crate__api__ssh__ssh_terminal_ack_impl(ptr, rust_vec_len, data_len),
+        65 => wire__crate__api__ssh__ssh_terminal_ack_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -4137,6 +4339,30 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::desktop::DesktopHandshake>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::desktop::DesktopInputEvent {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.pointer.into_into_dart().into_dart(),
+            self.code.into_into_dart().into_dart(),
+            self.flags.into_into_dart().into_dart(),
+            self.x.into_into_dart().into_dart(),
+            self.y.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::desktop::DesktopInputEvent
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::desktop::DesktopInputEvent>
+    for crate::api::desktop::DesktopInputEvent
+{
+    fn into_into_dart(self) -> crate::api::desktop::DesktopInputEvent {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::desktop::DesktopTile {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -4158,6 +4384,27 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::desktop::DesktopTile>
     for crate::api::desktop::DesktopTile
 {
     fn into_into_dart(self) -> crate::api::desktop::DesktopTile {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::desktop::DesktopWorkerStarted {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.session_id.into_into_dart().into_dart(),
+            self.process_id.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::desktop::DesktopWorkerStarted
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::desktop::DesktopWorkerStarted>
+    for crate::api::desktop::DesktopWorkerStarted
+{
+    fn into_into_dart(self) -> crate::api::desktop::DesktopWorkerStarted {
         self
     }
 }
@@ -4721,6 +4968,18 @@ impl SseEncode for StreamSink<Vec<u8>, flutter_rust_bridge::for_generated::SseCo
 }
 
 impl SseEncode
+    for StreamSink<
+        Option<crate::api::desktop::DesktopFrame>,
+        flutter_rust_bridge::for_generated::DcoCodec,
+    >
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        unimplemented!("")
+    }
+}
+
+impl SseEncode
     for StreamSink<crate::api::ssh::PortForwardEvent, flutter_rust_bridge::for_generated::SseCodec>
 {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -4824,6 +5083,17 @@ impl SseEncode for crate::api::desktop::DesktopHandshake {
     }
 }
 
+impl SseEncode for crate::api::desktop::DesktopInputEvent {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.pointer, serializer);
+        <u16>::sse_encode(self.code, serializer);
+        <u16>::sse_encode(self.flags, serializer);
+        <u16>::sse_encode(self.x, serializer);
+        <u16>::sse_encode(self.y, serializer);
+    }
+}
+
 impl SseEncode for crate::api::desktop::DesktopTile {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -4833,6 +5103,14 @@ impl SseEncode for crate::api::desktop::DesktopTile {
         <u16>::sse_encode(self.height, serializer);
         <u16>::sse_encode(self.source_x, serializer);
         <u16>::sse_encode(self.source_y, serializer);
+    }
+}
+
+impl SseEncode for crate::api::desktop::DesktopWorkerStarted {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <u32>::sse_encode(self.session_id, serializer);
+        <u32>::sse_encode(self.process_id, serializer);
     }
 }
 
@@ -5018,6 +5296,16 @@ impl SseEncode for Vec<String> {
         <i32>::sse_encode(self.len() as _, serializer);
         for item in self {
             <String>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::desktop::DesktopInputEvent> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::desktop::DesktopInputEvent>::sse_encode(item, serializer);
         }
     }
 }

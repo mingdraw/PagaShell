@@ -42,8 +42,9 @@ class _PreviousCompositor {
     previous?.dispose();
   }
 
-  void paint(ui.Canvas canvas) =>
-      canvas.drawImage(image!, Offset.zero, ui.Paint());
+  final _paint = ui.Paint()..filterQuality = ui.FilterQuality.low;
+
+  void paint(ui.Canvas canvas) => canvas.drawImage(image!, Offset.zero, _paint);
   void dispose() => image?.dispose();
 }
 
@@ -79,6 +80,9 @@ RdpFrame _nativeAtlas(
             (x, y),
       ];
   final complete = coordinates.length == 70;
+  if (complete) {
+    return RdpFrame(width: 1280, height: 800, rgba: full);
+  }
   final candidates =
       [
         for (
@@ -98,26 +102,22 @@ RdpFrame _nativeAtlas(
         return shape != 0 ? shape : b.compareTo(a);
       });
   final columns = candidates.first;
-  final bitmapWidth = complete ? 1280 : columns * 130;
-  final bitmapHeight = complete
-      ? 800
-      : ((coordinates.length + columns - 1) ~/ columns) * 130;
-  final pixels = complete ? full : Uint8List(bitmapWidth * bitmapHeight * 4);
+  final bitmapWidth = columns * 130;
+  final bitmapHeight = ((coordinates.length + columns - 1) ~/ columns) * 130;
+  final pixels = Uint8List(bitmapWidth * bitmapHeight * 4);
   final tiles = <RdpTile>[];
   for (var i = 0; i < coordinates.length; i++) {
     final (x, y) = coordinates[i];
     final width = (1280 - x).clamp(0, 128);
     final height = (800 - y).clamp(0, 128);
-    final sourceX = complete ? x : (i % columns) * 130 + 1;
-    final sourceY = complete ? y : (i ~/ columns) * 130 + 1;
-    if (!complete) {
-      for (var row = -1; row <= height; row++) {
-        for (var col = -1; col <= width; col++) {
-          final from =
-              ((y + row).clamp(0, 799) * 1280 + (x + col).clamp(0, 1279)) * 4;
-          final to = ((sourceY + row) * bitmapWidth + sourceX + col) * 4;
-          pixels.setRange(to, to + 4, full, from);
-        }
+    final sourceX = (i % columns) * 130 + 1;
+    final sourceY = (i ~/ columns) * 130 + 1;
+    for (var row = -1; row <= height; row++) {
+      for (var col = -1; col <= width; col++) {
+        final from =
+            ((y + row).clamp(0, 799) * 1280 + (x + col).clamp(0, 1279)) * 4;
+        final to = ((sourceY + row) * bitmapWidth + sourceX + col) * 4;
+        pixels.setRange(to, to + 4, full, from);
       }
     }
     tiles.add(
@@ -166,16 +166,28 @@ Uint8List _sparsePixels(Uint8List initial, int value) {
   return pixels;
 }
 
-Future<void> _render(void Function(ui.Canvas) paint) async {
+Future<void> _render(void Function(ui.Canvas) paint, double scale) async {
   final recorder = ui.PictureRecorder();
-  paint(ui.Canvas(recorder));
+  paint(ui.Canvas(recorder)..scale(scale));
   final picture = recorder.endRecording();
   try {
-    final image = await picture.toImage(1280, 800);
+    final image = await picture.toImage(
+      (1280 * scale).round(),
+      (800 * scale).round(),
+    );
     image.dispose();
   } finally {
     picture.dispose();
   }
+}
+
+Map<String, int> _timings(List<int> micros) {
+  micros.sort();
+  return {
+    'total_us': micros.fold(0, (total, sample) => total + sample),
+    'p50_us': micros[(micros.length * 0.50).ceil() - 1],
+    'p95_us': micros[(micros.length * 0.95).ceil() - 1],
+  };
 }
 
 void main() {
@@ -197,20 +209,33 @@ void main() {
         rgba: _pixels(1280, 800, 0),
       );
       for (final scenario in [
-        (128, 128, 'localized'),
-        (1024, 512, 'scrolling'),
-        (1280, 800, 'full'),
-        (1201, 731, 'sparse'),
+        (128, 128, 'localized', 1.0),
+        (1024, 512, 'scrolling', 1.0),
+        (1280, 800, 'full', 1.0),
+        (1201, 731, 'sparse', 1.0),
+        (1024, 512, 'scaled_scrolling', 0.375),
+        (128, 128, 'rotating_tiles', 1.0),
       ]) {
-        final (width, height, name) = scenario;
+        final (width, height, name, scale) = scenario;
+        final rotating = name == 'rotating_tiles';
         final frames = [
-          for (final value in [64, 192])
+          for (var index = 0; index < (rotating ? 20 : 2); index++)
             () {
+              final value = index.isEven ? 64 : 192;
               final previous = RdpFrame(
                 width: 1280,
                 height: 800,
-                x: name == 'sparse' ? 10 : (width == 1280 ? 0 : 128),
-                y: name == 'sparse' ? 20 : 0,
+                x: switch (name) {
+                  'rotating_tiles' => index % 10 * 128,
+                  'sparse' => 10,
+                  'full' => 0,
+                  _ => 128,
+                },
+                y: switch (name) {
+                  'rotating_tiles' => index ~/ 10 * 128,
+                  'sparse' => 20,
+                  _ => 0,
+                },
                 patchWidth: width,
                 patchHeight: height,
                 rgba: name == 'sparse'
@@ -234,49 +259,56 @@ void main() {
           await surface.apply(initial);
           // Warm both paths, then alternate measurement order across rounds.
           for (var i = 0; i < 4; i++) {
-            await previous.apply(frames[i % 2].previous);
-            await _render(previous.paint);
-            await surface.apply(frames[i % 2].atlas);
-            await _render(surface.paint);
+            await previous.apply(frames[i % frames.length].previous);
+            await _render(previous.paint, scale);
+            await surface.apply(frames[i % frames.length].atlas);
+            await _render(surface.paint, scale);
           }
           const rounds = 4;
           const updatesPerRound = 20;
-          var previousUs = 0;
-          var atlasUs = 0;
+          final previousUs = <int>[];
+          final atlasUs = <int>[];
+          final compactingUs = <int>[];
           final started = DateTime.now().toUtc();
           for (var round = 0; round < rounds; round++) {
             for (final useAtlas
                 in round.isEven ? [false, true] : [true, false]) {
-              final clock = Stopwatch()..start();
               for (var i = 0; i < updatesPerRound; i++) {
+                final compactionsBefore = surface.compactions;
+                final update = frames[i % frames.length];
+                final clock = Stopwatch()..start();
                 if (useAtlas) {
-                  await surface.apply(frames[i % 2].atlas);
-                  await _render(surface.paint);
+                  await surface.apply(update.atlas);
+                  await _render(surface.paint, scale);
+                  atlasUs.add(clock.elapsedMicroseconds);
+                  if (surface.compactions != compactionsBefore) {
+                    compactingUs.add(atlasUs.last);
+                  }
                 } else {
-                  await previous.apply(frames[i % 2].previous);
-                  await _render(previous.paint);
+                  await previous.apply(update.previous);
+                  await _render(previous.paint, scale);
+                  previousUs.add(clock.elapsedMicroseconds);
                 }
-              }
-              clock.stop();
-              if (useAtlas) {
-                atlasUs += clock.elapsedMicroseconds;
-              } else {
-                previousUs += clock.elapsedMicroseconds;
               }
             }
           }
           reports.add({
             'scenario': name,
+            'scale': scale,
             'updates_per_path': rounds * updatesPerRound,
             'started_utc': started.toIso8601String(),
             'finished_utc': DateTime.now().toUtc().toIso8601String(),
-            'previous_us': previousUs,
-            'atlas_us': atlasUs,
+            'previous': _timings(previousUs),
+            'atlas': _timings(atlasUs),
+            'atlas_compacting': compactingUs.isEmpty
+                ? {}
+                : _timings(compactingUs),
             'previous_bytes_per_update': frames[0].previous.rgba.length,
             'atlas_bytes_per_update': frames[0].atlas.rgba.length,
             'compactions': surface.compactions,
             'retained_pixels': surface.retainedPixels,
           });
+          if (rotating) expect(compactingUs, isNotEmpty);
         } finally {
           previous.dispose();
           surface.dispose();
@@ -285,6 +317,6 @@ void main() {
     });
     binding.reportData = {'rdp_rendering': reports};
     debugPrint('RDP_RENDERING_BENCHMARK ${jsonEncode(reports)}');
-    expect(reports, hasLength(4));
+    expect(reports, hasLength(6));
   });
 }

@@ -41,6 +41,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  RustStreamSink<DesktopFrame?>
+  dco_decode_StreamSink_opt_box_autoadd_desktop_frame_Dco(dynamic raw);
+
+  @protected
   RustStreamSink<PortForwardEvent> dco_decode_StreamSink_port_forward_event_Sse(
     dynamic raw,
   );
@@ -114,7 +118,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DesktopHandshake dco_decode_desktop_handshake(dynamic raw);
 
   @protected
+  DesktopInputEvent dco_decode_desktop_input_event(dynamic raw);
+
+  @protected
   DesktopTile dco_decode_desktop_tile(dynamic raw);
+
+  @protected
+  DesktopWorkerStarted dco_decode_desktop_worker_started(dynamic raw);
 
   @protected
   DockerComposeAction dco_decode_docker_compose_action(dynamic raw);
@@ -156,6 +166,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<String> dco_decode_list_String(dynamic raw);
+
+  @protected
+  List<DesktopInputEvent> dco_decode_list_desktop_input_event(dynamic raw);
 
   @protected
   List<DesktopTile> dco_decode_list_desktop_tile(dynamic raw);
@@ -282,6 +295,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  RustStreamSink<DesktopFrame?>
+  sse_decode_StreamSink_opt_box_autoadd_desktop_frame_Dco(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   RustStreamSink<PortForwardEvent> sse_decode_StreamSink_port_forward_event_Sse(
     SseDeserializer deserializer,
   );
@@ -367,7 +386,17 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DesktopHandshake sse_decode_desktop_handshake(SseDeserializer deserializer);
 
   @protected
+  DesktopInputEvent sse_decode_desktop_input_event(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   DesktopTile sse_decode_desktop_tile(SseDeserializer deserializer);
+
+  @protected
+  DesktopWorkerStarted sse_decode_desktop_worker_started(
+    SseDeserializer deserializer,
+  );
 
   @protected
   DockerComposeAction sse_decode_docker_compose_action(
@@ -423,6 +452,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<String> sse_decode_list_String(SseDeserializer deserializer);
+
+  @protected
+  List<DesktopInputEvent> sse_decode_list_desktop_input_event(
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<DesktopTile> sse_decode_list_desktop_tile(SseDeserializer deserializer);
@@ -573,6 +607,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_StreamSink_opt_box_autoadd_desktop_frame_Dco(
+    RustStreamSink<DesktopFrame?> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_StreamSink_port_forward_event_Sse(
     RustStreamSink<PortForwardEvent> self,
     SseSerializer serializer,
@@ -675,7 +715,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_desktop_input_event(
+    DesktopInputEvent self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_desktop_tile(DesktopTile self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_desktop_worker_started(
+    DesktopWorkerStarted self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_docker_compose_action(
@@ -745,6 +797,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_list_String(List<String> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_desktop_input_event(
+    List<DesktopInputEvent> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_desktop_tile(

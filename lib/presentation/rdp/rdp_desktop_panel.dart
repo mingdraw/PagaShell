@@ -103,7 +103,7 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _inputs = RdpInputQueue(onError: _fail);
+    _inputs = RdpInputQueue(onError: _fail, sendBatch: _writeInputs);
     _frames = widget.session.frames
         .asyncMap(_decode)
         .listen(
@@ -201,10 +201,39 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     );
   }
 
-  void _send(Future<void> Function() action, {bool movement = false}) {
+  void _send(Future<void> Function() action) {
     if (_failed) return;
-    _inputs.add(action, movement: movement);
+    _inputs.add(action);
   }
+
+  Future<void> _writeInputs(List<RdpInputEvent> events) async {
+    if (_failed) return;
+    final session = widget.session;
+    if (session is RdpBatchInputSession) {
+      await session.inputBatch(events);
+    } else {
+      for (final event in events) {
+        if (_failed) return;
+        await switch (event) {
+          RdpKeyInput() => session.key(
+            event.scanCode,
+            down: event.down,
+            extended: event.extended,
+          ),
+          RdpPointerInput() => session.pointer(
+            event.x,
+            event.y,
+            event.flags,
+            wheel: event.wheel,
+          ),
+        };
+      }
+    }
+  }
+
+  void _sendScan(int scan, {required bool down}) => _inputs.addEvent(
+    RdpKeyInput(scan & 0xff, down: down, extended: scan > 255),
+  );
 
   void _syncFrames() {
     final paused = !widget.active || !_appResumed || !workspaceVisible;
@@ -283,10 +312,7 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
       _vncPressed.clear();
     }
     for (final scan in _pressed.toList()) {
-      _send(
-        () =>
-            widget.session.key(scan & 0xff, down: false, extended: scan > 255),
-      );
+      _sendScan(scan, down: false);
     }
     _pressed.clear();
     for (final button in _buttons.toList()) {
@@ -307,10 +333,7 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
           _macMeta.remove(physical);
           final scan = rdpScanCode(physical)!;
           if (_pressed.remove(scan)) {
-            _send(
-              () =>
-                  widget.session.key(scan & 0xff, down: false, extended: true),
-            );
+            _sendScan(scan, down: false);
           }
         } else {
           _macMeta.add(physical);
@@ -337,19 +360,19 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
           if (physical == PhysicalKeyboardKey.keyV) {
             if (!await _clipboard!.syncBeforePaste()) return;
           }
-          await widget.session.key(0x1d, down: true);
-          await widget.session.key(scan, down: true);
-          await widget.session.key(scan, down: false);
-          await widget.session.key(0x1d, down: false);
+          await _writeInputs([
+            const RdpKeyInput(0x1d, down: true),
+            RdpKeyInput(scan, down: true),
+            RdpKeyInput(scan, down: false),
+            const RdpKeyInput(0x1d, down: false),
+          ]);
         });
         return KeyEventResult.handled;
       }
       for (final meta in _macMeta) {
         final scan = rdpScanCode(meta)!;
         if (_pressed.add(scan)) {
-          _send(
-            () => widget.session.key(scan & 0xff, down: true, extended: true),
-          );
+          _sendScan(scan, down: true);
         }
       }
     }
@@ -395,12 +418,17 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
         down &&
         event.physicalKey == PhysicalKeyboardKey.keyV &&
         HardwareKeyboard.instance.isControlPressed;
-    _send(() async {
-      if (paste && _clipboard != null) {
-        if (!await _clipboard!.syncBeforePaste()) return;
-      }
-      await widget.session.key(scan & 0xff, down: down, extended: scan > 255);
-    });
+    final clipboard = _clipboard;
+    if (paste && clipboard != null) {
+      _send(() async {
+        if (!await clipboard.syncBeforePaste()) return;
+        await _writeInputs([
+          RdpKeyInput(scan & 0xff, down: down, extended: scan > 255),
+        ]);
+      });
+    } else {
+      _sendScan(scan, down: down);
+    }
     return KeyEventResult.handled;
   }
 
@@ -409,7 +437,7 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     if (!image.hasImage) return;
     final x = position.dx.round().clamp(0, image.width - 1);
     final y = position.dy.round().clamp(0, image.height - 1);
-    _send(() => widget.session.pointer(x, y, flags), movement: flags == 0x0800);
+    _inputs.addEvent(RdpPointerInput(x, y, flags));
   }
 
   void _flushMove() {
@@ -430,20 +458,25 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     if (_failed || !_surface.hasImage) return;
     final x = _wheelPosition.dx.round().clamp(0, _surface.width - 1);
     final y = _wheelPosition.dy.round().clamp(0, _surface.height - 1);
-    final session = widget.session;
     _inputs.addWheel(dx, dy, (horizontal, vertical) async {
+      var events = <RdpInputEvent>[];
       Future<void> sendAxis(int delta, int axis) async {
         final flags = axis | (delta > 0 ? 0x0100 : 0);
         var remaining = delta.abs();
         while (remaining > 0 && !_failed) {
           final step = math.min(remaining, 255);
-          await session.pointer(x, y, flags, wheel: step);
+          events.add(RdpPointerInput(x, y, flags, wheel: step));
+          if (events.length == RdpInputQueue.maxBatchSize) {
+            await _writeInputs(events);
+            events = [];
+          }
           remaining -= step;
         }
       }
 
       await sendAxis(vertical, 0x0200);
       await sendAxis(horizontal, 0x0400);
+      if (events.isNotEmpty) await _writeInputs(events);
     });
   }
 
@@ -618,15 +651,10 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
       return;
     }
     for (final scan in [0x1d, 0x38, 0x153]) {
-      _send(
-        () => widget.session.key(scan & 0xff, down: true, extended: scan > 255),
-      );
+      _sendScan(scan, down: true);
     }
     for (final scan in [0x153, 0x38, 0x1d]) {
-      _send(
-        () =>
-            widget.session.key(scan & 0xff, down: false, extended: scan > 255),
-      );
+      _sendScan(scan, down: false);
     }
     _focus.requestFocus();
   }
@@ -920,11 +948,6 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
                       _scheduleAutomaticResize();
                     }
                   }
-                  final dpr = MediaQuery.devicePixelRatioOf(context);
-                  final downscaled =
-                      !_originalSize &&
-                      (image.width > constraints.maxWidth * dpr ||
-                          image.height > constraints.maxHeight * dpr);
                   return Focus(
                     focusNode: _focus,
                     onKeyEvent: _key,
@@ -986,9 +1009,6 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
                                                 ),
                                                 painter: RdpSurfacePainter(
                                                   _surface,
-                                                  filterQuality: downscaled
-                                                      ? ui.FilterQuality.medium
-                                                      : ui.FilterQuality.low,
                                                 ),
                                                 isComplex: true,
                                                 willChange: true,

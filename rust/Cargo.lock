@@ -3030,6 +3030,7 @@ dependencies = [
  "tracing",
  "unicode-width",
  "vnc-rs",
+ "windows-sys 0.61.2",
  "x509-cert 0.2.5",
 ]
 

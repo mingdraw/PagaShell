@@ -66,9 +66,14 @@ class RdpSurface extends ChangeNotifier {
   int height = 0;
   int generation = 0;
   int compactions = 0;
+  _Atlas? _fullAtlas;
   List<_Tile?> _tiles = [];
   final Set<_Atlas> _atlases = {};
   List<_AtlasBatch> _batches = [];
+  // The packed atlas has a one-pixel gutter for bilinear sampling only.
+  final _paint = ui.Paint()
+    ..filterQuality = ui.FilterQuality.low
+    ..isAntiAlias = false;
   bool _disposed = false;
 
   int get retainedPixels =>
@@ -89,6 +94,12 @@ class RdpSurface extends ChangeNotifier {
       if (frame.tiles.isNotEmpty) throw _invalidFrame;
       return;
     }
+    final full =
+        frame.tiles.isEmpty &&
+        frame.x == 0 &&
+        frame.y == 0 &&
+        frame.patchWidth == frame.width &&
+        frame.patchHeight == frame.height;
     final regions = frame.tiles.isEmpty
         ? [
             RdpTile(
@@ -123,12 +134,21 @@ class RdpSurface extends ChangeNotifier {
       );
       created.add(atlas);
       if (_disposed) return;
+      if (full) {
+        width = frame.width;
+        height = frame.height;
+        _setFullAtlas(atlas);
+        transferred = true;
+        generation++;
+        notifyListeners();
+        return;
+      }
       final resized = width != frame.width || height != frame.height;
       final columns = (frame.width + _tileSize - 1) ~/ _tileSize;
       final rows = (frame.height + _tileSize - 1) ~/ _tileSize;
       final next = resized
           ? List<_Tile?>.filled(columns * rows, null)
-          : List<_Tile?>.of(_tiles);
+          : _copyTiles(columns, rows);
       for (final region in regions) {
         final target = Rect.fromLTWH(
           region.x.toDouble(),
@@ -209,6 +229,7 @@ class RdpSurface extends ChangeNotifier {
       if (next.any((tile) => tile == null)) throw _invalidFrame;
       width = frame.width;
       height = frame.height;
+      _fullAtlas = null;
       _tiles = next;
       _atlases.addAll(created);
       transferred = true;
@@ -229,6 +250,34 @@ class RdpSurface extends ChangeNotifier {
         }
       }
     }
+  }
+
+  List<_Tile?> _copyTiles(int columns, int rows) {
+    final full = _fullAtlas;
+    if (full == null) return List<_Tile?>.of(_tiles);
+    return List<_Tile?>.generate(columns * rows, (index) {
+      final x = index % columns * _tileSize;
+      final y = index ~/ columns * _tileSize;
+      final rect = Rect.fromLTWH(
+        x.toDouble(),
+        y.toDouble(),
+        math.min(_tileSize, width - x).toDouble(),
+        math.min(_tileSize, height - y).toDouble(),
+      );
+      return _Tile(full, rect, rect);
+    });
+  }
+
+  void _setFullAtlas(_Atlas atlas) {
+    for (final previous in _atlases) {
+      previous.image.dispose();
+    }
+    _atlases
+      ..clear()
+      ..add(atlas);
+    _fullAtlas = atlas;
+    _tiles = [];
+    _batches = [];
   }
 
   void _releaseUnused() {
@@ -268,34 +317,15 @@ class RdpSurface extends ChangeNotifier {
       image.dispose();
       return;
     }
-    final atlas = _Atlas(image);
-    _tiles = [
-      for (final tile in _tiles)
-        _Tile(atlas, tile!.destination, tile.destination),
-    ];
-    _atlases.add(atlas);
-    _releaseUnused();
-    _rebuildBatches();
+    _setFullAtlas(_Atlas(image));
     compactions++;
   }
 
-  void paint(
-    ui.Canvas canvas, {
-    FilterQuality filterQuality = FilterQuality.low,
-  }) {
-    final paint = ui.Paint()
-      ..filterQuality = filterQuality
-      ..isAntiAlias = false;
-    if (_atlases.length == 1) {
-      final image = _atlases.single.image;
-      if (image.width == width &&
-          image.height == height &&
-          _tiles.every(
-            (tile) => tile != null && tile.source == tile.destination,
-          )) {
-        canvas.drawImage(image, Offset.zero, paint);
-        return;
-      }
+  void paint(ui.Canvas canvas) {
+    final full = _fullAtlas;
+    if (full != null) {
+      canvas.drawImage(full.image, Offset.zero, _paint);
+      return;
     }
     // Submit one sprite batch per retained atlas instead of crossing into the
     // engine separately for every 128-pixel tile.
@@ -307,7 +337,7 @@ class RdpSurface extends ChangeNotifier {
         null,
         null,
         null,
-        paint,
+        _paint,
       );
     }
   }
@@ -315,6 +345,7 @@ class RdpSurface extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _fullAtlas = null;
     _tiles = [];
     _batches = [];
     for (final atlas in _atlases) {
@@ -326,16 +357,13 @@ class RdpSurface extends ChangeNotifier {
 }
 
 class RdpSurfacePainter extends CustomPainter {
-  RdpSurfacePainter(this.surface, {this.filterQuality = FilterQuality.low})
-    : super(repaint: surface);
+  RdpSurfacePainter(this.surface) : super(repaint: surface);
   final RdpSurface surface;
-  final FilterQuality filterQuality;
 
   @override
-  void paint(Canvas canvas, Size size) =>
-      surface.paint(canvas, filterQuality: filterQuality);
+  void paint(Canvas canvas, Size size) => surface.paint(canvas);
+
   @override
   bool shouldRepaint(RdpSurfacePainter oldDelegate) =>
-      oldDelegate.surface != surface ||
-      oldDelegate.filterQuality != filterQuality;
+      oldDelegate.surface != surface;
 }

@@ -9,6 +9,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 import 'page.dart';
 
+// These functions are ignored because they are not marked as `pub`: `frame_for_session`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `fmt`
 
 Future<void> desktopClipboardActive({
@@ -43,6 +44,21 @@ Future<void> desktopClipboardCancel({required int sessionId}) => RustLib
     .instance
     .api
     .crateApiDesktopDesktopClipboardCancel(sessionId: sessionId);
+
+/// Starts a Windows direct RDP worker and returns its cancellable session before
+/// any network operation starts. No target or credentials are passed on argv.
+Future<DesktopWorkerStarted> desktopWorkerOpen() =>
+    RustLib.instance.api.crateApiDesktopDesktopWorkerOpen();
+
+Future<DesktopHandshake> desktopWorkerHandshake({
+  required int sessionId,
+  required String host,
+  required int port,
+}) => RustLib.instance.api.crateApiDesktopDesktopWorkerHandshake(
+  sessionId: sessionId,
+  host: host,
+  port: port,
+);
 
 /// An SSH gateway ID must refer to an already authenticated/verified session.
 Future<DesktopHandshake> desktopHandshake({
@@ -80,7 +96,8 @@ Future<void> desktopAuthenticate({
 );
 
 /// Long poll coalesced damage. Pixels are copied only when a consumer is ready.
-Future<DesktopFrame?> desktopFrame({
+/// The single result travels as DCO typed data rather than byte-by-byte SSE.
+Future<Stream<DesktopFrame?>> desktopFrame({
   required int sessionId,
   required int afterSequence,
 }) => RustLib.instance.api.crateApiDesktopDesktopFrame(
@@ -105,6 +122,15 @@ Future<void> desktopInput({
   x: x,
   y: y,
   text: text,
+);
+
+/// Send ordered keyboard and pointer edges in one Fast-Path input PDU.
+Future<void> desktopInputBatch({
+  required int sessionId,
+  required List<DesktopInputEvent> events,
+}) => RustLib.instance.api.crateApiDesktopDesktopInputBatch(
+  sessionId: sessionId,
+  events: events,
 );
 
 /// Requests a remote monitor size. False means Display Control was unavailable.
@@ -212,7 +238,7 @@ class DesktopCursor {
 class DesktopFrame {
   final int sequence;
 
-  /// Full desktop size. Pixels contain a packed atlas of changed tiles.
+  /// Full desktop size. Pixels contain the whole image or a packed atlas.
   final int width;
   final int height;
   final int bitmapWidth;
@@ -283,6 +309,41 @@ class DesktopHandshake {
           certificateError == other.certificateError;
 }
 
+class DesktopInputEvent {
+  final bool pointer;
+  final int code;
+  final int flags;
+  final int x;
+  final int y;
+
+  const DesktopInputEvent({
+    required this.pointer,
+    required this.code,
+    required this.flags,
+    required this.x,
+    required this.y,
+  });
+
+  @override
+  int get hashCode =>
+      pointer.hashCode ^
+      code.hashCode ^
+      flags.hashCode ^
+      x.hashCode ^
+      y.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DesktopInputEvent &&
+          runtimeType == other.runtimeType &&
+          pointer == other.pointer &&
+          code == other.code &&
+          flags == other.flags &&
+          x == other.x &&
+          y == other.y;
+}
+
 class DesktopTile {
   final int x;
   final int y;
@@ -320,4 +381,25 @@ class DesktopTile {
           height == other.height &&
           sourceX == other.sourceX &&
           sourceY == other.sourceY;
+}
+
+class DesktopWorkerStarted {
+  final int sessionId;
+  final int processId;
+
+  const DesktopWorkerStarted({
+    required this.sessionId,
+    required this.processId,
+  });
+
+  @override
+  int get hashCode => sessionId.hashCode ^ processId.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DesktopWorkerStarted &&
+          runtimeType == other.runtimeType &&
+          sessionId == other.sessionId &&
+          processId == other.processId;
 }

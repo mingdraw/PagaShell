@@ -212,7 +212,10 @@ void main() {
     final gate = Completer<void>();
     final sent = <String>[];
     final errors = <Object>[];
-    final queue = RdpInputQueue(onError: errors.add);
+    final queue = RdpInputQueue(
+      onError: errors.add,
+      sendBatch: (_) async => fail('wheel coalescing should call its sender'),
+    );
 
     queue.add(() async {
       sent.add('first');

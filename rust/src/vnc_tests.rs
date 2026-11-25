@@ -141,7 +141,7 @@ async fn rfb_versions_password_frame_pointer_keyboard_and_disconnect() {
         commands.send(raw_frame(1, 1, &[0, 0, 255, 0])).unwrap();
         let patch = next_frame(id, first.sequence, &[255, 0, 0, 255, 0, 0, 255, 255]).await;
         assert_eq!(patch.bitmap_width, 2);
-        assert_eq!(patch.tiles[0].x, 0);
+        assert!(patch.tiles.is_empty()); // The single dirty tile covers the whole desktop.
         input(id, 0, 0xff51, 0, 0, 0, String::new()).await.unwrap();
         input(id, 0, 0xff51, 1, 0, 0, String::new()).await.unwrap();
         input(id, 1, 0, 0x9000, 1, 0, String::new()).await.unwrap();

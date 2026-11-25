@@ -14,11 +14,14 @@ Uint8List solid(int width, int height, List<int> color) {
   return bytes;
 }
 
-Future<Uint8List> readPixels(RdpSurface surface) async {
+Future<Uint8List> readPixels(RdpSurface surface, {double scale = 1}) async {
   final recorder = ui.PictureRecorder();
-  surface.paint(ui.Canvas(recorder));
+  surface.paint(ui.Canvas(recorder)..scale(scale));
   final picture = recorder.endRecording();
-  final image = await picture.toImage(surface.width, surface.height);
+  final image = await picture.toImage(
+    (surface.width * scale).round(),
+    (surface.height * scale).round(),
+  );
   try {
     return (await image.toByteData(format: ui.ImageByteFormat.rawRgba))!.buffer
         .asUint8List();
@@ -124,6 +127,45 @@ void main() {
           );
         }
       }
+    });
+  });
+
+  testWidgets('缩小图集时不采样一像素补边之外的透明背景', (tester) async {
+    await tester.runAsync(() async {
+      final surface = RdpSurface();
+      addTearDown(surface.dispose);
+      const green = [0, 255, 0, 255];
+      await surface.apply(
+        RdpFrame(width: 384, height: 384, rgba: solid(384, 384, green)),
+      );
+      // Pack one tile into a padded atlas; the rest is unrelated transparent
+      // space. The adjacent desktop tiles still use the previous image.
+      const atlasWidth = 260;
+      final atlas = Uint8List(atlasWidth * 260 * 4);
+      final row = solid(130, 1, green);
+      for (var y = 0; y < 130; y++) {
+        atlas.setRange(y * atlasWidth * 4, (y * atlasWidth + 130) * 4, row);
+      }
+      await surface.apply(
+        RdpFrame(
+          width: 384,
+          height: 384,
+          patchWidth: atlasWidth,
+          patchHeight: 260,
+          rgba: atlas,
+          tiles: const [
+            RdpTile(
+              x: 128,
+              y: 128,
+              width: 128,
+              height: 128,
+              sourceX: 1,
+              sourceY: 1,
+            ),
+          ],
+        ),
+      );
+      expect(await readPixels(surface, scale: 0.375), solid(144, 144, green));
     });
   });
 

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show Platform;
 import 'dart:typed_data';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge.dart'
@@ -368,17 +369,30 @@ class RustRdpEngine implements RdpEngine {
         ) as _RustEngineSession;
       }
       checkCancelled();
-      final prepared = gateway?.host.gatewayType == GatewayType.page
-          ? await desktop.desktopHandshakeViaPage(
-              host: host.hostname,
-              port: host.port,
-              gateway: _pageSettings(gateway!),
-            )
-          : await desktop.desktopHandshake(
-              host: host.hostname,
-              port: host.port,
-              sshGatewayId: sshGateway?._sessionId,
-            );
+      final desktop.DesktopHandshake prepared;
+      if (Platform.isWindows && gateway == null) {
+        // Register a cancellable handle before the worker starts network I/O.
+        final worker = await desktop.desktopWorkerOpen();
+        id = worker.sessionId;
+        checkCancelled();
+        prepared = await desktop.desktopWorkerHandshake(
+          sessionId: id,
+          host: host.hostname,
+          port: host.port,
+        );
+      } else if (gateway?.host.gatewayType == GatewayType.page) {
+        prepared = await desktop.desktopHandshakeViaPage(
+          host: host.hostname,
+          port: host.port,
+          gateway: _pageSettings(gateway!),
+        );
+      } else {
+        prepared = await desktop.desktopHandshake(
+          host: host.hostname,
+          port: host.port,
+          sshGatewayId: sshGateway?._sessionId,
+        );
+      }
       id = prepared.sessionId;
       checkCancelled();
       if (!await verifyHostKey(
@@ -405,6 +419,7 @@ class RustRdpEngine implements RdpEngine {
       success = true;
       return _RustRdpDesktopSession(id, sshGateway);
     } on AnyhowException catch (e) {
+      checkCancelled();
       throw rdpConnectionError(e.message, cause: e);
     } finally {
       finished = true;
@@ -494,8 +509,39 @@ class RustVncEngine implements VncEngine {
 }
 
 class _RustRdpDesktopSession extends _RustDesktopSession
-    implements RdpClipboardSession {
+    implements RdpClipboardSession, RdpBatchInputSession {
   _RustRdpDesktopSession(super.id, super.gateway);
+
+  @override
+  Future<void> inputBatch(List<RdpInputEvent> events) async {
+    if (_closed) return;
+    try {
+      await desktop.desktopInputBatch(
+        sessionId: id,
+        events: [
+          for (final event in events)
+            switch (event) {
+              RdpKeyInput() => desktop.DesktopInputEvent(
+                pointer: false,
+                code: event.scanCode,
+                flags: (event.down ? 0 : 1) | (event.extended ? 2 : 0),
+                x: 0,
+                y: 0,
+              ),
+              RdpPointerInput() => desktop.DesktopInputEvent(
+                pointer: true,
+                code: event.wheel,
+                flags: event.flags,
+                x: event.x,
+                y: event.y,
+              ),
+            },
+        ],
+      );
+    } on AnyhowException catch (error) {
+      throw SshEngineException(error.message.split('\n').first, error);
+    }
+  }
 
   @override
   Stream<RdpClipboardEvent> get clipboardEvents async* {
@@ -588,10 +634,11 @@ class _RustDesktopSession implements RdpEngineSession {
         // An async* stream only suspends at yield. When the frame RPC times
         // out with no update, it would keep polling even with a paused viewer.
         while (!_closed && controller.hasListener && !controller.isPaused) {
-          final frame = await (isVnc ? vnc.vncFrame : desktop.desktopFrame)(
+          final reply = await (isVnc ? vnc.vncFrame : desktop.desktopFrame)(
             sessionId: id,
             afterSequence: sequence,
           );
+          final frame = await reply.first;
           if (_closed || !controller.hasListener) return;
           if (frame == null) continue;
           sequence = frame.sequence;

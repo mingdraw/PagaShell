@@ -9,6 +9,11 @@ pub(crate) const TILE_SIZE: u16 = 128;
 // filtering must never bleed from an unrelated tile packed next to this one.
 const ATLAS_CELL_SIZE: u16 = TILE_SIZE + 2;
 
+// Desktop pixels are opaque, even when a codec uses the fourth byte as padding.
+fn opaque([r, g, b, _]: [u8; 4]) -> [u8; 4] {
+    [r, g, b, 255]
+}
+
 pub(crate) struct FrameRequest {
     pub after: u32,
     pub reply: oneshot::Sender<DesktopFrame>,
@@ -78,6 +83,13 @@ impl FrameEncoder {
         self.dirty.contains(&true) || self.cursor_dirty || after != self.sequence
     }
 
+    /// The previous framebuffer is no longer a valid base, even at the same size.
+    pub fn invalidate(&mut self, width: u16, height: u16) {
+        self.resize(width, height);
+        self.dirty.fill(true);
+        self.cursor_dirty = self.cursor.is_some();
+    }
+
     pub fn snapshot(&mut self, image: &DecodedImage, after: u32) -> DesktopFrame {
         self.snapshot_rgba(image.width(), image.height(), image.data(), after)
     }
@@ -106,14 +118,44 @@ impl FrameEncoder {
         // A cancelled poll may have consumed an atlas. Recover every tile when
         // the caller's base differs, including the current cursor shape.
         let full = resized || after != self.sequence;
+        let cursor = if full || self.cursor_dirty {
+            self.cursor.clone()
+        } else {
+            None
+        };
+        self.cursor_dirty = false;
+        self.sequence = self.sequence.wrapping_add(1).max(1);
+
+        if full || self.dirty.iter().all(|&dirty| dirty) {
+            self.dirty.fill(false);
+            let rgba = pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .copied()
+                .map(opaque)
+                .collect::<Vec<_>>()
+                .into_flattened();
+            // A contiguous desktop needs neither tile metadata nor an atlas.
+            return DesktopFrame {
+                sequence: self.sequence,
+                width,
+                height,
+                bitmap_width: width,
+                bitmap_height: height,
+                rgba,
+                tiles: Vec::new(),
+                cursor,
+            };
+        }
+
         let dirty: Vec<_> = self
             .dirty
             .iter()
             .enumerate()
-            .filter_map(|(index, &dirty)| (full || dirty).then_some(index))
+            .filter_map(|(index, &dirty)| dirty.then_some(index))
             .collect();
         let mut tiles = Vec::with_capacity(dirty.len());
-        let complete = dirty.len() == self.dirty.len();
         // Choose a compact grid rather than inheriting desktop columns. For
         // example, 32 tiles use 8x4 cells instead of 10x4 with 8 empty cells.
         // Bound the aspect ratio as well so prime tile counts do not create
@@ -134,9 +176,7 @@ impl FrameEncoder {
                 )
             })
             .unwrap_or(1);
-        let (bitmap_width, bitmap_height) = if complete {
-            (self.width, self.height)
-        } else if dirty.is_empty() {
+        let (bitmap_width, bitmap_height) = if dirty.is_empty() {
             (0, 0)
         } else {
             (
@@ -144,15 +184,7 @@ impl FrameEncoder {
                 dirty.len().div_ceil(atlas_columns) as u16 * ATLAS_CELL_SIZE,
             )
         };
-        let mut rgba = if complete {
-            let mut rgba = pixels.to_vec();
-            for pixel in rgba.as_chunks_mut::<4>().0 {
-                pixel[3] = 255;
-            }
-            rgba
-        } else {
-            vec![0; usize::from(bitmap_width) * usize::from(bitmap_height) * 4]
-        };
+        let mut rgba = vec![0; usize::from(bitmap_width) * usize::from(bitmap_height) * 4];
         let input_stride = usize::from(self.width) * 4;
         let output_stride = usize::from(bitmap_width) * 4;
         for (slot, index) in dirty.into_iter().enumerate() {
@@ -160,35 +192,23 @@ impl FrameEncoder {
             let y = (index / self.columns) as u16 * TILE_SIZE;
             let width = TILE_SIZE.min(self.width - x);
             let height = TILE_SIZE.min(self.height - y);
-            let source_x = if complete {
-                x
-            } else {
-                (slot % atlas_columns) as u16 * ATLAS_CELL_SIZE + 1
-            };
-            let source_y = if complete {
-                y
-            } else {
-                (slot / atlas_columns) as u16 * ATLAS_CELL_SIZE + 1
-            };
-            let row_bytes = usize::from(width) * 4;
-            for row in 0..if complete { 0 } else { height + 2 } {
+            let source_x = (slot % atlas_columns) as u16 * ATLAS_CELL_SIZE + 1;
+            let source_y = (slot / atlas_columns) as u16 * ATLAS_CELL_SIZE + 1;
+            let col = usize::from(x);
+            let cols = usize::from(width);
+            for row in 0..height + 2 {
                 let image_row = (u32::from(y) + u32::from(row))
                     .saturating_sub(1)
                     .min(u32::from(self.height) - 1) as u16;
-                let input = usize::from(image_row) * input_stride + usize::from(x) * 4;
+                let input = usize::from(image_row) * input_stride;
                 let output =
                     usize::from(source_y + row - 1) * output_stride + usize::from(source_x - 1) * 4;
-                let target = &mut rgba[output..output + row_bytes + 8];
-                let left =
-                    usize::from(image_row) * input_stride + usize::from(x.saturating_sub(1)) * 4;
-                let right = usize::from(image_row) * input_stride
-                    + usize::from((x + width).min(self.width - 1)) * 4;
-                target[..4].copy_from_slice(&pixels[left..left + 4]);
-                target[4..row_bytes + 4].copy_from_slice(&pixels[input..input + row_bytes]);
-                target[row_bytes + 4..].copy_from_slice(&pixels[right..right + 4]);
-                // Normalize only copied rows while they are still cache-hot.
-                for pixel in target.as_chunks_mut::<4>().0 {
-                    pixel[3] = 255;
+                let source = pixels[input..input + input_stride].as_chunks::<4>().0;
+                let target = rgba[output..output + (cols + 2) * 4].as_chunks_mut::<4>().0;
+                target[0] = opaque(source[col.saturating_sub(1)]);
+                target[cols + 1] = opaque(source[(col + cols).min(source.len() - 1)]);
+                for (to, &from) in target[1..cols + 1].iter_mut().zip(&source[col..col + cols]) {
+                    *to = opaque(from);
                 }
             }
             tiles.push(DesktopTile {
@@ -201,13 +221,6 @@ impl FrameEncoder {
             });
         }
         self.dirty.fill(false);
-        let cursor = if full || self.cursor_dirty {
-            self.cursor.clone()
-        } else {
-            None
-        };
-        self.cursor_dirty = false;
-        self.sequence = self.sequence.wrapping_add(1).max(1);
         DesktopFrame {
             sequence: self.sequence,
             width: self.width,
@@ -240,7 +253,7 @@ mod tests {
         let image = DecodedImage::new(PixelFormat::RgbA32, 1280, 800);
         let mut encoder = FrameEncoder::new(1280, 800);
         let first = encoder.snapshot(&image, 0);
-        assert_eq!(first.tiles.len(), 70);
+        assert!(first.tiles.is_empty());
         assert_eq!(first.rgba.len(), 1280 * 800 * 4);
         encoder.damage(damage(10, 20, 19, 29));
         encoder.damage(damage(1200, 740, 1210, 750));
@@ -249,7 +262,11 @@ mod tests {
         assert_eq!(update.rgba.len(), 2 * 130 * 130 * 4);
         assert!(!encoder.ready(update.sequence));
         let recovered = encoder.snapshot(&image, first.sequence);
-        assert_eq!(recovered.tiles.len(), first.tiles.len());
+        assert!(recovered.tiles.is_empty());
+        assert_eq!(
+            (recovered.bitmap_width, recovered.bitmap_height),
+            (1280, 800)
+        );
         assert_eq!(recovered.rgba.len(), first.rgba.len());
     }
 
@@ -269,10 +286,10 @@ mod tests {
         let image = DecodedImage::new(PixelFormat::RgbA32, 260, 130);
         let mut encoder = FrameEncoder::new(260, 130);
         let first = encoder.snapshot(&image, 0);
-        encoder.damage(damage(127, 127, 259, 129));
+        encoder.damage(damage(128, 127, 259, 129));
         encoder.damage(damage(128, 128, 259, 129));
         let frame = encoder.snapshot(&image, first.sequence);
-        assert_eq!(frame.tiles.len(), 6);
+        assert_eq!(frame.tiles.len(), 4);
         let edge = frame
             .tiles
             .iter()
@@ -294,7 +311,7 @@ mod tests {
     }
 
     #[test]
-    fn egfx_resize_sends_all_tiles_even_when_the_sequence_matches() {
+    fn egfx_resize_sends_a_contiguous_frame_even_when_the_sequence_matches() {
         let mut encoder = FrameEncoder::new(128, 128);
         let first = encoder.snapshot(&DecodedImage::new(PixelFormat::RgbA32, 128, 128), 0);
         let frame = encoder.snapshot(
@@ -302,7 +319,22 @@ mod tests {
             first.sequence,
         );
         assert_eq!((frame.width, frame.height), (257, 129));
-        assert_eq!(frame.tiles.len(), 6);
+        assert!(frame.tiles.is_empty());
+        assert_eq!((frame.bitmap_width, frame.bitmap_height), (257, 129));
+        assert_eq!(frame.rgba.len(), 257 * 129 * 4);
+    }
+
+    #[test]
+    fn same_size_reset_replaces_the_base_without_reusing_sequence_numbers() {
+        let mut encoder = FrameEncoder::new(256, 256);
+        let image = DecodedImage::new(PixelFormat::RgbA32, 256, 256);
+        let first = encoder.snapshot(&image, 0);
+        encoder.invalidate(256, 256);
+        encoder.damage(damage(0, 0, 127, 127));
+        let next = encoder.snapshot(&image, first.sequence);
+        assert!(next.tiles.is_empty());
+        assert_eq!(next.rgba.len(), 256 * 256 * 4);
+        assert_eq!(next.sequence, first.sequence + 1);
     }
 
     #[test]

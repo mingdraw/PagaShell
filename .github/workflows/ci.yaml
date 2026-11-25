@@ -185,6 +185,13 @@ jobs:
       - name: Build Linux and Windows
         if: matrix.target != 'macos'
         run: flutter build ${{ matrix.target }} --release
+      - name: Exercise RDP worker timeout and crash on Windows
+        if: matrix.target == 'windows'
+        shell: pwsh
+        run: |
+          cargo test --locked --manifest-path rust/Cargo.toml --lib desktop_worker::windows_handles
+          if ($LASTEXITCODE -ne 0) { throw 'RDP worker mapping tests failed' }
+          flutter test --no-pub -d windows integration_test/rdp_worker_windows_test.dart --reporter expanded
       - name: Build macOS
         if: matrix.target == 'macos'
         env:

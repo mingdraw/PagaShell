@@ -1,5 +1,9 @@
 //! Embedded RFB desktop connections; passwords never leave the protocol engine.
 use anyhow::Result;
+use flutter_rust_bridge::{for_generated::DcoCodec, frb};
+
+use crate::api::desktop::DesktopFrame;
+use crate::frb_generated::StreamSink;
 
 pub async fn vnc_connect(
     host: String,
@@ -11,11 +15,15 @@ pub async fn vnc_connect(
     crate::vnc::connect(host, port, password, ssh_gateway_id, page_gateway).await
 }
 
+#[frb(stream_dart_await)]
 pub async fn vnc_frame(
     session_id: u32,
     after_sequence: u32,
-) -> Result<Option<crate::api::desktop::DesktopFrame>> {
-    crate::vnc::frame(session_id, after_sequence).await
+    sink: StreamSink<Option<DesktopFrame>, DcoCodec>,
+) -> Result<()> {
+    let frame = crate::vnc::frame(session_id, after_sequence).await?;
+    let _ = sink.add(frame);
+    Ok(())
 }
 
 /// kind: 0 X11 keysym, 1 pointer with desktop pointer flags, 2 Unicode text.

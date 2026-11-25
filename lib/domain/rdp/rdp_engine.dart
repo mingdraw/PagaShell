@@ -88,6 +88,31 @@ abstract interface class RdpEngineSession {
   Future<void> close();
 }
 
+sealed class RdpInputEvent {
+  const RdpInputEvent();
+}
+
+final class RdpKeyInput extends RdpInputEvent {
+  const RdpKeyInput(this.scanCode, {required this.down, this.extended = false});
+
+  final int scanCode;
+  final bool down;
+  final bool extended;
+}
+
+final class RdpPointerInput extends RdpInputEvent {
+  const RdpPointerInput(this.x, this.y, this.flags, {this.wheel = 0});
+
+  final int x;
+  final int y;
+  final int flags;
+  final int wheel;
+}
+
+abstract interface class RdpBatchInputSession implements RdpEngineSession {
+  Future<void> inputBatch(List<RdpInputEvent> events);
+}
+
 /// Windows 拒绝了可重新输入的密码凭据；账号状态或协议错误不属于此类。
 class DesktopAuthenticationException extends SshEngineException {
   const DesktopAuthenticationException(String message, {Object? cause})

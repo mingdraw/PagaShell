@@ -24,7 +24,7 @@ Future<int> vncConnect({
   pageGateway: pageGateway,
 );
 
-Future<DesktopFrame?> vncFrame({
+Future<Stream<DesktopFrame?>> vncFrame({
   required int sessionId,
   required int afterSequence,
 }) => RustLib.instance.api.crateApiVncVncFrame(

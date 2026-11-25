@@ -254,16 +254,21 @@ impl Clipboard {
         }
         self.advertise();
         // A paste key must follow the new FormatList on the same wire.
+        tokio::time::timeout(Duration::from_secs(5), self.barrier()?)
+            .await
+            .context("RDP 剪贴板同步超时")?
+            .context("RDP 剪贴板通道已关闭")?;
+        Ok(())
+    }
+
+    /// Completes on the active RDP session loop, including when no pixels change.
+    pub(crate) fn barrier(&self) -> Result<oneshot::Receiver<()>> {
         let (reply, receiver) = oneshot::channel();
         self.inner
             .messages
             .send(Command::Barrier(reply))
             .map_err(|_| anyhow!("RDP 剪贴板通道已关闭"))?;
-        tokio::time::timeout(Duration::from_secs(5), receiver)
-            .await
-            .context("RDP 剪贴板同步超时")?
-            .context("RDP 剪贴板通道已关闭")?;
-        Ok(())
+        Ok(receiver)
     }
 
     fn advertise(&self) {

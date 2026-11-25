@@ -35,6 +35,8 @@ PagaShell 会检查证书链、有效期和连接地址。首次连接、证书�
 
 每个远程桌面标签持有独立目标连接；关闭标签会取消在途认证并释放连接及网关资源。断线后标签显示失败，可点击重试。Windows 对同一账号的并发会话策略可能使旧会话断开。
 
+Windows 上的直连 RDP 会为每个会话启动独立进程。会话进程崩溃或长期无响应时，可以在该页签重连；结束一个会话不会终止其他会话。经网关连接的 RDP 和 VNC 保持现有连接方式。
+
 密码沿用本机 SecretStore 存储，不进入 SQLite 或日志。RDP 与 SSH 的可信记录按协议隔离。RDP 服务不显示 SSH 文件传输和端口转发入口。
 
 ## 证书确认后仍无法连接
@@ -67,6 +69,13 @@ RDP 会话通过 CLIPRDR 虚拟通道同步 Unicode 文字、多个文件和目�
 <details>
 <summary>协议、渲染与开发验证</summary>
 
+### Windows 直连会话隔离
+
+- 安装目录中的 PagaShell 可执行文件以子进程模式运行 Rust，在创建 Flutter 引擎之前进入会话处理。主窗口保留证书确认和渲染，用户确认后才经私有管道传递密码；命令行不携带目标或凭据。子进程负责 RDP 连接、解码、键鼠和协议剪贴板。
+- 控制和像素分开传输。像素用一份按需扩容的匿名共享内存，每个会话只保留当前缓冲，主程序读完才请求下一帧。帧内容不经管道序列化。
+- 健康检查由 RDP 会话循环应答，静止画面不会触发超时。关闭会话时先尝试正常断开，1.2 秒内没有应答就终止该子进程。主进程异常退出后由 Windows Job Object 回收子进程。
+- Windows 原生回归：`flutter test -d windows integration_test/rdp_worker_windows_test.dart`。覆盖握手无应答时限时关闭、子进程被终止后唤醒等待，以及另一个会话进程继续工作。Windows 实机还需在保持 SSH 页签连接的同时，验证高负载桌面卡死时仍能切换标签和重连；若 Flutter 渲染本身卡住，则另行定位。
+
 ### 剪贴板验证
 
 ```bash
@@ -84,9 +93,10 @@ cargo test --manifest-path rust/Cargo.toml --locked desktop_clipboard
 
 - 握手初始桌面为 1280×800，收到首帧后默认按窗口可用区域的逻辑像素调整。窗口连续调整后等待 350 毫秒再发送，调整期间合并后续变化。固定模式只在用户选择时调整远端。动态分辨率遵循 [MS-RDPEDISP 显示布局规范](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpedisp/ea2de591-9203-42cd-9908-be7a55237d1c)，客户端像素上限为 16,777,216。
 - IronRDP 声明 TLS 与 NLA/CredSSP，按服务端选择建立加密连接；NLA 使用 NTLM 密码认证。协议声明见[微软 RDP 协商规范](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/902b090b-9cb3-4efc-92bf-ee13373371e3)。
-- Rust 按显示端需求累计精确变化区域，以 128×128 分块打包为一张 RGBA 图集，只传递变动分块；相距较远的小更新不会复制中间未变化的画面。图集边缘补入相邻像素，防止缩放时串色。全屏更新直接复制连续画面，交付上限约 60 次/秒；没有画面变化时不复制桌面。取消取帧、丢失更新或 EGFX 分辨率变化后自动恢复完整画面。
-- 鼠标形状与桌面像素分开传递，在本地显示指针；鼠标移动无需等待 Windows 回传画面。输入队列合并尚未发送的连续鼠标移动，保留键盘和鼠标按钮的按下、释放顺序。原生连接公平处理已就绪的输入和图形数据，直连 TCP 启用 `TCP_NODELAY`；主动断开前释放原生会话记录的按键和按钮。
-- Flutter 串行上传每张图集，保留未变分块，使用 `drawRawAtlas` 按图集批量提交 GPU 绘制；正常增量帧不再逐次生成整屏图像，也不重建组件。图集保留像素超过桌面像素的三倍时压实，限制历史图集占用；压实期间会暂时额外分配一张完整图像。后台标签或应用暂停时停止请求和上传。
+- Rust 按显示端需求累计精确变化区域，以 128×128 分块打包；相距较远的小更新不会复制中间未变化的画面。RDP 和 VNC 的 RGBA 通过 FRB DCO 以原生字节缓冲交给 Dart，跳过 SSE 的逐字节编码；生成像素快照和上传 GPU 仍各有成本。快照在复制时一次补齐不透明 alpha；整屏更新以连续画面发送，无需分块元数据。RDP 在请求和更新都就绪时交付，持续更新间隔至少 16 毫秒，空闲后首个更新无需等周期 tick。
+- RDP 建连后等待有效图形。EGFX 重置后保留旧画面，等有像素内容的 `EndFrame` 再替换完整画面；尺寸不变的重置也会刷新全部内容。可恢复的传统位图丢弃或 EGFX 解码丢弃会按服务器能力请求重绘，每个会话最多两秒一次。
+- 鼠标形状与桌面像素分开传递，在本地显示指针。输入队列合并尚未发送的连续移动，将就绪的 RDP 键鼠事件成批发送，保留按下、释放及剪贴板同步顺序。解码一个网络包后优先处理一批就绪输入，然后恢复公平轮询。直连 TCP 启用 `TCP_NODELAY`；主动断开前释放原生会话记录的按键和按钮。
+- Flutter 整帧直接绘制单张图像，局部更新使用 `drawRawAtlas` 按图集批量提交 GPU 绘制，保留未变分块。缩放统一使用[双线性采样](https://api.flutter.dev/flutter/dart-ui/FilterQuality.html)，匹配一像素补边。图集超过 16 张或保留像素超过桌面的三倍时压实；压实期间会额外生成一张完整图像。后台标签或应用暂停时停止请求和上传。
 - 桌面协商 32 位位图、RemoteFX 与 64 KB bulk compression，并注册 EGFX 动态图形通道。H.264 AVC420 由 IronRDP 的 OpenH264 后端在 Rust 侧软件解码；解码器无法初始化时不声明 AVC 能力，保留非 AVC 回退。仅声明已实现的 V8.1/V8 能力，不声明 AVC444。实际编码由 Windows 协商决定；当前没有接入 VideoToolbox 等硬件解码或原生零拷贝纹理。
 - 性能体验应使用 Release 构建。Debug 模式也单独优化 Rust 图像处理依赖，便于调试，但不能代替 Release 性能验收。变化区域大小、Windows 实际选择的编码、网络时延与远端负载都会影响帧率；约 60 次/秒是客户端交付上限，不是实际帧率保证。原生库与桥接接口变更后必须退出应用并完整重建，Dart 热重载无法载入新的 Rust 库。
 - 回归覆盖服务类型、默认端口、密码凭证保留、复制与持久化、证书门禁、标签取消/关闭/重试、缩放坐标、键鼠顺序、分块像素合成与图集压实、独立光标和后台暂停；Rust 使用本地生成的 H.264 压缩帧验证 EGFX 能力协商、解码像素和帧确认。初始与 EGFX 重置画面共用 16,777,216 像素上限。
@@ -113,13 +123,15 @@ Rust 回归 54 项通过、1 项环境握手探测跳过，`cargo fmt --check` �
 
 ### 本地渲染基准
 
-`integration_test/rdp_rendering_performance_test.dart` 在原生 Flutter 引擎比较旧的局部更新后整屏合成与新的图集绘制。固定桌面 1280×800，覆盖局部、滚动、整屏和稀疏更新，使用包含边缘像素的实际图集格式；每种路径预热 4 次后分 4 轮交错测量共 80 次。两种路径都包含同样的最终离屏绘制成本。日志输出原始微秒、UTC 起止时间、更新次数、像素字节数和图集压实次数。
+`integration_test/rdp_rendering_performance_test.dart` 在原生 Flutter 引擎比较旧的局部更新后整屏合成与当前渲染路径。固定桌面 1280×800，覆盖局部、滚动、整屏、稀疏、缩小滚动和轮换分块更新；每种路径预热 4 次后分 4 轮交错测量共 80 次。两种路径都包含最终离屏绘制。日志记录每帧耗时的 P50 / P95、像素字节数和触发图集压实的帧耗时。
 
 ```bash
 flutter test integration_test/rdp_rendering_performance_test.dart -d macos
 ```
 
 该命令运行 Debug 引擎，使用本地合成像素，不包含 Windows 编码、网络或 RDP 解码耗时，结果不代表真实远程桌面 FPS。
+
+2026-11-25 本机 macOS arm64 的合成基准中，当前路径的整屏 P95 为 782 µs、缩小滚动为 400 µs，轮换分块触发压实 5 次，压实帧最慢 566 µs。单独测量 Rust 整帧快照，在 1080p / 1440p 下把复制和补 alpha 合成一遍后，P50 分别从 477 / 692 µs 降到 166 / 216 µs。以上均为本机数据，不含 Windows 网络、解码或 GPU 呈现耗时。
 
 2026-10-20 本机 macOS arm64 的一次测量（UTC 13:58:35.827118 至 13:58:36.206647）：
 
@@ -131,6 +143,12 @@ flutter test integration_test/rdp_rendering_performance_test.dart -d macos
 | 两处相距较远的小更新 | 54,857 µs | 23,164 µs | 降低 57.8% | 3,511,724 → 135,200 |
 
 耗时变化为 `(新路径总耗时 / 旧路径总耗时 - 1) × 100%`；该稀疏更新示例的像素量减少 96.1%。测试保留了滚动和整屏场景的少量额外开销，没有将局部更新收益推广到所有场景。GPU 工作可能异步排队，离屏图像完成时间不能直接作为屏幕呈现时间；H.264 解码收益和真实 Windows App 对比仍需远端实测。
+
+### Windows GPU 与现场验收
+
+- 目标 Flutter SDK 已默认启用 Windows [Impeller](https://docs.flutter.dev/perf/impeller)。`drawImage` 和 `drawRawAtlas` 已走引擎渲染；切换引擎或在 Dart 加着色器都不会减少 OpenH264 软件解码和 RGBA 上传成本。定位渲染后端时可以用 `flutter run -d windows --profile --no-enable-impeller` 做对照。
+- 原生 `Texture` 可以省去 Dart 像素桥接、图集管理和 `decodeImageFromPixels`。`PixelBufferTexture` 仍会[整张上传 CPU 像素](https://github.com/flutter/flutter/blob/master/engine/src/flutter/shell/platform/windows/external_texture_pixelbuffer.cc)。后续可以由 Rust 或原生宿主把脏矩形更新到可共享的 D3D11 纹理，再由 [Windows Texture Registrar](https://api.flutter.dev/windows-embedder/flutter__texture__registrar_8h.html) 导入。若接入硬件 H.264 解码，再评估在 GPU 上做颜色转换并交付纹理。需要验证多标签、设备丢失、分辨率切换和释放，保留现有图集作为回退。
+- Windows 使用同一台远端主机、相同连线及 1080p / 1440p 分辨率对照 Release 版本，检查首次画面、调整大小、拖动窗口、连续滚动及键鼠延迟。Flutter DevTools 看 raster 帧时间，Windows 性能跟踪看原生解码线程和纹理上传。上游 ClearCodec 的局部合成、未实现的 codec、服务器端帧流控及本机 IME 需要分别验证；重绘只覆盖能被检测到的丢弃。
 
 ### 仅探测握手
 

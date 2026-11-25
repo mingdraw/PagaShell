@@ -5,6 +5,8 @@ mod desktop_diagnostics;
 mod desktop_display;
 mod desktop_frame;
 mod desktop_input;
+#[cfg(any(windows, test))]
+mod desktop_worker;
 mod docker_operations;
 mod frb_generated;
 mod page;
