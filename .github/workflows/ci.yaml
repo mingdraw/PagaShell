@@ -7,6 +7,10 @@ on:
         description: Only verify native update helper transactions
         type: boolean
         default: false
+      windows_proxy_only:
+        description: Only verify Windows native WinINet proxy handling
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -16,7 +20,34 @@ env:
   PUB_HOSTED_URL: https://pub.dev
 
 jobs:
+  windows-proxy:
+    if: inputs.helpers_only != true
+    name: Windows proxy ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            arch: amd64
+          - os: windows-11-arm
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run Windows WinINet proxy tests
+        shell: pwsh
+        run: |
+          cmake -S windows/tests -B "$env:RUNNER_TEMP\windows_proxy_tests"
+          if ($LASTEXITCODE -ne 0) { throw 'CMake configure failed' }
+          cmake --build "$env:RUNNER_TEMP\windows_proxy_tests" --config Release
+          if ($LASTEXITCODE -ne 0) { throw 'CMake build failed' }
+          & "$env:RUNNER_TEMP\windows_proxy_tests\Release\system_proxy_settings_test.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'system_proxy_settings_test failed' }
+          & "$env:RUNNER_TEMP\windows_proxy_tests\Release\system_proxy_wininet_test.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'system_proxy_wininet_test failed' }
+
   update-helpers:
+    if: inputs.windows_proxy_only != true
     name: Update helper ${{ matrix.platform }} ${{ matrix.arch }}
     strategy:
       fail-fast: false
@@ -46,7 +77,7 @@ jobs:
       - run: python scripts/test_updater_helpers.py
 
   analyze-and-test:
-    if: inputs.helpers_only != true
+    if: inputs.helpers_only != true && inputs.windows_proxy_only != true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -64,7 +95,7 @@ jobs:
           "$RUNNER_TEMP/system_proxy_settings_test"
 
   rust-check:
-    if: inputs.helpers_only != true
+    if: inputs.helpers_only != true && inputs.windows_proxy_only != true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -86,8 +117,8 @@ jobs:
         working-directory: rust
 
   build:
-    if: inputs.helpers_only != true
-    needs: [analyze-and-test, rust-check, update-helpers]
+    if: inputs.helpers_only != true && inputs.windows_proxy_only != true
+    needs: [windows-proxy, analyze-and-test, rust-check, update-helpers]
     name: Build ${{ matrix.target }} ${{ matrix.arch }}
     timeout-minutes: 90
     strategy:

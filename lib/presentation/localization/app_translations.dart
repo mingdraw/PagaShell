@@ -199,6 +199,7 @@ class AppTranslations extends Translations {
     '监听地址：127.0.0.1；支持手动配置或自动设置系统网络代理': 'Listen address: 127.0.0.1. Configure apps manually or set the system network proxy automatically.',
     '系统代理已被占用，请先停止其他代理或取消自动设置': 'A system proxy is already active. Stop the other proxy or disable automatic setup.',
     '没有修改系统代理的权限，请授权后重试': 'Permission to change system proxy settings was denied. Authorize and try again.',
+    'Windows 自动设置系统代理需启用 HTTP(S)，或取消自动设置后手动配置 SOCKS5': 'Automatic system proxy on Windows requires HTTP(S). Enable HTTP(S), or disable automatic setup and configure SOCKS5 manually.',
     '自动设置系统代理失败，请检查系统设置或取消自动设置': 'Could not set the system proxy. Check system settings or disable automatic setup.',
     '当前系统不支持自动设置网络代理，请手动设置': 'Automatic proxy setup is unavailable on this system. Configure the proxy manually.',
     '恢复系统代理失败，请重试停止代理':

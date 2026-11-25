@@ -27,11 +27,18 @@ int Port(const Map& map, const char* name) {
   }
   return -1;
 }
-void FreeValues(INTERNET_PER_CONN_OPTIONW* options) {
-  for (size_t i = 1; i < 3; ++i) {
-    if (options[i].Value.pszValue) GlobalFree(options[i].Value.pszValue);
-    options[i].Value.pszValue = nullptr;
-  }
+std::string FormatWinInetError(const char* prefix,
+                               const windows_proxy::WinInetError& err) {
+  std::ostringstream oss;
+  oss << prefix << " (stage=" << (err.stage && *err.stage ? err.stage : "unknown")
+      << ", win32=" << err.code;
+  if (err.option_error) oss << ", option=" << err.option_error;
+  oss << ")";
+  return oss.str();
+}
+
+const char* ErrorCodeFor(const windows_proxy::WinInetError& err) {
+  return err.IsPermissionDenied() ? "proxy_permission" : "proxy_failed";
 }
 
 std::string ToLowerAscii(std::string text) {
@@ -177,50 +184,12 @@ bool ParseEndpoint(std::string value, std::string default_protocol,
 }
 }  // namespace
 
-bool SystemNetworkProxy::Read(Settings* settings) {
-  INTERNET_PER_CONN_OPTIONW options[3]{};
-  options[0].dwOption = INTERNET_PER_CONN_FLAGS_UI;
-  options[1].dwOption = INTERNET_PER_CONN_PROXY_SERVER;
-  options[2].dwOption = INTERNET_PER_CONN_PROXY_BYPASS;
-  INTERNET_PER_CONN_OPTION_LISTW list{};
-  list.dwSize = sizeof(list);
-  list.dwOptionCount = 3;
-  list.pOptions = options;
-  DWORD size = sizeof(list);
-  // NULL connection selects the current user's default LAN/Internet settings.
-  if (!InternetQueryOptionW(nullptr, INTERNET_OPTION_PER_CONNECTION_OPTION, &list, &size)) {
-    FreeValues(options);
-    options[0].dwOption = INTERNET_PER_CONN_FLAGS;
-    size = sizeof(list);
-    if (!InternetQueryOptionW(nullptr, INTERNET_OPTION_PER_CONNECTION_OPTION, &list, &size)) {
-      FreeValues(options);
-      return false;
-    }
-  }
-  settings->flags = options[0].Value.dwValue;
-  settings->server = options[1].Value.pszValue ? options[1].Value.pszValue : L"";
-  settings->bypass = options[2].Value.pszValue ? options[2].Value.pszValue : L"";
-  FreeValues(options);
-  return true;
+bool SystemNetworkProxy::Read(Settings* settings, WinInetError* error) {
+  return windows_proxy::ReadWinInet(settings, error);
 }
 
-bool SystemNetworkProxy::Write(const Settings& settings) {
-  // Only manage the manual proxy fields; leave saved or active PAC URLs alone.
-  INTERNET_PER_CONN_OPTIONW options[3]{};
-  options[0].dwOption = INTERNET_PER_CONN_FLAGS;
-  options[0].Value.dwValue = settings.flags;
-  options[1].dwOption = INTERNET_PER_CONN_PROXY_SERVER;
-  options[1].Value.pszValue = const_cast<wchar_t*>(settings.server.c_str());
-  options[2].dwOption = INTERNET_PER_CONN_PROXY_BYPASS;
-  options[2].Value.pszValue = const_cast<wchar_t*>(settings.bypass.c_str());
-  INTERNET_PER_CONN_OPTION_LISTW list{};
-  list.dwSize = sizeof(list);
-  list.dwOptionCount = 3;
-  list.pOptions = options;
-  if (!InternetSetOptionW(nullptr, INTERNET_OPTION_PER_CONNECTION_OPTION, &list, sizeof(list))) return false;
-  const bool changed = InternetSetOptionW(nullptr, INTERNET_OPTION_SETTINGS_CHANGED, nullptr, 0) != FALSE;
-  const bool refreshed = InternetSetOptionW(nullptr, INTERNET_OPTION_REFRESH, nullptr, 0) != FALSE;
-  return changed && refreshed;
+bool SystemNetworkProxy::Write(const Settings& settings, WinInetError* error) {
+  return windows_proxy::WriteWinInet(settings, error);
 }
 
 void SystemNetworkProxy::Handle(const flutter::MethodCall<Value>& call,
@@ -300,16 +269,20 @@ void SystemNetworkProxy::Handle(const flutter::MethodCall<Value>& call,
   if (call.method_name() == "restore") {
     if (owner_ != *id || !before_ || !installed_) { result->Success(); return; }
     Settings current;
-    if (!Read(&current)) { result->Error("proxy_failed", "Could not read system proxy"); return; }
+    WinInetError err;
+    if (!Read(&current, &err)) {
+      result->Error(ErrorCodeFor(err), FormatWinInetError("Could not read system proxy", err));
+      return;
+    }
     using windows_proxy::ManualProxyOwner;
     auto owner = windows_proxy::ManualOwner(current, *installed_);
-    if (owner == ManualProxyOwner::kLocal || current == *before_) {
+    if (windows_proxy::ShouldRestore(current, *before_, *installed_)) {
       // Repeat the refresh if an earlier attempt restored the fields but
       // failed to notify WinINet. Leave a full takeover alone.
       const auto restored =
           windows_proxy::RestoreManual(current, *before_, *installed_);
-      if (!Write(restored) || !Read(&current)) {
-        result->Error("proxy_failed", "Could not restore system proxy");
+      if (!Write(restored, &err) || !Read(&current, &err)) {
+        result->Error(ErrorCodeFor(err), FormatWinInetError("Could not restore system proxy", err));
         return;
       }
       owner = windows_proxy::ManualOwner(current, *installed_);
@@ -319,7 +292,8 @@ void SystemNetworkProxy::Handle(const flutter::MethodCall<Value>& call,
                     "System proxy map partially changed; remove remaining PagaShell entries before retrying");
       return;
     }
-    if (owner == ManualProxyOwner::kLocal) {
+    if (owner == ManualProxyOwner::kLocal ||
+        windows_proxy::IsEmptyManualLeftover(current, *before_)) {
       result->Error("proxy_failed", "Could not restore system proxy");
       return;
     }
@@ -334,20 +308,45 @@ void SystemNetworkProxy::Handle(const flutter::MethodCall<Value>& call,
   if (http < 0 || http > 65535 || https < 0 || https > 65535 || socks < 0 || socks > 65535 || !(http || https || socks)) {
     result->Error("proxy_failed", "Invalid proxy ports"); return;
   }
+  if (!(http || https)) {
+    result->Error("proxy_windows_http_required",
+                  "Windows system proxy requires HTTP(S); configure SOCKS5 manually");
+    return;
+  }
   Settings current;
-  if (!Read(&current)) { result->Error("proxy_failed", "Could not read system proxy"); return; }
+  WinInetError err;
+  if (!Read(&current, &err)) {
+    result->Error(ErrorCodeFor(err), FormatWinInetError("Could not read system proxy", err));
+    return;
+  }
   if (!owner_.empty() || (current.flags & windows_proxy::kActive)) {
     result->Error("proxy_conflict", "A system proxy is already active"); return;
   }
-  const auto desired = windows_proxy::LocalSettings(current, http, https, socks);
+  const auto desired = windows_proxy::LocalSettings(current, http, https);
   owner_ = *id;
   before_ = current;
   installed_ = desired;
   // Retain snapshots if writing/refreshing fails so Dart can roll back or retry.
-  if (!Write(desired)) { result->Error("proxy_failed", "Could not set system proxy"); return; }
+  if (!Write(desired, &err)) {
+    result->Error(ErrorCodeFor(err), FormatWinInetError("Could not set system proxy", err));
+    return;
+  }
   Settings verified;
-  if (!Read(&verified) || !windows_proxy::MatchesInstalled(verified, desired)) {
-    result->Error("proxy_failed", "System proxy changed during setup"); return;
+  if (!Read(&verified, &err)) {
+    result->Error(ErrorCodeFor(err), FormatWinInetError("Could not verify system proxy", err));
+    return;
+  }
+  if (!windows_proxy::MatchesInstalled(verified, desired)) {
+    const bool flags_match = (verified.flags & windows_proxy::kActive) ==
+                             (desired.flags & windows_proxy::kActive);
+    const bool bypass_match = windows_proxy::detail::Trim(verified.bypass) ==
+                              windows_proxy::detail::Trim(desired.bypass);
+    std::ostringstream oss;
+    oss << "System proxy changed during setup (flagsMatch="
+        << (flags_match ? 1 : 0) << ", bypassMatch=" << (bypass_match ? 1 : 0)
+        << ")";
+    result->Error("proxy_failed", oss.str());
+    return;
   }
   result->Success();
 }

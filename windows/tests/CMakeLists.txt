@@ -1,0 +1,21 @@
+cmake_minimum_required(VERSION 3.14)
+project(windows_proxy_tests LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+add_executable(system_proxy_settings_test system_proxy_settings_test.cpp)
+if(MSVC)
+  target_compile_options(system_proxy_settings_test PRIVATE /W4 /WX)
+else()
+  target_compile_options(system_proxy_settings_test PRIVATE -Wall -Wextra -Werror)
+endif()
+
+if(WIN32)
+  add_executable(system_proxy_wininet_test system_proxy_wininet_test.cpp)
+  target_compile_definitions(system_proxy_wininet_test PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+  if(MSVC)
+    target_compile_options(system_proxy_wininet_test PRIVATE /W4 /WX)
+  endif()
+  target_link_libraries(system_proxy_wininet_test PRIVATE wininet.lib advapi32.lib)
+endif()

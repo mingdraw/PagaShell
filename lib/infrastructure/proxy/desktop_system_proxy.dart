@@ -99,6 +99,8 @@ class NativeSystemProxy implements SystemProxyBackend {
       throw SystemProxyException(switch (error.code) {
         'proxy_conflict' => '系统代理已被占用，请先停止其他代理或取消自动设置',
         'proxy_permission' => '没有修改系统代理的权限，请授权后重试',
+        'proxy_windows_http_required' =>
+          'Windows 自动设置系统代理需启用 HTTP(S)，或取消自动设置后手动配置 SOCKS5',
         _ => '自动设置系统代理失败，请检查系统设置或取消自动设置',
       });
     } on MissingPluginException {

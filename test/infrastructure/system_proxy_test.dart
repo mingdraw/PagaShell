@@ -145,6 +145,46 @@ void main() {
     });
   });
 
+  test('原生接口按错误码映射冲突、权限、Windows 仅 SOCKS5 与通用失败提示', () async {
+    const channel = MethodChannel('pagashell/system_proxy_errors_test');
+    var currentCode = 'proxy_failed';
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          if (call.method == 'enable') {
+            throw PlatformException(code: currentCode, message: 'native error');
+          }
+          return null;
+        });
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null),
+    );
+    final cases = <String, String>{
+      'proxy_conflict': '系统代理已被占用，请先停止其他代理或取消自动设置',
+      'proxy_permission': '没有修改系统代理的权限，请授权后重试',
+      'proxy_windows_http_required':
+          'Windows 自动设置系统代理需启用 HTTP(S)，或取消自动设置后手动配置 SOCKS5',
+      'proxy_failed': '自动设置系统代理失败，请检查系统设置或取消自动设置',
+    };
+    for (final entry in cases.entries) {
+      currentCode = entry.key;
+      final lease = DesktopSystemProxy(
+        backend: const NativeSystemProxy(channel: channel),
+      ).createLease(const ProxyConfig());
+      await expectLater(
+        lease.enable(),
+        throwsA(
+          isA<SystemProxyException>().having(
+            (e) => e.message,
+            'message',
+            entry.value,
+          ),
+        ),
+      );
+      await lease.restore();
+    }
+  });
+
   for (final kind in ['GNOME', 'KDE5', 'KDE6']) {
     test('$kind 设置 HTTP CONNECT/SOCKS5 并恢复原有配置与缺失键', () async {
       final desktop = _Desktop(

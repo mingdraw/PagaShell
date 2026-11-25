@@ -19,7 +19,7 @@
 | 平台 | 作用范围与要求 |
 | --- | --- |
 | macOS | 为当前 IPv4/IPv6 主网络服务设置 HTTP、HTTPS CONNECT 和 SOCKS 代理；需要时由系统弹窗请求网络配置权限。GitHub 桌面版不启用 App Sandbox，以使用 Authorization Services；升级后继续使用已有沙盒数据库和保险库文件。 |
-| Windows | 通过 WinINet 修改当前用户默认 LAN/Internet 代理并刷新设置；HTTP 与 HTTPS 均指向普通 HTTP 代理端口。SOCKS 明确使用 SOCKS5 URI，Chrome/Edge 可识别；旧 WinINet 应用不一定支持此 SOCKS5 写法，建议同时开启 HTTP(S)。 |
+| Windows | 通过 WinINet 修改当前用户默认 LAN/Internet 代理并刷新设置；仅向系统写入 HTTP 与 HTTPS 代理端口。WinINet 会忽略 `socks5://` 协议头并将裸 `socks=` 视为 SOCKS4，因此同时启用 SOCKS5 时本地 SOCKS5 监听仍可手动使用，但不会写入系统代理；仅启用 SOCKS5 时请取消自动设置并手动配置应用。 |
 | Linux | 支持 GNOME 的 GSettings 和 KDE Plasma 5/6 的 KConfig；GNOME 需 `gsettings` 与相应 schema，KDE 需同版本的 `kreadconfig5/6`、`kwriteconfig5/6` 及 `dbus-send`。使用当前桌面用户会话；接口缺失、不支持的桌面或配置不可写时明确报错。 |
 
 - 只影响遵循系统代理设置的应用，不修改 hosts 或终端的代理环境变量。规则/全局选路仍由本地动态代理处理。

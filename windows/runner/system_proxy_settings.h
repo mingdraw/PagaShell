@@ -28,21 +28,22 @@ struct Settings {
   }
 };
 
-inline Settings LocalSettings(const Settings& before, int http, int https,
-                              int socks) {
+// WinINet's INTERNET_PER_CONN_PROXY_SERVER silently drops socks=socks5://...
+// entries on Windows 10/11 and interprets bare socks=host:port as SOCKS4.
+// Only install HTTP/HTTPS entries into the Windows system proxy; local SOCKS5
+// listeners remain available for explicit per-app configuration.
+inline Settings LocalSettings(const Settings& before, int http, int https) {
   Settings settings;
   // WinINet's manual proxy flags include DIRECT for bypassed connections.
   settings.flags = before.flags | kDirect | kManual;
-  auto add = [&settings](const wchar_t* scheme, const wchar_t* prefix, int port) {
+  auto add = [&settings](const wchar_t* scheme, int port) {
     if (!port) return;
     if (!settings.server.empty()) settings.server += L';';
-    settings.server += std::wstring(scheme) + L"=" + prefix + L"127.0.0.1:" +
-                       std::to_wstring(port);
+    settings.server +=
+        std::wstring(scheme) + L"=127.0.0.1:" + std::to_wstring(port);
   };
-  add(L"http", L"", http);
-  add(L"https", L"", https);
-  // Chromium interprets a bare socks= address as SOCKS4.
-  add(L"socks", L"socks5://", socks);
+  add(L"http", http);
+  add(L"https", https);
   return settings;
 }
 
@@ -98,6 +99,7 @@ inline bool MatchesInstalled(const Settings& current, const Settings& installed)
   }
   const auto actual = detail::ParseServer(current.server);
   const auto expected = detail::ParseServer(installed.server);
+  if (expected.empty()) return false;
   if (actual.size() == 1 && actual.front().first.empty() &&
       expected.size() == 2 && expected[0].first == L"http" &&
       expected[1].first == L"https") {
@@ -141,6 +143,19 @@ inline ManualProxyOwner ManualOwner(const Settings& current,
   }
   if (!local) return ManualProxyOwner::kOther;
   return other ? ManualProxyOwner::kMixed : ManualProxyOwner::kLocal;
+}
+
+inline bool IsEmptyManualLeftover(const Settings& current,
+                                  const Settings& before) {
+  return !(before.flags & kManual) && (current.flags & kManual) &&
+         detail::ParseServer(current.server).empty();
+}
+
+inline bool ShouldRestore(const Settings& current, const Settings& before,
+                          const Settings& installed) {
+  const auto owner = ManualOwner(current, installed);
+  return owner == ManualProxyOwner::kLocal || current == before ||
+         IsEmptyManualLeftover(current, before);
 }
 
 inline Settings RestoreManual(const Settings& current, const Settings& before,

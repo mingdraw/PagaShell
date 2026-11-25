@@ -10,6 +10,7 @@
 #include <string>
 
 #include "system_proxy_settings.h"
+#include "system_proxy_wininet.h"
 
 class SystemNetworkProxy {
  public:
@@ -18,8 +19,9 @@ class SystemNetworkProxy {
 
  private:
   using Settings = windows_proxy::Settings;
-  static bool Read(Settings* settings);
-  static bool Write(const Settings& settings);
+  using WinInetError = windows_proxy::WinInetError;
+  static bool Read(Settings* settings, WinInetError* error = nullptr);
+  static bool Write(const Settings& settings, WinInetError* error = nullptr);
   std::string owner_;
   std::optional<Settings> before_;
   std::optional<Settings> installed_;
