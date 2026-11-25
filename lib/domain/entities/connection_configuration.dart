@@ -17,6 +17,107 @@ class ConfigurationException implements Exception {
   String toString() => message;
 }
 
+/// 配置导出范围：支持全局、单个服务/凭证/网关，以及三类文件夹递归导出。
+sealed class ConfigurationExportScope {
+  const ConfigurationExportScope();
+
+  const factory ConfigurationExportScope.all() = AllConfigurationScope;
+  const factory ConfigurationExportScope.service(String id) =
+      ServiceConfigurationScope;
+  const factory ConfigurationExportScope.serviceFolder(String id) =
+      ServiceFolderConfigurationScope;
+  const factory ConfigurationExportScope.identity(String id) =
+      IdentityConfigurationScope;
+  const factory ConfigurationExportScope.identityFolder(String id) =
+      IdentityFolderConfigurationScope;
+  const factory ConfigurationExportScope.gateway(String id) =
+      GatewayConfigurationScope;
+  const factory ConfigurationExportScope.gatewayFolder(String id) =
+      GatewayFolderConfigurationScope;
+}
+
+final class AllConfigurationScope extends ConfigurationExportScope {
+  const AllConfigurationScope();
+
+  @override
+  bool operator ==(Object other) => other is AllConfigurationScope;
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+}
+
+final class ServiceConfigurationScope extends ConfigurationExportScope {
+  const ServiceConfigurationScope(this.id);
+  final String id;
+
+  @override
+  bool operator ==(Object other) =>
+      other is ServiceConfigurationScope && other.id == id;
+
+  @override
+  int get hashCode => Object.hash(runtimeType, id);
+}
+
+final class ServiceFolderConfigurationScope extends ConfigurationExportScope {
+  const ServiceFolderConfigurationScope(this.id);
+  final String id;
+
+  @override
+  bool operator ==(Object other) =>
+      other is ServiceFolderConfigurationScope && other.id == id;
+
+  @override
+  int get hashCode => Object.hash(runtimeType, id);
+}
+
+final class IdentityConfigurationScope extends ConfigurationExportScope {
+  const IdentityConfigurationScope(this.id);
+  final String id;
+
+  @override
+  bool operator ==(Object other) =>
+      other is IdentityConfigurationScope && other.id == id;
+
+  @override
+  int get hashCode => Object.hash(runtimeType, id);
+}
+
+final class IdentityFolderConfigurationScope extends ConfigurationExportScope {
+  const IdentityFolderConfigurationScope(this.id);
+  final String id;
+
+  @override
+  bool operator ==(Object other) =>
+      other is IdentityFolderConfigurationScope && other.id == id;
+
+  @override
+  int get hashCode => Object.hash(runtimeType, id);
+}
+
+final class GatewayConfigurationScope extends ConfigurationExportScope {
+  const GatewayConfigurationScope(this.id);
+  final String id;
+
+  @override
+  bool operator ==(Object other) =>
+      other is GatewayConfigurationScope && other.id == id;
+
+  @override
+  int get hashCode => Object.hash(runtimeType, id);
+}
+
+final class GatewayFolderConfigurationScope extends ConfigurationExportScope {
+  const GatewayFolderConfigurationScope(this.id);
+  final String id;
+
+  @override
+  bool operator ==(Object other) =>
+      other is GatewayFolderConfigurationScope && other.id == id;
+
+  @override
+  int get hashCode => Object.hash(runtimeType, id);
+}
+
 /// 仅用于配置迁移。密钥引用不跨设备传递，凭据按用户选择写入导出文件。
 class ConnectionConfiguration {
   const ConnectionConfiguration({
@@ -28,6 +129,7 @@ class ConnectionConfiguration {
     this.identities = const [],
     this.identitySecrets = const {},
     this.hostSecrets = const {},
+    this.partial = false,
   });
 
   final List<Folder> serviceFolders;
@@ -39,8 +141,287 @@ class ConnectionConfiguration {
   final Map<String, String> identitySecrets;
   final Map<String, String> hostSecrets;
 
+  /// 是否为单项或文件夹局部导出。导入时根级已有项目保留原所在目录。
+  final bool partial;
+
+  /// 按范围提取可独立导入的配置子集，自动补齐所依赖的网关、凭证及密文。
+  ConnectionConfiguration select(ConfigurationExportScope scope) {
+    switch (scope) {
+      case AllConfigurationScope():
+        return this;
+      case ServiceConfigurationScope(:final id):
+        final host = _findById(
+          services,
+          id,
+          (h) => h.id,
+          const ConfigurationException('所选服务已不存在'),
+        );
+        return _selectServices(
+          selectedFolders: const [],
+          selectedServices: [host.copyWith(folderId: null, sortOrder: 0)],
+        );
+      case ServiceFolderConfigurationScope(:final id):
+        final subtree = _selectFolderSubtree(serviceFolders, id);
+        final folderIds = subtree.map((f) => f.id).toSet();
+        final selectedServices = [
+          for (final host in services)
+            if (folderIds.contains(host.folderId)) host,
+        ];
+        return _selectServices(
+          selectedFolders: subtree,
+          selectedServices: selectedServices,
+        );
+      case IdentityConfigurationScope(:final id):
+        final identity = _findById(
+          identities,
+          id,
+          (i) => i.id,
+          const ConfigurationException('所选凭证已不存在'),
+        );
+        final selected = [identity.copyWith(folderId: null, sortOrder: 0)];
+        return _subset(identities: selected);
+      case IdentityFolderConfigurationScope(:final id):
+        final subtree = _selectFolderSubtree(identityFolders, id);
+        final folderIds = subtree.map((f) => f.id).toSet();
+        final selected = [
+          for (final identity in identities)
+            if (folderIds.contains(identity.folderId)) identity,
+        ];
+        return _subset(identityFolders: subtree, identities: selected);
+      case GatewayConfigurationScope(:final id):
+        final gateway = _findById(
+          gateways,
+          id,
+          (g) => g.id,
+          const ConfigurationException('所选网关已不存在'),
+        );
+        return _selectGateways(
+          selectedFolders: const [],
+          selectedGateways: [gateway.copyWith(folderId: null, sortOrder: 0)],
+        );
+      case GatewayFolderConfigurationScope(:final id):
+        final subtree = _selectFolderSubtree(gatewayFolders, id);
+        final folderIds = subtree.map((f) => f.id).toSet();
+        final selectedGateways = [
+          for (final gateway in gateways)
+            if (folderIds.contains(gateway.folderId)) gateway,
+        ];
+        return _selectGateways(
+          selectedFolders: subtree,
+          selectedGateways: selectedGateways,
+        );
+    }
+  }
+
+  ConnectionConfiguration _selectServices({
+    required List<Folder> selectedFolders,
+    required List<Host> selectedServices,
+  }) {
+    final gatewayIds = {for (final host in selectedServices) ?host.gatewayId};
+    final gatewayDeps = _selectHostDependencies(
+      allFolders: gatewayFolders,
+      allHosts: gateways,
+      targetIds: gatewayIds,
+    );
+    final identityIds = {
+      for (final host in selectedServices) ?host.identityId,
+      for (final gateway in gatewayDeps.items) ?gateway.identityId,
+    };
+    final identityDeps = _selectIdentityDependencies(
+      allFolders: identityFolders,
+      allIdentities: identities,
+      targetIds: identityIds,
+    );
+    return _subset(
+      serviceFolders: selectedFolders,
+      services: selectedServices,
+      gatewayFolders: gatewayDeps.folders,
+      gateways: gatewayDeps.items,
+      identityFolders: identityDeps.folders,
+      identities: identityDeps.items,
+    );
+  }
+
+  ConnectionConfiguration _selectGateways({
+    required List<Folder> selectedFolders,
+    required List<Host> selectedGateways,
+  }) {
+    final identityIds = {
+      for (final gateway in selectedGateways) ?gateway.identityId,
+    };
+    final identityDeps = _selectIdentityDependencies(
+      allFolders: identityFolders,
+      allIdentities: identities,
+      targetIds: identityIds,
+    );
+    return _subset(
+      gatewayFolders: selectedFolders,
+      gateways: selectedGateways,
+      identityFolders: identityDeps.folders,
+      identities: identityDeps.items,
+    );
+  }
+
+  ConnectionConfiguration _subset({
+    List<Folder> serviceFolders = const [],
+    List<Host> services = const [],
+    List<Folder> gatewayFolders = const [],
+    List<Host> gateways = const [],
+    List<Folder> identityFolders = const [],
+    List<Identity> identities = const [],
+  }) {
+    final identityIds = identities.map((v) => v.id).toSet();
+    final hostIds = [...services, ...gateways].map((v) => v.id).toSet();
+    return ConnectionConfiguration(
+      serviceFolders: serviceFolders,
+      services: services,
+      gatewayFolders: gatewayFolders,
+      gateways: gateways,
+      identityFolders: identityFolders,
+      identities: identities,
+      identitySecrets: {
+        for (final entry in identitySecrets.entries)
+          if (identityIds.contains(entry.key)) entry.key: entry.value,
+      },
+      hostSecrets: {
+        for (final entry in hostSecrets.entries)
+          if (hostIds.contains(entry.key)) entry.key: entry.value,
+      },
+      partial: true,
+    );
+  }
+
+  static T _findById<T>(
+    List<T> items,
+    String id,
+    String Function(T) idOf,
+    ConfigurationException notFound,
+  ) {
+    for (final item in items) {
+      if (idOf(item) == id) return item;
+    }
+    throw notFound;
+  }
+
+  static List<Folder> _selectFolderSubtree(
+    List<Folder> allFolders,
+    String rootId,
+  ) {
+    _findById(
+      allFolders,
+      rootId,
+      (f) => f.id,
+      const ConfigurationException('所选文件夹已不存在'),
+    );
+    final childrenByParent = <String?, List<Folder>>{};
+    for (final folder in allFolders) {
+      (childrenByParent[folder.parentId] ??= []).add(folder);
+    }
+    final included = <String>{rootId};
+    final queue = <String>[rootId];
+    for (var i = 0; i < queue.length; i++) {
+      for (final child in childrenByParent[queue[i]] ?? const <Folder>[]) {
+        if (included.add(child.id)) queue.add(child.id);
+      }
+    }
+    return [
+      for (final folder in allFolders)
+        if (included.contains(folder.id))
+          folder.id == rootId
+              ? folder.copyWith(parentId: null, sortOrder: 0)
+              : folder,
+    ];
+  }
+
+  static ({List<Folder> folders, List<Host> items}) _selectHostDependencies({
+    required List<Folder> allFolders,
+    required List<Host> allHosts,
+    required Set<String> targetIds,
+  }) => _selectDependencies<Host>(
+    allFolders: allFolders,
+    allItems: allHosts,
+    targetIds: targetIds,
+    idOf: (h) => h.id,
+    nameOf: (h) => h.name,
+    folderIdOf: (h) => h.folderId,
+    detach: (h, sortOrder) => h.copyWith(folderId: null, sortOrder: sortOrder),
+  );
+
+  static ({List<Folder> folders, List<Identity> items})
+  _selectIdentityDependencies({
+    required List<Folder> allFolders,
+    required List<Identity> allIdentities,
+    required Set<String> targetIds,
+  }) => _selectDependencies<Identity>(
+    allFolders: allFolders,
+    allItems: allIdentities,
+    targetIds: targetIds,
+    idOf: (i) => i.id,
+    nameOf: (i) => i.name,
+    folderIdOf: (i) => i.folderId,
+    detach: (i, sortOrder) => i.copyWith(folderId: null, sortOrder: sortOrder),
+  );
+
+  /// 依赖项默认脱离原目录导出；仅当依赖集合内出现同名项时保留其祖先目录，避免同级重名冲突。
+  static ({List<Folder> folders, List<T> items}) _selectDependencies<T>({
+    required List<Folder> allFolders,
+    required List<T> allItems,
+    required Set<String> targetIds,
+    required String Function(T) idOf,
+    required String Function(T) nameOf,
+    required String? Function(T) folderIdOf,
+    required T Function(T, int sortOrder) detach,
+  }) {
+    if (targetIds.isEmpty) {
+      return (folders: const [], items: const []);
+    }
+    final selected = [
+      for (final item in allItems)
+        if (targetIds.contains(idOf(item))) item,
+    ];
+    if (selected.length != targetIds.length) {
+      throw const ConfigurationException('配置文件内容无效或引用不完整');
+    }
+    final nameCounts = <String, int>{};
+    for (final item in selected) {
+      final name = nameOf(item);
+      nameCounts[name] = (nameCounts[name] ?? 0) + 1;
+    }
+    final foldersById = {for (final folder in allFolders) folder.id: folder};
+    final requiredFolderIds = <String>{};
+    final items = <T>[];
+    var rootOrder = 0;
+    for (final item in selected) {
+      final folderId = folderIdOf(item);
+      if (folderId != null && nameCounts[nameOf(item)]! > 1) {
+        String? current = folderId;
+        final visited = <String>{};
+        while (current != null) {
+          if (!visited.add(current)) {
+            throw const ConfigurationException('配置文件内容无效或引用不完整');
+          }
+          final folder = foldersById[current];
+          if (folder == null) {
+            throw const ConfigurationException('配置文件内容无效或引用不完整');
+          }
+          requiredFolderIds.add(current);
+          current = folder.parentId;
+        }
+        items.add(item);
+      } else {
+        items.add(detach(item, rootOrder++));
+      }
+    }
+    final folders = [
+      for (final folder in allFolders)
+        if (requiredFolderIds.contains(folder.id)) folder,
+    ];
+    return (folders: folders, items: items);
+  }
+
   Map<String, Object?> toJson() => {
     'version': 5,
+    if (partial) 'partial': true,
     'serviceFolders': serviceFolders.map(_folderJson).toList(),
     'services': services.map(_hostJson).toList(),
     'gatewayFolders': gatewayFolders.map(_folderJson).toList(),
@@ -73,6 +454,11 @@ class ConnectionConfiguration {
           json['version'] != 5) {
         throw const FormatException();
       }
+      final partialValue = json['partial'];
+      if (partialValue != null && partialValue is! bool) {
+        throw const FormatException();
+      }
+      final partial = partialValue == true;
       var result = ConnectionConfiguration(
         serviceFolders: _list(json, 'serviceFolders', _folder),
         services: _list(
@@ -105,6 +491,7 @@ class ConnectionConfiguration {
         ),
         identitySecrets: _secrets(json['identitySecrets']),
         hostSecrets: _secrets(json['hostSecrets']),
+        partial: partial,
       );
       if (legacy) {
         final usage = <String, Set<ServiceType>>{};
@@ -136,6 +523,7 @@ class ConnectionConfiguration {
                 e.key: result.identitySecrets[e.value]!,
           },
           hostSecrets: result.hostSecrets,
+          partial: result.partial,
         );
       }
       result.validate();

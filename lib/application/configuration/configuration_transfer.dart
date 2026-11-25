@@ -17,11 +17,14 @@ class ConfigurationTransfer {
   static const _aad =
       'PagaShell.configuration.v1.pbkdf2-sha256.600000.aes-256-gcm';
 
-  Future<Uint8List> exportFile([String? password]) async {
+  Future<Uint8List> exportFile([
+    String? password,
+    ConfigurationExportScope scope = const ConfigurationExportScope.all(),
+  ]) async {
     if (password != null && password.length < 8) {
       throw const ConfigurationException('导出密码至少需要 8 个字符');
     }
-    final data = await repository.read();
+    final data = await repository.read(scope: scope);
     data.validate();
     if (password == null) {
       final bytes = Uint8List.fromList(

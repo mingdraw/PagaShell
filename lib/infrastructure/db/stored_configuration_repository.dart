@@ -48,8 +48,10 @@ abstract class StoredConfigurationRepository
   );
 
   @override
-  Future<ConnectionConfiguration> read() => transaction(() async {
-    final data = await _metadata();
+  Future<ConnectionConfiguration> read({
+    ConfigurationExportScope scope = const ConfigurationExportScope.all(),
+  }) => transaction(() async {
+    final data = (await _metadata()).select(scope);
     final store = secretStore;
     final exportHosts = [
       for (final host in [...data.services, ...data.gateways])
@@ -87,6 +89,7 @@ abstract class StoredConfigurationRepository
       identities: data.identities,
       identitySecrets: identitySecrets,
       hostSecrets: hostSecrets,
+      partial: data.partial,
     );
   });
 
@@ -106,18 +109,21 @@ abstract class StoredConfigurationRepository
           current.services,
           incoming.serviceFolders,
           incoming.services,
+          preserveExistingRootParent: incoming.partial,
         );
         final gatewayTree = _mergeTree(
           current.gatewayFolders,
           current.gateways,
           incoming.gatewayFolders,
           incoming.gateways,
+          preserveExistingRootParent: incoming.partial,
         );
         final identityTree = _mergeTree(
           current.identityFolders,
           current.identities,
           incoming.identityFolders,
           incoming.identities,
+          preserveExistingRootParent: incoming.partial,
         );
         final oldIdentities = {
           for (final item in current.identities) item.id: item,
@@ -271,12 +277,73 @@ typedef _Entry = ({
 });
 
 /// 导入项保留文件中的混合排序，本机独有项放在对应同级末尾。同名不同 ID 保留两份。
+///
+/// 局部导出（[preserveExistingRootParent] 为 true）中脱离原目录的根级项，若本机已存在同 ID，
+/// 在不引入目录循环的前提下沿用其本机目录，避免单项导入把共享凭证/网关移出原文件夹。
 _Tree _mergeTree(
   List<Folder> oldFolders,
   List<Object> oldItems,
   List<Folder> newFolders,
-  List<Object> newItems,
-) {
+  List<Object> newItems, {
+  bool preserveExistingRootParent = false,
+}) {
+  var incomingFolders = newFolders;
+  var incomingItems = newItems;
+  if (preserveExistingRootParent &&
+      (incomingFolders.isNotEmpty || incomingItems.isNotEmpty)) {
+    final oldFolderById = {for (final folder in oldFolders) folder.id: folder};
+    final incomingFolderIds = {for (final folder in incomingFolders) folder.id};
+    bool canReuseFolderParent(String? parentId) {
+      if (parentId == null) return false;
+      final visited = <String>{};
+      String? cursor = parentId;
+      while (cursor != null) {
+        if (incomingFolderIds.contains(cursor) || !visited.add(cursor)) {
+          return false;
+        }
+        final folder = oldFolderById[cursor];
+        if (folder == null) return false;
+        cursor = folder.parentId;
+      }
+      return true;
+    }
+
+    incomingFolders = [
+      for (final folder in incomingFolders)
+        if (folder.parentId == null &&
+            canReuseFolderParent(oldFolderById[folder.id]?.parentId))
+          folder.copyWith(parentId: oldFolderById[folder.id]!.parentId)
+        else
+          folder,
+    ];
+    final oldItemParent = <String, String?>{};
+    for (final item in oldItems) {
+      switch (item) {
+        case final Host value:
+          oldItemParent[value.id] = value.folderId;
+        case final Identity value:
+          oldItemParent[value.id] = value.folderId;
+        default:
+          throw const FormatException();
+      }
+    }
+    bool hasFolder(String? folderId) =>
+        folderId != null &&
+        (oldFolderById.containsKey(folderId) ||
+            incomingFolderIds.contains(folderId));
+    incomingItems = [
+      for (final item in incomingItems)
+        switch (item) {
+          Host()
+              when item.folderId == null && hasFolder(oldItemParent[item.id]) =>
+            item.copyWith(folderId: oldItemParent[item.id]),
+          Identity()
+              when item.folderId == null && hasFolder(oldItemParent[item.id]) =>
+            item.copyWith(folderId: oldItemParent[item.id]),
+          _ => item,
+        },
+    ];
+  }
   _Entry entry(Object value) => switch (value) {
     Folder() => (
       id: value.id,
@@ -304,7 +371,7 @@ _Tree _mergeTree(
     ),
     _ => throw const FormatException(),
   };
-  final imported = [...newFolders, ...newItems].map(entry).toList();
+  final imported = [...incomingFolders, ...incomingItems].map(entry).toList();
   final ids = imported.map((v) => (v.folder, v.id)).toSet();
   final remaining = [
     ...oldFolders,

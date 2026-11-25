@@ -16,6 +16,7 @@ import '../../../application/identities/identity_tree_controller.dart';
 import '../../../application/session/session.dart' show SessionKind;
 import '../../../application/session/session_controller.dart';
 import '../../../application/settings/settings_controller.dart';
+import '../../../domain/entities/connection_configuration.dart';
 import '../../../domain/entities/folder.dart';
 import '../../../domain/entities/host.dart';
 import '../../../domain/entities/host_tree_item.dart';
@@ -29,6 +30,7 @@ import '../../components/app_list_row.dart';
 import '../../components/app_menu.dart';
 import '../../components/app_tree_drag.dart';
 import '../../components/app_tree_expansion.dart';
+import '../../configuration/configuration_transfer_dialog.dart';
 import '../../folders/folder_dialogs.dart';
 import '../../hosts/host_edit_dialog.dart';
 import '../../identities/identity_edit_dialog.dart';
@@ -517,6 +519,15 @@ class _FolderTile extends StatelessWidget {
           folderId: folder.id,
           folderController: controller,
         );
+      case 'export':
+        await showConfigurationExportDialog(
+          scope: containsIdentities
+              ? ConfigurationExportScope.identityFolder(folder.id)
+              : containsGateways
+              ? ConfigurationExportScope.gatewayFolder(folder.id)
+              : ConfigurationExportScope.serviceFolder(folder.id),
+          targetName: folder.name,
+        );
       case 'delete':
         if (context.mounted) {
           await confirmDeleteFolder(
@@ -552,6 +563,7 @@ class _FolderTile extends StatelessWidget {
             ('new-gateway', '在此新建网关'.tr),
             ('new-subfolder', '新建文件夹'.tr),
             ('rename', '重命名'.tr),
+            ('export', '导出配置'.tr),
             ('delete', '删除'.tr),
           ]
         : _folderActions;
@@ -638,6 +650,7 @@ List<(String, String)> get _folderActions => [
   ('new-host', '在此新建服务'.tr),
   ('new-subfolder', '新建文件夹'.tr),
   ('rename', '重命名'.tr),
+  ('export', '导出配置'.tr),
   ('delete', '删除'.tr),
 ];
 
@@ -645,6 +658,7 @@ List<(String, String)> get _identityFolderActions => [
   ('new-identity', '在此新建凭证'.tr),
   ('new-subfolder', '新建文件夹'.tr),
   ('rename', '重命名'.tr),
+  ('export', '导出配置'.tr),
   ('delete', '删除'.tr),
 ];
 
@@ -724,7 +738,7 @@ Widget _titleWithLabel(
   );
 }
 
-/// 凭证项：双击编辑；悬停显示类型与编辑按钮；右键菜单：编辑、复制、删除。
+/// 凭证项：双击编辑；悬停显示类型与编辑按钮；右键菜单：编辑、复制、导出配置、删除。
 class _IdentityTile extends StatefulWidget {
   const _IdentityTile({
     required this.identity,
@@ -791,6 +805,11 @@ class _IdentityTileState extends State<_IdentityTile> {
         await showIdentityEditDialog(context, identity: widget.identity);
       case 'copy':
         await showIdentityEditDialog(context, copyFrom: widget.identity);
+      case 'export':
+        await showConfigurationExportDialog(
+          scope: ConfigurationExportScope.identity(widget.identity.id),
+          targetName: widget.identity.name,
+        );
       case 'delete':
         await confirmDeleteIdentity(context, widget.identity);
     }
@@ -800,7 +819,12 @@ class _IdentityTileState extends State<_IdentityTile> {
   Widget build(BuildContext context) {
     final colors = shadcn.Theme.of(context).colorScheme;
     final identity = widget.identity;
-    final actions = [('edit', '编辑'.tr), ('copy', '复制'.tr), ('delete', '删除'.tr)];
+    final actions = [
+      ('edit', '编辑'.tr),
+      ('copy', '复制'.tr),
+      ('export', '导出配置'.tr),
+      ('delete', '删除'.tr),
+    ];
 
     final search = widget.search;
     final titleText = _sidebarMatchText(
@@ -872,7 +896,7 @@ class _IdentityTileState extends State<_IdentityTile> {
 /// 服务项交互：
 /// - 单击：聚焦该服务已有的会话标签（若有），不新建；
 /// - 双击：打开该服务的标签——已有则聚焦，没有则发起连接（默认一机一标签）；
-/// - 右键菜单：新建会话（同一服务多开）、文件传输、编辑、复制、删除。
+/// - 右键菜单：新建会话（同一服务多开）、文件传输、编辑、复制、导出配置、删除。
 class _HostTile extends StatefulWidget {
   const _HostTile({
     required this.host,
@@ -950,6 +974,13 @@ class _HostTileState extends State<_HostTile> {
           copyFrom: widget.host,
           gateway: widget.gateway,
         );
+      case 'export':
+        await showConfigurationExportDialog(
+          scope: widget.gateway
+              ? ConfigurationExportScope.gateway(widget.host.id)
+              : ConfigurationExportScope.service(widget.host.id),
+          targetName: widget.host.name,
+        );
       case 'delete':
         await confirmDeleteHost(context, widget.host, gateway: widget.gateway);
     }
@@ -966,6 +997,7 @@ class _HostTileState extends State<_HostTile> {
       if (widget.gateway) ('dynamic-proxy', '动态代理'.tr),
       ('edit', '编辑'.tr),
       ('copy', '复制'.tr),
+      ('export', '导出配置'.tr),
       ('delete', '删除'.tr),
     ];
     final baseIcon = AppIcon(

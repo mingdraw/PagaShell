@@ -56,18 +56,54 @@ Future<void> showConfigurationImportDialog({
   }
 }
 
-Future<void> showConfigurationExportDialog() =>
-    AppNavigation.dialog<void>(const ConfigurationTransferDialog());
+Future<void> showConfigurationExportDialog({
+  ConfigurationExportScope scope = const ConfigurationExportScope.all(),
+  String? targetName,
+  Future<bool> Function(Uint8List, String) saveFile = saveExportFile,
+}) => AppNavigation.dialog<void>(
+  ConfigurationTransferDialog(
+    exportScope: scope,
+    exportTargetName: targetName,
+    saveFile: saveFile,
+  ),
+);
+
+String suggestedConfigurationFileName({
+  required DateTime now,
+  ConfigurationExportScope scope = const ConfigurationExportScope.all(),
+  String? targetName,
+}) {
+  final date = now.toIso8601String().substring(0, 10);
+  if (scope is AllConfigurationScope || targetName == null) {
+    return 'PagaShell-$date.pagashell';
+  }
+  final cleaned = targetName
+      .trim()
+      .replaceAll(RegExp(r'[^\p{L}\p{N}_.-]+', unicode: true), '_')
+      .replaceAll(RegExp(r'_+'), '_')
+      .replaceAll(RegExp(r'^[._]+|[._]+$'), '');
+  if (cleaned.isEmpty) return 'PagaShell-$date.pagashell';
+  final runes = cleaned.runes;
+  final truncated =
+      (runes.length > 64 ? String.fromCharCodes(runes.take(64)) : cleaned)
+          .replaceAll(RegExp(r'[._]+$'), '');
+  if (truncated.isEmpty) return 'PagaShell-$date.pagashell';
+  return 'PagaShell-$truncated-$date.pagashell';
+}
 
 class ConfigurationTransferDialog extends StatefulWidget {
   const ConfigurationTransferDialog({
     this.importFileName,
     this.importBytes,
+    this.exportScope = const ConfigurationExportScope.all(),
+    this.exportTargetName,
     this.saveFile = saveExportFile,
     super.key,
   }) : assert((importFileName == null) == (importBytes == null));
   final String? importFileName;
   final Uint8List? importBytes;
+  final ConfigurationExportScope exportScope;
+  final String? exportTargetName;
   final Future<bool> Function(Uint8List, String) saveFile;
 
   @override
@@ -108,11 +144,15 @@ class _ConfigurationTransferDialogState
       } else {
         final bytes = await transfer.exportFile(
           _encrypt ? _password.text : null,
+          widget.exportScope,
         );
         if (!mounted) return;
-        final date = DateTime.now().toIso8601String().substring(0, 10);
-        if (await widget.saveFile(bytes, 'PagaShell-$date.pagashell') &&
-            mounted) {
+        final filename = suggestedConfigurationFileName(
+          now: DateTime.now(),
+          scope: widget.exportScope,
+          targetName: widget.exportTargetName,
+        );
+        if (await widget.saveFile(bytes, filename) && mounted) {
           AppNavigation.closeDialog<void>();
           AppNotice.success('配置已导出'.tr);
         }
@@ -124,6 +164,39 @@ class _ConfigurationTransferDialogState
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  String get _exportDescription {
+    final name = widget.exportTargetName?.trim() ?? '';
+    return switch (widget.exportScope) {
+      AllConfigurationScope() => '导出服务、凭证、网关及文件夹，包含密码和私钥。'.tr,
+      ServiceConfigurationScope() =>
+        name.isEmpty
+            ? '导出所选服务及其关联的凭证、网关和凭据。'.tr
+            : '导出服务「@name」及其关联的凭证、网关和凭据。'.trParams({'name': name}),
+      ServiceFolderConfigurationScope() =>
+        name.isEmpty
+            ? '导出所选服务文件夹及其中全部子文件夹、服务，以及关联的凭证、网关和凭据。'.tr
+            : '导出服务文件夹「@name」及其中全部子文件夹、服务，以及关联的凭证、网关和凭据。'.trParams({
+                'name': name,
+              }),
+      IdentityConfigurationScope() =>
+        name.isEmpty
+            ? '导出所选凭证及其密码或私钥。'.tr
+            : '导出凭证「@name」及其密码或私钥。'.trParams({'name': name}),
+      IdentityFolderConfigurationScope() =>
+        name.isEmpty
+            ? '导出所选凭证文件夹及其中全部子文件夹和凭证，包含密码和私钥。'.tr
+            : '导出凭证文件夹「@name」及其中全部子文件夹和凭证，包含密码和私钥。'.trParams({'name': name}),
+      GatewayConfigurationScope() =>
+        name.isEmpty
+            ? '导出所选网关及其关联的凭证、端口映射、动态代理配置和凭据。'.tr
+            : '导出网关「@name」及其关联的凭证、端口映射、动态代理配置和凭据。'.trParams({'name': name}),
+      GatewayFolderConfigurationScope() =>
+        name.isEmpty
+            ? '导出所选网关文件夹及其中全部子文件夹、网关，以及关联的凭证和凭据。'.tr
+            : '导出网关文件夹「@name」及其中全部子文件夹、网关，以及关联的凭证和凭据。'.trParams({'name': name}),
+    };
   }
 
   @override
@@ -139,10 +212,7 @@ class _ConfigurationTransferDialogState
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text(
-              (_importing ? '此配置文件已加密，请输入导出时设置的密码。' : '导出服务、凭证、网关及文件夹，包含密码和私钥。')
-                  .tr,
-            ),
+            Text(_importing ? '此配置文件已加密，请输入导出时设置的密码。'.tr : _exportDescription),
             const SizedBox(height: 16),
             if (_importing) ...[
               Text(

@@ -1397,6 +1397,22 @@ class AppTranslations extends Translations {
     '加密': 'Encrypt',
     '此配置文件已加密，请输入导出时设置的密码。': 'This configuration file is encrypted. Enter the password used to export it.',
     '导出服务、凭证、网关及文件夹，包含密码和私钥。': 'Export services, credentials, gateways and folders, including passwords and private keys.',
+    '导出所选服务及其关联的凭证、网关和凭据。': 'Export the selected service with its linked credentials, gateway, and secrets.',
+    '导出服务「@name」及其关联的凭证、网关和凭据。': 'Export service “@name” with its linked credentials, gateway, and secrets.',
+    '导出所选服务文件夹及其中全部子文件夹、服务，以及关联的凭证、网关和凭据。': 'Export the selected service folder with all subfolders, services, and their linked credentials, gateways, and secrets.',
+    '导出服务文件夹「@name」及其中全部子文件夹、服务，以及关联的凭证、网关和凭据。': 'Export service folder “@name” with all subfolders, services, and their linked credentials, gateways, and secrets.',
+    '导出所选凭证及其密码或私钥。':
+        'Export the selected credential with its password or private key.',
+    '导出凭证「@name」及其密码或私钥。':
+        'Export credential “@name” with its password or private key.',
+    '导出所选凭证文件夹及其中全部子文件夹和凭证，包含密码和私钥。': 'Export the selected credential folder with all subfolders and credentials, including passwords and private keys.',
+    '导出凭证文件夹「@name」及其中全部子文件夹和凭证，包含密码和私钥。': 'Export credential folder “@name” with all subfolders and credentials, including passwords and private keys.',
+    '导出所选网关及其关联的凭证、端口映射、动态代理配置和凭据。': 'Export the selected gateway with its linked credential, port mappings, proxy settings, and secrets.',
+    '导出网关「@name」及其关联的凭证、端口映射、动态代理配置和凭据。': 'Export gateway “@name” with its linked credential, port mappings, proxy settings, and secrets.',
+    '导出所选网关文件夹及其中全部子文件夹、网关，以及关联的凭证和凭据。': 'Export the selected gateway folder with all subfolders, gateways, and their linked credentials and secrets.',
+    '导出网关文件夹「@name」及其中全部子文件夹、网关，以及关联的凭证和凭据。': 'Export gateway folder “@name” with all subfolders, gateways, and their linked credentials and secrets.',
+    '所选凭证已不存在': 'The selected credential no longer exists',
+    '所选文件夹已不存在': 'The selected folder no longer exists',
     '导出文件将使用密码加密，导入时需要此密码。': 'The file will be encrypted with a password, which is required to import it.',
     '未加密的文件包含明文密码和私钥。':
         'Unencrypted files contain passwords and private keys in plain text.',

@@ -862,4 +862,485 @@ void main() {
       );
     });
   });
+
+  group('单项与文件夹导出及全局导入', () {
+    test('单独导出服务附带关联网关、凭证及密文，排除无关项目并可全局导入', () async {
+      late Uint8List archive;
+      late Uint8List ownArchive;
+      late ConnectionConfiguration parsed;
+      late ConnectionConfiguration ownParsed;
+      final source = _Store();
+      try {
+        await source.repository.merge(_fixture());
+        archive = await source.transfer.exportFile(
+          null,
+          const ConfigurationExportScope.service('ssh'),
+        );
+        parsed = await source.transfer.readFile(archive);
+        ownArchive = await source.transfer.exportFile(
+          'test-export-password',
+          const ConfigurationExportScope.service('own'),
+        );
+        ownParsed = await source.transfer.readFile(
+          ownArchive,
+          'test-export-password',
+        );
+      } finally {
+        await source.db.close();
+      }
+      final envelope = jsonDecode(utf8.decode(archive)) as Map<String, dynamic>;
+      final data = envelope['data']! as Map<String, dynamic>;
+      expect(data['partial'], isTrue);
+
+      expect(parsed.partial, isTrue);
+      expect(parsed.serviceFolders, isEmpty);
+      expect(parsed.services.map((h) => h.id), ['ssh']);
+      expect(parsed.services.single.folderId, isNull);
+      expect(parsed.gatewayFolders, isEmpty);
+      expect(parsed.gateways.map((g) => g.id), ['jump']);
+      expect(parsed.gateways.single.folderId, isNull);
+      expect(parsed.identityFolders, isEmpty);
+      expect(
+        parsed.identities.map((i) => i.id),
+        unorderedEquals(['password', 'key']),
+      );
+      expect(parsed.identities.every((i) => i.folderId == null), isTrue);
+      expect(parsed.identitySecrets.keys, unorderedEquals(['password', 'key']));
+      expect(parsed.hostSecrets, isEmpty);
+
+      // 单独导出自有密码服务不携带凭证和网关，保留自有密码。
+      expect(ownParsed.services.map((h) => h.id), ['own']);
+      expect(ownParsed.gateways, isEmpty);
+      expect(ownParsed.identities, isEmpty);
+      expect(ownParsed.hostSecrets, {'own': 'test-host-password'});
+
+      // 全局导入到全新环境。
+      final target = _Store();
+      addTearDown(target.db.close);
+      await target.transfer.importFile(archive);
+      final imported = await target.repository.read();
+      expect(imported.services.map((h) => h.id), ['ssh']);
+      expect(imported.services.single.gatewayId, 'jump');
+      expect(imported.services.single.identityId, 'password');
+      expect(imported.gateways.map((g) => g.id), ['jump']);
+      expect(imported.gateways.single.identityId, 'key');
+      expect(
+        imported.identities.map((i) => i.id),
+        unorderedEquals(['password', 'key']),
+      );
+      expect(imported.identitySecrets['password'], 'test-password-only');
+      expect(
+        imported.identitySecrets['key'],
+        contains('public-test-key-marker-only'),
+      );
+
+      await target.transfer.importFile(ownArchive, 'test-export-password');
+      final afterSecond = await target.repository.read();
+      expect(
+        afterSecond.services.map((h) => h.id),
+        unorderedEquals(['ssh', 'own']),
+      );
+      expect(afterSecond.hostSecrets['own'], 'test-host-password');
+    });
+
+    test('导出服务文件夹保留子文件夹层级、排序与全部关联依赖，可全局导入', () async {
+      late ConnectionConfiguration sfData;
+      late Uint8List childArchive;
+      final source = _Store();
+      try {
+        await source.repository.merge(_fixture());
+        final sfArchive = await source.transfer.exportFile(
+          null,
+          const ConfigurationExportScope.serviceFolder('sf'),
+        );
+        sfData = await source.transfer.readFile(sfArchive);
+        childArchive = await source.transfer.exportFile(
+          null,
+          const ConfigurationExportScope.serviceFolder('sf-child'),
+        );
+      } finally {
+        await source.db.close();
+      }
+      expect(sfData.partial, isTrue);
+      expect(
+        sfData.serviceFolders.map((f) => f.id),
+        unorderedEquals(['sf', 'sf-child']),
+      );
+      expect(
+        sfData.serviceFolders.singleWhere((f) => f.id == 'sf').parentId,
+        isNull,
+      );
+      expect(
+        sfData.serviceFolders.singleWhere((f) => f.id == 'sf-child').parentId,
+        'sf',
+      );
+      expect(
+        sfData.services.map((h) => h.id),
+        unorderedEquals(['ssh', 'nested']),
+      );
+      expect(sfData.gateways.map((g) => g.id), ['jump']);
+      expect(
+        sfData.identities.map((i) => i.id),
+        unorderedEquals(['password', 'key']),
+      );
+
+      // 仅导出嵌套子文件夹时，该子文件夹变为根级目录，不带出父目录 sf。
+      final target = _Store();
+      addTearDown(target.db.close);
+      await target.transfer.importFile(childArchive);
+      final imported = await target.repository.read();
+      expect(imported.serviceFolders.map((f) => f.id), ['sf-child']);
+      expect(imported.serviceFolders.single.parentId, isNull);
+      expect(imported.services.map((h) => h.id), ['nested']);
+      expect(imported.services.single.folderId, 'sf-child');
+      expect(imported.gateways, isEmpty);
+      expect(imported.identities.map((i) => i.id), ['key']);
+      expect(imported.identitySecrets.keys, ['key']);
+    });
+
+    test('单独导出凭证与凭证文件夹、以及空文件夹均可全局导入', () async {
+      late Uint8List singleArchive;
+      late Uint8List folderArchive;
+      late Uint8List emptyArchive;
+      final source = _Store();
+      try {
+        await source.repository.merge(_fixture());
+        await source.repository.identityFolders.upsert(
+          const Folder(id: 'if-empty', name: 'Empty credentials'),
+        );
+        singleArchive = await source.transfer.exportFile(
+          null,
+          const ConfigurationExportScope.identity('rdp-password'),
+        );
+        folderArchive = await source.transfer.exportFile(
+          null,
+          const ConfigurationExportScope.identityFolder('if'),
+        );
+        emptyArchive = await source.transfer.exportFile(
+          null,
+          const ConfigurationExportScope.identityFolder('if-empty'),
+        );
+      } finally {
+        await source.db.close();
+      }
+
+      // 单个 RDP 凭证（带 rdpDomain）。
+      final target = _Store();
+      addTearDown(target.db.close);
+      await target.transfer.importFile(singleArchive);
+      var imported = await target.repository.read();
+      expect(imported.services, isEmpty);
+      expect(imported.gateways, isEmpty);
+      expect(imported.identityFolders, isEmpty);
+      expect(imported.identities.map((i) => i.id), ['rdp-password']);
+      expect(imported.identities.single.folderId, isNull);
+      expect(imported.identities.single.rdpDomain, 'CREDENTIAL-CORP');
+      expect(
+        imported.identitySecrets['rdp-password'],
+        'test-rdp-password-only',
+      );
+
+      // 凭证文件夹（含子文件夹与私钥凭证）。
+      await target.transfer.importFile(folderArchive);
+      imported = await target.repository.read();
+      expect(
+        imported.identityFolders.map((f) => f.id),
+        unorderedEquals(['if', 'if-child']),
+      );
+      expect(
+        imported.identities.map((i) => i.id),
+        unorderedEquals(['rdp-password', 'key']),
+      );
+      expect(
+        imported.identities.singleWhere((i) => i.id == 'rdp-password').folderId,
+        'if-child',
+      );
+      expect(
+        imported.identities.singleWhere((i) => i.id == 'key').folderId,
+        'if-child',
+      );
+      expect(imported.identitySecrets['key'], contains('test-passphrase-only'));
+
+      // 空文件夹导出导入。
+      await target.transfer.importFile(emptyArchive);
+      imported = await target.repository.read();
+      expect(
+        imported.identityFolders.map((f) => f.id),
+        unorderedEquals(['if', 'if-child', 'if-empty']),
+      );
+    });
+
+    test('单独导出网关（SSH/Page）与网关文件夹保留端口映射、代理配置与凭据', () async {
+      late Uint8List pageArchive;
+      late Uint8List gwFolderArchive;
+      final source = _Store();
+      try {
+        await source.repository.merge(_fixture());
+        pageArchive = await source.transfer.exportFile(
+          null,
+          const ConfigurationExportScope.gateway('page'),
+        );
+        gwFolderArchive = await source.transfer.exportFile(
+          null,
+          const ConfigurationExportScope.gatewayFolder('gf'),
+        );
+      } finally {
+        await source.db.close();
+      }
+
+      final target = _Store();
+      addTearDown(target.db.close);
+      await target.transfer.importFile(pageArchive);
+      var imported = await target.repository.read();
+      expect(imported.services, isEmpty);
+      expect(imported.identities, isEmpty);
+      expect(imported.gateways.map((g) => g.id), ['page']);
+      expect(imported.gateways.single.gatewayType, GatewayType.page);
+      expect(imported.gateways.single.forwardPorts.single.localPort, 13306);
+      expect(imported.gateways.single.proxyConfig.mode, ProxyMode.rule);
+      expect(imported.hostSecrets, {'page': 'test-page-token'});
+
+      await target.transfer.importFile(gwFolderArchive);
+      imported = await target.repository.read();
+      expect(
+        imported.gatewayFolders.map((f) => f.id),
+        unorderedEquals(['gf', 'gf-child']),
+      );
+      expect(
+        imported.gateways.map((g) => g.id),
+        unorderedEquals(['page', 'jump']),
+      );
+      expect(
+        imported.gateways.singleWhere((g) => g.id == 'jump').folderId,
+        'gf-child',
+      );
+      expect(imported.identities.map((i) => i.id), ['key']);
+      expect(
+        imported.identitySecrets['key'],
+        contains('public-test-key-marker-only'),
+      );
+    });
+
+    test('全局导入局部导出时保留本机已有目录归属且重复导入幂等，避免循环目录', () async {
+      late Uint8List childArchive;
+      late Uint8List sshArchive;
+      final source = _Store();
+      try {
+        await source.repository.merge(_fixture());
+        childArchive = await source.transfer.exportFile(
+          null,
+          const ConfigurationExportScope.serviceFolder('sf-child'),
+        );
+        sshArchive = await source.transfer.exportFile(
+          null,
+          const ConfigurationExportScope.service('ssh'),
+        );
+      } finally {
+        await source.db.close();
+      }
+
+      final target = _Store();
+      try {
+        await target.repository.merge(_fixture());
+        await target.transfer.importFile(childArchive);
+        await target.transfer.importFile(sshArchive);
+        final after = await target.repository.read();
+        expect(
+          after.serviceFolders.singleWhere((f) => f.id == 'sf-child').parentId,
+          'sf',
+        );
+        expect(after.services.singleWhere((h) => h.id == 'ssh').folderId, 'sf');
+        expect(
+          after.gateways.singleWhere((g) => g.id == 'jump').folderId,
+          'gf-child',
+        );
+        expect(
+          after.identities.singleWhere((i) => i.id == 'key').folderId,
+          'if-child',
+        );
+        final snapshot = after.toJson();
+        await target.transfer.importFile(sshArchive);
+        expect((await target.repository.read()).toJson(), snapshot);
+      } finally {
+        await target.db.close();
+      }
+
+      // 若本地目录为 A -> B，而局部导入为 B -> A，不沿用旧父级从而避免目录循环。
+      final cycleTarget = _Store();
+      addTearDown(cycleTarget.db.close);
+      await cycleTarget.repository.merge(
+        const ConnectionConfiguration(
+          serviceFolders: [
+            Folder(id: 'fa', name: 'A'),
+            Folder(id: 'fb', name: 'B', parentId: 'fa'),
+          ],
+        ),
+      );
+      await cycleTarget.repository.merge(
+        const ConnectionConfiguration(
+          serviceFolders: [
+            Folder(id: 'fb', name: 'B'),
+            Folder(id: 'fa', name: 'A', parentId: 'fb'),
+          ],
+          partial: true,
+        ),
+      );
+      final folders = await cycleTarget.repository.serviceFolders.getAll();
+      expect(folders.singleWhere((f) => f.id == 'fb').parentId, isNull);
+      expect(folders.singleWhere((f) => f.id == 'fa').parentId, 'fb');
+    });
+
+    test('导出范围关联到不同目录的同名凭证或网关时自动保留祖先目录且不重命名', () async {
+      late Uint8List archive;
+      final source = _Store();
+      try {
+        await source.repository.merge(
+          const ConnectionConfiguration(
+            serviceFolders: [Folder(id: 'sf', name: 'Cluster')],
+            services: [
+              Host(
+                id: 's1',
+                name: 'App 1',
+                hostname: 'app1.test',
+                folderId: 'sf',
+                identityId: 'i1',
+                gatewayId: 'g1',
+              ),
+              Host(
+                id: 's2',
+                name: 'App 2',
+                hostname: 'app2.test',
+                folderId: 'sf',
+                identityId: 'i2',
+                gatewayId: 'g2',
+              ),
+            ],
+            gatewayFolders: [
+              Folder(id: 'gf1', name: 'East'),
+              Folder(id: 'gf2', name: 'West'),
+            ],
+            gateways: [
+              Host(
+                id: 'g1',
+                name: 'jump',
+                hostname: 'g1.test',
+                folderId: 'gf1',
+              ),
+              Host(
+                id: 'g2',
+                name: 'jump',
+                hostname: 'g2.test',
+                folderId: 'gf2',
+              ),
+            ],
+            identityFolders: [
+              Folder(id: 'if1', name: 'East'),
+              Folder(id: 'if2', name: 'West'),
+            ],
+            identities: [
+              Identity(
+                id: 'i1',
+                name: 'root',
+                username: 'root',
+                authType: AuthType.password,
+                folderId: 'if1',
+              ),
+              Identity(
+                id: 'i2',
+                name: 'root',
+                username: 'root',
+                authType: AuthType.password,
+                folderId: 'if2',
+              ),
+            ],
+            identitySecrets: {'i1': 's1', 'i2': 's2'},
+          ),
+        );
+        archive = await source.transfer.exportFile(
+          null,
+          const ConfigurationExportScope.serviceFolder('sf'),
+        );
+      } finally {
+        await source.db.close();
+      }
+      final target = _Store();
+      addTearDown(target.db.close);
+      await target.transfer.importFile(archive);
+      final imported = await target.repository.read();
+      expect(
+        imported.identities.map((i) => (i.id, i.name, i.folderId)),
+        unorderedEquals([('i1', 'root', 'if1'), ('i2', 'root', 'if2')]),
+      );
+      expect(
+        imported.gateways.map((g) => (g.id, g.name, g.folderId)),
+        unorderedEquals([('g1', 'jump', 'gf1'), ('g2', 'jump', 'gf2')]),
+      );
+    });
+
+    test('无关项缺失密文不阻塞局部导出；目标不存在或关联引用缺失时拒绝导出', () async {
+      final source = _Store();
+      addTearDown(source.db.close);
+      await source.repository.merge(_fixture());
+      // 删除与 own 无关的 key 凭证密文。
+      final key = (await source.repository.identities.getAll()).singleWhere(
+        (i) => i.id == 'key',
+      );
+      source.vault.values.remove(key.secretRef);
+
+      // 导出不依赖 key 的 own 服务和 password 凭证均应成功。
+      final ownBytes = await source.transfer.exportFile(
+        null,
+        const ConfigurationExportScope.service('own'),
+      );
+      expect(
+        (await source.transfer.readFile(ownBytes)).services.map((h) => h.id),
+        ['own'],
+      );
+      final pwdBytes = await source.transfer.exportFile(
+        null,
+        const ConfigurationExportScope.identity('password'),
+      );
+      expect(
+        (await source.transfer.readFile(pwdBytes)).identities.map((i) => i.id),
+        ['password'],
+      );
+
+      // 导出依赖 key 的 ssh 服务必须失败。
+      await expectLater(
+        source.transfer.exportFile(
+          null,
+          const ConfigurationExportScope.service('ssh'),
+        ),
+        _configurationError,
+      );
+
+      // 目标不存在时返回明确错误。
+      for (final (scope, message) in [
+        (const ConfigurationExportScope.service('missing'), '所选服务已不存在'),
+        (const ConfigurationExportScope.identity('missing'), '所选凭证已不存在'),
+        (const ConfigurationExportScope.gateway('missing'), '所选网关已不存在'),
+        (const ConfigurationExportScope.serviceFolder('missing'), '所选文件夹已不存在'),
+        (const ConfigurationExportScope.identityFolder('missing'), '所选文件夹已不存在'),
+        (const ConfigurationExportScope.gatewayFolder('missing'), '所选文件夹已不存在'),
+      ]) {
+        await expectLater(
+          source.transfer.exportFile(null, scope),
+          throwsA(
+            isA<ConfigurationException>().having(
+              (e) => e.message,
+              'message',
+              message,
+            ),
+          ),
+        );
+      }
+
+      // 非法 partial 字段拒绝解析。
+      final invalidJson = _fixture().toJson()..['partial'] = 'yes';
+      expect(
+        () => ConnectionConfiguration.fromJson(invalidJson),
+        _configurationError,
+      );
+    });
+  });
 }

@@ -341,6 +341,12 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
     expect(highlighted('复制'), isFalse);
+    expect(highlighted('导出配置'), isTrue);
+    expect(highlighted('删除'), isFalse);
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(highlighted('导出配置'), isFalse);
     expect(highlighted('删除'), isTrue);
     await tester.sendKeyEvent(LogicalKeyboardKey.escape);
     await tester.pumpAndSettle();
@@ -366,6 +372,8 @@ void main() {
     expect(find.text('新建会话'), findsOneWidget);
     expect(find.text('文件传输'), findsOneWidget);
     expect(find.text('编辑'), findsOneWidget);
+    expect(find.text('复制'), findsOneWidget);
+    expect(find.text('导出配置'), findsOneWidget);
     expect(find.text('删除'), findsOneWidget);
     await tester.sendKeyEvent(LogicalKeyboardKey.escape);
     await tester.pumpAndSettle();

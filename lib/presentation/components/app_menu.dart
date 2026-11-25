@@ -52,6 +52,7 @@ AppIcons? _menuIcon(Object? action) => switch (action) {
   'new-identity' => AppIcons.fileKey,
   'edit' || 'rename' => AppIcons.pencil,
   'copy' => AppIcons.copy,
+  'export' => AppIcons.fileExport,
   'delete' => AppIcons.trash2,
   'download' => AppIcons.download,
   'upload' => AppIcons.upload,
