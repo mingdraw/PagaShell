@@ -1,5 +1,6 @@
 use ironrdp::pdu::geometry::InclusiveRectangle;
 use ironrdp::session::image::DecodedImage;
+use ironrdp_egfx::gpu::GpuPresentedFrame;
 use tokio::sync::oneshot;
 
 use crate::api::desktop::{DesktopCursor, DesktopFrame, DesktopTile};
@@ -14,9 +15,14 @@ fn opaque([r, g, b, _]: [u8; 4]) -> [u8; 4] {
     [r, g, b, 255]
 }
 
+pub(crate) struct FrameDelivery {
+    pub frame: DesktopFrame,
+    pub gpu: Option<Box<dyn GpuPresentedFrame>>,
+}
+
 pub(crate) struct FrameRequest {
     pub after: u32,
-    pub reply: oneshot::Sender<DesktopFrame>,
+    pub reply: oneshot::Sender<FrameDelivery>,
 }
 
 /// Keep exact dirty tiles until the consumer requests an update. A single atlas
@@ -91,7 +97,37 @@ impl FrameEncoder {
     }
 
     pub fn snapshot(&mut self, image: &DecodedImage, after: u32) -> DesktopFrame {
-        self.snapshot_rgba(image.width(), image.height(), image.data(), after)
+        self.snapshot_pixels(
+            image.width(),
+            image.height(),
+            image.data(),
+            after,
+            image.is_opaque_rgba(),
+        )
+    }
+
+    pub fn snapshot_gpu(&mut self, width: u16, height: u16, after: u32) -> DesktopFrame {
+        let resized = self.resize(width, height);
+        let full = resized || after != self.sequence;
+        let cursor = if full || self.cursor_dirty {
+            self.cursor.clone()
+        } else {
+            None
+        };
+        self.cursor_dirty = false;
+        self.dirty.fill(false);
+        self.sequence = self.sequence.wrapping_add(1).max(1);
+        DesktopFrame {
+            sequence: self.sequence,
+            width,
+            height,
+            bitmap_width: 0,
+            bitmap_height: 0,
+            rgba: Vec::new(),
+            tiles: Vec::new(),
+            cursor,
+            texture_id: None,
+        }
     }
 
     pub fn resize(&mut self, width: u16, height: u16) -> bool {
@@ -114,6 +150,17 @@ impl FrameEncoder {
         pixels: &[u8],
         after: u32,
     ) -> DesktopFrame {
+        self.snapshot_pixels(width, height, pixels, after, false)
+    }
+
+    fn snapshot_pixels(
+        &mut self,
+        width: u16,
+        height: u16,
+        pixels: &[u8],
+        after: u32,
+        known_opaque: bool,
+    ) -> DesktopFrame {
         let resized = self.resize(width, height);
         // A cancelled poll may have consumed an atlas. Recover every tile when
         // the caller's base differs, including the current cursor shape.
@@ -128,14 +175,18 @@ impl FrameEncoder {
 
         if full || self.dirty.iter().all(|&dirty| dirty) {
             self.dirty.fill(false);
-            let rgba = pixels
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .copied()
-                .map(opaque)
-                .collect::<Vec<_>>()
-                .into_flattened();
+            let rgba = if known_opaque {
+                pixels.to_vec()
+            } else {
+                pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .copied()
+                    .map(opaque)
+                    .collect::<Vec<_>>()
+                    .into_flattened()
+            };
             // A contiguous desktop needs neither tile metadata nor an atlas.
             return DesktopFrame {
                 sequence: self.sequence,
@@ -146,6 +197,7 @@ impl FrameEncoder {
                 rgba,
                 tiles: Vec::new(),
                 cursor,
+                texture_id: None,
             };
         }
 
@@ -205,10 +257,19 @@ impl FrameEncoder {
                     usize::from(source_y + row - 1) * output_stride + usize::from(source_x - 1) * 4;
                 let source = pixels[input..input + input_stride].as_chunks::<4>().0;
                 let target = rgba[output..output + (cols + 2) * 4].as_chunks_mut::<4>().0;
-                target[0] = opaque(source[col.saturating_sub(1)]);
-                target[cols + 1] = opaque(source[(col + cols).min(source.len() - 1)]);
-                for (to, &from) in target[1..cols + 1].iter_mut().zip(&source[col..col + cols]) {
-                    *to = opaque(from);
+                let left = source[col.saturating_sub(1)];
+                let right = source[(col + cols).min(source.len() - 1)];
+                let row = &source[col..col + cols];
+                if known_opaque {
+                    target[0] = left;
+                    target[cols + 1] = right;
+                    target[1..cols + 1].copy_from_slice(row);
+                } else {
+                    target[0] = opaque(left);
+                    target[cols + 1] = opaque(right);
+                    for (to, &from) in target[1..cols + 1].iter_mut().zip(row) {
+                        *to = opaque(from);
+                    }
                 }
             }
             tiles.push(DesktopTile {
@@ -230,6 +291,7 @@ impl FrameEncoder {
             rgba,
             tiles,
             cursor,
+            texture_id: None,
         }
     }
 }

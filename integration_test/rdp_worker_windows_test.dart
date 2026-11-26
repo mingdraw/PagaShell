@@ -6,6 +6,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge.dart'
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:pagashell/src/rust/api/desktop.dart' as rdp;
+import 'package:pagashell/src/rust/api/vnc.dart' as vnc;
 import 'package:pagashell/src/rust/frb_generated.dart';
 
 const _deadline = Duration(seconds: 10);
@@ -66,6 +67,51 @@ void main() {
     await blocked.timeout(_deadline);
     await worker.waitForExit();
   });
+
+  test('VNC 子进程无响应限时关闭且意外退出会唤醒等待', () async {
+    final stalled = await _openVncWorker();
+    final crashed = await _openVncWorker();
+    expect(stalled.info.processId, isNot(crashed.info.processId));
+    expect(stalled.info.processId, isNot(pid));
+
+    final listener = await _listen();
+    final connection = listener.first;
+    final blocked = expectLater(
+      vnc.vncWorkerConnect(
+        sessionId: stalled.info.sessionId,
+        host: InternetAddress.loopbackIPv4.address,
+        port: listener.port,
+        password: '',
+      ),
+      throwsA(_nativeError('VNC 会话进程无响应')),
+    );
+    final heldPeer = await connection.timeout(_deadline);
+    addTearDown(heldPeer.destroy);
+
+    final elapsed = Stopwatch()..start();
+    await vnc.vncDisconnect(sessionId: stalled.info.sessionId);
+    expect(elapsed.elapsed, lessThan(const Duration(seconds: 4)));
+    await blocked;
+    await stalled.waitForExit();
+    expect(crashed.exited, isFalse);
+
+    final listener2 = await _listen();
+    final connection2 = listener2.first;
+    final crashWait = expectLater(
+      vnc.vncWorkerConnect(
+        sessionId: crashed.info.sessionId,
+        host: InternetAddress.loopbackIPv4.address,
+        port: listener2.port,
+        password: '',
+      ),
+      throwsA(_nativeError('VNC 会话进程已退出')),
+    );
+    final heldPeer2 = await connection2.timeout(_deadline);
+    addTearDown(heldPeer2.destroy);
+    crashed.terminate();
+    await crashWait.timeout(_deadline);
+    await crashed.waitForExit();
+  });
 }
 
 Matcher _nativeError(String message) => isA<AnyhowException>().having(
@@ -92,6 +138,14 @@ Future<ServerSocket> _listen() async {
 Future<_Worker> _openWorker() async {
   final info = await rdp.desktopWorkerOpen();
   addTearDown(() => rdp.desktopDisconnect(sessionId: info.sessionId));
+  final worker = _Worker(info);
+  addTearDown(worker.closeHandle);
+  return worker;
+}
+
+Future<_Worker> _openVncWorker() async {
+  final info = await vnc.vncWorkerOpen();
+  addTearDown(() => vnc.vncDisconnect(sessionId: info.sessionId));
   final worker = _Worker(info);
   addTearDown(worker.closeHandle);
   return worker;

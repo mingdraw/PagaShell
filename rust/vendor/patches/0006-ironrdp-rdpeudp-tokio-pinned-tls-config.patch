@@ -1,0 +1,71 @@
+--- a/crates/ironrdp-rdpeudp-tokio/src/tls.rs
++++ b/crates/ironrdp-rdpeudp-tokio/src/tls.rs
+@@ -75,7 +75,7 @@
+     tokio::task::spawn_blocking(action).await.map_err(io::Error::other)?
+ }
+ 
+-async fn tls_connect_with_config<S>(
++pub(crate) async fn tls_connect_with_config<S>(
+     stream: S,
+     server_name: &str,
+     config: tokio_rustls::rustls::ClientConfig,
+--- a/crates/ironrdp-rdpeudp-tokio/src/transport.rs
++++ b/crates/ironrdp-rdpeudp-tokio/src/transport.rs
+@@ -34,7 +34,7 @@
+     UdpTransportErrorKind,
+ };
+ use crate::stream::{RdpeudpStream, SharedIo};
+-use crate::tls::{tls_accept, tls_upgrade};
++use crate::tls::{tls_accept, tls_connect_with_config, tls_upgrade};
+ use crate::tunnel::{read_tunnel_pdu, tunnel_data_loop, write_tunnel_pdu};
+ 
+ // ════════════════════════════════════════════════════════════════════
+@@ -115,6 +115,9 @@
+     pub certificate_validation_callback: Option<CertificateValidationCallback>,
+     /// Endpoint passed to the validation callback.
+     pub certificate_validation_endpoint: String,
++    /// Optional complete configuration from the primary client. A strict
++    /// validation exception callback cannot reject a valid but different cert.
++    pub client_config: Option<tokio_rustls::rustls::ClientConfig>,
+ }
+ 
+ impl UdpTlsConfig {
+@@ -124,6 +127,7 @@
+             certificate_validation: CertificateValidation::default(),
+             certificate_validation_callback: None,
+             certificate_validation_endpoint,
++            client_config: None,
+         }
+     }
+ }
+@@ -620,16 +624,20 @@
+ 
+     // Phase 3: TLS handshake over the RDPEUDP2 stream
+     let rdpeudp_stream = RdpeudpStream::new(Arc::clone(&shared));
+-    let tls_stream = tokio::time::timeout(
+-        config.tls_timeout,
+-        tls_upgrade(
+-            rdpeudp_stream,
+-            &config.server_name,
+-            config.tls.certificate_validation,
+-            config.tls.certificate_validation_callback,
+-            &config.tls.certificate_validation_endpoint,
+-        ),
+-    )
++    let tls_stream = tokio::time::timeout(config.tls_timeout, async {
++        if let Some(tls) = config.tls.client_config {
++            tls_connect_with_config(rdpeudp_stream, &config.server_name, tls).await
++        } else {
++            tls_upgrade(
++                rdpeudp_stream,
++                &config.server_name,
++                config.tls.certificate_validation,
++                config.tls.certificate_validation_callback,
++                &config.tls.certificate_validation_endpoint,
++            )
++            .await
++        }
++    })
+     .await
+     .map_err(|_| {
+         debug!(timeout = ?config.tls_timeout, "TLS handshake timed out");

@@ -74,6 +74,13 @@ set_target_properties(${BINARY_NAME}
 # them to the application.
 include(flutter/generated_plugins.cmake)
 
+# The runner and Dart FFI use the same Rust library for native texture
+# registration. The bundle installs it in lib/ with the other FFI libraries.
+add_dependencies(${BINARY_NAME} rust_lib_pagashell_cargokit)
+get_filename_component(PAGASHELL_RUST_LIB_DIR "${rust_lib_pagashell_bundled_libraries}" DIRECTORY)
+target_link_directories(${BINARY_NAME} PRIVATE "${PAGASHELL_RUST_LIB_DIR}")
+target_link_libraries(${BINARY_NAME} PRIVATE -lrust_lib_pagashell)
+
 
 # === Installation ===
 # By default, "installing" just makes a relocatable bundle in the build

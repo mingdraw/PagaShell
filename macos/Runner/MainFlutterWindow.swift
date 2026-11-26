@@ -12,6 +12,7 @@ class MainFlutterWindow: NSWindow {
   private var clipboardChannel: FlutterMethodChannel?
   private var systemProxyChannel: FlutterMethodChannel?
   private var trayChannel: FlutterMethodChannel?
+  private var rdpTextures: MacRdpTextureRegistry?
   private let systemProxy = MacSystemProxy()
   private var systemTray: MacSystemTray?
   private var headerMouseDownEvent: NSEvent?
@@ -24,6 +25,7 @@ class MainFlutterWindow: NSWindow {
     self.setFrame(windowFrame, display: true)
 
     RegisterGeneratedPlugins(registry: flutterViewController)
+    rdpTextures = MacRdpTextureRegistry(controller: flutterViewController)
 
     super.awakeFromNib()
 
@@ -255,6 +257,11 @@ class MainFlutterWindow: NSWindow {
   func cleanupTray() {
     isHiddenInTray = false
     systemTray?.dispose()
+  }
+
+  func cleanupRdpTextures() {
+    rdpTextures?.close()
+    rdpTextures = nil
   }
 
   private func isCustomHeaderContent(_ point: NSPoint) -> Bool {

@@ -66,6 +66,7 @@ class RdpSurface extends ChangeNotifier {
   int height = 0;
   int generation = 0;
   int compactions = 0;
+  int? textureId;
   _Atlas? _fullAtlas;
   List<_Tile?> _tiles = [];
   final Set<_Atlas> _atlases = {};
@@ -90,6 +91,25 @@ class RdpSurface extends ChangeNotifier {
         frame.rgba.length != frame.patchWidth * frame.patchHeight * 4) {
       throw _invalidFrame;
     }
+    if (frame.textureId case final id?) {
+      if (id < 0 ||
+          frame.rgba.isNotEmpty ||
+          frame.tiles.isNotEmpty ||
+          frame.patchWidth != 0 ||
+          frame.patchHeight != 0) {
+        throw _invalidFrame;
+      }
+      if (textureId == id && width == frame.width && height == frame.height) {
+        return;
+      }
+      _clearAtlases();
+      textureId = id;
+      width = frame.width;
+      height = frame.height;
+      generation++;
+      notifyListeners();
+      return;
+    }
     if (frame.rgba.isEmpty) {
       if (frame.tiles.isNotEmpty) throw _invalidFrame;
       return;
@@ -100,6 +120,7 @@ class RdpSurface extends ChangeNotifier {
         frame.y == 0 &&
         frame.patchWidth == frame.width &&
         frame.patchHeight == frame.height;
+    if (textureId != null && !full) throw _invalidFrame;
     final regions = frame.tiles.isEmpty
         ? [
             RdpTile(
@@ -137,6 +158,7 @@ class RdpSurface extends ChangeNotifier {
       if (full) {
         width = frame.width;
         height = frame.height;
+        textureId = null;
         _setFullAtlas(atlas);
         transferred = true;
         generation++;
@@ -269,13 +291,17 @@ class RdpSurface extends ChangeNotifier {
   }
 
   void _setFullAtlas(_Atlas atlas) {
+    _clearAtlases();
+    _atlases.add(atlas);
+    _fullAtlas = atlas;
+  }
+
+  void _clearAtlases() {
     for (final previous in _atlases) {
       previous.image.dispose();
     }
-    _atlases
-      ..clear()
-      ..add(atlas);
-    _fullAtlas = atlas;
+    _atlases.clear();
+    _fullAtlas = null;
     _tiles = [];
     _batches = [];
   }
@@ -345,13 +371,7 @@ class RdpSurface extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
-    _fullAtlas = null;
-    _tiles = [];
-    _batches = [];
-    for (final atlas in _atlases) {
-      atlas.image.dispose();
-    }
-    _atlases.clear();
+    _clearAtlases();
     super.dispose();
   }
 }

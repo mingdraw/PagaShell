@@ -163,8 +163,10 @@ async fn rfb_versions_password_frame_pointer_keyboard_and_disconnect() {
         assert_eq!(received[2], [5, 1, 0, 1, 0, 0]);
         assert_eq!(received[3][1], 17); // Scroll down while left button remains held.
         assert_eq!(received[4][1], 1);
+        probe(id).await.unwrap();
         disconnect(id).await;
         disconnect(id).await; // Idempotent.
+        assert!(probe(id).await.is_err());
         assert!(!SESSIONS.lock().await.contains_key(&id));
         drop(commands);
         tokio::time::timeout(Duration::from_secs(2), worker)

@@ -30,9 +30,16 @@ const MAX_PIXELS: usize = 8_294_400;
 static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 static SESSIONS: LazyLock<Mutex<HashMap<u32, Arc<Session>>>> = LazyLock::new(Default::default);
 
+#[cfg(windows)]
+pub(crate) fn reserve_session_id() -> u32 {
+    NEXT_ID.fetch_add(1, Ordering::Relaxed)
+}
+
 struct Session {
     frames: mpsc::Sender<FrameRequest>,
     inputs: mpsc::Sender<InputRequest>,
+    #[cfg(any(windows, test))]
+    probes: mpsc::Sender<oneshot::Sender<()>>,
     cancel: CancellationToken,
     finished: watch::Sender<bool>,
 }
@@ -190,20 +197,39 @@ pub(crate) async fn connect(
     page_gateway: Option<crate::api::page::PageGateway>,
 ) -> Result<u32> {
     let deadline = tokio::time::Instant::now() + TIMEOUT;
-    let client = tokio::time::timeout_at(deadline, async move {
-        let stream = if let Some(gateway) = page_gateway {
-            Transport::Page(Box::new(
+    connect_inner(password, deadline, async move {
+        if let Some(gateway) = page_gateway {
+            Ok(Transport::Page(Box::new(
                 crate::page::connect(gateway, &host, port, deadline).await?,
-            ))
+            )))
         } else if let Some(id) = ssh_gateway {
-            Transport::Ssh(crate::api::ssh::desktop_tunnel(id, host, port).await?)
+            Ok(Transport::Ssh(
+                crate::api::ssh::desktop_tunnel(id, host, port).await?,
+            ))
         } else {
             let stream = TcpStream::connect((host.as_str(), port))
                 .await
                 .context("VNC TCP 连接失败")?;
             stream.set_nodelay(true)?;
-            Transport::Direct(stream)
-        };
+            Ok(Transport::Direct(stream))
+        }
+    })
+    .await
+}
+
+#[cfg(windows)]
+pub(crate) async fn connect_transport(password: String, stream: Transport) -> Result<u32> {
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    connect_inner(password, deadline, async move { Ok(stream) }).await
+}
+
+async fn connect_inner(
+    password: String,
+    deadline: tokio::time::Instant,
+    open_stream: impl std::future::Future<Output = Result<Transport>>,
+) -> Result<u32> {
+    let client = tokio::time::timeout_at(deadline, async move {
+        let stream = open_stream.await?;
         let state = VncConnector::new(stream)
             .set_auth_method(async move { Ok(password) })
             .set_pixel_format(PixelFormat::rgba())
@@ -227,15 +253,22 @@ pub(crate) async fn connect(
     .context("VNC 连接超时")??;
     let (frames, frame_rx) = mpsc::channel(4);
     let (inputs, input_rx) = mpsc::channel(64);
+    #[cfg(any(windows, test))]
+    let (probes, probe_rx) = mpsc::channel(4);
     let (finished, _) = watch::channel(false);
     let session = Arc::new(Session {
         frames,
         inputs,
+        #[cfg(any(windows, test))]
+        probes,
         cancel: CancellationToken::new(),
         finished,
     });
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     SESSIONS.lock().await.insert(id, Arc::clone(&session));
+    #[cfg(any(windows, test))]
+    tokio::spawn(run(session, client, frame_rx, input_rx, probe_rx));
+    #[cfg(not(any(windows, test)))]
     tokio::spawn(run(session, client, frame_rx, input_rx));
     Ok(id)
 }
@@ -258,6 +291,7 @@ async fn run(
     client: VncClient,
     mut frames: mpsc::Receiver<FrameRequest>,
     mut inputs: mpsc::Receiver<InputRequest>,
+    #[cfg(any(windows, test))] mut probes: mpsc::Receiver<oneshot::Sender<()>>,
 ) {
     let mut image = Framebuffer::default();
     let mut held = HeldInputs::default();
@@ -269,8 +303,17 @@ async fn run(
             if pending.as_ref().is_some_and(|request| request.reply.is_closed()) { pending = None; }
             let frame_ready = pending.as_ref().is_some_and(|request| image.ready(request.after));
             let deadline = if frame_ready { publish_at.unwrap_or_else(Instant::now) } else { refresh_at };
+            #[cfg(any(windows, test))]
+            let next_probe = probes.recv();
+            #[cfg(not(any(windows, test)))]
+            let next_probe = std::future::pending::<Option<oneshot::Sender<()>>>();
             tokio::select! {
                 _ = session.cancel.cancelled() => return Ok(()),
+                probe = next_probe => {
+                    if let Some(reply) = probe {
+                        let _ = reply.send(());
+                    }
+                }
                 // recv_event holds the vnc-rs mutex. Only the owner uses the client,
                 // and select drops the read future before processing an input.
                 event = client.recv_event() => {
@@ -302,7 +345,12 @@ async fn run(
                         let request = pending.take().unwrap();
                         publish_at = None;
                         if !request.reply.is_closed() {
-                            if let Some(frame) = image.frame(request.after) { let _ = request.reply.send(frame); }
+                            if let Some(frame) = image.frame(request.after) {
+                                let _ = request.reply.send(crate::desktop_frame::FrameDelivery {
+                                    frame,
+                                    gpu: None,
+                                });
+                            }
                         }
                     } else {
                         tokio::select! {
@@ -319,6 +367,8 @@ async fn run(
     drop(frames);
     drop(pending);
     drop(inputs);
+    #[cfg(any(windows, test))]
+    drop(probes);
     if session.cancel.is_cancelled() {
         let _ = tokio::time::timeout(Duration::from_secs(1), async {
             if let Some(code) = held.typed_key.take() {
@@ -393,7 +443,7 @@ pub(crate) async fn frame(id: u32, after: u32) -> Result<Option<DesktopFrame>> {
             .await
             .map_err(|_| anyhow!("VNC 连接已断开，请重新连接"))?;
         match result.await {
-            Ok(frame) => Ok(Some(frame)),
+            Ok(delivery) => Ok(Some(delivery.frame)),
             Err(_) if session.frames.is_closed() || session.cancel.is_cancelled() => {
                 bail!("VNC 连接已断开，请重新连接")
             }
@@ -533,6 +583,20 @@ async fn apply_input(
     Ok(())
 }
 
+#[cfg(any(windows, test))]
+pub(crate) async fn probe(id: u32) -> Result<()> {
+    let session = get(id).await?;
+    let (reply, waiter) = oneshot::channel();
+    session
+        .probes
+        .send(reply)
+        .await
+        .map_err(|_| anyhow!("VNC 连接已断开，请重新连接"))?;
+    waiter
+        .await
+        .map_err(|_| anyhow!("VNC 连接已断开，请重新连接"))
+}
+
 pub(crate) async fn disconnect(id: u32) {
     let Some(session) = SESSIONS.lock().await.remove(&id) else {
         return;
@@ -540,6 +604,19 @@ pub(crate) async fn disconnect(id: u32) {
     session.cancel.cancel();
     let _ = tokio::time::timeout(
         Duration::from_secs(2),
+        session.finished.subscribe().wait_for(|finished| *finished),
+    )
+    .await;
+}
+
+#[cfg(windows)]
+pub(crate) async fn disconnect_worker(id: u32) {
+    let Some(session) = SESSIONS.lock().await.remove(&id) else {
+        return;
+    };
+    session.cancel.cancel();
+    let _ = tokio::time::timeout(
+        Duration::from_millis(650),
         session.finished.subscribe().wait_for(|finished| *finished),
     )
     .await;

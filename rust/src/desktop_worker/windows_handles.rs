@@ -1,15 +1,25 @@
 use std::{
+    collections::hash_map::RandomState,
     ffi::c_void,
+    hash::BuildHasher,
     io,
     mem::size_of,
-    os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle},
+    os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle, OwnedHandle, RawHandle},
     ptr::{self, NonNull},
-    sync::atomic::{AtomicU32, Ordering},
+    sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
 use anyhow::{bail, ensure, Context, Result};
+use sha2::{Digest, Sha256};
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    net::windows::named_pipe::{NamedPipeClient, NamedPipeServer, ServerOptions},
+};
 use windows_sys::Win32::{
-    Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS, INVALID_HANDLE_VALUE},
+    Foundation::{
+        DuplicateHandle, DUPLICATE_SAME_ACCESS, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
+    },
+    Storage::FileSystem::{CreateFileW, FILE_FLAG_OVERLAPPED, OPEN_EXISTING},
     System::{
         JobObjects::{
             AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
@@ -25,6 +35,9 @@ use windows_sys::Win32::{
 };
 
 use super::wire::{MapOffer, MAX_FRAME_BYTES};
+
+const TUNNEL_PIPE_BUFFER: u32 = 256 * 1024;
+static TUNNEL_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 pub(super) struct WorkerJob {
     job: OwnedHandle,
@@ -75,12 +88,12 @@ impl WorkerJob {
         unsafe { TerminateJobObject(self.job.as_raw_handle(), 1) };
     }
 
-    fn share(&self, mapping: &OwnedHandle, capacity: usize) -> io::Result<MapOffer> {
+    pub(super) fn share_handle(&self, handle: &OwnedHandle) -> io::Result<u64> {
         let mut remote = ptr::null_mut();
         if unsafe {
             DuplicateHandle(
                 GetCurrentProcess(),
-                mapping.as_raw_handle(),
+                handle.as_raw_handle(),
                 self.process.as_raw_handle(),
                 &mut remote,
                 0,
@@ -92,11 +105,89 @@ impl WorkerJob {
             return Err(io::Error::last_os_error());
         }
         // The handle is valid only in the child. It owns and closes the copy.
+        Ok(remote as usize as u64)
+    }
+
+    fn share(&self, mapping: &OwnedHandle, capacity: usize) -> io::Result<MapOffer> {
+        let handle = self.share_handle(mapping)?;
         Ok(MapOffer {
-            handle: remote as usize as u64,
+            handle,
             capacity: capacity as u32,
         })
     }
+}
+
+/// A private single-instance full-duplex overlapped pipe used to bridge an
+/// authenticated SSH `direct-tcpip` stream into a worker subprocess without
+/// opening a localhost TCP port or sharing SSH credentials.
+pub(super) struct TunnelPipe {
+    server: NamedPipeServer,
+    client: OwnedHandle,
+}
+
+impl TunnelPipe {
+    pub(super) fn create() -> io::Result<Self> {
+        let seq = TUNNEL_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut hasher = Sha256::new();
+        hasher.update(std::process::id().to_le_bytes());
+        hasher.update(seq.to_le_bytes());
+        hasher.update(RandomState::new().hash_one(seq).to_le_bytes());
+        let digest = hasher.finalize();
+        let mut hex = String::with_capacity(32);
+        for byte in &digest[..16] {
+            use std::fmt::Write as _;
+            let _ = write!(&mut hex, "{byte:02x}");
+        }
+        let name = format!(r"\\.\pipe\pagashell-tunnel-{}-{hex}", std::process::id());
+        let server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .max_instances(1)
+            .reject_remote_clients(true)
+            .in_buffer_size(TUNNEL_PIPE_BUFFER)
+            .out_buffer_size(TUNNEL_PIPE_BUFFER)
+            .create(&name)?;
+        // Connect the single client end in-process via raw CreateFileW so the
+        // client FILE_OBJECT is NOT bound to the parent's IOCP port before
+        // being duplicated into the child process.
+        let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        let client = owned(unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                0,
+                ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_OVERLAPPED,
+                ptr::null_mut(),
+            )
+        })?;
+        Ok(Self { server, client })
+    }
+
+    pub(super) async fn bridge(
+        self,
+        job: &WorkerJob,
+        mut upstream: impl AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    ) -> Result<(u64, tokio::task::JoinHandle<()>)> {
+        let Self { mut server, client } = self;
+        server.connect().await.context("无法连接网关隧道管道")?;
+        let remote = job.share_handle(&client).context("无法共享网关隧道句柄")?;
+        // Release the parent's client reference immediately so closing the
+        // worker triggers EOF on the server end.
+        drop(client);
+        let task = tokio::spawn(async move {
+            let _ = tokio::io::copy_bidirectional(&mut upstream, &mut server).await;
+        });
+        Ok((remote, task))
+    }
+}
+
+pub(super) fn accept_tunnel(handle: u64) -> Result<NamedPipeClient> {
+    let raw = usize::try_from(handle).context("网关隧道句柄无效")? as RawHandle;
+    let handle = owned(raw).context("网关隧道句柄无效")?;
+    // Transfer ownership of the validated handle into Tokio's IOCP-backed client.
+    unsafe { NamedPipeClient::from_raw_handle(handle.into_raw_handle()) }
+        .context("无法打开网关隧道管道")
 }
 
 fn owned(handle: RawHandle) -> io::Result<OwnedHandle> {
@@ -185,20 +276,20 @@ impl FrameReader {
             .context("无法共享 RDP 会话进程帧缓冲")
     }
 
-    pub(super) fn read(&self, len: usize, sequence: u32) -> Result<Vec<u8>> {
+    pub(super) fn pixels(&self, len: usize, sequence: u32) -> Result<&[u8]> {
         if len > self.view.capacity || sequence == 0 {
             bail!("RDP 会话进程画面无效");
         }
         if len == 0 {
-            return Ok(Vec::new());
+            return Ok(&[]);
         }
         ensure!(
             self.view.sequence().load(Ordering::Acquire) == sequence,
             "RDP 会话进程画面未就绪"
         );
-        // The parent issues no new frame request while reading. It copies to
-        // an owned Vec so the mapping may be reused after returning to Flutter.
-        Ok(unsafe { std::slice::from_raw_parts(self.view.pixels(), len) }.to_vec())
+        // The caller holds or has retired the slot, so the child cannot
+        // rewrite the mapping until this borrow is no longer in use.
+        Ok(unsafe { std::slice::from_raw_parts(self.view.pixels(), len) })
     }
 }
 
@@ -244,13 +335,42 @@ mod tests {
         let read = FrameReader::new(1024).unwrap();
         let mut write =
             FrameWriter(View::new(read.mapping.as_raw_handle(), FILE_MAP_WRITE, 1024).unwrap());
-        assert!(read.read(4, 1).is_err());
+        assert!(read.pixels(4, 1).is_err());
         write.publish(&[1, 2, 3, 255], 1);
-        let first = read.read(4, 1).unwrap();
+        let first = read.pixels(4, 1).unwrap().to_vec();
         write.publish(&[4, 5, 6, 255], 2);
         assert_eq!(first, [1, 2, 3, 255]);
-        assert_eq!(read.read(4, 2).unwrap(), [4, 5, 6, 255]);
-        assert!(read.read(4, 1).is_err());
-        assert!(read.read(1025, 2).is_err());
+        assert_eq!(read.pixels(4, 2).unwrap(), [4, 5, 6, 255]);
+        assert!(read.pixels(4, 1).is_err());
+        assert!(read.pixels(1025, 2).is_err());
+    }
+
+    #[tokio::test]
+    async fn tunnel_pipe_bridges_bidirectional_stream_without_tcp_port() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let pipe = TunnelPipe::create().unwrap();
+        let TunnelPipe { mut server, client } = pipe;
+        let client_raw = client.into_raw_handle() as usize as u64;
+        server.connect().await.unwrap();
+        let mut child_pipe = accept_tunnel(client_raw).unwrap();
+        let (mut peer, mut bridge_end) = tokio::io::duplex(4096);
+        let bridge = tokio::spawn(async move {
+            let _ = tokio::io::copy_bidirectional(&mut bridge_end, &mut server).await;
+        });
+
+        peer.write_all(b"hello-worker").await.unwrap();
+        let mut buf = [0u8; 12];
+        child_pipe.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"hello-worker");
+
+        child_pipe.write_all(b"hello-gateway").await.unwrap();
+        let mut reply = [0u8; 13];
+        peer.read_exact(&mut reply).await.unwrap();
+        assert_eq!(&reply, b"hello-gateway");
+
+        drop(child_pipe);
+        drop(peer);
+        let _ = bridge.await;
     }
 }

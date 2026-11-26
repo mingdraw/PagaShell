@@ -1,0 +1,2068 @@
+--- a/crates/ironrdp-egfx/src/client.rs
++++ b/crates/ironrdp-egfx/src/client.rs
+@@ -81,6 +81,7 @@
+ };
+ use crate::compositor::{Compositor, OutputUpdate};
+ use crate::decode::{DecoderFactory, H264Decoder};
++use crate::gpu::{GpuCompositor, GpuPresentedFrame, HwVideoFrame};
+ use crate::pdu::{
+     Avc420BitmapStream, Avc444BitmapStream, CacheImportOfferPdu, CacheImportReplyPdu, CacheToSurfacePdu,
+     CapabilitiesAdvertisePdu, CapabilitiesV8Flags, CapabilitiesV10Flags, CapabilitiesV81Flags, CapabilitiesV103Flags,
+@@ -259,6 +260,11 @@
+ /// All methods have default no-op implementations so you only need
+ /// to override the ones relevant to your use case.
+ pub trait GraphicsPipelineHandler: Send {
++    /// Use the normal EGFX bitmap cache budget when the desktop can afford it.
++    fn small_bitmap_cache(&self) -> bool {
++        true
++    }
++
+     /// Returns the capability sets to advertise to the server
+     ///
+     /// The default advertises every version from 10.7 down to 10 with AVC444, then V8.1
+@@ -273,7 +279,7 @@
+     ///
+     /// [capability negotiation]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpegfx/31c6e2b1-335b-4a75-9454-bb2309958c21
+     fn capabilities(&self) -> Vec<CapabilitySet> {
+-        vec![
++        let mut caps = vec![
+             CapabilitySet::V10_7 {
+                 flags: CapabilitiesV107Flags::SMALL_CACHE,
+             },
+@@ -302,7 +308,24 @@
+             CapabilitySet::V8 {
+                 flags: CapabilitiesV8Flags::SMALL_CACHE,
+             },
+-        ]
++        ];
++        if !self.small_bitmap_cache() {
++            for cap in &mut caps {
++                match cap {
++                    CapabilitySet::V10_7 { flags } => flags.remove(CapabilitiesV107Flags::SMALL_CACHE),
++                    CapabilitySet::V10_6 { flags }
++                    | CapabilitySet::V10_5 { flags }
++                    | CapabilitySet::V10_4 { flags } => flags.remove(CapabilitiesV104Flags::SMALL_CACHE),
++                    CapabilitySet::V10_2 { flags } | CapabilitySet::V10 { flags } => {
++                        flags.remove(CapabilitiesV10Flags::SMALL_CACHE)
++                    }
++                    CapabilitySet::V8_1 { flags } => flags.remove(CapabilitiesV81Flags::SMALL_CACHE),
++                    CapabilitySet::V8 { flags } => flags.remove(CapabilitiesV8Flags::SMALL_CACHE),
++                    _ => {}
++                }
++            }
++        }
++        caps
+     }
+ 
+     /// Called when the server confirms negotiated capabilities
+@@ -329,6 +352,15 @@
+     /// surface ID, destination rectangle, and RGBA pixel data.
+     fn on_bitmap_updated(&mut self, _update: &BitmapUpdate) {}
+ 
++    /// Whether this handler consumes pixels separately from the compositor.
++    fn needs_bitmap_pixels(&self) -> bool {
++        true
++    }
++
++    /// Called instead of `on_bitmap_updated` for a region applied directly
++    /// to the compositor when the handler does not require its pixels.
++    fn on_compositor_pixels_applied(&mut self) {}
++
+     /// Called when a logical frame is complete
+     ///
+     /// All bitmap updates between the corresponding `StartFrame`
+@@ -466,6 +498,7 @@
+     /// The decoders from `h264_decoder_factory`, one for each other surface sending H.264.
+     /// `None` for a surface that couldn't get one, so a start that hangs doesn't block each of its updates.
+     surface_h264_decoders: BTreeMap<u16, Option<Box<dyn H264Decoder>>>,
++    avc420_rgba: Vec<u8>,
+     /// Combined AVC444 picture of each surface, kept between updates so a luma-only or
+     /// chroma-only update combines with what earlier ones left.
+     avc444_frames: BTreeMap<u16, Yuv444Frame>,
+@@ -474,6 +507,7 @@
+     /// V-bar and glyph cache spine (see `ClearCodecDecoder::new`) unallocated saves that
+     /// much per session for the common case of a server that never sends ClearCodec.
+     clearcodec_decoder: Option<ClearCodecDecoder>,
++    clearcodec_pixels: Vec<u8>,
+     planar_decoder: BitmapStreamDecoder,
+     progressive_decoder: ProgressiveDecoder,
+     rfx_decoder: RfxMessageDecoder,
+@@ -490,8 +524,14 @@
+ 
+     surfaces: BTreeMap<u16, Surface>,
+     compositor: Compositor,
++    gpu_compositor: Option<Box<dyn GpuCompositor>>,
++    pending_gpu_frame: Option<Box<dyn GpuPresentedFrame>>,
++    gpu_failed: bool,
+     current_frame_id: Option<u32>,
+     total_frames_decoded: u32,
++    defer_frame_acks: bool,
++    direct_output: bool,
++    frame_acks: Vec<FrameAcknowledgePdu>,
+     pending_output_reset: Option<(u16, u16)>,
+ 
+     persistent_cache: Option<Box<dyn PersistentCacheStore>>,
+@@ -517,8 +557,10 @@
+             h264_decoder_factory: None,
+             h264_decoder_surface: None,
+             surface_h264_decoders: BTreeMap::new(),
++            avc420_rgba: Vec::new(),
+             avc444_frames: BTreeMap::new(),
+             clearcodec_decoder: None,
++            clearcodec_pixels: Vec::new(),
+             planar_decoder: BitmapStreamDecoder::default(),
+             progressive_decoder: ProgressiveDecoder::new(),
+             rfx_decoder: RfxMessageDecoder::new(),
+@@ -531,8 +573,14 @@
+             codec_caps: CodecCapabilities::default(),
+             surfaces: BTreeMap::new(),
+             compositor: Compositor::default(),
++            gpu_compositor: None,
++            pending_gpu_frame: None,
++            gpu_failed: false,
+             current_frame_id: None,
+             total_frames_decoded: 0,
++            defer_frame_acks: false,
++            direct_output: false,
++            frame_acks: Vec::new(),
+             pending_output_reset: None,
+             persistent_cache: None,
+             cache_import_attempted: false,
+@@ -540,6 +588,84 @@
+         }
+     }
+ 
++    /// Let the embedding application schedule ACKs. It must drain them after
++    /// each process call and send every ACK in its original order.
++    pub fn with_deferred_frame_acks(mut self) -> Self {
++        self.defer_frame_acks = true;
++        self
++    }
++
++    pub fn take_frame_acks(&mut self) -> Vec<FrameAcknowledgePdu> {
++        std::mem::take(&mut self.frame_acks)
++    }
++
++    /// Keep the last frame's spans until the session can blit them into its
++    /// framebuffer. The ordinary drain API still produces owned pixels.
++    pub fn with_direct_output(mut self) -> Self {
++        self.direct_output = true;
++        self
++    }
++
++    /// Start unpainted desktop pixels opaque so ordinary color updates can
++    /// be copied verbatim. The caller's H.264 decoder must emit opaque RGBA.
++    pub fn with_opaque_surface_base(mut self) -> Self {
++        self.compositor.enable_opaque_surface_base();
++        self
++    }
++
++    /// Attach a GPU-resident surface compositor so hardware-decoded H.264
++    /// frames stay on the GPU through composition and presentation.
++    #[must_use]
++    pub fn with_gpu_compositor(mut self, gpu: Box<dyn GpuCompositor>) -> Self {
++        self.gpu_compositor = Some(gpu);
++        self
++    }
++
++    /// Replace or disable the GPU surface compositor at runtime.
++    pub fn set_gpu_compositor(&mut self, gpu: Option<Box<dyn GpuCompositor>>) {
++        self.gpu_compositor = gpu;
++        self.pending_gpu_frame = None;
++        self.gpu_failed = false;
++    }
++
++    /// Replace the shared H.264 decoder (and optional per-surface factory) before channel start.
++    pub fn set_h264_decoder(&mut self, decoder: Option<Box<dyn H264Decoder>>, factory: Option<DecoderFactory>) {
++        self.end_h264_streams();
++        self.h264_decoder = decoder;
++        self.h264_decoder_factory = factory;
++    }
++
++    /// Whether a GPU-resident surface compositor is currently active.
++    #[must_use]
++    pub fn has_gpu_compositor(&self) -> bool {
++        self.gpu_compositor.is_some()
++    }
++
++    /// Take the latest GPU-composited desktop output produced by `EndFrame`.
++    #[must_use]
++    pub fn take_gpu_frame(&mut self) -> Option<Box<dyn GpuPresentedFrame>> {
++        self.pending_gpu_frame.take()
++    }
++
++    /// Returns true once if GPU compositing failed and fell back to CPU.
++    #[must_use]
++    pub fn take_gpu_failed(&mut self) -> bool {
++        core::mem::take(&mut self.gpu_failed)
++    }
++
++    fn disable_gpu(&mut self) {
++        if self.gpu_compositor.take().is_some() {
++            self.pending_gpu_frame = None;
++            self.gpu_failed = true;
++            self.dropped_updates = self.dropped_updates.saturating_add(1);
++            warn!("GPU EGFX compositor failed; falling back to CPU compositor");
++        }
++    }
++
++    fn has_surface_storage(&self, surface_id: u16) -> bool {
++        self.gpu_compositor.is_some() || self.compositor.has_surface(surface_id)
++    }
++
+     /// Keep the bitmap cache across sessions in `store` ([MS-RDPEGFX] [3.3.1.5]).
+     ///
+     /// Once the server confirms capabilities, the client offers the stored entries in a
+@@ -644,15 +770,19 @@
+         self.surfaces.clear();
+         // The compositor reset below drops their budget charge with everything else.
+         self.avc444_frames.clear();
++        self.avc420_rgba = Vec::new();
+         self.cache_import_attempted = false;
+         self.offered_cache_keys = None;
+         self.compositor.reset_protocol();
++        self.pending_gpu_frame = None;
+         // A full channel reset restarts codec contexts, unlike the output-only ResetGraphics PDU.
+         self.clearcodec_decoder = None;
++        self.clearcodec_pixels = Vec::new();
+         self.planar_decoder = BitmapStreamDecoder::default();
+         self.progressive_decoder = ProgressiveDecoder::new();
+         self.end_h264_streams();
+         self.current_frame_id = None;
++        self.frame_acks.clear();
+         // Windows restarts its sent-frame count and rejects ACK counts greater than that value.
+         self.total_frames_decoded = 0;
+     }
+@@ -690,9 +820,28 @@
+     /// ready to blit into a framebuffer. Each call empties the queue.
+     #[must_use]
+     pub fn drain_output(&mut self) -> Vec<OutputUpdate> {
++        self.compositor.materialize_direct();
+         self.compositor.drain_output()
+     }
+ 
++    pub fn drain_buffered_output(&mut self) -> Vec<OutputUpdate> {
++        self.compositor.drain_output()
++    }
++
++    pub fn blit_direct_output(
++        &mut self,
++        rgba: &mut [u8],
++        width: u16,
++        height: u16,
++        opaque: bool,
++    ) -> Vec<ExclusiveRectangle> {
++        let (updates, limited) = self.compositor.blit_direct(rgba, width, height, opaque);
++        if limited {
++            self.dropped_updates = self.dropped_updates.saturating_add(1);
++        }
++        updates
++    }
++
+     /// Take the RemoteApp window regions that changed in completed frames.
+     ///
+     /// Surfaces the server maps to a RAIL window with `MapSurfaceToWindow` or
+@@ -718,6 +867,9 @@
+     // ========================================================================
+ 
+     fn process_messages(&mut self, payload: &[u8]) -> PduResult<Vec<DvcMessage>> {
++        // Keep the old snapshot valid even when a consumer doesn't drain
++        // after every DVC message.
++        self.compositor.materialize_direct();
+         self.decompressed_buffer.clear();
+         self.decompressed_buffer.shrink_to(MAX_DECOMPRESSED_BUFFER_CAPACITY);
+         self.decompressor
+@@ -730,20 +882,25 @@
+             let mut cursor = ReadCursor::new(self.decompressed_buffer.as_slice());
+             while !cursor.is_empty() {
+                 let pdu: GfxPdu = decode_cursor(&mut cursor).map_err(|e| decode_err!(e))?;
+-                pdus.push(pdu);
++                pdus.push((pdu, cursor.len()));
+             }
+         }
+ 
+         let mut responses: Vec<DvcMessage> = Vec::new();
+-        for pdu in pdus {
+-            let pdu_responses = self.handle_pdu(pdu)?;
++        for (pdu, pending_graphics_bytes) in pdus {
++            let pdu_responses = self.handle_pdu_with_pending(pdu, pending_graphics_bytes)?;
+             responses.extend(pdu_responses);
+         }
+ 
+         Ok(responses)
+     }
+ 
++    #[cfg(test)]
+     fn handle_pdu(&mut self, pdu: GfxPdu) -> PduResult<Vec<DvcMessage>> {
++        self.handle_pdu_with_pending(pdu, 0)
++    }
++
++    fn handle_pdu_with_pending(&mut self, pdu: GfxPdu, pending_graphics_bytes: usize) -> PduResult<Vec<DvcMessage>> {
+         // MS-RDPEGFX 3.3.5.19 ignores all pre-confirmation server messages, including ResetGraphics.
+         if self.state == ClientState::Resetting && !matches!(pdu, GfxPdu::CapabilitiesConfirm(_)) {
+             return Ok(Vec::new());
+@@ -785,13 +942,19 @@
+                 self.handle_wire_to_surface2(pdu)?;
+                 Ok(vec![])
+             }
+-            GfxPdu::EndFrame(end) => self.handle_end_frame(end.frame_id),
++            GfxPdu::EndFrame(end) => self.handle_end_frame(end.frame_id, pending_graphics_bytes),
+ 
+             // Surface operations
+             GfxPdu::SolidFill(pdu) => {
+                 trace!(surface_id = pdu.surface_id, "SolidFill");
+-                self.compositor
+-                    .solid_fill(pdu.surface_id, &pdu.fill_pixel, &pdu.rectangles);
++                if let Some(gpu) = self.gpu_compositor.as_mut() {
++                    if !gpu.solid_fill(pdu.surface_id, &pdu.fill_pixel, &pdu.rectangles) {
++                        self.disable_gpu();
++                    }
++                } else {
++                    self.compositor
++                        .solid_fill(pdu.surface_id, &pdu.fill_pixel, &pdu.rectangles);
++                }
+                 self.handler.on_solid_fill(&pdu);
+                 Ok(vec![])
+             }
+@@ -801,12 +964,23 @@
+                     dst = pdu.destination_surface_id,
+                     "SurfaceToSurface"
+                 );
+-                self.compositor.surface_to_surface(
+-                    pdu.source_surface_id,
+-                    pdu.destination_surface_id,
+-                    &pdu.source_rectangle,
+-                    &pdu.destination_points,
+-                );
++                if let Some(gpu) = self.gpu_compositor.as_mut() {
++                    if !gpu.surface_to_surface(
++                        pdu.source_surface_id,
++                        pdu.destination_surface_id,
++                        &pdu.source_rectangle,
++                        &pdu.destination_points,
++                    ) {
++                        self.disable_gpu();
++                    }
++                } else {
++                    self.compositor.surface_to_surface(
++                        pdu.source_surface_id,
++                        pdu.destination_surface_id,
++                        &pdu.source_rectangle,
++                        &pdu.destination_points,
++                    );
++                }
+                 self.handler.on_surface_to_surface(&pdu);
+                 Ok(vec![])
+             }
+@@ -818,8 +992,12 @@
+                     cache_slot = pdu.cache_slot,
+                     "SurfaceToCache"
+                 );
+-                self.compositor
+-                    .surface_to_cache(pdu.surface_id, pdu.cache_slot, pdu.cache_key, &pdu.source_rectangle);
++                if let Some(gpu) = self.gpu_compositor.as_mut() {
++                    let _ = gpu.surface_to_cache(pdu.surface_id, pdu.cache_slot, &pdu.source_rectangle);
++                } else {
++                    self.compositor
++                        .surface_to_cache(pdu.surface_id, pdu.cache_slot, pdu.cache_key, &pdu.source_rectangle);
++                }
+                 self.handler.on_surface_to_cache(&pdu);
+                 Ok(vec![])
+             }
+@@ -829,14 +1007,33 @@
+                     surface_id = pdu.surface_id,
+                     "CacheToSurface"
+                 );
+-                self.compositor
+-                    .cache_to_surface(pdu.cache_slot, pdu.surface_id, &pdu.destination_points);
+-                self.handler.on_cache_to_surface(&pdu);
++                if !pdu.destination_points.is_empty() {
++                    let applied = if let Some(gpu) = self.gpu_compositor.as_mut() {
++                        gpu.cache_to_surface(pdu.cache_slot, pdu.surface_id, &pdu.destination_points)
++                    } else {
++                        self.compositor
++                            .cache_to_surface(pdu.cache_slot, pdu.surface_id, &pdu.destination_points)
++                    };
++                    if applied {
++                        self.handler.on_cache_to_surface(&pdu);
++                    } else {
++                        self.drop_update(
++                            "CacheToSurface",
++                            pdu.surface_id,
++                            0,
++                            &"missing EGFX cache slot or destination surface",
++                        );
++                    }
++                }
+                 Ok(vec![])
+             }
+             GfxPdu::EvictCacheEntry(pdu) => {
+                 trace!(cache_slot = pdu.cache_slot, "EvictCacheEntry");
+-                self.compositor.evict_cache_entry(pdu.cache_slot);
++                if let Some(gpu) = self.gpu_compositor.as_mut() {
++                    gpu.evict_cache_entry(pdu.cache_slot);
++                } else {
++                    self.compositor.evict_cache_entry(pdu.cache_slot);
++                }
+                 self.handler.on_evict_cache_entry(&pdu);
+                 Ok(vec![])
+             }
+@@ -964,7 +1161,15 @@
+         self.surfaces.clear();
+         // The compositor reset below recomputes its budget without them.
+         self.avc444_frames.clear();
++        self.avc420_rgba = Vec::new();
++        self.pending_gpu_frame = None;
+         self.compositor.reset(width, height);
++        if output_size.is_some()
++            && let Some(gpu) = self.gpu_compositor.as_mut()
++            && !gpu.reset(width, height)
++        {
++            self.disable_gpu();
++        }
+         self.pending_output_reset = output_size;
+ 
+         // Reset frame tracking state so subsequent FrameAcknowledge PDUs
+@@ -1018,7 +1223,14 @@
+         debug!(surface_id, width, height, ?pixel_format, "Surface created");
+         self.end_h264_stream(surface_id);
+         self.release_avc444_frame(surface_id);
+-        self.compositor.create_surface(surface_id, width, height);
++        if let Some(gpu) = self.gpu_compositor.as_mut() {
++            if !gpu.create_surface(surface_id, width, height) {
++                self.disable_gpu();
++                self.compositor.create_surface(surface_id, width, height);
++            }
++        } else {
++            self.compositor.create_surface(surface_id, width, height);
++        }
+         self.handler.on_surface_created(&surface);
+         self.surfaces.insert(surface_id, surface);
+     }
+@@ -1028,7 +1240,11 @@
+         self.end_h264_stream(surface_id);
+         self.release_avc444_frame(surface_id);
+         if self.surfaces.remove(&surface_id).is_some() {
+-            self.compositor.delete_surface(surface_id);
++            if let Some(gpu) = self.gpu_compositor.as_mut() {
++                gpu.delete_surface(surface_id);
++            } else {
++                self.compositor.delete_surface(surface_id);
++            }
+             debug!(surface_id, "Surface deleted");
+             self.handler.on_surface_deleted(surface_id);
+         } else {
+@@ -1095,7 +1311,14 @@
+             surface.is_mapped = true;
+             surface.output_origin_x = origin_x;
+             surface.output_origin_y = origin_y;
+-            self.compositor.map_surface(surface_id, origin_x, origin_y);
++            let (width, height) = (u32::from(surface.width), u32::from(surface.height));
++            if let Some(gpu) = self.gpu_compositor.as_mut() {
++                if !gpu.map_surface_scaled(surface_id, (origin_x, origin_y), (width, height)) {
++                    self.disable_gpu();
++                }
++            } else {
++                self.compositor.map_surface(surface_id, origin_x, origin_y);
++            }
+             debug!(surface_id, origin_x, origin_y, "Surface mapped to output");
+             self.handler.on_surface_mapped(surface_id, origin_x, origin_y);
+         } else {
+@@ -1112,6 +1335,9 @@
+     ) {
+         if let Some(surface) = self.surfaces.get_mut(&surface_id) {
+             surface.is_mapped = true;
++            if let Some(gpu) = self.gpu_compositor.as_mut() {
++                gpu.unmap_surface(surface_id);
++            }
+             self.compositor
+                 .map_surface_to_window(surface_id, window_id, mapped, target);
+             debug!(surface_id, window_id, ?mapped, ?target, "Surface mapped to window");
+@@ -1125,13 +1351,23 @@
+             surface.is_mapped = true;
+             surface.output_origin_x = pdu.output_origin_x;
+             surface.output_origin_y = pdu.output_origin_y;
+-            self.compositor.map_surface_scaled(
+-                pdu.surface_id,
+-                pdu.output_origin_x,
+-                pdu.output_origin_y,
+-                pdu.target_width,
+-                pdu.target_height,
+-            );
++            if let Some(gpu) = self.gpu_compositor.as_mut() {
++                if !gpu.map_surface_scaled(
++                    pdu.surface_id,
++                    (pdu.output_origin_x, pdu.output_origin_y),
++                    (pdu.target_width, pdu.target_height),
++                ) {
++                    self.disable_gpu();
++                }
++            } else {
++                self.compositor.map_surface_scaled(
++                    pdu.surface_id,
++                    pdu.output_origin_x,
++                    pdu.output_origin_y,
++                    pdu.target_width,
++                    pdu.target_height,
++                );
++            }
+             debug!(
+                 surface_id = pdu.surface_id,
+                 origin_x = pdu.output_origin_x,
+@@ -1224,7 +1460,7 @@
+             .ok_or_else(|| pdu_other_err!("unknown surface in WireToSurface2"))?;
+         let (surface_width, surface_height) = (surface.width, surface.height);
+         // A surface the compositor refused paints nothing, so it keeps no Progressive tile state either.
+-        if !self.compositor.has_surface(pdu.surface_id) {
++        if !self.has_surface_storage(pdu.surface_id) {
+             trace!(
+                 surface_id = pdu.surface_id,
+                 "WireToSurface2 for a surface without pixels -- not decoded"
+@@ -1233,82 +1469,78 @@
+             return Ok(());
+         }
+ 
+-        let tiles = match self.progressive_decoder.decode_bitmap(
++        let compositor = &mut self.compositor;
++        let gpu_compositor = &mut self.gpu_compositor;
++        let mut gpu_error = false;
++        let handler = &mut self.handler;
++        let needs_pixels = handler.needs_bitmap_pixels();
++        let outcome = self.progressive_decoder.visit_bitmap(
+             pdu.surface_id,
+             pdu.codec_context_id,
+             surface_width,
+             surface_height,
+             &pdu.bitmap_data,
+-        ) {
+-            Ok(tiles) => tiles,
+-            Err(error) => {
+-                self.drop_update(pdu.codec_id, pdu.surface_id, pdu.bitmap_data.len(), &error);
+-                return Ok(());
+-            }
+-        };
+-
+-        for tile in tiles {
+-            let tile_left = tile.x_idx.saturating_mul(TILE_DIM);
+-            let tile_top = tile.y_idx.saturating_mul(TILE_DIM);
+-            let tile_width = surface_width.saturating_sub(tile_left).min(TILE_DIM);
+-            let tile_height = surface_height.saturating_sub(tile_top).min(TILE_DIM);
+-            if tile_width == 0 || tile_height == 0 {
+-                continue;
+-            }
+-
+-            let tile_rectangle = ExclusiveRectangle {
+-                left: tile_left,
+-                top: tile_top,
+-                right: tile_left + tile_width,
+-                bottom: tile_top + tile_height,
+-            };
+-            let mut emit_update = |destination_rectangle: ExclusiveRectangle, data: Vec<u8>| {
+-                let width = destination_rectangle.right - destination_rectangle.left;
+-                let height = destination_rectangle.bottom - destination_rectangle.top;
+-                let update = BitmapUpdate {
+-                    surface_id: pdu.surface_id,
+-                    destination_rectangle,
+-                    codec_id: Codec1Type::Uncompressed,
+-                    data,
+-                    width,
+-                    height,
+-                };
+-                self.compositor
+-                    .apply_bitmap(update.surface_id, &update.destination_rectangle, &update.data);
+-                self.handler.on_bitmap_updated(&update);
+-            };
+-
+-            if tile.update_rectangles.len() == 1 && tile.update_rectangles[0] == tile_rectangle {
+-                let data = if tile_width == TILE_DIM && tile_height == TILE_DIM {
+-                    tile.pixels
+-                } else {
+-                    crop_decoded_frame(
+-                        &tile.pixels,
+-                        u32::from(TILE_DIM),
+-                        u32::from(TILE_DIM),
+-                        tile_width,
+-                        tile_height,
+-                    )
+-                };
+-                emit_update(tile_rectangle, data);
+-                continue;
+-            }
+-
+-            for destination_rectangle in tile.update_rectangles {
+-                let width = destination_rectangle.right - destination_rectangle.left;
+-                let height = destination_rectangle.bottom - destination_rectangle.top;
+-                let source_x = usize::from(destination_rectangle.left - tile_left);
+-                let source_y = usize::from(destination_rectangle.top - tile_top);
+-                let source_stride = usize::from(TILE_DIM) * TILE_BYTES_PER_PIXEL;
+-                let row_bytes = usize::from(width) * TILE_BYTES_PER_PIXEL;
+-                let mut data = Vec::with_capacity(row_bytes * usize::from(height));
+-                for row in 0..usize::from(height) {
+-                    let source_start = (source_y + row) * source_stride + source_x * TILE_BYTES_PER_PIXEL;
+-                    data.extend_from_slice(&tile.pixels[source_start..source_start + row_bytes]);
++            |x_idx, y_idx, pixels, rectangles| {
++                let tile_left = x_idx * TILE_DIM;
++                let tile_top = y_idx * TILE_DIM;
++                for destination in rectangles {
++                    let source = (destination.left - tile_left, destination.top - tile_top);
++                    if let Some(gpu) = gpu_compositor.as_mut() {
++                        if !gpu.apply_rgba_region(
++                            pdu.surface_id,
++                            &destination,
++                            pixels,
++                            usize::from(TILE_DIM) * TILE_BYTES_PER_PIXEL,
++                            source,
++                        ) {
++                            gpu_error = true;
++                            continue;
++                        }
++                        handler.on_compositor_pixels_applied();
++                        continue;
++                    }
++                    if !compositor.apply_rgba_region(
++                        pdu.surface_id,
++                        &destination,
++                        pixels,
++                        usize::from(TILE_DIM) * TILE_BYTES_PER_PIXEL,
++                        source,
++                    ) {
++                        continue;
++                    }
++                    if needs_pixels {
++                        let width = destination.right - destination.left;
++                        let height = destination.bottom - destination.top;
++                        let data = copy_frame_region(
++                            pixels,
++                            u32::from(TILE_DIM),
++                            &ExclusiveRectangle {
++                                left: source.0,
++                                top: source.1,
++                                right: source.0 + width,
++                                bottom: source.1 + height,
++                            },
++                        );
++                        handler.on_bitmap_updated(&BitmapUpdate {
++                            surface_id: pdu.surface_id,
++                            destination_rectangle: destination,
++                            codec_id: Codec1Type::Uncompressed,
++                            data,
++                            width,
++                            height,
++                        });
++                    } else {
++                        handler.on_compositor_pixels_applied();
++                    }
+                 }
+-                emit_update(destination_rectangle, data);
+-            }
++            },
++        );
++        if gpu_error {
++            self.disable_gpu();
+         }
++        if let Err(error) = outcome {
++            self.drop_update(pdu.codec_id, pdu.surface_id, pdu.bitmap_data.len(), &error);
++        }
+ 
+         Ok(())
+     }
+@@ -1335,38 +1567,98 @@
+     }
+ 
+     fn decode_avc420(&mut self, surface_id: u16, dest_rect: &ExclusiveRectangle, bitmap_data: &[u8]) -> PduResult<()> {
++        let mut rgba = core::mem::take(&mut self.avc420_rgba);
++        let result = self.decode_avc420_into(surface_id, dest_rect, bitmap_data, &mut rgba);
++        // Retain at most one normal desktop buffer per session across updates.
++        if rgba.capacity() <= 72 * 1024 * 1024 {
++            self.avc420_rgba = rgba;
++        }
++        result
++    }
++
++    fn decode_avc420_into(
++        &mut self,
++        surface_id: u16,
++        dest_rect: &ExclusiveRectangle,
++        bitmap_data: &[u8],
++        rgba: &mut Vec<u8>,
++    ) -> PduResult<()> {
+         let mut cursor = ReadCursor::new(bitmap_data);
+         let stream = Avc420BitmapStream::decode(&mut cursor).map_err(|e| decode_err!(e))?;
+ 
++        let dest_width = dest_rect.right - dest_rect.left;
++        let dest_height = dest_rect.bottom - dest_rect.top;
++        let surface_bounds = self
++            .surfaces
++            .get(&surface_id)
++            .map(|s| (s.width, s.height))
++            .unwrap_or((dest_rect.right, dest_rect.bottom));
++        let use_gpu = self.gpu_compositor.is_some();
++
+         let Some(decoder) = self.surface_h264_decoder(surface_id)? else {
+             debug!("No H.264 decoder configured, skipping AVC420 frame");
+             return Ok(());
+         };
+ 
+-        // A decoder returning YUV planes is converted with the transform MS-RDPEGFX
+-        // specifies, whatever matrix it would convert with itself.
+-        let frame = if decoder.supports_yuv420() {
+-            decoder.decode_yuv420(stream.data).map(|picture| picture.to_rgba())
+-        } else {
+-            decoder.decode(stream.data)
++        if use_gpu && decoder.supports_hw_frame() {
++            if let Some(hw_frame) = decoder
++                .decode_hw(stream.data)
++                .map_err(|e| pdu_other_err!("H.264 decode", source: e))?
++            {
++                let (frame_width, frame_height) = (hw_frame.width(), hw_frame.height());
++                if frame_width < u32::from(dest_width) || frame_height < u32::from(dest_height) {
++                    return Err(pdu_other_err!(
++                        "decoded frame smaller than destination rectangle",
++                        source: crate::decode::DecoderError::msg(format!(
++                            "frame_width={frame_width}, frame_height={frame_height}, dest_width={dest_width}, dest_height={dest_height}",
++                        )),
++                    ));
++                }
++                let frame_w = u16::try_from(frame_width).unwrap_or(u16::MAX);
++                let frame_h = u16::try_from(frame_height).unwrap_or(u16::MAX);
++                let mut clipped_rects = Vec::with_capacity(stream.rectangles.len());
++                for region in &stream.rectangles {
++                    let clip_right = region.right.min(surface_bounds.0).min(frame_w);
++                    let clip_bottom = region.bottom.min(surface_bounds.1).min(frame_h);
++                    if region.left < clip_right && region.top < clip_bottom {
++                        clipped_rects.push(ExclusiveRectangle {
++                            left: region.left,
++                            top: region.top,
++                            right: clip_right,
++                            bottom: clip_bottom,
++                        });
++                    }
++                }
++                if stream.rectangles.is_empty() || !clipped_rects.is_empty() {
++                    let applied = self.gpu_compositor.as_mut().is_some_and(|gpu| {
++                        gpu.apply_hw_avc420(surface_id, hw_frame.as_ref(), dest_rect, &clipped_rects)
++                    });
++                    if applied {
++                        self.handler.on_compositor_pixels_applied();
++                    } else {
++                        self.disable_gpu();
++                    }
++                }
++                return Ok(());
++            }
+         }
+-        .map_err(|e| pdu_other_err!("H.264 decode", source: e))?;
+ 
+-        // MS-RDPEGFX 2.2.1.4.1: RDPGFX_RECT16 right/bottom are exclusive (one-past-end),
+-        // so dimensions are right-left / bottom-top despite the parsed type's name.
+-        let dest_width = dest_rect.right - dest_rect.left;
+-        let dest_height = dest_rect.bottom - dest_rect.top;
++        let Some(decoder) = self.surface_h264_decoder(surface_id)? else {
++            return Ok(());
++        };
+ 
++        let (frame_width, frame_height) = decoder
++            .decode_avc420(stream.data, rgba)
++            .map_err(|e| pdu_other_err!("H.264 decode", source: e))?;
++
+         // Decoded frame must be at least as large as the destination rectangle.
+         // Larger is expected (macroblock alignment) and handled by cropping.
+         // Smaller means the server sent mismatched dimensions.
+-        if frame.width() < u32::from(dest_width) || frame.height() < u32::from(dest_height) {
++        if frame_width < u32::from(dest_width) || frame_height < u32::from(dest_height) {
+             return Err(pdu_other_err!(
+                 "decoded frame smaller than destination rectangle",
+                 source: crate::decode::DecoderError::msg(format!(
+-                    "frame_width={}, frame_height={}, dest_width={dest_width}, dest_height={dest_height}",
+-                    frame.width(),
+-                    frame.height(),
++                    "frame_width={frame_width}, frame_height={frame_height}, dest_width={dest_width}, dest_height={dest_height}",
+                 )),
+             ));
+         }
+@@ -1383,21 +1675,37 @@
+         // `regionRects` and blitted a single bounding-box block copied from the
+         // frame origin (0, 0), so partial updates drew pixels from the top-left
+         // corner and overwrote the gaps between regions.
+-        let surface_bounds = self
+-            .surfaces
+-            .get(&surface_id)
+-            .map(|s| (s.width, s.height))
+-            .unwrap_or((dest_rect.right, dest_rect.bottom));
+-
+-        // Build and emit one AVC420 surface update from a destination rectangle
+-        // and its pixel data. Shared by the no-regionRects fallback and the
+-        // per-region loop so the BitmapUpdate shape lives in one place (mirrors
+-        // the `emit_update` closure on the uncompressed path).
+         let compositor = &mut self.compositor;
++        let gpu_compositor = &mut self.gpu_compositor;
++        let mut gpu_error = false;
+         let handler = &mut self.handler;
+-        let mut emit_avc420 = |destination_rectangle: ExclusiveRectangle, data: Vec<u8>| {
++        let source_pitch = usize::try_from(frame_width)
++            .ok()
++            .and_then(|width| width.checked_mul(4))
++            .ok_or_else(|| pdu_other_err!("AVC420 frame stride overflow"))?;
++        let mut emit_avc420 = |destination_rectangle: ExclusiveRectangle, source: Option<&ExclusiveRectangle>| {
++            if let Some(gpu) = gpu_compositor.as_mut() {
++                let origin = source.map_or((0, 0), |rect| (rect.left, rect.top));
++                if gpu.apply_rgba_region(surface_id, &destination_rectangle, rgba, source_pitch, origin) {
++                    handler.on_compositor_pixels_applied();
++                } else {
++                    gpu_error = true;
++                }
++                return;
++            }
++            if !handler.needs_bitmap_pixels() {
++                let origin = source.map_or((0, 0), |rect| (rect.left, rect.top));
++                if compositor.apply_rgba_region(surface_id, &destination_rectangle, rgba, source_pitch, origin) {
++                    handler.on_compositor_pixels_applied();
++                }
++                return;
++            }
+             let width = destination_rectangle.right - destination_rectangle.left;
+             let height = destination_rectangle.bottom - destination_rectangle.top;
++            let data = match source {
++                Some(rect) => copy_frame_region(rgba, frame_width, rect),
++                None => crop_decoded_frame(rgba, frame_width, frame_height, width, height),
++            };
+             let update = BitmapUpdate {
+                 surface_id,
+                 destination_rectangle,
+@@ -1414,8 +1722,10 @@
+             // No region metadata: fall back to the single bounding-box update,
+             // copying from the frame origin. This matches the pre-#2042 behavior
+             // for streams that legitimately omit regionRects.
+-            let cropped_data = crop_decoded_frame(frame.data(), frame.width(), frame.height(), dest_width, dest_height);
+-            emit_avc420(dest_rect.clone(), cropped_data);
++            emit_avc420(dest_rect.clone(), None);
++            if gpu_error {
++                self.disable_gpu();
++            }
+             return Ok(());
+         }
+ 
+@@ -1423,8 +1733,8 @@
+             // Clip the region to the surface and the decoded frame so a
+             // malformed or over-large rect cannot read out of bounds or paint
+             // outside the surface.
+-            let frame_w = u16::try_from(frame.width()).unwrap_or(u16::MAX);
+-            let frame_h = u16::try_from(frame.height()).unwrap_or(u16::MAX);
++            let frame_w = u16::try_from(frame_width).unwrap_or(u16::MAX);
++            let frame_h = u16::try_from(frame_height).unwrap_or(u16::MAX);
+             let clip_right = region.right.min(surface_bounds.0).min(frame_w);
+             let clip_bottom = region.bottom.min(surface_bounds.1).min(frame_h);
+             if region.left >= clip_right || region.top >= clip_bottom {
+@@ -1458,9 +1768,11 @@
+ 
+             // Copy pixels (x, y) -> (x, y): the source in the decoded frame is the
+             // region's own top-left, not the frame origin.
+-            let data = copy_frame_region(frame.data(), frame.width(), &clipped);
+-            emit_avc420(clipped, data);
++            emit_avc420(clipped.clone(), Some(&clipped));
+         }
++        if gpu_error {
++            self.disable_gpu();
++        }
+         Ok(())
+     }
+ 
+@@ -1493,9 +1805,80 @@
+             _ => (Some(&stream.stream1), stream.stream2.as_ref()),
+         };
+         // The caller forwards AVC444 to the handler unless a YUV decoder is present.
++        let use_gpu = self.gpu_compositor.is_some();
+         let decoder = self
+             .surface_h264_decoder(surface_id)?
+             .ok_or_else(|| pdu_other_err!("no H.264 decoder for AVC444"))?;
++
++        if use_gpu && decoder.supports_hw_frame() {
++            let main_hw = main
++                .map(|main| decoder.decode_hw(main.data))
++                .transpose()
++                .map_err(|e| pdu_other_err!("H.264 decode", source: e))?;
++            let aux_hw = auxiliary
++                .map(|auxiliary| decoder.decode_hw(auxiliary.data))
++                .transpose()
++                .map_err(|e| pdu_other_err!("H.264 decode", source: e))?;
++            let main_is_hw = main_hw.as_ref().is_some_and(Option::is_some);
++            let aux_is_hw = aux_hw.as_ref().is_some_and(Option::is_some);
++            let main_missing_hw = main.is_some() && !main_is_hw;
++            let aux_missing_hw = auxiliary.is_some() && !aux_is_hw;
++            if (main_is_hw || aux_is_hw) && (main_missing_hw || aux_missing_hw) {
++                return Err(pdu_other_err!("AVC444 hardware decode fell back mid-frame"));
++            }
++            if main_is_hw || aux_is_hw {
++                let main_frame: Option<Box<dyn HwVideoFrame>> = main_hw.flatten();
++                let aux_frame: Option<Box<dyn HwVideoFrame>> = aux_hw.flatten();
++                if let (Some(main_frame), Some(aux_frame)) = (&main_frame, &aux_frame)
++                    && (main_frame.width(), main_frame.height()) != (aux_frame.width(), aux_frame.height())
++                {
++                    return Err(pdu_other_err!("AVC444 views differ in size"));
++                }
++                let mut seen = BTreeSet::new();
++                let mut painted = Vec::new();
++                for rect in main
++                    .into_iter()
++                    .chain(auxiliary)
++                    .flat_map(|stream| stream.rectangles.iter())
++                {
++                    let clipped = ExclusiveRectangle {
++                        left: rect.left,
++                        top: rect.top,
++                        right: rect.right.min(width),
++                        bottom: rect.bottom.min(height),
++                    };
++                    if clipped.left < clipped.right
++                        && clipped.top < clipped.bottom
++                        && seen.insert((clipped.left, clipped.top, clipped.right, clipped.bottom))
++                    {
++                        painted.push(clipped);
++                    }
++                }
++                if !painted.is_empty() {
++                    let main_arg = main_frame
++                        .as_deref()
++                        .zip(main)
++                        .map(|(frame, stream)| (frame, stream.rectangles.as_slice()));
++                    let aux_arg = aux_frame
++                        .as_deref()
++                        .zip(auxiliary)
++                        .map(|(frame, stream)| (frame, stream.rectangles.as_slice()));
++                    let applied = self.gpu_compositor.as_mut().is_some_and(|gpu| {
++                        gpu.apply_hw_avc444(surface_id, layout, main_arg, aux_arg, &painted)
++                    });
++                    if applied {
++                        self.handler.on_compositor_pixels_applied();
++                    } else {
++                        self.disable_gpu();
++                    }
++                }
++                return Ok(());
++            }
++        }
++
++        let decoder = self
++            .surface_h264_decoder(surface_id)?
++            .ok_or_else(|| pdu_other_err!("no H.264 decoder for AVC444"))?;
+         // UNTESTED: that the decoder returns each view for its own sub-stream. Both sub-streams
+         // are one H.264 stream (MS-RDPEGFX 2.2.4.5), and a decoder that delays pictures would
+         // pair a main view with the previous auxiliary view; the tests use a decoder that cannot
+@@ -1528,9 +1911,10 @@
+         let frame = match self.avc444_frames.entry(surface_id) {
+             Entry::Occupied(entry) => entry.into_mut(),
+             Entry::Vacant(entry) => {
+-                if !self
+-                    .compositor
+-                    .reserve_for_surface(surface_id, Yuv444Frame::allocation_size(width, height))
++                if self.gpu_compositor.is_none()
++                    && !self
++                        .compositor
++                        .reserve_for_surface(surface_id, Yuv444Frame::allocation_size(width, height))
+                 {
+                     return Err(pdu_other_err!("AVC444 picture exceeds the compositor budget"));
+                 }
+@@ -1545,6 +1929,7 @@
+         }
+ 
+         let mut painted = BTreeSet::new();
++        let mut gpu_error = false;
+         for rect in main
+             .into_iter()
+             .chain(auxiliary)
+@@ -1562,11 +1947,21 @@
+             if !fresh {
+                 continue;
+             }
++            let data = frame.to_rgba(&clipped);
++            let rect_width = clipped.right - clipped.left;
++            if let Some(gpu) = self.gpu_compositor.as_mut() {
++                if gpu.apply_rgba_region(surface_id, &clipped, &data, usize::from(rect_width) * 4, (0, 0)) {
++                    self.handler.on_compositor_pixels_applied();
++                } else {
++                    gpu_error = true;
++                }
++                continue;
++            }
+             let update = BitmapUpdate {
+                 surface_id,
+-                data: frame.to_rgba(&clipped),
++                data,
+                 codec_id,
+-                width: clipped.right - clipped.left,
++                width: rect_width,
+                 height: clipped.bottom - clipped.top,
+                 destination_rectangle: clipped,
+             };
+@@ -1574,6 +1969,9 @@
+                 .apply_bitmap(surface_id, &update.destination_rectangle, &update.data);
+             self.handler.on_bitmap_updated(&update);
+         }
++        if gpu_error {
++            self.disable_gpu();
++        }
+         Ok(())
+     }
+ 
+@@ -1583,30 +1981,57 @@
+         dest_rect: &ExclusiveRectangle,
+         bitmap_data: &[u8],
+     ) -> PduResult<()> {
++        let surface = self
++            .surfaces
++            .get(&surface_id)
++            .ok_or_else(|| pdu_other_err!("unknown ClearCodec surface"))?;
++        if !self.has_surface_storage(surface_id)
++            || dest_rect.right > surface.width
++            || dest_rect.bottom > surface.height
++        {
++            return Err(pdu_other_err!("ClearCodec destination outside the allocated surface"));
++        }
+         // MS-RDPEGFX 2.2.1.4.1: see decode_avc420 above for wire-format note.
+         let dest_width = dest_rect.right - dest_rect.left;
+         let dest_height = dest_rect.bottom - dest_rect.top;
+ 
+-        let bgra = self
+-            .clearcodec_decoder
++        self.clearcodec_decoder
+             .get_or_insert_with(ClearCodecDecoder::new)
+-            .decode(bitmap_data, dest_width, dest_height)
++            .decode_into(bitmap_data, dest_width, dest_height, &mut self.clearcodec_pixels)
+             .map_err(|e| pdu_other_err!("ClearCodec decode", source: e))?;
+ 
+-        // ClearCodec outputs BGRA; convert to RGBA for the uniform BitmapUpdate format
+-        let rgba = convert_bgra_to_rgba(&bgra);
++        if let Some(gpu) = self.gpu_compositor.as_mut() {
++            if gpu.apply_clearcodec(surface_id, dest_rect, &self.clearcodec_pixels) {
++                self.handler.on_compositor_pixels_applied();
++            } else {
++                self.disable_gpu();
++            }
++            return Ok(());
++        }
+ 
++        let needs_pixels = self.handler.needs_bitmap_pixels();
++        if !self
++            .compositor
++            .apply_clearcodec(surface_id, dest_rect, &mut self.clearcodec_pixels, needs_pixels)
++        {
++            return Ok(());
++        }
++        if !needs_pixels {
++            self.handler.on_compositor_pixels_applied();
++            return Ok(());
++        }
++
+         let update = BitmapUpdate {
+             surface_id,
+             destination_rectangle: dest_rect.clone(),
+             codec_id: Codec1Type::ClearCodec,
+-            data: rgba,
++            data: std::mem::take(&mut self.clearcodec_pixels),
+             width: dest_width,
+             height: dest_height,
+         };
+ 
+-        self.compositor.apply_bitmap(surface_id, dest_rect, &update.data);
+         self.handler.on_bitmap_updated(&update);
++        self.clearcodec_pixels = update.data;
+         Ok(())
+     }
+ 
+@@ -1641,6 +2066,14 @@
+         // `ALPHACODEC_BITMAP_STREAM` ([MS-RDPEGFX] 2.2.4.3), so a Planar command
+         // contributes color only and the pixels are opaque.
+         let rgba = convert_rgb24_to_rgba(&rgb24);
++        if let Some(gpu) = self.gpu_compositor.as_mut() {
++            if gpu.apply_rgba_region(surface_id, dest_rect, &rgba, usize::from(dest_width) * 4, (0, 0)) {
++                self.handler.on_compositor_pixels_applied();
++            } else {
++                self.disable_gpu();
++            }
++            return Ok(());
++        }
+ 
+         let update = BitmapUpdate {
+             surface_id,
+@@ -1774,6 +2207,7 @@
+                     .decode(tile, &tile_set.quants, tile_set.entropy_algorithm)
+                     .map_err(|e| pdu_other_err!("RemoteFX tile decode", source: e))?;
+ 
++                let mut gpu_failed = false;
+                 for rectangle in visible {
+                     let destination_rectangle = ExclusiveRectangle {
+                         left: rectangle.left,
+@@ -1793,6 +2227,20 @@
+                         right: local_edge(destination_rectangle.right, tile_left),
+                         bottom: local_edge(destination_rectangle.bottom, tile_top),
+                     };
++                    if let Some(gpu) = self.gpu_compositor.as_mut() {
++                        if gpu.apply_rgba_region(
++                            surface_id,
++                            &destination_rectangle,
++                            pixels,
++                            tile_size as usize * 4,
++                            (local.left, local.top),
++                        ) {
++                            self.handler.on_compositor_pixels_applied();
++                        } else {
++                            gpu_failed = true;
++                        }
++                        continue;
++                    }
+                     let update = BitmapUpdate {
+                         surface_id,
+                         width: destination_rectangle.right - destination_rectangle.left,
+@@ -1805,6 +2253,9 @@
+                         .apply_bitmap(surface_id, &update.destination_rectangle, &update.data);
+                     self.handler.on_bitmap_updated(&update);
+                 }
++                if gpu_failed {
++                    self.disable_gpu();
++                }
+             }
+         }
+ 
+@@ -1818,9 +2269,10 @@
+     /// [MS-RDPEGFX]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpegfx/da5c75f9-cd99-450c-98c4-014a496942b0
+     /// [3.3.5.1]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpegfx/3fdfcd8d-ec4f-4b7a-8e0d-0385a840ec81
+     fn decode_alpha(&mut self, surface_id: u16, dest_rect: &ExclusiveRectangle, bitmap_data: &[u8]) -> PduResult<()> {
++        let needs_pixels = self.handler.needs_bitmap_pixels();
+         let composited = self
+             .compositor
+-            .apply_alpha(surface_id, dest_rect, bitmap_data)
++            .apply_alpha(surface_id, dest_rect, bitmap_data, needs_pixels)
+             .map_err(|e| pdu_other_err!("Alpha decode", source: e))?;
+ 
+         // The handler receives the whole clipped destination after every Alpha command,
+@@ -1828,6 +2280,10 @@
+         // complete RGBA pixels, which an alpha-only update would break; if that cost matters,
+         // change the handler contract rather than shrinking this update.
+         if let Some((destination_rectangle, data)) = composited {
++            if !needs_pixels {
++                self.handler.on_compositor_pixels_applied();
++                return Ok(());
++            }
+             let update = BitmapUpdate {
+                 surface_id,
+                 width: destination_rectangle.right - destination_rectangle.left,
+@@ -2026,6 +2482,20 @@
+         // the convention so that handlers get a uniform pixel format.
+         // Uncompressed wire format is 32-bit LE (0xAARRGGBB → bytes [B, G, R, A]).
+         let rgba_data = convert_uncompressed_to_rgba(&pdu.bitmap_data);
++        if let Some(gpu) = self.gpu_compositor.as_mut() {
++            if gpu.apply_rgba_region(
++                pdu.surface_id,
++                &pdu.destination_rectangle,
++                &rgba_data,
++                usize::from(dest_width) * 4,
++                (0, 0),
++            ) {
++                self.handler.on_compositor_pixels_applied();
++            } else {
++                self.disable_gpu();
++            }
++            return;
++        }
+ 
+         let update = BitmapUpdate {
+             surface_id: pdu.surface_id,
+@@ -2042,28 +2512,49 @@
+     }
+ 
+     #[expect(clippy::as_conversions, reason = "Box<GfxPdu> to Box<dyn DvcEncode> coercion")]
+-    fn handle_end_frame(&mut self, frame_id: u32) -> PduResult<Vec<DvcMessage>> {
++    fn handle_end_frame(&mut self, frame_id: u32, pending_graphics_bytes: usize) -> PduResult<Vec<DvcMessage>> {
+         self.total_frames_decoded = self.total_frames_decoded.wrapping_add(1);
+         self.current_frame_id = None;
+ 
+         self.progressive_decoder.end_frame();
+ 
+         // Commit the frame's compositor deltas so `drain_output` can surface them.
+-        self.compositor.end_frame();
++        if let Some(gpu) = self.gpu_compositor.as_mut() {
++            if let Some(frame) = gpu.end_frame() {
++                self.pending_gpu_frame = Some(frame);
++            }
++        } else if self.direct_output && pending_graphics_bytes == 0 {
++            self.compositor.end_frame_direct();
++        } else {
++            self.compositor.end_frame();
++        }
+ 
+         self.handler.on_frame_complete(frame_id);
+ 
+         // Per [3.3.5.12]: client MUST send FrameAcknowledge after EndFrame.
+-        // QueueDepth counts queued bytes, not decoded/queued frames. This client
+-        // does not measure queued bytes, so report Unavailable (not Suspend).
+-        let ack = GfxPdu::FrameAcknowledge(FrameAcknowledgePdu {
+-            queue_depth: QueueDepth::Unavailable,
++        // Count the actual unprocessed EGFX messages in this transport batch.
++        // Zero is reserved for "unavailable"; do not count Dart frames or TCP
++        // bytes that may belong to unrelated channels.
++        let pending = u32::try_from(pending_graphics_bytes)
++            .unwrap_or(u32::MAX)
++            .min(u32::MAX - 1);
++        let ack = FrameAcknowledgePdu {
++            queue_depth: if pending == 0 {
++                QueueDepth::Unavailable
++            } else {
++                QueueDepth::AvailableBytes(pending)
++            },
+             frame_id,
+             total_frames_decoded: self.total_frames_decoded,
+-        });
++        };
+ 
+-        trace!(frame_id, "Sending FrameAcknowledge");
+-        Ok(vec![Box::new(ack) as DvcMessage])
++        if self.defer_frame_acks {
++            self.frame_acks.push(ack);
++            Ok(Vec::new())
++        } else {
++            trace!(frame_id, "Sending FrameAcknowledge");
++            Ok(vec![Box::new(GfxPdu::FrameAcknowledge(ack)) as DvcMessage])
++        }
+     }
+ }
+ 
+@@ -2106,7 +2597,11 @@
+                 avc444, "No advertisable EGFX capability set; falling back to V8"
+             );
+             caps.push(CapabilitySet::V8 {
+-                flags: CapabilitiesV8Flags::SMALL_CACHE,
++                flags: if self.handler.small_bitmap_cache() {
++                    CapabilitiesV8Flags::SMALL_CACHE
++                } else {
++                    CapabilitiesV8Flags::empty()
++                },
+             });
+         }
+ 
+@@ -2168,15 +2663,6 @@
+     dst
+ }
+ 
+-fn convert_bgra_to_rgba(src: &[u8]) -> Vec<u8> {
+-    debug_assert!(src.len().is_multiple_of(4), "BGRA input length not aligned to 4 bytes");
+-    let mut dst = Vec::with_capacity(src.len());
+-    for pixel in src.chunks_exact(4) {
+-        dst.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+-    }
+-    dst
+-}
+-
+ /// Convert uncompressed 32bpp little-endian pixels to RGBA8888
+ ///
+ /// The wire format for uncompressed graphics is 0xAARRGGBB in a 32-bit
+@@ -2741,24 +3227,6 @@
+     }
+ 
+     #[test]
+-    fn convert_bgra_to_rgba_reorders_channels() {
+-        // BGRA input: [B, G, R, A] per pixel
+-        let bgra = vec![
+-            0xFF, 0x00, 0x00, 0xCC, // B=255, G=0, R=0, A=204 (blue)
+-            0x00, 0xFF, 0x00, 0x80, // B=0, G=255, R=0, A=128 (green)
+-        ];
+-        let rgba = convert_bgra_to_rgba(&bgra);
+-        // Expected: [R, G, B, A] per pixel
+-        assert_eq!(
+-            rgba,
+-            vec![
+-                0x00, 0x00, 0xFF, 0xCC, // R=0, G=0, B=255, A=204
+-                0x00, 0xFF, 0x00, 0x80, // R=0, G=255, B=0, A=128
+-            ]
+-        );
+-    }
+-
+-    #[test]
+     fn convert_uncompressed_bgrx_to_rgba() {
+         // Wire format: [B, G, R, A] per pixel (0xAARRGGBB little-endian)
+         let wire_pixels = vec![
+@@ -3981,7 +4449,7 @@
+     fn frame_ack_queue_depth_is_not_a_frame_count() {
+         let mut handler = GraphicsPipelineClient::new(Box::new(TestHandler), None);
+         handler.total_frames_decoded = 3;
+-        let responses = handler.handle_end_frame(7).unwrap();
++        let responses = handler.handle_end_frame(7, 0).unwrap();
+         let bytes = ironrdp_core::encode_vec(responses[0].as_ref()).unwrap();
+         let GfxPdu::FrameAcknowledge(ack) = ironrdp_core::decode::<GfxPdu>(&bytes).unwrap() else {
+             panic!("expected frame ack")
+--- a/crates/ironrdp-egfx/src/compositor.rs
++++ b/crates/ironrdp-egfx/src/compositor.rs
+@@ -123,6 +123,8 @@
+     /// INVARIANT: until it is set, window updates are opaque; once set, every pixel's
+     /// alpha byte holds the surface's alpha, starting from opaque.
+     has_alpha: bool,
++    /// True only if all contributing writes provided opaque colors.
++    pixels_opaque: bool,
+ }
+ 
+ /// A surface-to-window mapping: the surface's top-left `mapped_width` by
+@@ -201,6 +203,7 @@
+     height: u16,
+     /// RGBA8888, `width * height * 4` bytes.
+     data: Vec<u8>,
++    pixels_opaque: bool,
+     /// Value of [`Compositor::use_clock`] when the tile was last stored or pasted, so the
+     /// persistent cache can keep the most recently used tiles first.
+     last_used: u64,
+@@ -229,6 +232,10 @@
+     frame: Vec<DirtyRegion>,
+     /// Deltas from completed frames, awaiting drain.
+     ready: Vec<OutputUpdate>,
++    /// Last committed desktop regions, still backed by their surfaces. Any
++    /// command that could mutate those surfaces first materializes this list.
++    direct: Vec<DirtyRegion>,
++    opaque_surface_base: bool,
+     /// Whether the confirmed capabilities constrain the bitmap cache to 16 MB.
+     small_bitmap_cache: bool,
+     /// Window deltas from completed frames, awaiting drain.
+@@ -241,6 +248,7 @@
+         *self = Self {
+             output_width: self.output_width,
+             output_height: self.output_height,
++            opaque_surface_base: self.opaque_surface_base,
+             ..Self::default()
+         };
+     }
+@@ -284,6 +292,7 @@
+         self.surfaces.clear();
+         self.frame.clear();
+         self.ready.clear();
++        self.direct.clear();
+         self.ready_windows.clear();
+         // Only the cache keeps its allocations, so only its charge remains. Within the
+         // 3.3.1.4 cap the cache leaves room in the budget for the surfaces the server creates
+@@ -312,6 +321,10 @@
+         self.small_bitmap_cache = small;
+     }
+ 
++    pub(crate) fn enable_opaque_surface_base(&mut self) {
++        self.opaque_surface_base = true;
++    }
++
+     /// Reserve `len` pixel bytes, or refuse if that would exceed the budget.
+     ///
+     /// Refusing rather than erroring keeps the existing contract for allocations
+@@ -378,10 +391,15 @@
+             Surface {
+                 width,
+                 height,
+-                data: vec![0; len],
++                data: if self.opaque_surface_base {
++                    vec![[0, 0, 0, 255]; len / BYTES_PER_PIXEL].into_flattened()
++                } else {
++                    vec![0; len]
++                },
+                 mapping: None,
+                 window: None,
+                 has_alpha: false,
++                pixels_opaque: self.opaque_surface_base,
+             },
+         );
+     }
+@@ -485,6 +503,111 @@
+         self.record_dirty(surface_id, x, y, w, h);
+     }
+ 
++    /// Blit a rectangle from a larger decoded buffer without packing a patch.
++    pub(crate) fn apply_rgba_region(
++        &mut self,
++        surface_id: u16,
++        dest: &ExclusiveRectangle,
++        rgba: &[u8],
++        source_pitch: usize,
++        source_origin: (u16, u16),
++    ) -> bool {
++        let Some(surface) = self.surfaces.get_mut(&surface_id) else {
++            return false;
++        };
++        let width = dest.right.min(surface.width).saturating_sub(dest.left);
++        let height = dest.bottom.min(surface.height).saturating_sub(dest.top);
++        let row_bytes = usize::from(width) * BYTES_PER_PIXEL;
++        let src_x = usize::from(source_origin.0) * BYTES_PER_PIXEL;
++        if width == 0 || height == 0 || src_x + row_bytes > source_pitch {
++            return false;
++        }
++        let src_y = usize::from(source_origin.1);
++        let Some(src_end) = (src_y + usize::from(height) - 1)
++            .checked_mul(source_pitch)
++            .and_then(|offset| offset.checked_add(src_x + row_bytes))
++        else {
++            return false;
++        };
++        if src_end > rgba.len() {
++            return false;
++        }
++        let dst_pitch = usize::from(surface.width) * BYTES_PER_PIXEL;
++        let dst_x = usize::from(dest.left) * BYTES_PER_PIXEL;
++        let preserve_alpha = surface.has_alpha && surface.window.is_some();
++        for row in 0..usize::from(height) {
++            let src_offset = (src_y + row) * source_pitch + src_x;
++            let dst_offset = (usize::from(dest.top) + row) * dst_pitch + dst_x;
++            let source = &rgba[src_offset..src_offset + row_bytes];
++            let target = &mut surface.data[dst_offset..dst_offset + row_bytes];
++            if preserve_alpha {
++                for (dst, src) in target.chunks_exact_mut(4).zip(source.chunks_exact(4)) {
++                    dst[..3].copy_from_slice(&src[..3]);
++                }
++            } else {
++                target.copy_from_slice(source);
++            }
++        }
++        self.record_dirty(surface_id, dest.left, dest.top, width, height);
++        true
++    }
++
++    /// Composite ClearCodec colors over the current surface. Zero alpha in this
++    /// patch marks an omitted pixel, not a color to write to the surface.
++    /// Replace the marker with the actual pixel for the handler's bitmap.
++    pub(crate) fn apply_clearcodec(
++        &mut self,
++        surface_id: u16,
++        dest: &ExclusiveRectangle,
++        bgra: &mut [u8],
++        materialize: bool,
++    ) -> bool {
++        let Some(surface) = self.surfaces.get_mut(&surface_id) else {
++            return false;
++        };
++        let w = dest.right.saturating_sub(dest.left);
++        let h = dest.bottom.saturating_sub(dest.top);
++        let stride = usize::from(w) * BYTES_PER_PIXEL;
++        if w == 0
++            || h == 0
++            || dest.right > surface.width
++            || dest.bottom > surface.height
++            || bgra.len() != stride * usize::from(h)
++        {
++            return false;
++        }
++
++        let surface_stride = usize::from(surface.width) * BYTES_PER_PIXEL;
++        let x = usize::from(dest.left) * BYTES_PER_PIXEL;
++        let preserve_alpha = surface.has_alpha && surface.window.is_some();
++        let mut changed = false;
++        for (row, patch) in bgra.chunks_exact_mut(stride).enumerate() {
++            let offset = (usize::from(dest.top) + row) * surface_stride + x;
++            let base = &mut surface.data[offset..offset + stride];
++            for (next, current) in patch.chunks_exact_mut(4).zip(base.chunks_exact_mut(4)) {
++                if next[3] == 0 {
++                    if materialize {
++                        next.copy_from_slice(current);
++                    }
++                } else {
++                    let alpha = if preserve_alpha { current[3] } else { next[3] };
++                    let rgba = [next[2], next[1], next[0], alpha];
++                    if rgba != current {
++                        current.copy_from_slice(&rgba);
++                        changed = true;
++                    }
++                    if materialize {
++                        next.copy_from_slice(&rgba);
++                    }
++                }
++            }
++        }
++        if changed {
++            self.record_dirty(surface_id, dest.left, dest.top, w, h);
++        }
++        changed
++    }
++
+     /// Replace the alpha channel of a surface sub-rectangle with an `ALPHACODEC_BITMAP_STREAM`
+     /// (an `RDPGFX_CODECID_ALPHA` `WireToSurface1`), leaving its color channels untouched
+     /// (MS-RDPEGFX 3.3.5.1).
+@@ -499,6 +622,7 @@
+         surface_id: u16,
+         dest: &ExclusiveRectangle,
+         stream: &[u8],
++        materialize: bool,
+     ) -> Result<Option<(ExclusiveRectangle, Vec<u8>)>, AlphaDecodeError> {
+         let x = dest.left;
+         let y = dest.top;
+@@ -517,6 +641,9 @@
+             }
+             surface.has_alpha = true;
+         }
++        // Alpha can apply even to an offscreen surface that will be copied
++        // to an opaque desktop later.
++        surface.pixels_opaque = false;
+         let mut canvas = surface.canvas_mut();
+         alpha::decode(stream, w, h, |first_pixel, run| {
+             write_alpha_run(&mut canvas, (x, y, w), first_pixel, run);
+@@ -525,7 +652,11 @@
+         let right = dest.right.min(surface.width);
+         let bottom = dest.bottom.min(surface.height);
+         let composited = (x < right && y < bottom).then(|| {
+-            let data = copy_region(&surface.data, surface.width, x, y, right - x, bottom - y);
++            let data = if materialize {
++                copy_region(&surface.data, surface.width, x, y, right - x, bottom - y)
++            } else {
++                Vec::new()
++            };
+             (
+                 ExclusiveRectangle {
+                     left: x,
+@@ -586,8 +717,10 @@
+             .saturating_sub(src_rect.top)
+             .min(src.height.saturating_sub(src_rect.top));
+         let tile = copy_region(&src.data, src.width, src_rect.left, src_rect.top, w, h);
++        let pixels_opaque = src.pixels_opaque;
+ 
+         if let Some(dst) = self.surfaces.get_mut(&dst_id) {
++            dst.pixels_opaque &= pixels_opaque;
+             for point in dst_points {
+                 blit_region(dst.canvas_mut(), point.x, point.y, w, h, &tile);
+             }
+@@ -648,7 +781,8 @@
+         };
+ 
+         let data = copy_region(&surface.data, surface.width, src_rect.left, src_rect.top, w, h);
+-        self.fill_slot(cache_slot, cache_key, w, h, data);
++        let pixels_opaque = surface.pixels_opaque;
++        self.fill_slot(cache_slot, cache_key, w, h, data, pixels_opaque);
+     }
+ 
+     /// Store a tile read back from the persistent cache into a slot the server assigned it in
+@@ -669,7 +803,7 @@
+         if !self.claim_slot(cache_slot, data.len()) {
+             return false;
+         }
+-        self.fill_slot(cache_slot, cache_key, width, height, data);
++        self.fill_slot(cache_slot, cache_key, width, height, data, false);
+         true
+     }
+ 
+@@ -684,7 +818,15 @@
+     }
+ 
+     /// Store a tile in a slot claimed with [`Self::claim_slot`], as the most recently used.
+-    fn fill_slot(&mut self, cache_slot: u16, cache_key: u64, width: u16, height: u16, data: Vec<u8>) {
++    fn fill_slot(
++        &mut self,
++        cache_slot: u16,
++        cache_key: u64,
++        width: u16,
++        height: u16,
++        data: Vec<u8>,
++        pixels_opaque: bool,
++    ) {
+         let last_used = self.tick();
+         self.cache.insert(
+             cache_slot,
+@@ -693,6 +835,7 @@
+                 width,
+                 height,
+                 data,
++                pixels_opaque,
+                 last_used,
+             },
+         );
+@@ -720,10 +863,10 @@
+ 
+     /// Render a cached tile onto a surface at each destination point
+     /// (`CacheToSurface`).
+-    pub(crate) fn cache_to_surface(&mut self, cache_slot: u16, surface_id: u16, dst_points: &[Point]) {
++    pub(crate) fn cache_to_surface(&mut self, cache_slot: u16, surface_id: u16, dst_points: &[Point]) -> bool {
+         let now = self.tick();
+         let Some(tile) = self.cache.get_mut(&cache_slot) else {
+-            return;
++            return false;
+         };
+         tile.last_used = now;
+         let (w, h) = (tile.width, tile.height);
+@@ -733,13 +876,17 @@
+         // Recording is what needs all of `&mut self`, so it follows in its own loop
+         // once the tile borrow has ended.
+         if let Some(surface) = self.surfaces.get_mut(&surface_id) {
++            surface.pixels_opaque &= tile.pixels_opaque;
+             for point in dst_points {
+                 blit_region(surface.canvas_mut(), point.x, point.y, w, h, &tile.data);
+             }
++        } else {
++            return false;
+         }
+         for point in dst_points {
+             self.record_dirty(surface_id, point.x, point.y, w, h);
+         }
++        true
+     }
+ 
+     /// Evict a cache slot (`EvictCacheEntry`).
+@@ -764,6 +911,99 @@
+         }
+     }
+ 
++    pub(crate) fn end_frame_direct(&mut self) {
++        debug_assert!(self.direct.is_empty());
++        let mut frame = core::mem::take(&mut self.frame);
++        frame.retain(|dirty| {
++            let Some(window) = self.surfaces.get(&dirty.surface_id).and_then(|surface| surface.window) else {
++                return true;
++            };
++            self.release(size_of::<DirtyRegion>());
++            self.materialize_window(dirty, window);
++            false
++        });
++        self.frame = core::mem::replace(&mut self.direct, frame);
++    }
++
++    pub(crate) fn materialize_direct(&mut self) {
++        let mut direct = core::mem::take(&mut self.direct);
++        self.release(direct.len() * size_of::<DirtyRegion>());
++        for dirty in direct.drain(..) {
++            self.materialize(&dirty);
++        }
++        self.direct = direct;
++    }
++
++    /// Copy the committed surface spans straight to an RGBA desktop.
++    pub(crate) fn blit_direct(
++        &mut self,
++        output: &mut [u8],
++        width: u16,
++        height: u16,
++        opaque: bool,
++    ) -> (Vec<ExclusiveRectangle>, bool) {
++        let stride = usize::from(width) * BYTES_PER_PIXEL;
++        if output.len() != stride * usize::from(height) {
++            self.release(self.direct.len() * size_of::<DirtyRegion>());
++            self.direct.clear();
++            return (Vec::new(), true);
++        }
++        let mut applied = Vec::with_capacity(self.direct.len().min(256));
++        let mut budget = MAX_COMPOSITOR_BYTES;
++        let mut limited = false;
++        for dirty in &self.direct {
++            let Some((mapping, surface, rect)) = self.output_region(dirty) else {
++                continue;
++            };
++            if rect.right > width || rect.bottom > height {
++                continue;
++            }
++            let bytes = usize::from(rect.right - rect.left) * usize::from(rect.bottom - rect.top) * BYTES_PER_PIXEL;
++            let Some(remaining) = budget.checked_sub(bytes) else {
++                limited = true;
++                break;
++            };
++            budget = remaining;
++            let start = usize::from(rect.top) * stride + usize::from(rect.left) * BYTES_PER_PIXEL;
++            let target = &mut output[start..];
++            let fill_alpha = opaque && !surface.pixels_opaque;
++            if mapping.target_width == u32::from(surface.width) && mapping.target_height == u32::from(surface.height) {
++                let len = usize::from(rect.right - rect.left) * BYTES_PER_PIXEL;
++                let from_stride = usize::from(surface.width) * BYTES_PER_PIXEL;
++                let from_x = usize::from(dirty.rect.left) * BYTES_PER_PIXEL;
++                let from_y = usize::from(dirty.rect.top);
++                for y in 0..usize::from(rect.bottom - rect.top) {
++                    let from = (from_y + y) * from_stride + from_x;
++                    let to = y * stride;
++                    let source = &surface.data[from..from + len];
++                    let dest = &mut target[to..to + len];
++                    if fill_alpha {
++                        for (to, &[r, g, b, _]) in dest.as_chunks_mut::<4>().0.iter_mut().zip(source.as_chunks::<4>().0)
++                        {
++                            *to = [r, g, b, 255];
++                        }
++                    } else {
++                        dest.copy_from_slice(source);
++                    }
++                }
++            } else {
++                write_scaled_region(
++                    &surface.data,
++                    surface.width,
++                    (surface.width, surface.height),
++                    mapping,
++                    &rect,
++                    (target, stride),
++                    fill_alpha,
++                );
++            }
++            applied.push(rect);
++        }
++        self.release(self.direct.len() * size_of::<DirtyRegion>());
++        self.direct.clear();
++        (applied, limited)
++    }
++
+     /// Take all committed output updates, leaving the pending set empty.
+     pub(crate) fn drain_output(&mut self) -> Vec<OutputUpdate> {
+         let drained = core::mem::take(&mut self.ready);
+@@ -789,17 +1029,48 @@
+             self.materialize_window(dirty, window);
+             return;
+         }
+-        let Some((mapping, source_width, source_height)) = self
+-            .surfaces
+-            .get(&dirty.surface_id)
+-            .and_then(|surface| surface.mapping.map(|mapping| (mapping, surface.width, surface.height)))
+-        else {
++        let Some((mapping, _, output_rect)) = self.output_region(dirty) else {
+             return;
+         };
+-        if mapping.target_width == 0 || mapping.target_height == 0 {
++        let w = output_rect.right - output_rect.left;
++        let h = output_rect.bottom - output_rect.top;
++        let Some(len) = pixel_data_len(w, h) else {
+             return;
++        };
++        if !self.charge(len) {
++            return;
+         }
++        let Some(surface) = self.surfaces.get(&dirty.surface_id) else {
++            self.release(len);
++            return;
++        };
++        let (source_width, source_height) = (surface.width, surface.height);
++        let data =
++            if mapping.target_width == u32::from(source_width) && mapping.target_height == u32::from(source_height) {
++                copy_region(&surface.data, source_width, dirty.rect.left, dirty.rect.top, w, h)
++            } else {
++                copy_scaled_region(
++                    &surface.data,
++                    source_width,
++                    (source_width, source_height),
++                    mapping,
++                    &output_rect,
++                )
++            };
++        self.ready.push(OutputUpdate {
++            region: output_rect,
++            data,
++        });
++    }
+ 
++    fn output_region(&self, dirty: &DirtyRegion) -> Option<(OutputMapping, &Surface, ExclusiveRectangle)> {
++        let surface = self.surfaces.get(&dirty.surface_id)?;
++        let mapping = surface.mapping?;
++        let (source_width, source_height) = (surface.width, surface.height);
++        if mapping.target_width == 0 || mapping.target_height == 0 {
++            return None;
++        }
++
+         let mapped_left = scaled_edge(dirty.rect.left, source_width, mapping.target_width);
+         let mapped_top = scaled_edge(dirty.rect.top, source_height, mapping.target_height);
+         let mapped_right = scaled_edge(dirty.rect.right, source_width, mapping.target_width);
+@@ -828,47 +1099,20 @@
+             .saturating_add(mapped_bottom)
+             .min(u32::from(self.output_height));
+         if !(left < right && top < bottom) {
+-            return;
++            return None;
+         }
+ 
+         let left = u16::try_from(left).unwrap_or(u16::MAX);
+         let top = u16::try_from(top).unwrap_or(u16::MAX);
+         let right = u16::try_from(right).unwrap_or(u16::MAX);
+         let bottom = u16::try_from(bottom).unwrap_or(u16::MAX);
+-        let w = right - left;
+-        let h = bottom - top;
+-        let Some(len) = pixel_data_len(w, h) else {
+-            return;
+-        };
+-        if !self.charge(len) {
+-            return;
+-        }
+-        let Some(surface) = self.surfaces.get(&dirty.surface_id) else {
+-            self.release(len);
+-            return;
+-        };
+         let output_rect = ExclusiveRectangle {
+             left,
+             top,
+             right,
+             bottom,
+         };
+-        let data =
+-            if mapping.target_width == u32::from(source_width) && mapping.target_height == u32::from(source_height) {
+-                copy_region(&surface.data, source_width, dirty.rect.left, dirty.rect.top, w, h)
+-            } else {
+-                copy_scaled_region(
+-                    &surface.data,
+-                    source_width,
+-                    (source_width, source_height),
+-                    mapping,
+-                    &output_rect,
+-                )
+-            };
+-        self.ready.push(OutputUpdate {
+-            region: output_rect,
+-            data,
+-        });
++        Some((mapping, surface, output_rect))
+     }
+ 
+     /// Copy the pixels for one dirty region of a window-mapped surface into the
+@@ -1048,6 +1292,29 @@
+         return Vec::new();
+     };
+     let mut out = vec![0; len];
++    write_scaled_region(
++        src,
++        stride_width,
++        (src_width, src_height),
++        mapping,
++        output_rect,
++        (&mut out, usize::from(width) * BYTES_PER_PIXEL),
++        false,
++    );
++    out
++}
++
++fn write_scaled_region(
++    src: &[u8],
++    stride_width: u16,
++    (src_width, src_height): (u16, u16),
++    mapping: OutputMapping,
++    output_rect: &ExclusiveRectangle,
++    (out, out_stride): (&mut [u8], usize),
++    fill_alpha: bool,
++) {
++    let width = output_rect.right.saturating_sub(output_rect.left);
++    let height = output_rect.bottom.saturating_sub(output_rect.top);
+     let target_left = u32::from(output_rect.left).saturating_sub(mapping.origin.0);
+     let target_top = u32::from(output_rect.top).saturating_sub(mapping.origin.1);
+     let source_column_offsets = (0..width)
+@@ -1069,15 +1336,16 @@
+         let source_row_offset = usize::from(source_y) * usize::from(stride_width) * BYTES_PER_PIXEL;
+         for x in 0..width {
+             let source_offset = source_row_offset + source_column_offsets[usize::from(x)];
+-            let target_offset = (usize::from(y) * usize::from(width) + usize::from(x)) * BYTES_PER_PIXEL;
++            let target_offset = usize::from(y) * out_stride + usize::from(x) * BYTES_PER_PIXEL;
+             if source_offset + BYTES_PER_PIXEL <= src.len() {
+                 out[target_offset..target_offset + BYTES_PER_PIXEL]
+                     .copy_from_slice(&src[source_offset..source_offset + BYTES_PER_PIXEL]);
++                if fill_alpha {
++                    out[target_offset + 3] = 255;
++                }
+             }
+         }
+     }
+-
+-    out
+ }
+ 
+ /// Write a tightly-packed RGBA8888 buffer into a sub-rectangle of a canvas,
+@@ -1221,7 +1489,7 @@
+         c.map_surface_to_window(1, 7, (2, 1), (2, 1));
+         c.apply_bitmap(1, &rect(0, 0, 2, 1), &[0x10, 0x20, 0x30, 0xFF, 0x40, 0x50, 0x60, 0xFF]);
+         // ALPHACODEC_BITMAP_STREAM: alphaSig 0x414C, compressed 0, one byte for the first pixel.
+-        c.apply_alpha(1, &rect(0, 0, 1, 1), &[0x4C, 0x41, 0x00, 0x00, 0x80])
++        c.apply_alpha(1, &rect(0, 0, 1, 1), &[0x4C, 0x41, 0x00, 0x00, 0x80], true)
+             .unwrap();
+         c.end_frame();
+         let _ = c.drain_window_updates();
+--- a/crates/ironrdp-egfx/src/decode.rs
++++ b/crates/ironrdp-egfx/src/decode.rs
+@@ -311,6 +311,18 @@
+     /// macroblock alignment (16x16). The caller crops to fit.
+     fn decode(&mut self, data: &[u8]) -> DecoderResult<DecodedFrame>;
+ 
++    /// Decode an EGFX AVC420 picture into reusable full-range BT.709 RGBA storage.
++    fn decode_avc420(&mut self, data: &[u8], rgba: &mut Vec<u8>) -> DecoderResult<(u32, u32)> {
++        let frame = if self.supports_yuv420() {
++            self.decode_yuv420(data)?.to_rgba()
++        } else {
++            self.decode(data)?
++        };
++        let dimensions = (frame.width(), frame.height());
++        *rgba = frame.into_data();
++        Ok(dimensions)
++    }
++
+     /// Decode H.264 NAL units like [`H264Decoder::decode`], into the planes of the picture.
+     ///
+     /// The graphics pipeline converts these itself with the color transform MS-RDPEGFX
+@@ -333,6 +345,21 @@
+         false
+     }
+ 
++    /// Whether [`H264Decoder::decode_hw`] can return GPU-resident video frames
++    /// without reading decoded pixels back to CPU memory.
++    fn supports_hw_frame(&self) -> bool {
++        false
++    }
++
++    /// Decode H.264 NAL units into a GPU-resident frame for a [`crate::gpu::GpuCompositor`].
++    ///
++    /// Returning `Ok(None)` instructs the caller to fall back to [`Self::decode_avc420`]
++    /// or [`Self::decode_yuv420`] for the same access unit.
++    fn decode_hw(&mut self, data: &[u8]) -> DecoderResult<Option<Box<dyn crate::gpu::HwVideoFrame>>> {
++        let _ = data;
++        Ok(None)
++    }
++
+     /// Finishes starting the decoder, and reports whether it can decode.
+     ///
+     /// The graphics pipeline calls this when its channel opens, before it advertises its
+@@ -455,11 +482,7 @@
+                 .map_err(|e| DecoderError::new("OpenH264 decode failed", e))?
+                 .ok_or_else(|| DecoderError::msg("OpenH264 returned no picture"))
+         }
+-    }
+-
+-    impl H264Decoder for OpenH264Decoder {
+-        fn decode(&mut self, data: &[u8]) -> DecoderResult<DecodedFrame> {
+-            let matrix = self.matrix;
++        fn decode_rgba(&mut self, data: &[u8], matrix: YuvMatrix, rgba: &mut Vec<u8>) -> DecoderResult<(u32, u32)> {
+             let yuv = self.decode_picture(data)?;
+ 
+             let (width, height) = YUVSource::dimensions(&yuv);
+@@ -485,7 +508,7 @@
+                 .checked_mul(height)
+                 .and_then(|s| s.checked_mul(4))
+                 .ok_or_else(|| DecoderError::msg("frame dimensions too large for RGBA allocation"))?;
+-            let mut rgba = vec![0u8; rgba_size];
++            rgba.resize(rgba_size, 0);
+ 
+             // MS-RDPEGFX AVC420 streams carry full-range BT.709 YUV420 ([MS-RDPEGFX] 3.3.8.3.1),
+             // and MS-RDPEVOR video limited-range BT.601, so the matrix is chosen by the caller
+@@ -504,10 +527,22 @@
+                 width: w32,
+                 height: h32,
+             };
+-            yuv::yuv420_to_rgba(&planar, &mut rgba, rgba_stride, range, standard)
++            yuv::yuv420_to_rgba(&planar, rgba, rgba_stride, range, standard)
+                 .map_err(|e| DecoderError::new("failed to convert YUV420 to RGBA", e))?;
+ 
+-            Ok(DecodedFrame::new(rgba, w32, h32))
++            Ok((w32, h32))
++        }
++    }
++
++    impl H264Decoder for OpenH264Decoder {
++        fn decode(&mut self, data: &[u8]) -> DecoderResult<DecodedFrame> {
++            let mut rgba = Vec::new();
++            let (width, height) = self.decode_rgba(data, self.matrix, &mut rgba)?;
++            Ok(DecodedFrame::new(rgba, width, height))
++        }
++
++        fn decode_avc420(&mut self, data: &[u8], rgba: &mut Vec<u8>) -> DecoderResult<(u32, u32)> {
++            self.decode_rgba(data, YuvMatrix::Bt709Full, rgba)
+         }
+ 
+         fn decode_yuv420(&mut self, data: &[u8]) -> DecoderResult<Yuv420Frame> {
+--- a/crates/ironrdp-egfx/src/gpu.rs
++++ b/crates/ironrdp-egfx/src/gpu.rs
+@@ -0,0 +1,80 @@
++//! GPU-resident surface composition hooks for hardware-decoded EGFX streams.
++//!
++//! When an embedder supplies a [`GpuCompositor`] and a hardware [`crate::decode::H264Decoder`]
++//! implementing [`crate::decode::H264Decoder::decode_hw`], AVC420 and AVC444/v2 video frames
++//! remain on the GPU through color conversion, chroma combination, surface-to-surface blits,
++//! cache operations, and presentation into the embedder's external texture.
++
++use core::any::Any;
++
++pub use ironrdp_pdu::geometry::ExclusiveRectangle;
++
++use crate::avc444::Avc444Layout;
++use crate::pdu::{Color, Point};
++
++/// Opaque GPU-resident video picture returned by a hardware H.264 decoder
++/// (for example a `CVPixelBuffer` on macOS or a D3D11 NV12 texture on Windows).
++pub trait HwVideoFrame: Any + Send {
++    fn width(&self) -> u32;
++    fn height(&self) -> u32;
++    fn as_any(&self) -> &dyn Any;
++}
++
++/// Opaque GPU-composited output frame ready for direct presentation to an
++/// external texture (for example a pooled `CVPixelBuffer` or DXGI shared handle).
++pub trait GpuPresentedFrame: Any + Send {
++    fn width(&self) -> u16;
++    fn height(&self) -> u16;
++    fn as_any(&self) -> &dyn Any;
++    fn into_any(self: Box<Self>) -> Box<dyn Any + Send>;
++}
++
++/// Optional GPU-resident EGFX surface compositor.
++///
++/// Returning `false` from any mutating command signals an unrecoverable GPU
++/// error (such as device removal or out-of-budget allocation) so
++/// [`crate::client::GraphicsPipelineClient`] can tear down GPU compositing and
++/// fall back to the CPU compositor.
++pub trait GpuCompositor: Send {
++    fn reset(&mut self, width: u32, height: u32) -> bool;
++    fn create_surface(&mut self, id: u16, width: u16, height: u16) -> bool;
++    fn delete_surface(&mut self, id: u16);
++    fn map_surface_scaled(&mut self, id: u16, origin: (u32, u32), target: (u32, u32)) -> bool;
++    fn unmap_surface(&mut self, id: u16);
++    fn apply_hw_avc420(
++        &mut self,
++        surface_id: u16,
++        frame: &dyn HwVideoFrame,
++        dest: &ExclusiveRectangle,
++        rects: &[ExclusiveRectangle],
++    ) -> bool;
++    fn apply_hw_avc444(
++        &mut self,
++        surface_id: u16,
++        layout: Avc444Layout,
++        main: Option<(&dyn HwVideoFrame, &[ExclusiveRectangle])>,
++        auxiliary: Option<(&dyn HwVideoFrame, &[ExclusiveRectangle])>,
++        painted: &[ExclusiveRectangle],
++    ) -> bool;
++    fn apply_rgba_region(
++        &mut self,
++        surface_id: u16,
++        dest: &ExclusiveRectangle,
++        rgba: &[u8],
++        source_pitch: usize,
++        source_origin: (u16, u16),
++    ) -> bool;
++    fn apply_clearcodec(&mut self, surface_id: u16, dest: &ExclusiveRectangle, bgra_coverage: &[u8]) -> bool;
++    fn solid_fill(&mut self, surface_id: u16, color: &Color, rects: &[ExclusiveRectangle]) -> bool;
++    fn surface_to_surface(
++        &mut self,
++        src_id: u16,
++        dst_id: u16,
++        src_rect: &ExclusiveRectangle,
++        dst_points: &[Point],
++    ) -> bool;
++    fn surface_to_cache(&mut self, surface_id: u16, cache_slot: u16, src_rect: &ExclusiveRectangle) -> bool;
++    fn cache_to_surface(&mut self, cache_slot: u16, surface_id: u16, dst_points: &[Point]) -> bool;
++    fn evict_cache_entry(&mut self, cache_slot: u16);
++    fn end_frame(&mut self) -> Option<Box<dyn GpuPresentedFrame>>;
++}
+--- a/crates/ironrdp-egfx/src/lib.rs
++++ b/crates/ironrdp-egfx/src/lib.rs
+@@ -10,5 +10,6 @@
+ pub mod compositor;
+ pub mod decode;
+ pub mod encode;
++pub mod gpu;
+ pub mod pdu;
+ pub mod server;
+--- a/crates/ironrdp-egfx/src/pdu/avc.rs
++++ b/crates/ironrdp-egfx/src/pdu/avc.rs
+@@ -435,6 +435,25 @@
+     }
+ }
+ 
++/// Split a start-code-delimited Annex B access unit into complete NAL units,
++/// excluding start codes and trailing zero bytes.
++pub fn annex_b_units(mut data: &[u8]) -> impl Iterator<Item = &[u8]> {
++    let start = |bytes: &[u8]| bytes.windows(3).position(|prefix| prefix == [0, 0, 1]);
++    data = start(data).map_or(&[], |index| &data[index + 3..]);
++    core::iter::from_fn(move || {
++        loop {
++            if data.is_empty() {
++                return None;
++            }
++            let (nal, rest) = start(data).map_or((data, &[][..]), |end| (&data[..end], &data[end + 3..]));
++            data = rest;
++            if let Some(last) = nal.iter().rposition(|byte| *byte != 0) {
++                return Some(&nal[..=last]);
++            }
++        }
++    })
++}
++
+ /// Convert H.264 AVC format to Annex B format
+ ///
+ /// OpenH264 and similar decoders consume Annex B format (start code prefixed).

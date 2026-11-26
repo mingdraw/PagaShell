@@ -10,6 +10,27 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 import 'page.dart';
 
+/// Starts a Windows VNC worker and returns its cancellable session before any
+/// network operation starts. No target or credentials are passed on argv.
+Future<DesktopWorkerStarted> vncWorkerOpen() =>
+    RustLib.instance.api.crateApiVncVncWorkerOpen();
+
+Future<void> vncWorkerConnect({
+  required int sessionId,
+  required String host,
+  required int port,
+  required String password,
+  int? sshGatewayId,
+  PageGateway? pageGateway,
+}) => RustLib.instance.api.crateApiVncVncWorkerConnect(
+  sessionId: sessionId,
+  host: host,
+  port: port,
+  password: password,
+  sshGatewayId: sshGatewayId,
+  pageGateway: pageGateway,
+);
+
 Future<int> vncConnect({
   required String host,
   required int port,

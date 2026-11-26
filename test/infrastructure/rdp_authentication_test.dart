@@ -25,6 +25,8 @@ class _RdpApi extends RustLibApi {
     required String username,
     required String password,
     required String domain,
+    int? keyboardLayout,
+    required bool performanceMode,
   }) async {
     authentications++;
     this.username = username;

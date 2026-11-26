@@ -26,7 +26,10 @@ import '../theme/app_theme.dart';
 import '../vnc/vnc_keyboard.dart';
 import 'rdp_fullscreen_toolbar.dart';
 import 'rdp_input_queue.dart';
+import 'rdp_local_text_input.dart';
 import 'rdp_surface.dart';
+import 'rdp_windows_cursor.dart';
+import 'rdp_windows_keyboard.dart';
 
 /// Decodes one update at a time; native damage accumulates until requested.
 class RdpDesktopPanel extends StatefulWidget {
@@ -66,6 +69,7 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
   final _surface = RdpSurface();
   final _cursorPosition = ValueNotifier<Offset?>(null);
   ui.Image? _cursorImage;
+  RdpWindowsCursor? _nativeCursor;
   RdpCursor? _cursor;
   late final RdpInputQueue _inputs;
   Timer? _moveTimer;
@@ -91,6 +95,10 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
   final _verticalScroll = ScrollController();
   bool _originalSize = false;
   bool _typingText = false;
+  bool _useLocalIme = false;
+  late final RdpLocalTextInput _localTextInput;
+  late final RdpWindowsKeyboard _windowsKeyboard;
+  Offset? _imeAnchor;
   int _openMenus = 0;
   static const _maxTypedText = 2048;
 
@@ -103,6 +111,11 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _localTextInput = RdpLocalTextInput(_commitLocalText);
+    _windowsKeyboard = RdpWindowsKeyboard(
+      onKey: _captureScan,
+      onLost: _release,
+    );
     _inputs = RdpInputQueue(onError: _fail, sendBatch: _writeInputs);
     _frames = widget.session.frames
         .asyncMap(_decode)
@@ -135,7 +148,9 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
   Future<void> _decode(RdpFrame frame) async {
     final previousWidth = _surface.width;
     final previousHeight = _surface.height;
+    final previousTexture = _surface.textureId;
     ui.Image? cursorImage;
+    RdpWindowsCursor? nativeCursor;
     try {
       await _surface.apply(frame);
       if (!mounted) return;
@@ -146,17 +161,24 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
             cursor.rgba.length != cursor.width * cursor.height * 4) {
           throw const SshEngineException('远程桌面画面无效');
         }
-        cursorImage = await decodeRdpPixels(
-          cursor.rgba,
-          cursor.width,
-          cursor.height,
-        );
+        if (widget.session is! VncEngineSession) {
+          nativeCursor = await RdpWindowsCursor.create(cursor);
+        }
+        if (mounted && nativeCursor == null) {
+          cursorImage = await decodeRdpPixels(
+            cursor.rgba,
+            cursor.width,
+            cursor.height,
+          );
+        }
       }
       if (!mounted) {
         cursorImage?.dispose();
+        nativeCursor?.release();
         return;
       }
       final previousCursor = _cursorImage;
+      final previousNativeCursor = _nativeCursor;
       final layoutChanged =
           previousWidth != _surface.width || previousHeight != _surface.height;
       final actual = RdpResolution(_surface.width, _surface.height);
@@ -175,13 +197,27 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
       if (cursor != null) {
         _cursor = cursor;
         _cursorImage = cursorImage;
+        _nativeCursor = nativeCursor;
       }
       // Surface notifications repaint pixels without rebuilding any widgets.
-      if (layoutChanged || cursor != null || resizeConfirmed) setState(() {});
-      if (cursor != null) previousCursor?.dispose();
+      if (layoutChanged ||
+          cursor != null ||
+          resizeConfirmed ||
+          previousTexture != _surface.textureId) {
+        setState(() {});
+      }
+      if (cursor != null) {
+        previousCursor?.dispose();
+        if (previousNativeCursor != null) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            previousNativeCursor.release();
+          });
+        }
+      }
       if (layoutChanged || resizeConfirmed) _scheduleAutomaticResize();
     } on Object {
       cursorImage?.dispose();
+      nativeCursor?.release();
       rethrow;
     }
   }
@@ -193,6 +229,8 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
       _typingText = false;
     });
     _inputs.cancel();
+    _localTextInput.close();
+    _windowsKeyboard.setEnabled(false);
     _resizeDebounce?.cancel();
     _resizeConfirmation?.cancel();
     _clipboard?.setActive(false);
@@ -247,10 +285,111 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
   }
 
   @override
-  void onWorkspaceVisibilityChanged() => _syncFrames();
+  void onWorkspaceVisibilityChanged() {
+    if (!workspaceVisible) _release();
+    _syncFrames();
+    _syncLocalTextInput();
+    _syncRemoteKeyboard();
+    _syncKeyboard();
+  }
 
   void _focusChanged() {
     if (!_focus.hasFocus) _release();
+    _syncLocalTextInput();
+    _syncRemoteKeyboard();
+    _syncKeyboard();
+  }
+
+  void _syncKeyboard() {
+    final session = widget.session;
+    if (session is! RdpKeyboardSyncSession ||
+        !widget.active ||
+        !_appResumed ||
+        !workspaceVisible ||
+        !_focus.hasFocus ||
+        _failed) {
+      return;
+    }
+    final locks = HardwareKeyboard.instance.lockModesEnabled;
+    final flags =
+        (locks.contains(KeyboardLockMode.scrollLock) ? 1 : 0) |
+        (locks.contains(KeyboardLockMode.numLock) ? 2 : 0) |
+        (locks.contains(KeyboardLockMode.capsLock) ? 4 : 0);
+    _send(() => session.synchronizeKeyboard(flags));
+  }
+
+  void _syncLocalTextInput() {
+    if (!_useLocalIme ||
+        !widget.active ||
+        !_appResumed ||
+        !workspaceVisible ||
+        !_focus.hasFocus ||
+        _failed) {
+      _localTextInput.close();
+      return;
+    }
+    final view = View.of(context);
+    _localTextInput
+      ..setAnchor(
+        _imeAnchor ?? const Offset(24, 96),
+        view.physicalSize / view.devicePixelRatio,
+      )
+      ..open(view.viewId);
+  }
+
+  bool get _captureKeyboard =>
+      !_useLocalIme &&
+      !_failed &&
+      widget.active &&
+      widget.fullscreen &&
+      !widget.fullscreenBusy &&
+      _appResumed &&
+      workspaceVisible &&
+      _focus.hasFocus &&
+      _openMenus == 0 &&
+      widget.session is! VncEngineSession;
+
+  void _syncRemoteKeyboard() => _windowsKeyboard.setEnabled(_captureKeyboard);
+
+  void _captureScan(int scan, bool down) {
+    if (!_captureKeyboard) return;
+    final control = _pressed.contains(0x1d) || _pressed.contains(0x11d);
+    final alt = _pressed.contains(0x38) || _pressed.contains(0x138);
+    if (down &&
+        (scan == 0x1c || scan == 0x11c) &&
+        control &&
+        alt &&
+        widget.onToggleFullscreen != null) {
+      _windowsKeyboard.setEnabled(false);
+      _release();
+      widget.onToggleFullscreen!();
+      return;
+    }
+    _forwardScan(scan, down: down, paste: scan == 0x2f && control);
+  }
+
+  void _selectKeyboardMode(bool useLocalIme) {
+    if (_useLocalIme != useLocalIme) {
+      _release();
+      setState(() => _useLocalIme = useLocalIme);
+      _syncLocalTextInput();
+      _syncRemoteKeyboard();
+    }
+    _focus.requestFocus();
+  }
+
+  void _commitLocalText(String text) {
+    if (_failed || !widget.active || !_appResumed || !_focus.hasFocus) return;
+    final session = widget.session;
+    for (var offset = 0; offset < text.length;) {
+      var end = math.min(offset + _maxTypedText, text.length);
+      if (end < text.length && (text.codeUnitAt(end - 1) & 0xfc00) == 0xd800) {
+        end--;
+      }
+      final chunk = text.substring(offset, end);
+      _send(() => session.text(chunk));
+      offset = end;
+    }
   }
 
   void _syncClipboard() {
@@ -263,6 +402,9 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     _lifecycle = state;
     if (!_appResumed) _release();
     _syncFrames();
+    _syncLocalTextInput();
+    _syncRemoteKeyboard();
+    _syncKeyboard();
     _syncClipboard();
   }
 
@@ -287,9 +429,14 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     if (widget.fullscreen != oldWidget.fullscreen) {
       _release();
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted && widget.active) _focus.requestFocus();
+        if (mounted && widget.active) {
+          _focus.requestFocus();
+          _syncRemoteKeyboard();
+        }
       });
     }
+    _syncLocalTextInput();
+    _syncRemoteKeyboard();
   }
 
   void _release() {
@@ -407,19 +554,30 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
       return KeyEventResult.handled;
     }
     final scan = rdpScanCode(event.physicalKey);
+    // A modifier sent before composition must still be released remotely.
+    if ((scan == null || !_pressed.contains(scan)) &&
+        _localTextInput.handlesKey(event)) {
+      return KeyEventResult.skipRemainingHandlers;
+    }
     if (scan == null) return KeyEventResult.ignored;
-    final down = event is! KeyUpEvent;
+    _forwardScan(
+      scan,
+      down: event is! KeyUpEvent,
+      paste:
+          event.physicalKey == PhysicalKeyboardKey.keyV &&
+          HardwareKeyboard.instance.isControlPressed,
+    );
+    return KeyEventResult.handled;
+  }
+
+  void _forwardScan(int scan, {required bool down, required bool paste}) {
     if (down) {
       _pressed.add(scan);
     } else if (!_pressed.remove(scan)) {
-      return KeyEventResult.handled;
+      return;
     }
-    final paste =
-        down &&
-        event.physicalKey == PhysicalKeyboardKey.keyV &&
-        HardwareKeyboard.instance.isControlPressed;
     final clipboard = _clipboard;
-    if (paste && clipboard != null) {
+    if (down && paste && clipboard != null) {
       _send(() async {
         if (!await clipboard.syncBeforePaste()) return;
         await _writeInputs([
@@ -429,7 +587,6 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     } else {
       _sendScan(scan, down: down);
     }
-    return KeyEventResult.handled;
   }
 
   void _pointer(Offset position, int flags) {
@@ -490,6 +647,10 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
 
   void _button(PointerEvent event, bool down) {
     if (!widget.active) return;
+    if (down && _useLocalIme) {
+      _imeAnchor = event.position;
+      _syncLocalTextInput();
+    }
     _focus.requestFocus();
     _flushMove();
     _flushWheel();
@@ -727,6 +888,8 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
   void _menuVisibilityChanged(bool open) {
     if (!mounted) return;
     setState(() => _openMenus = math.max(0, _openMenus + (open ? 1 : -1)));
+    if (open) _release();
+    _syncRemoteKeyboard();
     if (!open && widget.active) _focus.requestFocus();
   }
 
@@ -821,6 +984,25 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
           ],
         ),
       ),
+      if (widget.session is! VncEngineSession)
+        AppMenuButton<bool>(
+          key: const ValueKey('rdp-keyboard-mode'),
+          enabled: widget.active && !_failed,
+          semanticLabel: '键盘输入模式'.tr,
+          tooltip: '键盘输入模式'.tr,
+          selectedValue: _useLocalIme,
+          items: [(false, '远端键盘'.tr), (true, '本机输入法'.tr)],
+          onSelected: _selectKeyboardMode,
+          onMenuVisibilityChanged: _menuVisibilityChanged,
+          icon: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text((_useLocalIme ? '本机输入法' : '远端键盘').tr),
+              const SizedBox(width: 4),
+              const AppIcon(AppIcons.chevronDown, size: 14),
+            ],
+          ),
+        ),
       AppIconButton(
         key: const ValueKey('rdp-type-clipboard'),
         semanticLabel: '键入剪贴板文本'.tr,
@@ -908,15 +1090,18 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _windowsKeyboard.setEnabled(false);
     _resizeDebounce?.cancel();
     _resizeConfirmation?.cancel();
     _release();
+    _localTextInput.close();
     _clipboard?.dispose();
     _focus.removeListener(_focusChanged);
     _focus.dispose();
     unawaited(_frames?.cancel());
     _surface.dispose();
     _cursorImage?.dispose();
+    _nativeCursor?.release();
     _cursorPosition.dispose();
     _horizontalScroll.dispose();
     _verticalScroll.dispose();
@@ -988,12 +1173,13 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
                                     onPointerSignal: _scroll,
                                     child: MouseRegion(
                                       cursor:
-                                          _cursor?.kind ==
-                                                  RdpCursorKind.bitmap ||
-                                              _cursor?.kind ==
-                                                  RdpCursorKind.hidden
-                                          ? SystemMouseCursors.none
-                                          : SystemMouseCursors.basic,
+                                          _nativeCursor ??
+                                          (_cursor?.kind ==
+                                                      RdpCursorKind.bitmap ||
+                                                  _cursor?.kind ==
+                                                      RdpCursorKind.hidden
+                                              ? SystemMouseCursors.none
+                                              : SystemMouseCursors.basic),
                                       onEnter: (event) =>
                                           _cursorPosition.value =
                                               event.localPosition,
@@ -1003,16 +1189,24 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
                                         children: [
                                           Positioned.fill(
                                             child: RepaintBoundary(
-                                              child: CustomPaint(
-                                                key: const ValueKey(
-                                                  'rdp-desktop-image',
-                                                ),
-                                                painter: RdpSurfacePainter(
-                                                  _surface,
-                                                ),
-                                                isComplex: true,
-                                                willChange: true,
-                                              ),
+                                              child: image.textureId != null
+                                                  ? Texture(
+                                                      textureId:
+                                                          image.textureId!,
+                                                      filterQuality:
+                                                          ui.FilterQuality.low,
+                                                    )
+                                                  : CustomPaint(
+                                                      key: const ValueKey(
+                                                        'rdp-desktop-image',
+                                                      ),
+                                                      painter:
+                                                          RdpSurfacePainter(
+                                                            _surface,
+                                                          ),
+                                                      isComplex: true,
+                                                      willChange: true,
+                                                    ),
                                             ),
                                           ),
                                           if (_cursorImage != null)

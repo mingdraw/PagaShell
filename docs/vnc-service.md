@@ -26,6 +26,7 @@
 - 协商 ZRLE、CopyRect、Raw、光标及桌面尺寸扩展；帧在 Rust 侧合并变更区域，跨 FFI 发送 RGBA 更新。
 - 键盘使用 X11 keysym，失焦与关闭时释放已按键及鼠标按钮。
 - 支持直连、SSH `direct-tcpip` 和 Page TCP 通道；每个桌面独立建立、取消和释放连接。
+- Windows 上直连、SSH 网关与 Page 网关 VNC 会话均运行在独立子进程中（SSH 隧道通过本机单实例匿名命名管道桥接，不暴露本地 TCP 端口），子进程崩溃或无响应可限时关闭并在当前页签重连，回归见 `integration_test/rdp_worker_windows_test.dart`。
 
 ### 凭证与升级
 

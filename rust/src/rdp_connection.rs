@@ -16,11 +16,12 @@ const SESSION: &str = "RDP 会话初始化失败";
 
 /// The caller must verify certificate consent before supplying credentials here.
 pub(crate) async fn finalize<S>(
-    upgraded: Upgraded,
+    _upgraded: Upgraded,
     mut connector: ClientConnector,
     framed: &mut TokioFramed<S>,
     host: String,
     public_key: Vec<u8>,
+    udp: &mut crate::desktop_udp::Sideband,
 ) -> Result<connector::ConnectionResult>
 where
     S: Send + Sync + Unpin + AsyncRead + AsyncWrite,
@@ -56,18 +57,30 @@ where
         connector.mark_credssp_as_done();
     }
 
-    tokio::time::timeout(
-        TIMEOUT,
-        ironrdp_tokio::connect_finalize(
-            upgraded,
-            connector,
-            framed,
-            &mut NtlmOnly,
-            host.into(),
-            Vec::new(), // CredSSP is complete; ordinary TLS does not use this key.
-            None,
-        ),
-    )
+    tokio::time::timeout(TIMEOUT, async {
+        // CredSSP ran above so its errors can be classified independently.
+        // Continue the connector sequence and service any sideband requests
+        // between those protocol steps.
+        let mut buffer = WriteBuf::new();
+        loop {
+            if connector.should_perform_multitransport() {
+                let request = connector
+                    .multitransport_request()
+                    .cloned()
+                    .ok_or_else(|| connector::general_err!("missing RDP multitransport request"))?;
+                let soft_sync = connector
+                    .multitransport_soft_sync_negotiated()
+                    .unwrap_or(false);
+                let outcome = udp.connect(request, soft_sync).await;
+                ironrdp_tokio::complete_multitransport(&mut connector, framed, outcome).await?;
+                continue;
+            }
+            ironrdp_tokio::single_sequence_step(framed, &mut connector, &mut buffer).await?;
+            if let Some(outcome) = connector.state.take_outcome() {
+                break outcome.into_connected();
+            }
+        }
+    })
     .await
     .map_err(|_| anyhow!("RDP 会话初始化超时"))?
     .map_err(|error| connection_error(SESSION, error))
@@ -214,6 +227,7 @@ mod tests {
                     &mut framed,
                     "windows.test".into(),
                     vec![1; 32],
+                    &mut crate::desktop_udp::Sideband::default(),
                 )
                 .await
                 .err()

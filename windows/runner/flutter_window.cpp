@@ -1,4 +1,7 @@
 #include "flutter_window.h"
+#include "rdp_cursor.h"
+#include "rdp_keyboard.h"
+#include "rdp_texture.h"
 #include "system_proxy.h"
 #include "system_tray.h"
 
@@ -6,9 +9,11 @@
 #include <algorithm>
 #include <cstring>
 #include <cstdint>
+#include <cwchar>
 #include <string>
 #include <vector>
 #include <shlobj.h>
+#include <flutter/event_stream_handler_functions.h>
 #include <flutter/standard_method_codec.h>
 
 #include "flutter/generated_plugin_registrant.h"
@@ -18,6 +23,7 @@ using Value = flutter::EncodableValue;
 using Map = flutter::EncodableMap;
 using List = flutter::EncodableList;
 using Result = flutter::MethodResult<Value>;
+using EventError = flutter::StreamHandlerError<Value>;
 constexpr size_t kMaxText = 16 * 1024 * 1024;
 constexpr UINT kDestroyWindowMessage = WM_APP + 1;
 
@@ -181,6 +187,8 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
+  rdp_textures_ = std::make_unique<RdpTextureRegistry>(
+      flutter_controller_->engine(), GetHandle());
   window_channel_ = std::make_unique<flutter::MethodChannel<Value>>(
       flutter_controller_->engine()->messenger(), "pagashell/window",
       &flutter::StandardMethodCodec::GetInstance());
@@ -245,7 +253,63 @@ bool FlutterWindow::OnCreate() {
       [this](const flutter::MethodCall<Value>& call, std::unique_ptr<Result> result) {
         ClipboardCall(GetHandle(), call, std::move(result));
       });
+  rdp_keyboard_channel_ = std::make_unique<flutter::MethodChannel<Value>>(
+      flutter_controller_->engine()->messenger(), "pagashell/rdpKeyboard",
+      &flutter::StandardMethodCodec::GetInstance());
+  rdp_keyboard_channel_->SetMethodCallHandler(
+      [this](const flutter::MethodCall<Value>& call, std::unique_ptr<Result> result) {
+        if (call.method_name() == "captureStart" || call.method_name() == "captureStop") {
+          const auto* owner = call.arguments() ? std::get_if<int32_t>(call.arguments()) : nullptr;
+          if (!owner || !rdp_keyboard_) { result->Success(Value(false)); return; }
+          if (call.method_name() == "captureStart") {
+            result->Success(Value(rdp_keyboard_->Start(*owner)));
+          } else {
+            rdp_keyboard_->Stop(*owner, false);
+            result->Success();
+          }
+          return;
+        }
+        if (call.method_name() != "state") {
+          result->NotImplemented();
+          return;
+        }
+        const int32_t flags = (GetKeyState(VK_SCROLL) & 1) |
+                              ((GetKeyState(VK_NUMLOCK) & 1) << 1) |
+                              ((GetKeyState(VK_CAPITAL) & 1) << 2);
+        wchar_t name[KL_NAMELENGTH] = {};
+        const int64_t layout = GetKeyboardLayoutNameW(name)
+            ? std::wcstoul(name, nullptr, 16) : 0;
+        result->Success(Value(Map{{Value("toggleFlags"), Value(flags)},
+                                  {Value("layout"), Value(layout)}}));
+      });
+  clipboard_changes_ = std::make_unique<flutter::EventChannel<Value>>(
+      flutter_controller_->engine()->messenger(), "pagashell/clipboardChanges",
+      &flutter::StandardMethodCodec::GetInstance());
+  clipboard_changes_->SetStreamHandler(
+      std::make_unique<flutter::StreamHandlerFunctions<Value>>(
+          [this](const Value*, std::unique_ptr<flutter::EventSink<Value>>&& sink)
+              -> std::unique_ptr<EventError> {
+            StopClipboardListener();
+            if (!AddClipboardFormatListener(GetHandle())) {
+              sink->Error("clipboard_listener_unavailable", "Clipboard messages unavailable");
+              sink->EndOfStream();
+            } else {
+              clipboard_sink_ = std::move(sink);
+              // Catch a change between Dart's initial read and registration.
+              clipboard_sink_->Success();
+            }
+            return nullptr;
+          },
+          [this](const Value*) -> std::unique_ptr<EventError> {
+            StopClipboardListener();
+            return nullptr;
+          }));
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
+  rdp_keyboard_ = std::make_unique<RdpKeyboardCapture>(
+      GetHandle(), flutter_controller_->view()->GetNativeWindow(), rdp_keyboard_channel_.get());
+  rdp_cursors_ = std::make_unique<RdpCursorRegistry>(
+      flutter_controller_->engine()->messenger(),
+      flutter_controller_->view()->GetNativeWindow());
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
     this->Show();
@@ -259,7 +323,23 @@ bool FlutterWindow::OnCreate() {
   return true;
 }
 
+void FlutterWindow::StopClipboardListener() {
+  if (!clipboard_sink_) return;
+  if (HWND window = GetHandle()) {
+    RemoveClipboardFormatListener(window);
+  }
+  clipboard_sink_.reset();
+}
+
 void FlutterWindow::OnDestroy() {
+  rdp_keyboard_.reset();
+  rdp_cursors_.reset();
+  rdp_textures_.reset();
+  StopClipboardListener();
+  if (clipboard_changes_) {
+    clipboard_changes_->SetStreamHandler(nullptr);
+    clipboard_changes_.reset();
+  }
   if (system_tray_) {
     system_tray_->Dispose();
     system_tray_.reset();
@@ -269,6 +349,7 @@ void FlutterWindow::OnDestroy() {
   system_proxy_channel_.reset();
   system_proxy_.reset();
   clipboard_channel_.reset();
+  rdp_keyboard_channel_.reset();
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }
@@ -280,6 +361,28 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  if (rdp_keyboard_) {
+    if (message == RdpKeyboardCapture::kKeyMessage) {
+      rdp_keyboard_->Dispatch(wparam, lparam);
+      return 0;
+    }
+    if ((message == WM_ACTIVATE && LOWORD(wparam) == WA_INACTIVE) ||
+        (message == WM_ACTIVATEAPP && !wparam) ||
+        (message == WM_SHOWWINDOW && !wparam) ||
+        (message == WM_SIZE && wparam == SIZE_MINIMIZED)) {
+      rdp_keyboard_->Deactivate();
+    } else if (message == WM_WINDOWPOSCHANGED) {
+      rdp_keyboard_->CheckFocus();
+    }
+  }
+  if (message == RdpTextureRegistry::kFrameMessage) {
+    if (rdp_textures_) rdp_textures_->MarkFrame(wparam);
+    return 0;
+  }
+  if (message == WM_CLIPBOARDUPDATE) {
+    if (clipboard_sink_) clipboard_sink_->Success();
+    return 0;
+  }
   if (message == kDestroyWindowMessage) {
     // Dart has finished saving data and restoring the system proxy. Remove the
     // window now, then shut down Flutter while the native loop still exists.

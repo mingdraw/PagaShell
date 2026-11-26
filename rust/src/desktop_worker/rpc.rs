@@ -14,10 +14,37 @@ pub(super) const STALLED: &str = "RDP 会话进程无响应，请重新连接";
 pub(super) const INVALID_REPLY: &str = "RDP 会话进程通信失败，请重新连接";
 pub(super) const CLOSED: &str = "RDP 会话已关闭";
 
+#[cfg(windows)]
+#[derive(Clone, Copy)]
+pub(super) struct Messages {
+    pub exited: &'static str,
+    pub stalled: &'static str,
+    pub invalid_reply: &'static str,
+    pub closed: &'static str,
+}
+
+#[cfg(windows)]
+pub(super) const RDP_MESSAGES: Messages = Messages {
+    exited: EXITED,
+    stalled: STALLED,
+    invalid_reply: INVALID_REPLY,
+    closed: CLOSED,
+};
+
+#[cfg(windows)]
+pub(super) const VNC_MESSAGES: Messages = Messages {
+    exited: "VNC 会话进程已退出，请重新连接",
+    stalled: "VNC 会话进程无响应，请重新连接",
+    invalid_reply: "VNC 会话进程通信失败，请重新连接",
+    closed: "VNC 会话已关闭",
+};
+
 #[derive(Clone)]
 pub(super) struct Client {
     tx: mpsc::Sender<Call>,
     terminal: watch::Sender<Option<&'static str>>,
+    exited: &'static str,
+    stalled: &'static str,
 }
 
 struct Call {
@@ -26,9 +53,37 @@ struct Call {
 }
 
 impl Client {
+    #[cfg(test)]
     pub(super) fn start(
+        reader: impl AsyncRead + Unpin + Send + 'static,
+        writer: impl AsyncWrite + Unpin + Send + 'static,
+    ) -> Self {
+        Self::start_inner(reader, writer, EXITED, STALLED, INVALID_REPLY, CLOSED)
+    }
+
+    #[cfg(windows)]
+    pub(super) fn start_with_messages(
+        reader: impl AsyncRead + Unpin + Send + 'static,
+        writer: impl AsyncWrite + Unpin + Send + 'static,
+        messages: Messages,
+    ) -> Self {
+        Self::start_inner(
+            reader,
+            writer,
+            messages.exited,
+            messages.stalled,
+            messages.invalid_reply,
+            messages.closed,
+        )
+    }
+
+    fn start_inner(
         mut reader: impl AsyncRead + Unpin + Send + 'static,
         writer: impl AsyncWrite + Unpin + Send + 'static,
+        exited: &'static str,
+        stalled: &'static str,
+        invalid_reply: &'static str,
+        closed: &'static str,
     ) -> Self {
         let (tx, calls) = mpsc::channel(MAX_IN_FLIGHT);
         let (replies, responses) = mpsc::channel(MAX_IN_FLIGHT);
@@ -50,8 +105,21 @@ impl Client {
                 } => {}
             }
         });
-        tokio::spawn(drive(writer, calls, responses, terminal.clone()));
-        Self { tx, terminal }
+        tokio::spawn(drive(
+            writer,
+            calls,
+            responses,
+            terminal.clone(),
+            exited,
+            invalid_reply,
+            closed,
+        ));
+        Self {
+            tx,
+            terminal,
+            exited,
+            stalled,
+        }
     }
 
     pub(super) async fn call(&self, request: Request, timeout: Duration) -> Result<Reply> {
@@ -70,10 +138,10 @@ impl Client {
         {
             Ok(Ok(Reply::Error(error))) => Err(anyhow!(error)),
             Ok(Ok(reply)) => Ok(reply),
-            Ok(Err(())) => Err(anyhow!(self.terminal.borrow().unwrap_or(EXITED))),
+            Ok(Err(())) => Err(anyhow!(self.terminal.borrow().unwrap_or(self.exited))),
             Err(_) => {
-                self.stop(STALLED);
-                Err(anyhow!(self.terminal.borrow().unwrap_or(STALLED)))
+                self.stop(self.stalled);
+                Err(anyhow!(self.terminal.borrow().unwrap_or(self.stalled)))
             }
         }
     }
@@ -107,25 +175,28 @@ async fn drive(
     mut calls: mpsc::Receiver<Call>,
     mut responses: mpsc::Receiver<std::io::Result<Packet<Reply>>>,
     terminal: watch::Sender<Option<&'static str>>,
+    exited: &'static str,
+    invalid_reply: &'static str,
+    closed: &'static str,
 ) {
     let mut pending = HashMap::<u32, oneshot::Sender<Reply>>::new();
     let mut next_id = 1u32;
     let reason = loop {
         tokio::select! {
-            _ = wait_stopped(&terminal) => break CLOSED,
+            _ = wait_stopped(&terminal) => break closed,
             response = responses.recv() => {
                 let response = match response {
                     Some(Ok(response)) => response,
                     Some(Err(error)) if error.kind() == std::io::ErrorKind::InvalidData => {
-                        break INVALID_REPLY;
+                        break invalid_reply;
                     }
-                    _ => break EXITED,
+                    _ => break exited,
                 };
-                let Some(reply) = pending.remove(&response.id) else { break INVALID_REPLY };
+                let Some(reply) = pending.remove(&response.id) else { break invalid_reply };
                 let _ = reply.send(response.body);
             }
             call = calls.recv(), if pending.len() < MAX_IN_FLIGHT => {
-                let Some(call) = call else { break CLOSED };
+                let Some(call) = call else { break closed };
                 if call.reply.is_closed() {
                     continue;
                 }
@@ -133,11 +204,11 @@ async fn drive(
                 next_id = next_id.wrapping_add(1);
                 pending.insert(id, call.reply);
                 let result = tokio::select! {
-                    _ = wait_stopped(&terminal) => break CLOSED,
+                    _ = wait_stopped(&terminal) => break closed,
                     result = wire::write(&mut writer, Packet { id, body: call.request }) => result,
                 };
                 if result.is_err() {
-                    break INVALID_REPLY;
+                    break invalid_reply;
                 }
             }
         }

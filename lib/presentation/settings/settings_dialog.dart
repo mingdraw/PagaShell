@@ -876,6 +876,7 @@ class _GeneralSettings extends StatelessWidget {
     final settings = Get.find<SettingsController>();
     final muted = shadcn.Theme.of(context).colorScheme.mutedForeground;
     final trayLabel = '关闭时最小化到托盘'.tr;
+    final rdpLabel = 'RDP 性能模式'.tr;
     return Obx(
       () => Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -941,6 +942,47 @@ class _GeneralSettings extends StatelessWidget {
                       AppNotice.error('语言设置保存失败，请重试');
                     }
                   },
+          ),
+          const SizedBox(height: 20),
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      rdpLabel,
+                      style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      '重新连接后请求远端关闭壁纸、主题特效和光标阴影。'.tr,
+                      style: TextStyle(fontSize: 12, color: muted),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 16),
+              Semantics(
+                label: rdpLabel,
+                child: shadcn.Switch(
+                  key: const ValueKey('rdp-performance-mode'),
+                  value: settings.rdpPerformanceMode.value,
+                  onChanged: settings.savingRdpPerformanceMode.value
+                      ? null
+                      : (value) async {
+                          try {
+                            await settings.setRdpPerformanceMode(value);
+                          } on Object {
+                            AppNotice.error('RDP 性能模式保存失败，请重试');
+                          }
+                        },
+                ),
+              ),
+            ],
           ),
           const SizedBox(height: 20),
           Row(

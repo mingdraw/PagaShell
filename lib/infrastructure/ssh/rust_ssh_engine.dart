@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io' show Platform;
 import 'dart:typed_data';
 
+import 'package:flutter/services.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge.dart'
     show AnyhowException;
 import 'package:path/path.dart' as path;
@@ -312,7 +313,9 @@ class RustSshEngine
 }
 
 class RustRdpEngine implements RdpEngine {
-  const RustRdpEngine();
+  const RustRdpEngine({this.performanceMode});
+
+  final Future<bool> Function()? performanceMode;
 
   @override
   Future<RdpEngineSession> connectDesktop(
@@ -333,12 +336,18 @@ class RustRdpEngine implements RdpEngine {
     }
     _RustEngineSession? sshGateway;
     int? id;
+    var textureAttached = false;
     var wasCancelled = false;
     var finished = false;
     Future<void> cleanup() async {
-      if (id != null) {
+      final sessionId = id;
+      if (sessionId != null) {
+        if (textureAttached) {
+          textureAttached = false;
+          await _RustDesktopSession.detachTextureForSession(sessionId);
+        }
         await desktop
-            .desktopDisconnect(sessionId: id)
+            .desktopDisconnect(sessionId: sessionId)
             .catchError((Object _) {});
       }
       await sshGateway?.close();
@@ -370,16 +379,32 @@ class RustRdpEngine implements RdpEngine {
       }
       checkCancelled();
       final desktop.DesktopHandshake prepared;
-      if (Platform.isWindows && gateway == null) {
+      if (Platform.isWindows) {
         // Register a cancellable handle before the worker starts network I/O.
         final worker = await desktop.desktopWorkerOpen();
         id = worker.sessionId;
         checkCancelled();
-        prepared = await desktop.desktopWorkerHandshake(
-          sessionId: id,
-          host: host.hostname,
-          port: host.port,
-        );
+        if (gateway?.host.gatewayType == GatewayType.page) {
+          prepared = await desktop.desktopWorkerHandshakeViaPage(
+            sessionId: id,
+            host: host.hostname,
+            port: host.port,
+            gateway: _pageSettings(gateway!),
+          );
+        } else if (sshGateway != null) {
+          prepared = await desktop.desktopWorkerHandshakeViaSsh(
+            sessionId: id,
+            host: host.hostname,
+            port: host.port,
+            sshGatewayId: sshGateway._sessionId,
+          );
+        } else {
+          prepared = await desktop.desktopWorkerHandshake(
+            sessionId: id,
+            host: host.hostname,
+            port: host.port,
+          );
+        }
       } else if (gateway?.host.gatewayType == GatewayType.page) {
         prepared = await desktop.desktopHandshakeViaPage(
           host: host.hostname,
@@ -408,16 +433,31 @@ class RustRdpEngine implements RdpEngine {
         throw const SshEngineException('RDP 证书未获信任，已取消连接');
       }
       checkCancelled();
+      final keyboardState = await _windowsRdpKeyboardState();
+      final faster =
+          await performanceMode?.call() ??
+          const bool.fromEnvironment('PAGASHELL_RDP_PERFORMANCE');
+      checkCancelled();
+      if (_RustDesktopSession.shouldUseTexture) {
+        textureAttached = await _RustDesktopSession.attachTextureForSession(id);
+      }
+      checkCancelled();
       await desktop.desktopAuthenticate(
         sessionId: id,
         expectedFingerprint: prepared.fingerprint,
         username: credentials.username ?? host.username,
         password: credentials.password!,
         domain: credentials.rdpDomain ?? host.rdpDomain,
+        keyboardLayout: keyboardState?['layout'],
+        performanceMode: faster,
       );
       checkCancelled();
       success = true;
-      return _RustRdpDesktopSession(id, sshGateway);
+      return _RustRdpDesktopSession(
+        id,
+        sshGateway,
+        preAttachedTexture: textureAttached,
+      );
     } on AnyhowException catch (e) {
       checkCancelled();
       throw rdpConnectionError(e.message, cause: e);
@@ -484,15 +524,30 @@ class RustVncEngine implements VncEngine {
         ) as _RustEngineSession;
       }
       checkCancelled();
-      id = await vnc.vncConnect(
-        host: host.hostname,
-        port: host.port,
-        password: credentials.password ?? '',
-        sshGatewayId: sshGateway?._sessionId,
-        pageGateway: gateway?.host.gatewayType == GatewayType.page
-            ? _pageSettings(gateway!)
-            : null,
-      );
+      final pageGateway = gateway?.host.gatewayType == GatewayType.page
+          ? _pageSettings(gateway!)
+          : null;
+      if (Platform.isWindows) {
+        final worker = await vnc.vncWorkerOpen();
+        id = worker.sessionId;
+        checkCancelled();
+        await vnc.vncWorkerConnect(
+          sessionId: id,
+          host: host.hostname,
+          port: host.port,
+          password: credentials.password ?? '',
+          sshGatewayId: sshGateway?._sessionId,
+          pageGateway: pageGateway,
+        );
+      } else {
+        id = await vnc.vncConnect(
+          host: host.hostname,
+          port: host.port,
+          password: credentials.password ?? '',
+          sshGatewayId: sshGateway?._sessionId,
+          pageGateway: pageGateway,
+        );
+      }
       checkCancelled();
       success = true;
       return _RustVncDesktopSession(id, sshGateway);
@@ -508,9 +563,34 @@ class RustVncEngine implements VncEngine {
   }
 }
 
+Future<Map<String, int>?> _windowsRdpKeyboardState() async {
+  if (!Platform.isWindows) return null;
+  const channel = MethodChannel('pagashell/rdpKeyboard');
+  try {
+    return await channel.invokeMapMethod<String, int>('state');
+  } on PlatformException {
+    return null;
+  } on MissingPluginException {
+    return null;
+  }
+}
+
 class _RustRdpDesktopSession extends _RustDesktopSession
-    implements RdpClipboardSession, RdpBatchInputSession {
-  _RustRdpDesktopSession(super.id, super.gateway);
+    implements
+        RdpClipboardSession,
+        RdpBatchInputSession,
+        RdpKeyboardSyncSession {
+  _RustRdpDesktopSession(
+    super.id,
+    super.gateway, {
+    super.preAttachedTexture = false,
+  });
+
+  @override
+  Future<void> synchronizeKeyboard(int toggleFlags) async {
+    final state = await _windowsRdpKeyboardState();
+    await _input(kind: 3, flags: state?['toggleFlags'] ?? toggleFlags);
+  }
 
   @override
   Future<void> inputBatch(List<RdpInputEvent> events) async {
@@ -615,12 +695,60 @@ class _RustVncDesktopSession extends _RustDesktopSession
 }
 
 class _RustDesktopSession implements RdpEngineSession {
-  _RustDesktopSession(this.id, this.gateway, {this.isVnc = false});
+  _RustDesktopSession(
+    this.id,
+    this.gateway, {
+    this.isVnc = false,
+    bool preAttachedTexture = false,
+  }) {
+    if (preAttachedTexture) {
+      _textureRegistration = Future<bool>.value(true);
+    }
+  }
+  static const _textureEnabled = bool.fromEnvironment('PAGASHELL_RDP_GPU');
+  static const _textureChannel = MethodChannel('pagashell/rdpTexture');
+
+  static bool get shouldUseTexture =>
+      (_textureEnabled || Platform.environment['PAGASHELL_RDP_GPU'] == '1') &&
+      (Platform.isWindows || Platform.isMacOS || Platform.isLinux);
+
+  static Future<bool> attachTextureForSession(int sessionId) async {
+    try {
+      return await _textureChannel.invokeMethod<bool>('attach', sessionId) ??
+          false;
+    } on PlatformException {
+      return false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
+
+  static Future<void> detachTextureForSession(int sessionId) async {
+    try {
+      await _textureChannel.invokeMethod<void>('detach', sessionId);
+    } on PlatformException {
+      // The runner also unregisters textures when its window closes.
+    } on MissingPluginException {
+      // The engine may already have been torn down.
+    }
+  }
+
   final int id;
   final _RustEngineSession? gateway;
   final bool isVnc;
   bool _closed = false;
   Future<void>? _closing;
+  Future<bool>? _textureRegistration;
+
+  Future<bool> _attachTexture() => attachTextureForSession(id);
+
+  Future<void> _detachTexture() async {
+    final registration = _textureRegistration;
+    if (registration == null) return;
+    _textureRegistration = Future<bool>.value(false);
+    if (!await registration) return;
+    await detachTextureForSession(id);
+  }
 
   @override
   Stream<RdpFrame> get frames {
@@ -631,6 +759,13 @@ class _RustDesktopSession implements RdpEngineSession {
       if (pumping || controller.isClosed) return;
       pumping = true;
       try {
+        if ((_textureEnabled ||
+                Platform.environment['PAGASHELL_RDP_GPU'] == '1') &&
+            !isVnc &&
+            !_closed &&
+            (Platform.isWindows || Platform.isMacOS || Platform.isLinux)) {
+          await (_textureRegistration ??= _attachTexture());
+        }
         // An async* stream only suspends at yield. When the frame RPC times
         // out with no update, it would keep polling even with a paused viewer.
         while (!_closed && controller.hasListener && !controller.isPaused) {
@@ -649,6 +784,7 @@ class _RustDesktopSession implements RdpEngineSession {
               rgba: frame.rgba,
               patchWidth: frame.bitmapWidth,
               patchHeight: frame.bitmapHeight,
+              textureId: frame.textureId?.toInt(),
               tiles: [
                 for (final tile in frame.tiles)
                   RdpTile(
@@ -676,6 +812,11 @@ class _RustDesktopSession implements RdpEngineSession {
                     ),
             ),
           );
+          if (!isVnc && frame.textureId == null) {
+            // Native upload already failed and Rust sent a fresh CPU frame.
+            // The old backing textures can be released after this delivery.
+            unawaited(_detachTexture());
+          }
         }
       } on Object catch (error, stack) {
         if (!_closed && controller.hasListener) {
@@ -755,7 +896,11 @@ class _RustDesktopSession implements RdpEngineSession {
         sessionId: id,
       );
     } finally {
-      await gateway?.close();
+      try {
+        await _detachTexture();
+      } finally {
+        await gateway?.close();
+      }
     }
   }();
 }

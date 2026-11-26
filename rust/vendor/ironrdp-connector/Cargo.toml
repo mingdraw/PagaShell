@@ -1,0 +1,36 @@
+[package]
+name = "ironrdp-connector"
+version = "0.12.0"
+readme = "README.md"
+description = "State machines to drive an RDP connection sequence"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Devolutions/IronRDP"
+
+[lib]
+doctest = false
+test = false
+
+[features]
+default = []
+__test = []
+qoi = ["ironrdp-pdu/qoi"]
+qoiz = ["ironrdp-pdu/qoiz"]
+remote-guard = ["dep:ironrdp-dvc", "dep:ironrdp-rdpear", "sspi/dns_resolver"]
+
+[dependencies]
+ironrdp-svc = { git = "https://github.com/Devolutions/IronRDP", rev = "85e88c2424d8c36407f81540cc1f3cf8d3436a7d", version = "0.10" } # public
+ironrdp-core = { git = "https://github.com/Devolutions/IronRDP", rev = "85e88c2424d8c36407f81540cc1f3cf8d3436a7d", version = "0.3" } # public
+ironrdp-error = { git = "https://github.com/Devolutions/IronRDP", rev = "85e88c2424d8c36407f81540cc1f3cf8d3436a7d", version = "0.2" } # public
+ironrdp-pdu = { git = "https://github.com/Devolutions/IronRDP", rev = "85e88c2424d8c36407f81540cc1f3cf8d3436a7d", version = "0.11", features = ["std"] } # public
+sspi = { version = "0.23.1", features = ["scard"] } # public
+ironrdp-dvc = { git = "https://github.com/Devolutions/IronRDP", rev = "85e88c2424d8c36407f81540cc1f3cf8d3436a7d", version = "0.10", optional = true } # public
+ironrdp-rdpear = { git = "https://github.com/Devolutions/IronRDP", rev = "85e88c2424d8c36407f81540cc1f3cf8d3436a7d", version = "0.1", optional = true }
+url = "2.5" # public
+rand = { version = "0.9", features = ["std"] }
+tracing = { version = "0.1", features = ["log"] }
+picky-asn1-der = "0.5"
+picky-asn1-x509 = "0.15"
+picky = "=7.0.0-rc.27" # FIXME: We are pinning with = because the candidate version number counts as the minor number by Cargo, and will be automatically bumped in the Cargo.lock.
+serde_json = "1"

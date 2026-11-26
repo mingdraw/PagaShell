@@ -1,17 +1,37 @@
+import 'dart:io';
+
 import 'package:flutter/services.dart';
 
 import '../../domain/rdp/rdp_clipboard.dart';
 
-class SystemClipboard implements LocalClipboard {
+class SystemClipboard implements ObservableLocalClipboard {
   SystemClipboard();
   static const _channel = MethodChannel('pagashell/clipboard');
+  static final _windowsChanges = const EventChannel(
+    'pagashell/clipboardChanges',
+  ).receiveBroadcastStream().map<void>((_) {});
   ClipboardSnapshot? _cached;
 
   @override
+  Stream<void>? get changes => Platform.isWindows ? _windowsChanges : null;
+
+  Future<Map<String, Object?>?> _readNative() async {
+    for (var attempt = 0; ; attempt++) {
+      try {
+        return await _channel.invokeMapMethod<String, Object?>('read', {
+          'afterChangeId': _cached?.changeId,
+        });
+      } on PlatformException catch (error) {
+        if (error.code != 'clipboard_busy' || attempt == 3) rethrow;
+        // The writer may still have the clipboard open when Windows notifies us.
+        await Future<void>.delayed(Duration(milliseconds: 25 << attempt));
+      }
+    }
+  }
+
+  @override
   Future<ClipboardSnapshot> read() async {
-    final data = await _channel.invokeMapMethod<String, Object?>('read', {
-      'afterChangeId': _cached?.changeId,
-    });
+    final data = await _readNative();
     if (data == null) {
       if (_cached != null) return _cached!;
       throw StateError('Clipboard unavailable');

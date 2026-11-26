@@ -18,6 +18,7 @@ class AppDelegate: FlutterAppDelegate {
   }
 
   override func applicationWillTerminate(_ notification: Notification) {
+    (mainFlutterWindow as? MainFlutterWindow)?.cleanupRdpTextures()
     (mainFlutterWindow as? MainFlutterWindow)?.cleanupTray()
     super.applicationWillTerminate(notification)
   }

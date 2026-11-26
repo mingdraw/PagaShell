@@ -1,0 +1,31 @@
+[package]
+name = "ironrdp-egfx"
+version = "0.5.0"
+readme = "README.md"
+description = "Graphics pipeline dynamic channel extension implementation"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Devolutions/IronRDP"
+
+[lib]
+doctest = false
+# test = false # FIXME: turn off and keep tests in testsuite crates
+
+[dependencies]
+arbitrary = { version = "1", features = ["derive"], optional = true }
+bit_field = "0.10"
+bitflags = "2.11"
+ironrdp-core = { git = "https://github.com/Devolutions/IronRDP", rev = "85e88c2424d8c36407f81540cc1f3cf8d3436a7d", version = "0.3" } # public
+ironrdp-dvc = { git = "https://github.com/Devolutions/IronRDP", rev = "85e88c2424d8c36407f81540cc1f3cf8d3436a7d", version = "0.10" } # public
+ironrdp-graphics = { path = "../ironrdp-graphics", version = "0.11" } # public
+ironrdp-pdu = { git = "https://github.com/Devolutions/IronRDP", rev = "85e88c2424d8c36407f81540cc1f3cf8d3436a7d", version = "0.11" } # public
+openh264 = { version = "0.9", optional = true, default-features = false }
+tracing = { version = "0.1", features = ["log"] }
+yuv = { version = "0.8", optional = true }
+
+[features]
+arbitrary = ["dep:arbitrary", "bitflags/arbitrary", "ironrdp-pdu/arbitrary"]
+openh264 = ["dep:openh264", "dep:yuv"]
+openh264-bundled = ["openh264", "openh264/source"]
+openh264-libloading = ["openh264", "openh264/libloading"]
+

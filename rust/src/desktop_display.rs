@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use ironrdp::displaycontrol::client::DisplayControlClient;
+use ironrdp::dvc::DvcMessageBatch;
 use ironrdp::session::ActiveStage;
 use tokio::sync::oneshot;
 
@@ -45,12 +46,12 @@ impl DisplayControl {
     }
 
     /// None means the server's display channel is not ready yet.
-    pub fn encode_resize(
+    pub fn prepare_resize(
         &self,
         stage: &mut ActiveStage,
         width: u16,
         height: u16,
-    ) -> Option<Result<Vec<u8>>> {
+    ) -> Option<Result<DvcMessageBatch>> {
         if stage.display_control_ready() != Some(true) {
             return None;
         }
@@ -58,7 +59,7 @@ impl DisplayControl {
             return Some(Err(error));
         }
         stage
-            .encode_resize(u32::from(width), u32::from(height), None, None)
+            .prepare_resize(u32::from(width), u32::from(height), None, None)
             .map(|result| result.context("RDP 分辨率请求编码失败"))
     }
 }

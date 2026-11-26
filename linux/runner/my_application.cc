@@ -7,6 +7,7 @@
 
 #include "flutter/generated_plugin_registrant.h"
 #include "clipboard.h"
+#include "rdp_texture.h"
 #include "system_tray.h"
 
 struct _MyApplication {
@@ -131,6 +132,7 @@ static void my_application_activate(GApplication* application) {
 
   fl_register_plugins(FL_PLUGIN_REGISTRY(view));
   RegisterClipboard(view);
+  RegisterRdpTextures(view);
   register_window_channel(view, window);
   RegisterSystemTray(view, window);
 

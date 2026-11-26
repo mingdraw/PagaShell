@@ -24,6 +24,10 @@ abstract interface class SettingsRepository {
 
   Future<void> saveMinimizeToTrayOnClose(bool enabled);
 
+  Future<bool?> readRdpPerformanceMode();
+
+  Future<void> saveRdpPerformanceMode(bool enabled);
+
   Future<bool> readAutomaticUpdates();
 
   Future<void> saveAutomaticUpdates(bool enabled);

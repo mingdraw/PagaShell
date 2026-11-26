@@ -26,7 +26,11 @@ class RdpClipboardController {
   final void Function(String) onError;
   final progress = Rxn<RdpClipboardEvent>();
   late final StreamSubscription<RdpClipboardEvent> _events;
+  StreamSubscription<void>? _localEvents;
   Timer? _poll;
+  bool _notificationsUnavailable = false;
+  bool _localChangePending = false;
+  bool _drainingLocalChanges = false;
   ClipboardSnapshot? _last;
   bool _active = false;
   bool _foreground = true;
@@ -38,6 +42,7 @@ class RdpClipboardController {
   int _remoteSerial = 0;
   Future<void>? _activation;
   Future<void>? _syncing;
+  Future<void>? _writingRemote;
 
   void setActive(bool active) {
     if (_disposed || active == _active) return;
@@ -46,7 +51,7 @@ class RdpClipboardController {
     _remoteSerial++;
     _initializing = active;
     _pendingRemote = null;
-    _poll?.cancel();
+    _stopWatching();
     progress.value = null;
     // Serialize enable/disable: a slow activation cannot reactivate a closed tab.
     _activation = (_activation ?? Future<void>.value()).then((_) async {
@@ -66,7 +71,7 @@ class RdpClipboardController {
         final pending = _pendingRemote;
         _pendingRemote = null;
         if (pending != null) _receive(pending);
-        _startPolling();
+        _startWatching();
       } on Object {
         if (_current(generation)) onError('无法访问本机剪贴板');
       }
@@ -81,23 +86,75 @@ class RdpClipboardController {
   void setForeground(bool foreground) {
     if (_disposed || foreground == _foreground) return;
     _foreground = foreground;
-    _poll?.cancel();
+    _stopWatching();
     if (foreground && _active) unawaited(_resumeLocal());
   }
 
   Future<void> _resumeLocal() async {
     await _activation;
     await syncLocal();
-    _startPolling();
+    _startWatching();
   }
 
-  void _startPolling() {
+  void _stopWatching() {
     _poll?.cancel();
-    if (!_active || !_foreground || _disposed) return;
+    _poll = null;
+    _localChangePending = false;
+    unawaited(_localEvents?.cancel());
+    _localEvents = null;
+  }
+
+  void _startWatching() {
+    if (!_active ||
+        !_foreground ||
+        _disposed ||
+        _poll != null ||
+        _localEvents != null) {
+      return;
+    }
+    final adapter = local;
+    final changes =
+        !_notificationsUnavailable && adapter is ObservableLocalClipboard
+        ? adapter.changes
+        : null;
+    if (changes != null) {
+      _localEvents = changes.listen(
+        (_) => _onLocalChange(),
+        onError: (Object _) => _fallbackToPolling(),
+        onDone: _fallbackToPolling,
+      );
+      return;
+    }
     _poll = Timer.periodic(
       const Duration(milliseconds: 500),
       (_) => unawaited(syncLocal()),
     );
+  }
+
+  void _fallbackToPolling() {
+    _notificationsUnavailable = true;
+    _stopWatching();
+    _startWatching();
+  }
+
+  void _onLocalChange() {
+    _localChangePending = true;
+    if (_drainingLocalChanges) return;
+    _drainingLocalChanges = true;
+    unawaited(_flushLocalChanges());
+  }
+
+  Future<void> _flushLocalChanges() async {
+    try {
+      while (_localChangePending) {
+        _localChangePending = false;
+        // A copy may arrive after an in-flight read took its snapshot.
+        await _syncing;
+        await syncLocal();
+      }
+    } finally {
+      _drainingLocalChanges = false;
+    }
   }
 
   Future<void> syncLocal({bool retryFailed = false}) {
@@ -117,6 +174,8 @@ class RdpClipboardController {
   Future<void> _sync({required bool retryFailed}) async {
     final generation = _generation;
     try {
+      await _writingRemote;
+      if (!_current(generation) || !_foreground) return;
       final snapshot = await local.read();
       if (!_current(generation) || !_foreground) return;
       if (snapshot.changeId == _last?.changeId &&
@@ -170,6 +229,7 @@ class RdpClipboardController {
     final generation = _generation;
     try {
       await _syncing;
+      await _writingRemote;
       final current = await local.read();
       if (!_current(generation) || serial != _remoteSerial) return;
       if (_last != null && current.changeId != _last!.changeId) {
@@ -177,16 +237,26 @@ class RdpClipboardController {
         await syncLocal();
         return;
       }
-      final written = await local.write(
-        content,
-        expectedChangeId: current.changeId,
-      );
-      if (!_current(generation) || serial != _remoteSerial) return;
-      if (written == null) {
+      final writeDone = Completer<void>();
+      _writingRemote = writeDone.future;
+      ClipboardSnapshot? written;
+      try {
+        written = await local.write(
+          content,
+          expectedChangeId: current.changeId,
+        );
+        if (_current(generation) && written != null) {
+          _last = written;
+          _publishFailed = false;
+        }
+      } finally {
+        // The OS can notify before the write's reply crosses the platform
+        // channel. Make the new change ID visible before another read.
+        _writingRemote = null;
+        writeDone.complete();
+      }
+      if (written == null && _current(generation) && serial == _remoteSerial) {
         await syncLocal();
-      } else {
-        _last = written; // Do not send this remote update straight back.
-        _publishFailed = false;
       }
     } on Object {
       if (_current(generation)) onError('无法写入本机剪贴板');
@@ -209,7 +279,7 @@ class RdpClipboardController {
     _active = false;
     _generation++;
     _remoteSerial++;
-    _poll?.cancel();
+    _stopWatching();
     unawaited(_events.cancel());
     unawaited(
       (_activation ?? Future<void>.value())

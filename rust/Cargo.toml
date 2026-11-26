@@ -12,6 +12,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(frb_expand)"] }
 [dependencies]
 alacritty_terminal = { version = "=0.26.0", default-features = false }
 anyhow = "1.0.104"
+bytes = "1"
 flutter_rust_bridge = "=2.13.0"
 futures-util = "0.3"
 russh = "0.62.4"
@@ -19,11 +20,12 @@ russh-sftp = "2.3.0"
 tokio = { version = "1.53.1", features = ["full"] }
 tracing = "0.1"
 # The crates.io connector pins pre-release crypto conflicting with russh.
-# Pin upstream crypto compatibility and Windows Progressive SRL decoding fixes.
-ironrdp = { git = "https://github.com/Devolutions/IronRDP", rev = "1f69e124e6bf85608efce3495c12eaf5f6b5a95d", features = ["connector", "session", "graphics", "dvc", "svc", "displaycontrol"] }
-ironrdp-tokio = { git = "https://github.com/Devolutions/IronRDP", rev = "1f69e124e6bf85608efce3495c12eaf5f6b5a95d" }
-ironrdp-egfx = { git = "https://github.com/Devolutions/IronRDP", rev = "1f69e124e6bf85608efce3495c12eaf5f6b5a95d", features = ["openh264-bundled"] }
-ironrdp-cliprdr = { git = "https://github.com/Devolutions/IronRDP", rev = "1f69e124e6bf85608efce3495c12eaf5f6b5a95d" }
+# Pin the Windows Progressive, legacy RemoteFX, Alpha and AVC444v2 fixes together.
+ironrdp = { git = "https://github.com/Devolutions/IronRDP", rev = "85e88c2424d8c36407f81540cc1f3cf8d3436a7d", features = ["connector", "session", "graphics", "dvc", "svc", "displaycontrol"] }
+ironrdp-tokio = { git = "https://github.com/Devolutions/IronRDP", rev = "85e88c2424d8c36407f81540cc1f3cf8d3436a7d" }
+ironrdp-egfx = { git = "https://github.com/Devolutions/IronRDP", rev = "85e88c2424d8c36407f81540cc1f3cf8d3436a7d", features = ["openh264-bundled"] }
+ironrdp-cliprdr = { git = "https://github.com/Devolutions/IronRDP", rev = "85e88c2424d8c36407f81540cc1f3cf8d3436a7d" }
+ironrdp-rdpeudp-tokio = { path = "vendor/ironrdp-rdpeudp-tokio" }
 tempfile = "3"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 sha2 = "0.10"
@@ -39,16 +41,29 @@ ipnet = "2"
 tokio-util = { version = "0.7", features = ["rt"] }
 unicode-width = "0.2"
 
+[patch."https://github.com/Devolutions/IronRDP"]
+ironrdp-connector = { path = "vendor/ironrdp-connector" }
+ironrdp-egfx = { path = "vendor/ironrdp-egfx" }
+ironrdp-graphics = { path = "vendor/ironrdp-graphics" }
+ironrdp-session = { path = "vendor/ironrdp-session" }
+
 [target.'cfg(windows)'.dependencies]
+ironrdp-egfx-native = { path = "vendor/ironrdp-egfx-native" }
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
+    "Win32_Media",
     "Win32_Security",
+    "Win32_Storage_FileSystem",
     "Win32_System_JobObjects",
     "Win32_System_Memory",
     "Win32_System_Threading",
 ] }
 
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+ironrdp-egfx-native = { path = "vendor/ironrdp-egfx-native" }
+
 [dev-dependencies]
+ironrdp-rdpemt = { git = "https://github.com/Devolutions/IronRDP", rev = "85e88c2424d8c36407f81540cc1f3cf8d3436a7d" }
 openh264 = "0.9.9"
 rcgen = "0.14"
 tokio = { version = "1.53.1", features = ["test-util"] }

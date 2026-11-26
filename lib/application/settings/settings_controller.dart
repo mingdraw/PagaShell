@@ -53,6 +53,10 @@ class SettingsController extends GetxController {
   final savingCloseTerminalOnDisconnect = false.obs;
   final minimizeToTrayOnClose = false.obs;
   final savingMinimizeToTrayOnClose = false.obs;
+  final rdpPerformanceMode = (const bool.fromEnvironment(
+    'PAGASHELL_RDP_PERFORMANCE',
+  )).obs;
+  final savingRdpPerformanceMode = false.obs;
   final isLoaded = false.obs;
   final automaticUpdates = true.obs;
   final savingAutomaticUpdates = false.obs;
@@ -115,6 +119,9 @@ class SettingsController extends GetxController {
       }, onError: (Object _) {}),
       _repository.readMinimizeToTrayOnClose().then<void>((saved) {
         if (!isClosed) minimizeToTrayOnClose.value = saved;
+      }, onError: (Object _) {}),
+      _repository.readRdpPerformanceMode().then<void>((saved) {
+        if (!isClosed && saved != null) rdpPerformanceMode.value = saved;
       }, onError: (Object _) {}),
       _repository.readAutomaticUpdates().then<void>(
         (saved) {
@@ -272,6 +279,19 @@ class SettingsController extends GetxController {
   }
 
   /// 保存成功后再应用开关；写入期间禁用重复操作。
+  Future<void> setRdpPerformanceMode(bool enabled) async {
+    if (isClosed || savingRdpPerformanceMode.value) return;
+    savingRdpPerformanceMode.value = true;
+    try {
+      await ready;
+      if (isClosed || rdpPerformanceMode.value == enabled) return;
+      await _repository.saveRdpPerformanceMode(enabled);
+      if (!isClosed) rdpPerformanceMode.value = enabled;
+    } finally {
+      if (!isClosed) savingRdpPerformanceMode.value = false;
+    }
+  }
+
   Future<void> setAutomaticUpdates(bool enabled) async {
     if (savingAutomaticUpdates.value) return;
     savingAutomaticUpdates.value = true;

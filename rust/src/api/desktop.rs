@@ -77,8 +77,11 @@ pub struct DesktopFrame {
     pub rgba: Vec<u8>,
     pub tiles: Vec<DesktopTile>,
     pub cursor: Option<DesktopCursor>,
+    #[cfg_attr(any(windows, test), serde(skip))]
+    pub texture_id: Option<i64>,
 }
 
+#[repr(C)]
 #[cfg_attr(any(windows, test), derive(serde::Serialize, serde::Deserialize))]
 pub struct DesktopTile {
     pub x: u16,
@@ -106,7 +109,7 @@ pub struct DesktopWorkerStarted {
     pub process_id: u32,
 }
 
-/// Starts a Windows direct RDP worker and returns its cancellable session before
+/// Starts a Windows RDP worker and returns its cancellable session before
 /// any network operation starts. No target or credentials are passed on argv.
 pub async fn desktop_worker_open() -> Result<DesktopWorkerStarted> {
     #[cfg(windows)]
@@ -122,6 +125,34 @@ pub async fn desktop_worker_handshake(
 ) -> Result<DesktopHandshake> {
     route_worker!(session_id, handshake(session_id, host, port));
     let _ = (session_id, host, port);
+    anyhow::bail!("RDP 会话进程已关闭");
+}
+
+pub async fn desktop_worker_handshake_via_page(
+    session_id: u32,
+    host: String,
+    port: u16,
+    gateway: crate::api::page::PageGateway,
+) -> Result<DesktopHandshake> {
+    route_worker!(
+        session_id,
+        handshake_via_page(session_id, host, port, gateway)
+    );
+    let _ = (session_id, host, port, gateway);
+    anyhow::bail!("RDP 会话进程已关闭");
+}
+
+pub async fn desktop_worker_handshake_via_ssh(
+    session_id: u32,
+    host: String,
+    port: u16,
+    ssh_gateway_id: u32,
+) -> Result<DesktopHandshake> {
+    route_worker!(
+        session_id,
+        handshake_via_ssh(session_id, host, port, ssh_gateway_id)
+    );
+    let _ = (session_id, host, port, ssh_gateway_id);
     anyhow::bail!("RDP 会话进程已关闭");
 }
 
@@ -148,17 +179,44 @@ pub async fn desktop_authenticate(
     username: String,
     password: String,
     domain: String,
+    keyboard_layout: Option<u32>,
+    performance_mode: bool,
 ) -> Result<()> {
+    let preferences = crate::rdp::ClientPreferences {
+        keyboard_layout,
+        performance_mode,
+    };
+    #[cfg(windows)]
+    let gpu_adapter_luid =
+        crate::desktop_texture::Presenter::for_session(session_id).and_then(|p| p.adapter_luid());
+    #[cfg(target_os = "macos")]
+    let gpu_adapter_luid = crate::desktop_texture::Presenter::for_session(session_id)
+        .filter(|p| p.supports_gpu())
+        .map(|_| 0u64);
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let gpu_adapter_luid: Option<u64> = None;
+
     route_worker!(
         session_id,
-        authenticate(expected_fingerprint, username, password, domain)
+        authenticate(
+            expected_fingerprint,
+            username,
+            password,
+            domain,
+            preferences,
+            gpu_adapter_luid,
+        )
     );
-    crate::desktop::authenticate(session_id, expected_fingerprint, username, password, domain).await
-}
-
-async fn frame_for_session(session_id: u32, after_sequence: u32) -> Result<Option<DesktopFrame>> {
-    route_worker!(session_id, frame(after_sequence));
-    crate::desktop::frame(session_id, after_sequence).await
+    crate::desktop::authenticate_with_gpu(
+        session_id,
+        expected_fingerprint,
+        username,
+        password,
+        domain,
+        preferences,
+        gpu_adapter_luid,
+    )
+    .await
 }
 
 /// Long poll coalesced damage. Pixels are copied only when a consumer is ready.
@@ -169,12 +227,50 @@ pub async fn desktop_frame(
     after_sequence: u32,
     sink: StreamSink<Option<DesktopFrame>, DcoCodec>,
 ) -> Result<()> {
-    let frame = frame_for_session(session_id, after_sequence).await?;
+    #[cfg(windows)]
+    if let Some(worker) = crate::desktop_worker::get(session_id).await {
+        let _ = sink.add(worker.frame(session_id, after_sequence).await?);
+        return Ok(());
+    }
+    let delivery = crate::desktop::frame_delivery(session_id, after_sequence).await?;
+    let frame = match delivery {
+        None => None,
+        Some(crate::desktop_frame::FrameDelivery { frame, gpu }) => {
+            #[cfg(any(windows, target_os = "macos"))]
+            let presented = if let Some(gpu) = gpu {
+                match crate::desktop_texture::present_gpu(session_id, frame, gpu).await {
+                    Ok(frame) => Ok(frame),
+                    Err(()) => {
+                        crate::desktop::disable_gpu(session_id).await;
+                        Err(())
+                    }
+                }
+            } else {
+                crate::desktop_texture::present(session_id, frame).await
+            };
+            #[cfg(target_os = "linux")]
+            let presented = {
+                let _ = gpu;
+                crate::desktop_texture::present(session_id, frame).await
+            };
+            #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+            let presented: std::result::Result<DesktopFrame, ()> = {
+                let _ = gpu;
+                Ok(frame)
+            };
+            match presented {
+                Ok(frame) => Some(frame),
+                Err(()) => crate::desktop::frame_delivery(session_id, 0)
+                    .await?
+                    .map(|d| d.frame),
+            }
+        }
+    };
     let _ = sink.add(frame);
     Ok(())
 }
 
-/// kind: 0 scan code, 1 pointer, 2 Unicode text. Flags are RDP wire flags.
+/// kind: 0 scan code, 1 pointer, 2 Unicode text, 3 synchronize keyboard locks.
 pub async fn desktop_input(
     session_id: u32,
     kind: u8,
@@ -210,6 +306,8 @@ pub async fn desktop_resize(session_id: u32, width: u16, height: u16) -> Result<
 }
 
 pub async fn desktop_disconnect(session_id: u32) -> Result<()> {
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+    crate::desktop_texture::pagashell_rdp_texture_detach(session_id);
     #[cfg(windows)]
     if let Some(worker) = crate::desktop_worker::remove(session_id).await {
         worker.close().await;

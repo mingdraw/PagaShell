@@ -25,6 +25,7 @@ class RdpFrame {
     int? patchHeight,
     this.tiles = const [],
     this.cursor,
+    this.textureId,
   }) : patchWidth = patchWidth ?? width,
        patchHeight = patchHeight ?? height;
   final int width;
@@ -38,6 +39,10 @@ class RdpFrame {
   /// Atlas source/destination rectangles; empty for a single rectangle frame.
   final List<RdpTile> tiles;
   final RdpCursor? cursor;
+
+  /// Native desktop presentation. Such frames carry dimensions and cursor
+  /// metadata, without an RGBA payload.
+  final int? textureId;
 }
 
 class RdpTile {
@@ -111,6 +116,10 @@ final class RdpPointerInput extends RdpInputEvent {
 
 abstract interface class RdpBatchInputSession implements RdpEngineSession {
   Future<void> inputBatch(List<RdpInputEvent> events);
+}
+
+abstract interface class RdpKeyboardSyncSession implements RdpEngineSession {
+  Future<void> synchronizeKeyboard(int toggleFlags);
 }
 
 /// Windows 拒绝了可重新输入的密码凭据；账号状态或协议错误不属于此类。

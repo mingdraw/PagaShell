@@ -28,18 +28,52 @@ pub(super) struct MapOffer {
 }
 
 #[derive(Serialize, Deserialize)]
+pub(super) struct GpuSurfaceOffer {
+    pub handle: u64,
+    pub generation: u64,
+}
+
+#[derive(Serialize, Deserialize)]
 pub(super) enum Request {
     Prepare {
         version: u32,
         host: String,
         port: u16,
     },
+    PreparePage {
+        version: u32,
+        host: String,
+        port: u16,
+        gateway: crate::api::page::PageGateway,
+    },
+    PrepareTunnel {
+        version: u32,
+        host: String,
+        tunnel_handle: u64,
+    },
+    VncConnect {
+        version: u32,
+        host: String,
+        port: u16,
+        password: String,
+        page_gateway: Option<crate::api::page::PageGateway>,
+    },
+    VncConnectTunnel {
+        version: u32,
+        password: String,
+        tunnel_handle: u64,
+    },
     Authenticate {
         fingerprint: String,
         username: String,
         password: String,
         domain: String,
+        #[serde(default)]
+        preferences: crate::rdp::ClientPreferences,
+        #[serde(default)]
+        gpu_adapter_luid: Option<u64>,
     },
+    DisableGpu,
     Frame {
         after: u32,
         mapping: Option<MapOffer>,
@@ -47,6 +81,14 @@ pub(super) enum Request {
     Input {
         kind: u8,
         code: u16,
+        flags: u16,
+        x: u16,
+        y: u16,
+        text: String,
+    },
+    VncInput {
+        kind: u8,
+        code: u32,
         flags: u16,
         x: u16,
         y: u16,
@@ -78,6 +120,10 @@ pub(super) enum Reply {
     Done,
     Handshake(DesktopHandshake),
     Frame(Option<DesktopFrame>),
+    GpuFrame {
+        frame: DesktopFrame,
+        surface: GpuSurfaceOffer,
+    },
     NeedFrameSpace(u32),
     Resize(bool),
     Clipboard(Option<DesktopClipboardEvent>),
@@ -158,6 +204,7 @@ mod tests {
                     rgba: vec![32; 1280 * 800 * 4],
                     tiles: vec![],
                     cursor: None,
+                    texture_id: Some(99),
                 })),
             },
         )
@@ -169,6 +216,146 @@ mod tests {
         };
         assert_eq!((packet.id, frame.sequence, frame.width), (42, 2, 1280));
         assert!(frame.rgba.is_empty());
+        assert!(frame.texture_id.is_none());
         assert_eq!(VERSION, 1);
+    }
+
+    #[tokio::test]
+    async fn gateway_rdp_and_vnc_requests_round_trip_over_pipe() {
+        let (mut writer, mut reader) = tokio::io::duplex(4096);
+        let gateway = crate::api::page::PageGateway {
+            server_host: "page.example.com".into(),
+            server_port: 443,
+            client_id: "client-1".into(),
+            token: "tok".into(),
+            server_fingerprint: "SHA256:AA".into(),
+        };
+        let requests = [
+            Request::PreparePage {
+                version: VERSION,
+                host: "rdp.internal".into(),
+                port: 3389,
+                gateway: gateway.clone(),
+            },
+            Request::PrepareTunnel {
+                version: VERSION,
+                host: "rdp.internal".into(),
+                tunnel_handle: 0x1234,
+            },
+            Request::VncConnect {
+                version: VERSION,
+                host: "vnc.internal".into(),
+                port: 5900,
+                password: "pw".into(),
+                page_gateway: Some(gateway),
+            },
+            Request::VncConnectTunnel {
+                version: VERSION,
+                password: "pw".into(),
+                tunnel_handle: 0x5678,
+            },
+            Request::VncInput {
+                kind: 0,
+                code: 0x0100_4e2d,
+                flags: 0,
+                x: 0,
+                y: 0,
+                text: String::new(),
+            },
+        ];
+        for (index, body) in requests.into_iter().enumerate() {
+            write(
+                &mut writer,
+                Packet {
+                    id: index as u32 + 1,
+                    body,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        assert!(matches!(
+            read::<Request>(&mut reader).await.unwrap().body,
+            Request::PreparePage { port: 3389, .. }
+        ));
+        assert!(matches!(
+            read::<Request>(&mut reader).await.unwrap().body,
+            Request::PrepareTunnel {
+                tunnel_handle: 0x1234,
+                ..
+            }
+        ));
+        assert!(matches!(
+            read::<Request>(&mut reader).await.unwrap().body,
+            Request::VncConnect {
+                port: 5900,
+                page_gateway: Some(_),
+                ..
+            }
+        ));
+        assert!(matches!(
+            read::<Request>(&mut reader).await.unwrap().body,
+            Request::VncConnectTunnel {
+                tunnel_handle: 0x5678,
+                ..
+            }
+        ));
+        assert!(matches!(
+            read::<Request>(&mut reader).await.unwrap().body,
+            Request::VncInput {
+                code: 0x0100_4e2d,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn gpu_frame_and_disable_gpu_round_trip_over_pipe() {
+        let (mut writer, mut reader) = tokio::io::duplex(2048);
+        write(
+            &mut writer,
+            Packet {
+                id: 7,
+                body: Request::DisableGpu,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            read::<Request>(&mut reader).await.unwrap().body,
+            Request::DisableGpu
+        ));
+
+        write(
+            &mut writer,
+            Packet {
+                id: 8,
+                body: Reply::GpuFrame {
+                    frame: DesktopFrame {
+                        sequence: 5,
+                        width: 1920,
+                        height: 1080,
+                        bitmap_width: 0,
+                        bitmap_height: 0,
+                        rgba: Vec::new(),
+                        tiles: Vec::new(),
+                        cursor: None,
+                        texture_id: None,
+                    },
+                    surface: GpuSurfaceOffer {
+                        handle: 0xDEAD_BEEF,
+                        generation: 3,
+                    },
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let Reply::GpuFrame { frame, surface } = read::<Reply>(&mut reader).await.unwrap().body
+        else {
+            panic!("expected GpuFrame reply");
+        };
+        assert_eq!((frame.sequence, frame.width, frame.height), (5, 1920, 1080));
+        assert_eq!((surface.handle, surface.generation), (0xDEAD_BEEF, 3));
     }
 }

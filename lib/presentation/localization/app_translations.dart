@@ -491,14 +491,15 @@ class AppTranslations extends Translations {
     'RDP 会话处理异常，请重新连接':
         'The RDP session encountered an error. Reconnect to continue.',
     '无法启动 Windows RDP 会话进程': 'Could not start the Windows RDP session process',
-    '无法隔离 Windows RDP 会话进程': 'Could not isolate the Windows RDP session process',
+    '无法隔离 Windows RDP 会话进程':
+        'Could not isolate the Windows RDP session process',
     'RDP 会话进程已退出，请重新连接':
         'The RDP session process exited. Reconnect to continue.',
     'RDP 会话进程无响应，请重新连接':
         'The RDP session process stopped responding. Reconnect to continue.',
-    'RDP 会话进程通信失败，请重新连接':
-        'Communication with the RDP session process failed. Reconnect to continue.',
-    'RDP 会话进程协议版本不兼容': 'The RDP session process uses an incompatible protocol version',
+    'RDP 会话进程通信失败，请重新连接': 'Communication with the RDP session process failed. Reconnect to continue.',
+    'RDP 会话进程协议版本不兼容':
+        'The RDP session process uses an incompatible protocol version',
     'RDP TCP 连接失败': 'The RDP TCP connection failed',
     'RDP TLS 握手失败': 'The RDP TLS handshake failed',
     'RDP 服务器未提供证书': 'The RDP server did not provide a certificate',
@@ -1869,6 +1870,12 @@ class AppTranslations extends Translations {
     '固定工具栏': 'Pin toolbar',
     '取消固定工具栏': 'Unpin toolbar',
     '键入剪贴板文本': 'Type clipboard text',
+    '键盘输入模式': 'Keyboard input mode',
+    '远端键盘': 'Remote keyboard',
+    '本机输入法': 'Local input method',
+    'RDP 性能模式': 'RDP performance mode',
+    '重新连接后请求远端关闭壁纸、主题特效和光标阴影。': 'Reconnect to request that the server disable wallpaper, themes, and cursor shadows.',
+    'RDP 性能模式保存失败，请重试': 'Could not save RDP performance mode. Try again.',
     '剪贴板没有可键入的文本': 'The clipboard does not contain text',
     '剪贴板文本太长，最多可键入 @count 个字符':
         'Clipboard text is too long. The limit is @count characters.',

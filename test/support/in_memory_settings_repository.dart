@@ -21,6 +21,7 @@ class InMemorySettingsRepository implements SettingsRepository {
   bool automaticUpdates;
   bool closeTerminalOnDisconnect;
   bool minimizeToTrayOnClose;
+  bool? rdpPerformanceMode;
   AppProxySettings proxySettings;
   List<QuickCommandCategory> customQuickCommandGroups;
 
@@ -65,6 +66,13 @@ class InMemorySettingsRepository implements SettingsRepository {
   @override
   Future<void> saveMinimizeToTrayOnClose(bool enabled) async =>
       minimizeToTrayOnClose = enabled;
+
+  @override
+  Future<bool?> readRdpPerformanceMode() async => rdpPerformanceMode;
+
+  @override
+  Future<void> saveRdpPerformanceMode(bool enabled) async =>
+      rdpPerformanceMode = enabled;
 
   @override
   Future<AppProxySettings> readProxySettings() async => proxySettings;

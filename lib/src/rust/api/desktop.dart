@@ -9,7 +9,6 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 import 'page.dart';
 
-// These functions are ignored because they are not marked as `pub`: `frame_for_session`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `fmt`
 
 Future<void> desktopClipboardActive({
@@ -45,7 +44,7 @@ Future<void> desktopClipboardCancel({required int sessionId}) => RustLib
     .api
     .crateApiDesktopDesktopClipboardCancel(sessionId: sessionId);
 
-/// Starts a Windows direct RDP worker and returns its cancellable session before
+/// Starts a Windows RDP worker and returns its cancellable session before
 /// any network operation starts. No target or credentials are passed on argv.
 Future<DesktopWorkerStarted> desktopWorkerOpen() =>
     RustLib.instance.api.crateApiDesktopDesktopWorkerOpen();
@@ -58,6 +57,30 @@ Future<DesktopHandshake> desktopWorkerHandshake({
   sessionId: sessionId,
   host: host,
   port: port,
+);
+
+Future<DesktopHandshake> desktopWorkerHandshakeViaPage({
+  required int sessionId,
+  required String host,
+  required int port,
+  required PageGateway gateway,
+}) => RustLib.instance.api.crateApiDesktopDesktopWorkerHandshakeViaPage(
+  sessionId: sessionId,
+  host: host,
+  port: port,
+  gateway: gateway,
+);
+
+Future<DesktopHandshake> desktopWorkerHandshakeViaSsh({
+  required int sessionId,
+  required String host,
+  required int port,
+  required int sshGatewayId,
+}) => RustLib.instance.api.crateApiDesktopDesktopWorkerHandshakeViaSsh(
+  sessionId: sessionId,
+  host: host,
+  port: port,
+  sshGatewayId: sshGatewayId,
 );
 
 /// An SSH gateway ID must refer to an already authenticated/verified session.
@@ -87,12 +110,16 @@ Future<void> desktopAuthenticate({
   required String username,
   required String password,
   required String domain,
+  int? keyboardLayout,
+  required bool performanceMode,
 }) => RustLib.instance.api.crateApiDesktopDesktopAuthenticate(
   sessionId: sessionId,
   expectedFingerprint: expectedFingerprint,
   username: username,
   password: password,
   domain: domain,
+  keyboardLayout: keyboardLayout,
+  performanceMode: performanceMode,
 );
 
 /// Long poll coalesced damage. Pixels are copied only when a consumer is ready.
@@ -105,7 +132,7 @@ Future<Stream<DesktopFrame?>> desktopFrame({
   afterSequence: afterSequence,
 );
 
-/// kind: 0 scan code, 1 pointer, 2 Unicode text. Flags are RDP wire flags.
+/// kind: 0 scan code, 1 pointer, 2 Unicode text, 3 synchronize keyboard locks.
 Future<void> desktopInput({
   required int sessionId,
   required int kind,
@@ -246,6 +273,7 @@ class DesktopFrame {
   final Uint8List rgba;
   final List<DesktopTile> tiles;
   final DesktopCursor? cursor;
+  final PlatformInt64? textureId;
 
   const DesktopFrame({
     required this.sequence,
@@ -256,6 +284,7 @@ class DesktopFrame {
     required this.rgba,
     required this.tiles,
     this.cursor,
+    this.textureId,
   });
 
   @override
@@ -267,7 +296,8 @@ class DesktopFrame {
       bitmapHeight.hashCode ^
       rgba.hashCode ^
       tiles.hashCode ^
-      cursor.hashCode;
+      cursor.hashCode ^
+      textureId.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -281,7 +311,8 @@ class DesktopFrame {
           bitmapHeight == other.bitmapHeight &&
           rgba == other.rgba &&
           tiles == other.tiles &&
-          cursor == other.cursor;
+          cursor == other.cursor &&
+          textureId == other.textureId;
 }
 
 class DesktopHandshake {

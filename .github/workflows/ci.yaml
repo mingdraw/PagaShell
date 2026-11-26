@@ -102,7 +102,7 @@ jobs:
       - name: Install Rust native build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang cmake nasm
+          sudo apt-get install -y clang cmake nasm pkg-config libavcodec-dev libavutil-dev
       - uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: clippy, rustfmt
@@ -152,7 +152,7 @@ jobs:
         if: matrix.target == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libsecret-1-dev liblzma-dev nasm
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libsecret-1-dev liblzma-dev nasm libavcodec-dev libavutil-dev
       - name: Install macOS build dependencies
         if: matrix.target == 'macos'
         run: brew install nasm

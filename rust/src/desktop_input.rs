@@ -1,5 +1,59 @@
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{Context, Result};
 use ironrdp::pdu::input::fast_path::{FastPathInputEvent, KeyboardFlags};
 use ironrdp::pdu::input::mouse::{MousePdu, PointerFlags};
+use ironrdp::session::encode_fastpath_input;
+use ironrdp_tokio::FramedWrite;
+use tokio::sync::{mpsc, watch, Mutex};
+
+/// FastPath encoding and writes need no framebuffer. This task stays runnable
+/// while the session is synchronously decoding a graphics update.
+pub(crate) async fn write_to_peer<W: FramedWrite + Send>(
+    writer: Arc<Mutex<W>>,
+    mut commands: mpsc::Receiver<Vec<FastPathInputEvent>>,
+    mut cancel: watch::Receiver<bool>,
+    mut stop: watch::Receiver<bool>,
+    timeout: Duration,
+) -> Result<()> {
+    let mut held = HeldInputs::default();
+    while !*cancel.borrow() && !*stop.borrow() {
+        let events = tokio::select! {
+            biased;
+            _ = cancel.changed() => break,
+            _ = stop.changed() => break,
+            events = commands.recv() => match events {
+                Some(events) => events,
+                None => break,
+            },
+        };
+        tokio::time::timeout(timeout, write_batch(&writer, &events))
+            .await
+            .context("RDP 输入发送超时")??;
+        held.record(&events);
+    }
+
+    // The UI can be gone before its queued releases reach native code.
+    let releases = held.releases();
+    if !releases.is_empty() {
+        let _ =
+            tokio::time::timeout(Duration::from_millis(500), write_batch(&writer, &releases)).await;
+    }
+    Ok(())
+}
+
+async fn write_batch<W: FramedWrite + Send>(
+    writer: &Mutex<W>,
+    events: &[FastPathInputEvent],
+) -> Result<()> {
+    let frames = encode_fastpath_input(events).context("RDP 输入编码失败")?;
+    let mut writer = writer.lock().await;
+    for frame in frames {
+        writer.write_all(&frame).await.context("RDP 输入发送失败")?;
+    }
+    Ok(())
+}
 
 /// Track inputs accepted by the native session, independently of UI teardown.
 pub(crate) struct HeldInputs {

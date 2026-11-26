@@ -1,0 +1,4991 @@
+--- /dev/null
++++ b/crates/ironrdp-egfx-native/build.rs
+@@ -0,0 +1,42 @@
++fn main() {
++    println!("cargo:rustc-check-cfg=cfg(paga_vaapi)");
++    match std::env::var("CARGO_CFG_TARGET_OS").as_deref() {
++        Ok("macos") => {
++            println!("cargo:rerun-if-changed=src/video_toolbox.c");
++            println!("cargo:rerun-if-changed=src/metal_compositor.m");
++            cc::Build::new()
++                .file("src/video_toolbox.c")
++                .compile("paga_rdp_videotoolbox");
++            cc::Build::new()
++                .file("src/metal_compositor.m")
++                .flag("-fobjc-arc")
++                .compile("paga_rdp_metal_compositor");
++            for framework in [
++                "CoreFoundation",
++                "CoreMedia",
++                "CoreVideo",
++                "Foundation",
++                "Metal",
++                "VideoToolbox",
++            ] {
++                println!("cargo:rustc-link-lib=framework={framework}");
++            }
++        }
++        Ok("linux") => {
++            println!("cargo:rerun-if-changed=src/vaapi.c");
++            let headers = |name| pkg_config::Config::new().cargo_metadata(false).probe(name);
++            if let (Ok(codec), Ok(util)) = (headers("libavcodec"), headers("libavutil")) {
++                // Use the distribution's ABI headers only. The libraries are
++                // loaded on demand and are not required to launch the app.
++                cc::Build::new()
++                    .file("src/vaapi.c")
++                    .includes(codec.include_paths)
++                    .includes(util.include_paths)
++                    .compile("paga_rdp_vaapi");
++                println!("cargo:rustc-link-lib=dl");
++                println!("cargo:rustc-cfg=paga_vaapi");
++            }
++        }
++        _ => {}
++    }
++}
+--- a/crates/ironrdp-egfx-native/src/d3d11_compositor.rs
++++ b/crates/ironrdp-egfx-native/src/d3d11_compositor.rs
+@@ -0,0 +1,1628 @@
++//! D3D11 GPU-resident EGFX surface compositor for Windows.
++//!
++//! Shares a single multithreaded `ID3D11Device` with Media Foundation so
++//! hardware-decoded NV12 surfaces flow through HLSL compute shaders into
++//! persistent RGBA8 surfaces and a triple-buffered DXGI shared output ring
++//! with zero CPU readback.
++
++use core::any::Any;
++use core::ffi::c_void;
++use std::collections::BTreeMap;
++use std::sync::OnceLock;
++
++use ironrdp_egfx::avc444::Avc444Layout;
++use ironrdp_egfx::decode::{DecoderResult, H264Decoder, YuvMatrix};
++use ironrdp_egfx::gpu::{ExclusiveRectangle, GpuCompositor, GpuPresentedFrame, HwVideoFrame};
++use ironrdp_egfx::pdu::{Color, Point};
++use tracing::warn;
++use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
++use windows::Win32::Graphics::Direct3D::{
++    D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN, D3D_SRV_DIMENSION_TEXTURE2D, ID3DBlob,
++};
++use windows::Win32::Graphics::Direct3D10::ID3D10Multithread;
++use windows::Win32::Graphics::Direct3D11::{
++    D3D11_BIND_CONSTANT_BUFFER, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BIND_UNORDERED_ACCESS,
++    D3D11_BOX, D3D11_BUFFER_DESC, D3D11_COMPARISON_NEVER, D3D11_CPU_ACCESS_WRITE, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
++    D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_FENCE_FLAG_NONE, D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_MAP_WRITE_DISCARD,
++    D3D11_MAPPED_SUBRESOURCE, D3D11_RESOURCE_MISC_SHARED, D3D11_SAMPLER_DESC, D3D11_SDK_VERSION,
++    D3D11_SHADER_RESOURCE_VIEW_DESC, D3D11_TEX2D_SRV, D3D11_TEX2D_UAV, D3D11_TEXTURE_ADDRESS_CLAMP,
++    D3D11_TEXTURE2D_DESC, D3D11_UAV_DIMENSION_TEXTURE2D, D3D11_UNORDERED_ACCESS_VIEW_DESC, D3D11_USAGE_DEFAULT,
++    D3D11_USAGE_DYNAMIC, D3D11CreateDevice, ID3D11Buffer, ID3D11ComputeShader, ID3D11Device, ID3D11Device5,
++    ID3D11DeviceContext, ID3D11DeviceContext4, ID3D11Fence, ID3D11SamplerState, ID3D11ShaderResourceView,
++    ID3D11Texture2D, ID3D11UnorderedAccessView, ID3D11VideoDevice,
++};
++use windows::Win32::Graphics::Dxgi::Common::{
++    DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8G8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
++    DXGI_SAMPLE_DESC,
++};
++use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIAdapter, IDXGIFactory1, IDXGIResource};
++use windows::Win32::System::LibraryLoader::{GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW};
++use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
++use windows::core::{Error, HRESULT, Interface, PCSTR, Result, s, w};
++
++use crate::media_foundation::D3D11Nv12Frame;
++
++const MAX_BUDGET_BYTES: usize = 256 * 1024 * 1024;
++const MAX_OUTPUT_PIXELS: u64 = 16_777_216;
++const RING_SLOTS: usize = 3;
++
++const HLSL_SOURCE: &str = r#"
++cbuffer Params : register(b0) {
++    uint4 p0;
++    uint4 p1;
++    float4 f0;
++};
++
++Texture2D<float> y_tex : register(t0);
++Texture2D<float2> uv_tex : register(t1);
++Texture2D<float> u_tex : register(t1);
++Texture2D<float> v_tex : register(t2);
++Texture2D<float4> src_rgba : register(t0);
++SamplerState linear_sampler : register(s0);
++
++RWTexture2D<unorm float4> dst_rgba : register(u0);
++RWTexture2D<unorm float> out_y : register(u0);
++RWTexture2D<unorm float> out_u : register(u1);
++RWTexture2D<unorm float> out_v : register(u2);
++
++float4 egfx_yuv_to_rgba(int y, int u, int v) {
++    int luma = 256 * y;
++    int uu = u - 128;
++    int vv = v - 128;
++    int r = clamp((luma + 403 * vv) >> 8, 0, 255);
++    int g = clamp((luma - 48 * uu - 120 * vv) >> 8, 0, 255);
++    int b = clamp((luma + 475 * uu) >> 8, 0, 255);
++    return float4(float(r) / 255.0, float(g) / 255.0, float(b) / 255.0, 1.0);
++}
++
++int reverse_filter(int avg, int right, int below, int diag) {
++    int rev = clamp(4 * avg - right - below - diag, 0, 255);
++    return abs(rev - avg) < 30 ? avg : rev;
++}
++
++[numthreads(16, 16, 1)]
++void avc420_to_rgba(uint3 gid : SV_DispatchThreadID) {
++    // p0 = (src_x, src_y, dst_x, dst_y), p1 = (width, height, 0, 0)
++    if (gid.x >= p1.x || gid.y >= p1.y) return;
++    uint yw, yh, uvw, uvh, dw, dh;
++    y_tex.GetDimensions(yw, yh);
++    uv_tex.GetDimensions(uvw, uvh);
++    dst_rgba.GetDimensions(dw, dh);
++    uint sx = p0.x + gid.x;
++    uint sy = p0.y + gid.y;
++    uint dx = p0.z + gid.x;
++    uint dy = p0.w + gid.y;
++    if (sx >= yw || sy >= yh || dx >= dw || dy >= dh) return;
++    uint cx = min(sx >> 1, uvw - 1);
++    uint cy = min(sy >> 1, uvh - 1);
++    int y = int(round(y_tex.Load(int3(sx, sy, 0)) * 255.0));
++    float2 uv = uv_tex.Load(int3(cx, cy, 0));
++    int u = int(round(uv.x * 255.0));
++    int v = int(round(uv.y * 255.0));
++    dst_rgba[uint2(dx, dy)] = egfx_yuv_to_rgba(y, u, v);
++}
++
++[numthreads(16, 16, 1)]
++void avc444_apply_main(uint3 gid : SV_DispatchThreadID) {
++    // p0 = (area_left, area_top, area_width, area_height)
++    // p1 = (rect_left, rect_top, rect_right, rect_bottom)
++    if (gid.x >= p0.z || gid.y >= p0.w) return;
++    uint yw, yh, uvw, uvh, ow, oh;
++    y_tex.GetDimensions(yw, yh);
++    uv_tex.GetDimensions(uvw, uvh);
++    out_y.GetDimensions(ow, oh);
++    uint col = p0.x + gid.x;
++    uint row = p0.y + gid.y;
++    if (col >= yw || row >= yh || col >= ow || row >= oh) return;
++    if (col >= p1.x && col < p1.z && row >= p1.y && row < p1.w) {
++        out_y[uint2(col, row)] = y_tex.Load(int3(col, row, 0));
++    }
++    uint cx = min(col >> 1, uvw - 1);
++    uint cy = min(row >> 1, uvh - 1);
++    float2 uv = uv_tex.Load(int3(cx, cy, 0));
++    out_u[uint2(col, row)] = uv.x;
++    out_v[uint2(col, row)] = uv.y;
++}
++
++[numthreads(16, 16, 1)]
++void avc444_apply_aux_v1(uint3 gid : SV_DispatchThreadID) {
++    // p0 = (area_left, area_top, area_width, area_height)
++    // out_u at u1, out_v at u2
++    if (gid.x >= p0.z || gid.y >= p0.w) return;
++    uint yw, yh, uvw, uvh, ow, oh;
++    y_tex.GetDimensions(yw, yh);
++    uv_tex.GetDimensions(uvw, uvh);
++    out_u.GetDimensions(ow, oh);
++    uint col = p0.x + gid.x;
++    uint row = p0.y + gid.y;
++    if (col >= ow || row >= oh) return;
++    if ((row & 1u) == 1u) {
++        uint u_row = (row - (row & 15u)) + ((row & 15u) >> 1);
++        uint v_row = u_row + 8u;
++        if (col < yw && v_row < yh) {
++            out_u[uint2(col, row)] = y_tex.Load(int3(col, u_row, 0));
++            out_v[uint2(col, row)] = y_tex.Load(int3(col, v_row, 0));
++        }
++    } else if ((col & 1u) == 1u) {
++        uint cx = col >> 1;
++        uint cy = row >> 1;
++        if (cx < uvw && cy < uvh) {
++            float2 uv = uv_tex.Load(int3(cx, cy, 0));
++            out_u[uint2(col, row)] = uv.x;
++            out_v[uint2(col, row)] = uv.y;
++        }
++    }
++}
++
++[numthreads(16, 16, 1)]
++void avc444_apply_aux_v2(uint3 gid : SV_DispatchThreadID) {
++    // p0 = (area_left, area_top, area_width, area_height), p1 = (half_w, quarter_w, 0, 0)
++    if (gid.x >= p0.z || gid.y >= p0.w) return;
++    uint yw, yh, uvw, uvh, ow, oh;
++    y_tex.GetDimensions(yw, yh);
++    uv_tex.GetDimensions(uvw, uvh);
++    out_u.GetDimensions(ow, oh);
++    uint col = p0.x + gid.x;
++    uint row = p0.y + gid.y;
++    if (col >= ow || row >= oh) return;
++    if ((col & 1u) == 1u) {
++        uint ux = col >> 1;
++        uint vx = p1.x + ux;
++        if (vx < yw && row < yh) {
++            out_u[uint2(col, row)] = y_tex.Load(int3(ux, row, 0));
++            out_v[uint2(col, row)] = y_tex.Load(int3(vx, row, 0));
++        }
++    } else if ((row & 1u) == 1u) {
++        uint ux = col >> 2;
++        uint vx = p1.y + ux;
++        uint cy = row >> 1;
++        if (vx < uvw && cy < uvh) {
++            float u_val, v_val;
++            if ((col & 3u) == 0u) {
++                u_val = uv_tex.Load(int3(ux, cy, 0)).x;
++                v_val = uv_tex.Load(int3(vx, cy, 0)).x;
++            } else {
++                u_val = uv_tex.Load(int3(ux, cy, 0)).y;
++                v_val = uv_tex.Load(int3(vx, cy, 0)).y;
++            }
++            out_u[uint2(col, row)] = u_val;
++            out_v[uint2(col, row)] = v_val;
++        }
++    }
++}
++
++[numthreads(16, 16, 1)]
++void avc444_to_rgba(uint3 gid : SV_DispatchThreadID) {
++    // p0 = (x, y, width, height)
++    if (gid.x >= p0.z || gid.y >= p0.w) return;
++    uint yw, yh, dw, dh;
++    y_tex.GetDimensions(yw, yh);
++    dst_rgba.GetDimensions(dw, dh);
++    uint col = p0.x + gid.x;
++    uint row = p0.y + gid.y;
++    if (col >= dw || row >= dh || col >= yw || row >= yh) return;
++    int y = int(round(y_tex.Load(int3(col, row, 0)) * 255.0));
++    int u = int(round(u_tex.Load(int3(col, row, 0)) * 255.0));
++    int v = int(round(v_tex.Load(int3(col, row, 0)) * 255.0));
++    if (((row & 1u) == 0u) && ((col & 1u) == 0u) && (col + 1u) < yw && (row + 1u) < yh) {
++        int ur = int(round(u_tex.Load(int3(col + 1u, row, 0)) * 255.0));
++        int ub = int(round(u_tex.Load(int3(col, row + 1u, 0)) * 255.0));
++        int ud = int(round(u_tex.Load(int3(col + 1u, row + 1u, 0)) * 255.0));
++        u = reverse_filter(u, ur, ub, ud);
++        int vr = int(round(v_tex.Load(int3(col + 1u, row, 0)) * 255.0));
++        int vb = int(round(v_tex.Load(int3(col, row + 1u, 0)) * 255.0));
++        int vd = int(round(v_tex.Load(int3(col + 1u, row + 1u, 0)) * 255.0));
++        v = reverse_filter(v, vr, vb, vd);
++    }
++    dst_rgba[uint2(col, row)] = egfx_yuv_to_rgba(y, u, v);
++}
++
++[numthreads(16, 16, 1)]
++void copy_opaque(uint3 gid : SV_DispatchThreadID) {
++    // p0 = (dst_x, dst_y, width, height)
++    if (gid.x >= p0.z || gid.y >= p0.w) return;
++    uint dw, dh;
++    dst_rgba.GetDimensions(dw, dh);
++    uint dx = p0.x + gid.x;
++    uint dy = p0.y + gid.y;
++    if (dx >= dw || dy >= dh) return;
++    float4 c = src_rgba.Load(int3(gid.x, gid.y, 0));
++    dst_rgba[uint2(dx, dy)] = float4(c.rgb, 1.0);
++}
++
++[numthreads(16, 16, 1)]
++void clearcodec_composite(uint3 gid : SV_DispatchThreadID) {
++    // p0 = (dst_x, dst_y, width, height)
++    if (gid.x >= p0.z || gid.y >= p0.w) return;
++    uint dw, dh;
++    dst_rgba.GetDimensions(dw, dh);
++    uint dx = p0.x + gid.x;
++    uint dy = p0.y + gid.y;
++    if (dx >= dw || dy >= dh) return;
++    float4 c = src_rgba.Load(int3(gid.x, gid.y, 0));
++    if (c.a > 0.0) {
++        dst_rgba[uint2(dx, dy)] = float4(c.rgb, 1.0);
++    }
++}
++
++[numthreads(16, 16, 1)]
++void solid_fill(uint3 gid : SV_DispatchThreadID) {
++    // p0 = (x, y, width, height), f0 = (r, g, b, 1)
++    if (gid.x >= p0.z || gid.y >= p0.w) return;
++    uint dw, dh;
++    dst_rgba.GetDimensions(dw, dh);
++    uint dx = p0.x + gid.x;
++    uint dy = p0.y + gid.y;
++    if (dx >= dw || dy >= dh) return;
++    dst_rgba[uint2(dx, dy)] = float4(f0.rgb, 1.0);
++}
++
++[numthreads(16, 16, 1)]
++void blit_scaled(uint3 gid : SV_DispatchThreadID) {
++    // p0 = (dst_x, dst_y, dst_w, dst_h)
++    if (gid.x >= p0.z || gid.y >= p0.w) return;
++    uint dw, dh;
++    dst_rgba.GetDimensions(dw, dh);
++    uint dx = p0.x + gid.x;
++    uint dy = p0.y + gid.y;
++    if (dx >= dw || dy >= dh) return;
++    float2 uv = float2((float(gid.x) + 0.5) / float(p0.z), (float(gid.y) + 0.5) / float(p0.w));
++    float4 c = src_rgba.SampleLevel(linear_sampler, uv, 0.0);
++    dst_rgba[uint2(dx, dy)] = float4(c.rgb, 1.0);
++}
++"#;
++
++#[repr(C)]
++#[derive(Clone, Copy)]
++struct ShaderParams {
++    p0: [u32; 4],
++    p1: [u32; 4],
++    f0: [f32; 4],
++}
++
++type D3DCompileFn = unsafe extern "system" fn(
++    *const c_void,
++    usize,
++    PCSTR,
++    *const c_void,
++    *const c_void,
++    PCSTR,
++    PCSTR,
++    u32,
++    u32,
++    *mut *mut c_void,
++    *mut *mut c_void,
++) -> HRESULT;
++
++fn load_d3d_compile() -> Result<D3DCompileFn> {
++    static COMPILER: OnceLock<Option<D3DCompileFn>> = OnceLock::new();
++    (*COMPILER.get_or_init(|| {
++        let module = unsafe { LoadLibraryExW(w!("d3dcompiler_47.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) }.ok()?;
++        let proc = unsafe { GetProcAddress(module, s!("D3DCompile")) }?;
++        Some(unsafe { core::mem::transmute::<_, D3DCompileFn>(proc) })
++    }))
++    .ok_or_else(Error::empty)
++}
++
++fn compile_cs(device: &ID3D11Device, entry: PCSTR) -> Result<ID3D11ComputeShader> {
++    let compile = load_d3d_compile()?;
++    let mut code_ptr: *mut c_void = core::ptr::null_mut();
++    let mut err_ptr: *mut c_void = core::ptr::null_mut();
++    let hr = unsafe {
++        compile(
++            HLSL_SOURCE.as_ptr().cast(),
++            HLSL_SOURCE.len(),
++            PCSTR::null(),
++            core::ptr::null(),
++            core::ptr::null(),
++            entry,
++            s!("cs_5_0"),
++            0,
++            0,
++            &mut code_ptr,
++            &mut err_ptr,
++        )
++    };
++    let _err_blob = if !err_ptr.is_null() {
++        Some(unsafe { ID3DBlob::from_raw(err_ptr) })
++    } else {
++        None
++    };
++    hr.ok()?;
++    if code_ptr.is_null() {
++        return Err(Error::empty());
++    }
++    let blob = unsafe { ID3DBlob::from_raw(code_ptr) };
++    let bytes = unsafe { core::slice::from_raw_parts(blob.GetBufferPointer().cast::<u8>(), blob.GetBufferSize()) };
++    let mut shader = None;
++    unsafe { device.CreateComputeShader(bytes, None, Some(&mut shader)) }?;
++    shader.ok_or_else(Error::empty)
++}
++
++fn find_adapter(adapter_luid: Option<u64>) -> Result<Option<IDXGIAdapter>> {
++    let Some(target) = adapter_luid.filter(|&luid| luid != 0) else {
++        return Ok(None);
++    };
++    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }?;
++    for index in 0u32.. {
++        let Ok(adapter) = (unsafe { factory.EnumAdapters1(index) }) else {
++            break;
++        };
++        if let Ok(desc) = unsafe { adapter.GetDesc1() } {
++            let luid = ((desc.AdapterLuid.HighPart as u32 as u64) << 32) | u64::from(desc.AdapterLuid.LowPart);
++            if luid == target {
++                return Ok(Some(adapter.cast::<IDXGIAdapter>()?));
++            }
++        }
++    }
++    Err(Error::empty())
++}
++
++fn create_tex_2d(
++    device: &ID3D11Device,
++    width: u32,
++    height: u32,
++    format: DXGI_FORMAT,
++    bind_flags: u32,
++    misc_flags: u32,
++) -> Result<ID3D11Texture2D> {
++    let desc = D3D11_TEXTURE2D_DESC {
++        Width: width,
++        Height: height,
++        MipLevels: 1,
++        ArraySize: 1,
++        Format: format,
++        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
++        Usage: D3D11_USAGE_DEFAULT,
++        BindFlags: bind_flags,
++        CPUAccessFlags: 0,
++        MiscFlags: misc_flags,
++    };
++    let mut tex = None;
++    unsafe { device.CreateTexture2D(&desc, None, Some(&mut tex)) }?;
++    tex.ok_or_else(Error::empty)
++}
++
++fn create_srv(device: &ID3D11Device, tex: &ID3D11Texture2D, format: DXGI_FORMAT) -> Result<ID3D11ShaderResourceView> {
++    let mut desc = D3D11_SHADER_RESOURCE_VIEW_DESC {
++        Format: format,
++        ViewDimension: D3D_SRV_DIMENSION_TEXTURE2D,
++        ..Default::default()
++    };
++    desc.Anonymous.Texture2D = D3D11_TEX2D_SRV {
++        MostDetailedMip: 0,
++        MipLevels: 1,
++    };
++    let mut view = None;
++    unsafe { device.CreateShaderResourceView(tex, Some(&desc), Some(&mut view)) }?;
++    view.ok_or_else(Error::empty)
++}
++
++fn create_uav(device: &ID3D11Device, tex: &ID3D11Texture2D, format: DXGI_FORMAT) -> Result<ID3D11UnorderedAccessView> {
++    let mut desc = D3D11_UNORDERED_ACCESS_VIEW_DESC {
++        Format: format,
++        ViewDimension: D3D11_UAV_DIMENSION_TEXTURE2D,
++        ..Default::default()
++    };
++    desc.Anonymous.Texture2D = D3D11_TEX2D_UAV { MipSlice: 0 };
++    let mut view = None;
++    unsafe { device.CreateUnorderedAccessView(tex, Some(&desc), Some(&mut view)) }?;
++    view.ok_or_else(Error::empty)
++}
++
++struct Avc444Planes {
++    y_srv: ID3D11ShaderResourceView,
++    y_uav: ID3D11UnorderedAccessView,
++    u_srv: ID3D11ShaderResourceView,
++    u_uav: ID3D11UnorderedAccessView,
++    v_srv: ID3D11ShaderResourceView,
++    v_uav: ID3D11UnorderedAccessView,
++    _y: ID3D11Texture2D,
++    _u: ID3D11Texture2D,
++    _v: ID3D11Texture2D,
++}
++
++struct SurfaceState {
++    width: u16,
++    height: u16,
++    color: ID3D11Texture2D,
++    color_srv: ID3D11ShaderResourceView,
++    color_uav: ID3D11UnorderedAccessView,
++    avc444: Option<Avc444Planes>,
++    bytes: usize,
++    mapped: bool,
++    origin_x: u32,
++    origin_y: u32,
++    target_w: u32,
++    target_h: u32,
++    painted: bool,
++}
++
++struct CacheEntry {
++    width: u16,
++    height: u16,
++    texture: ID3D11Texture2D,
++    bytes: usize,
++}
++
++struct OutputSlot {
++    texture: ID3D11Texture2D,
++    uav: ID3D11UnorderedAccessView,
++    shared_handle: u64,
++    generation: u64,
++}
++
++/// Thread-safe handle to a compositor's `ID3D11Device` for opening shared-device
++/// [`crate::MediaFoundationH264Decoder`] instances.
++#[derive(Clone)]
++pub struct D3D11DecoderOpener {
++    device: ID3D11Device,
++}
++
++// The underlying ID3D11Device has ID3D10Multithread::SetMultithreadProtected(true).
++unsafe impl Send for D3D11DecoderOpener {}
++unsafe impl Sync for D3D11DecoderOpener {}
++
++impl D3D11DecoderOpener {
++    pub fn open(&self, matrix: YuvMatrix) -> DecoderResult<Box<dyn H264Decoder>> {
++        Ok(Box::new(crate::MediaFoundationH264Decoder::new_with_device(
++            matrix,
++            Some(self.device.clone()),
++        )?))
++    }
++}
++
++/// D3D11 GPU-composited frame ready for cross-process DXGI shared handle presentation.
++pub struct D3D11PresentedFrame {
++    width: u16,
++    height: u16,
++    handle: u64,
++    generation: u64,
++}
++
++impl D3D11PresentedFrame {
++    pub fn shared_handle(&self) -> u64 {
++        self.handle
++    }
++
++    pub fn generation(&self) -> u64 {
++        self.generation
++    }
++}
++
++impl GpuPresentedFrame for D3D11PresentedFrame {
++    fn width(&self) -> u16 {
++        self.width
++    }
++
++    fn height(&self) -> u16 {
++        self.height
++    }
++
++    fn as_any(&self) -> &dyn Any {
++        self
++    }
++
++    fn into_any(self: Box<Self>) -> Box<dyn Any + Send> {
++        self
++    }
++}
++
++struct Pipelines {
++    avc420: ID3D11ComputeShader,
++    avc444_main: ID3D11ComputeShader,
++    avc444_aux_v1: ID3D11ComputeShader,
++    avc444_aux_v2: ID3D11ComputeShader,
++    avc444_to_rgba: ID3D11ComputeShader,
++    copy_opaque: ID3D11ComputeShader,
++    clearcodec: ID3D11ComputeShader,
++    solid_fill: ID3D11ComputeShader,
++    blit_scaled: ID3D11ComputeShader,
++}
++
++/// Windows D3D11 GPU-resident EGFX surface compositor.
++pub struct D3D11GpuCompositor {
++    device: ID3D11Device,
++    context: ID3D11DeviceContext,
++    fenced_context: ID3D11DeviceContext4,
++    fence: ID3D11Fence,
++    fence_event: HANDLE,
++    fence_value: u64,
++    cbuffer: ID3D11Buffer,
++    sampler: ID3D11SamplerState,
++    pipes: Pipelines,
++    surfaces: BTreeMap<u16, SurfaceState>,
++    map_order: Vec<u16>,
++    cache: BTreeMap<u16, CacheEntry>,
++    budget_used: usize,
++    output_width: u16,
++    output_height: u16,
++    output_ring: Vec<OutputSlot>,
++    ring_index: usize,
++    pool_generation: u64,
++    dirty: bool,
++}
++
++// D3D11 device has SetMultithreadProtected(true) and compositor methods require &mut self.
++unsafe impl Send for D3D11GpuCompositor {}
++
++impl Drop for D3D11GpuCompositor {
++    fn drop(&mut self) {
++        if !self.fence_event.is_invalid() {
++            unsafe {
++                let _ = CloseHandle(self.fence_event);
++            }
++        }
++    }
++}
++
++impl D3D11GpuCompositor {
++    /// Creates a GPU compositor on the adapter matching `adapter_luid` (or default HW adapter if `None`/`Some(0)`).
++    pub fn new(adapter_luid: Option<u64>) -> Result<Self> {
++        let adapter = find_adapter(adapter_luid)?;
++        let driver_type = if adapter.is_some() {
++            D3D_DRIVER_TYPE_UNKNOWN
++        } else {
++            D3D_DRIVER_TYPE_HARDWARE
++        };
++        let mut device = None;
++        let mut context = None;
++        unsafe {
++            D3D11CreateDevice(
++                adapter.as_ref(),
++                driver_type,
++                Default::default(),
++                D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
++                None,
++                D3D11_SDK_VERSION,
++                Some(&mut device),
++                None,
++                Some(&mut context),
++            )?;
++        }
++        let device = device.ok_or_else(Error::empty)?;
++        let context = context.ok_or_else(Error::empty)?;
++        // Verify hardware video support on this shared device.
++        let _video = device.cast::<ID3D11VideoDevice>()?;
++        let multithread = device.cast::<ID3D10Multithread>()?;
++        let _ = unsafe { multithread.SetMultithreadProtected(true) };
++
++        let fence_device = device.cast::<ID3D11Device5>()?;
++        let fenced_context = context.cast::<ID3D11DeviceContext4>()?;
++        let mut fence: Option<ID3D11Fence> = None;
++        unsafe { fence_device.CreateFence(0, D3D11_FENCE_FLAG_NONE, &mut fence) }?;
++        let fence = fence.ok_or_else(Error::empty)?;
++        let fence_event = unsafe { CreateEventW(None, false, false, None) }?;
++
++        let cb_desc = D3D11_BUFFER_DESC {
++            ByteWidth: core::mem::size_of::<ShaderParams>() as u32,
++            Usage: D3D11_USAGE_DYNAMIC,
++            BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32,
++            CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
++            MiscFlags: 0,
++            StructureByteStride: 0,
++        };
++        let mut cbuffer = None;
++        unsafe { device.CreateBuffer(&cb_desc, None, Some(&mut cbuffer)) }?;
++        let cbuffer = cbuffer.ok_or_else(Error::empty)?;
++
++        let sampler_desc = D3D11_SAMPLER_DESC {
++            Filter: D3D11_FILTER_MIN_MAG_MIP_LINEAR,
++            AddressU: D3D11_TEXTURE_ADDRESS_CLAMP,
++            AddressV: D3D11_TEXTURE_ADDRESS_CLAMP,
++            AddressW: D3D11_TEXTURE_ADDRESS_CLAMP,
++            MipLODBias: 0.0,
++            MaxAnisotropy: 1,
++            ComparisonFunc: D3D11_COMPARISON_NEVER,
++            BorderColor: [0.0; 4],
++            MinLOD: 0.0,
++            MaxLOD: f32::MAX,
++        };
++        let mut sampler = None;
++        unsafe { device.CreateSamplerState(&sampler_desc, Some(&mut sampler)) }?;
++        let sampler = sampler.ok_or_else(Error::empty)?;
++
++        let pipes = Pipelines {
++            avc420: compile_cs(&device, s!("avc420_to_rgba"))?,
++            avc444_main: compile_cs(&device, s!("avc444_apply_main"))?,
++            avc444_aux_v1: compile_cs(&device, s!("avc444_apply_aux_v1"))?,
++            avc444_aux_v2: compile_cs(&device, s!("avc444_apply_aux_v2"))?,
++            avc444_to_rgba: compile_cs(&device, s!("avc444_to_rgba"))?,
++            copy_opaque: compile_cs(&device, s!("copy_opaque"))?,
++            clearcodec: compile_cs(&device, s!("clearcodec_composite"))?,
++            solid_fill: compile_cs(&device, s!("solid_fill"))?,
++            blit_scaled: compile_cs(&device, s!("blit_scaled"))?,
++        };
++
++        Ok(Self {
++            device,
++            context,
++            fenced_context,
++            fence,
++            fence_event,
++            fence_value: 0,
++            cbuffer,
++            sampler,
++            pipes,
++            surfaces: BTreeMap::new(),
++            map_order: Vec::new(),
++            cache: BTreeMap::new(),
++            budget_used: 0,
++            output_width: 0,
++            output_height: 0,
++            output_ring: Vec::new(),
++            ring_index: 0,
++            pool_generation: 0,
++            dirty: false,
++        })
++    }
++
++    /// Clones a COM reference to the shared D3D11 device for Media Foundation.
++    pub fn device(&self) -> ID3D11Device {
++        self.device.clone()
++    }
++
++    /// Returns a `Send` handle that opens Media Foundation H.264 decoders
++    /// bound to this compositor's D3D11 device without exposing COM types.
++    pub fn decoder_opener(&self) -> D3D11DecoderOpener {
++        D3D11DecoderOpener {
++            device: self.device.clone(),
++        }
++    }
++
++    fn write_params(&self, params: ShaderParams) -> bool {
++        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
++        if unsafe { self.context.Map(&self.cbuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut mapped)) }.is_err() {
++            return false;
++        }
++        unsafe {
++            core::ptr::write(mapped.pData.cast::<ShaderParams>(), params);
++            self.context.Unmap(&self.cbuffer, 0);
++        }
++        true
++    }
++
++    fn clear_cs_bindings(&self) {
++        let empty_srvs: [Option<ID3D11ShaderResourceView>; 4] = [None, None, None, None];
++        let empty_uavs: [Option<ID3D11UnorderedAccessView>; 3] = [None, None, None];
++        unsafe {
++            self.context.CSSetShaderResources(0, Some(&empty_srvs));
++            self.context.CSSetUnorderedAccessViews(0, 3, Some(empty_uavs.as_ptr()), None);
++        }
++    }
++
++    fn dispatch(&self, shader: &ID3D11ComputeShader, width: u32, height: u32) {
++        if width == 0 || height == 0 {
++            return;
++        }
++        let cb = [Some(self.cbuffer.clone())];
++        unsafe {
++            self.context.CSSetConstantBuffers(0, Some(&cb));
++            self.context.CSSetShader(shader, None);
++            self.context.Dispatch(width.div_ceil(16), height.div_ceil(16), 1);
++        }
++    }
++
++    fn fill_uav_solid(&self, uav: &ID3D11UnorderedAccessView, x: u32, y: u32, w: u32, h: u32, rgb: [f32; 3]) -> bool {
++        if w == 0 || h == 0 {
++            return true;
++        }
++        if !self.write_params(ShaderParams {
++            p0: [x, y, w, h],
++            p1: [0; 4],
++            f0: [rgb[0], rgb[1], rgb[2], 1.0],
++        }) {
++            return false;
++        }
++        let uavs = [Some(uav.clone())];
++        unsafe {
++            self.context.CSSetUnorderedAccessViews(0, 1, Some(uavs.as_ptr()), None);
++        }
++        self.dispatch(&self.pipes.solid_fill, w, h);
++        self.clear_cs_bindings();
++        true
++    }
++
++    fn ensure_avc444(&mut self, surface_id: u16) -> bool {
++        let Some(surf) = self.surfaces.get(&surface_id) else {
++            return false;
++        };
++        if surf.avc444.is_some() {
++            return true;
++        }
++        let pw = u32::from(surf.width).next_multiple_of(16);
++        let ph = u32::from(surf.height).next_multiple_of(16);
++        let extra = (pw as usize).saturating_mul(ph as usize).saturating_mul(3);
++        if self.budget_used.saturating_add(extra) > MAX_BUDGET_BYTES {
++            return false;
++        }
++        let bind = (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS).0 as u32;
++        let Ok(y) = create_tex_2d(&self.device, pw, ph, DXGI_FORMAT_R8_UNORM, bind, 0) else {
++            return false;
++        };
++        let Ok(u) = create_tex_2d(&self.device, pw, ph, DXGI_FORMAT_R8_UNORM, bind, 0) else {
++            return false;
++        };
++        let Ok(v) = create_tex_2d(&self.device, pw, ph, DXGI_FORMAT_R8_UNORM, bind, 0) else {
++            return false;
++        };
++        let (Ok(y_srv), Ok(y_uav), Ok(u_srv), Ok(u_uav), Ok(v_srv), Ok(v_uav)) = (
++            create_srv(&self.device, &y, DXGI_FORMAT_R8_UNORM),
++            create_uav(&self.device, &y, DXGI_FORMAT_R8_UNORM),
++            create_srv(&self.device, &u, DXGI_FORMAT_R8_UNORM),
++            create_uav(&self.device, &u, DXGI_FORMAT_R8_UNORM),
++            create_srv(&self.device, &v, DXGI_FORMAT_R8_UNORM),
++            create_uav(&self.device, &v, DXGI_FORMAT_R8_UNORM),
++        ) else {
++            return false;
++        };
++        unsafe {
++            self.context.ClearUnorderedAccessViewFloat(&y_uav, &[0.0, 0.0, 0.0, 0.0]);
++            let mid = 128.0 / 255.0;
++            self.context.ClearUnorderedAccessViewFloat(&u_uav, &[mid, 0.0, 0.0, 0.0]);
++            self.context.ClearUnorderedAccessViewFloat(&v_uav, &[mid, 0.0, 0.0, 0.0]);
++        }
++        if let Some(surf) = self.surfaces.get_mut(&surface_id) {
++            surf.avc444 = Some(Avc444Planes {
++                y_srv,
++                y_uav,
++                u_srv,
++                u_uav,
++                v_srv,
++                v_uav,
++                _y: y,
++                _u: u,
++                _v: v,
++            });
++            surf.bytes += extra;
++            self.budget_used += extra;
++            true
++        } else {
++            false
++        }
++    }
++
++    fn upload_patch(
++        &mut self,
++        surface_id: u16,
++        dest: &ExclusiveRectangle,
++        pixels: &[u8],
++        pitch: usize,
++        src_origin: (u16, u16),
++        format: DXGI_FORMAT,
++        clearcodec: bool,
++    ) -> bool {
++        let Some((surf_w, surf_h, dst_uav, mapped)) = self
++            .surfaces
++            .get(&surface_id)
++            .map(|s| (s.width, s.height, s.color_uav.clone(), s.mapped))
++        else {
++            return false;
++        };
++        let right = dest.right.min(surf_w);
++        let bottom = dest.bottom.min(surf_h);
++        if dest.left >= right || dest.top >= bottom {
++            return true;
++        }
++        let w = u32::from(right - dest.left);
++        let h = u32::from(bottom - dest.top);
++        let row_bytes = (w as usize).saturating_mul(4);
++        let start = usize::from(src_origin.1)
++            .saturating_mul(pitch)
++            .saturating_add(usize::from(src_origin.0).saturating_mul(4));
++        let needed = start
++            .saturating_add((h as usize).saturating_sub(1).saturating_mul(pitch))
++            .saturating_add(row_bytes);
++        if pitch < row_bytes || needed > pixels.len() {
++            return false;
++        }
++        let Ok(staging) = create_tex_2d(&self.device, w, h, format, D3D11_BIND_SHADER_RESOURCE.0 as u32, 0) else {
++            return false;
++        };
++        let Ok(srv) = create_srv(&self.device, &staging, format) else {
++            return false;
++        };
++        unsafe {
++            self.context
++                .UpdateSubresource(&staging, 0, None, pixels.as_ptr().add(start).cast(), pitch as u32, 0);
++        }
++        if !self.write_params(ShaderParams {
++            p0: [u32::from(dest.left), u32::from(dest.top), w, h],
++            p1: [0; 4],
++            f0: [0.0; 4],
++        }) {
++            return false;
++        }
++        let srvs = [Some(srv)];
++        let uavs = [Some(dst_uav)];
++        unsafe {
++            self.context.CSSetShaderResources(0, Some(&srvs));
++            self.context.CSSetUnorderedAccessViews(0, 1, Some(uavs.as_ptr()), None);
++        }
++        let pipe = if clearcodec {
++            &self.pipes.clearcodec
++        } else {
++            &self.pipes.copy_opaque
++        };
++        self.dispatch(pipe, w, h);
++        self.clear_cs_bindings();
++        if let Some(surf) = self.surfaces.get_mut(&surface_id) {
++            surf.painted = true;
++        }
++        if mapped {
++            self.dirty = true;
++        }
++        true
++    }
++}
++
++impl GpuCompositor for D3D11GpuCompositor {
++    fn reset(&mut self, width: u32, height: u32) -> bool {
++        if width == 0
++            || height == 0
++            || width > u32::from(u16::MAX)
++            || height > u32::from(u16::MAX)
++            || u64::from(width) * u64::from(height) > MAX_OUTPUT_PIXELS
++        {
++            return false;
++        }
++        for surf in self.surfaces.values() {
++            self.budget_used = self.budget_used.saturating_sub(surf.bytes);
++        }
++        self.surfaces.clear();
++        self.map_order.clear();
++        self.dirty = false;
++
++        let (w, h) = (width as u16, height as u16);
++        if self.output_width != w || self.output_height != h || self.output_ring.len() != RING_SLOTS {
++            self.output_ring.clear();
++            self.pool_generation = self.pool_generation.wrapping_add(1).max(1);
++            let bind = (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET | D3D11_BIND_UNORDERED_ACCESS).0 as u32;
++            for _ in 0..RING_SLOTS {
++                let Ok(texture) = create_tex_2d(
++                    &self.device,
++                    width,
++                    height,
++                    DXGI_FORMAT_R8G8B8A8_UNORM,
++                    bind,
++                    D3D11_RESOURCE_MISC_SHARED.0 as u32,
++                ) else {
++                    self.output_ring.clear();
++                    return false;
++                };
++                let Ok(uav) = create_uav(&self.device, &texture, DXGI_FORMAT_R8G8B8A8_UNORM) else {
++                    self.output_ring.clear();
++                    return false;
++                };
++                let Ok(resource) = texture.cast::<IDXGIResource>() else {
++                    self.output_ring.clear();
++                    return false;
++                };
++                let Ok(handle) = (unsafe { resource.GetSharedHandle() }) else {
++                    self.output_ring.clear();
++                    return false;
++                };
++                if handle.is_invalid() {
++                    self.output_ring.clear();
++                    return false;
++                }
++                self.output_ring.push(OutputSlot {
++                    texture,
++                    uav,
++                    shared_handle: handle.0 as usize as u64,
++                    generation: self.pool_generation,
++                });
++            }
++            self.output_width = w;
++            self.output_height = h;
++            self.ring_index = 0;
++        }
++        true
++    }
++
++    fn create_surface(&mut self, id: u16, width: u16, height: u16) -> bool {
++        if width == 0 || height == 0 {
++            return false;
++        }
++        if let Some(old) = self.surfaces.remove(&id) {
++            self.budget_used = self.budget_used.saturating_sub(old.bytes);
++            self.map_order.retain(|&mapped_id| mapped_id != id);
++        }
++        let bytes = usize::from(width).saturating_mul(usize::from(height)).saturating_mul(4);
++        if self.budget_used.saturating_add(bytes) > MAX_BUDGET_BYTES {
++            return false;
++        }
++        let bind = (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS).0 as u32;
++        let Ok(color) = create_tex_2d(
++            &self.device,
++            u32::from(width),
++            u32::from(height),
++            DXGI_FORMAT_R8G8B8A8_UNORM,
++            bind,
++            0,
++        ) else {
++            return false;
++        };
++        let (Ok(color_srv), Ok(color_uav)) = (
++            create_srv(&self.device, &color, DXGI_FORMAT_R8G8B8A8_UNORM),
++            create_uav(&self.device, &color, DXGI_FORMAT_R8G8B8A8_UNORM),
++        ) else {
++            return false;
++        };
++        unsafe {
++            self.context
++                .ClearUnorderedAccessViewFloat(&color_uav, &[0.0, 0.0, 0.0, 1.0]);
++        }
++        self.surfaces.insert(
++            id,
++            SurfaceState {
++                width,
++                height,
++                color,
++                color_srv,
++                color_uav,
++                avc444: None,
++                bytes,
++                mapped: false,
++                origin_x: 0,
++                origin_y: 0,
++                target_w: u32::from(width),
++                target_h: u32::from(height),
++                painted: false,
++            },
++        );
++        self.budget_used += bytes;
++        true
++    }
++
++    fn delete_surface(&mut self, id: u16) {
++        if let Some(surf) = self.surfaces.remove(&id) {
++            if surf.mapped && surf.painted {
++                self.dirty = true;
++            }
++            self.budget_used = self.budget_used.saturating_sub(surf.bytes);
++            self.map_order.retain(|&mapped_id| mapped_id != id);
++        }
++    }
++
++    fn map_surface_scaled(&mut self, id: u16, origin: (u32, u32), target: (u32, u32)) -> bool {
++        let Some(surf) = self.surfaces.get_mut(&id) else {
++            return false;
++        };
++        surf.mapped = true;
++        surf.origin_x = origin.0;
++        surf.origin_y = origin.1;
++        surf.target_w = if target.0 == 0 { u32::from(surf.width) } else { target.0 };
++        surf.target_h = if target.1 == 0 { u32::from(surf.height) } else { target.1 };
++        let painted = surf.painted;
++        self.map_order.retain(|&mapped_id| mapped_id != id);
++        self.map_order.push(id);
++        if painted {
++            self.dirty = true;
++        }
++        true
++    }
++
++    fn unmap_surface(&mut self, id: u16) {
++        if let Some(surf) = self.surfaces.get_mut(&id)
++            && surf.mapped
++        {
++            surf.mapped = false;
++            self.map_order.retain(|&mapped_id| mapped_id != id);
++            if surf.painted {
++                self.dirty = true;
++            }
++        }
++    }
++
++    fn apply_hw_avc420(
++        &mut self,
++        surface_id: u16,
++        frame: &dyn HwVideoFrame,
++        dest: &ExclusiveRectangle,
++        rects: &[ExclusiveRectangle],
++    ) -> bool {
++        let Some(nv12) = frame.as_any().downcast_ref::<D3D11Nv12Frame>() else {
++            return false;
++        };
++        let Some((dst_uav, mapped)) = self.surfaces.get(&surface_id).map(|s| (s.color_uav.clone(), s.mapped)) else {
++            return false;
++        };
++        let (Ok(y_srv), Ok(uv_srv)) = (
++            create_srv(&self.device, nv12.texture(), DXGI_FORMAT_R8_UNORM),
++            create_srv(&self.device, nv12.texture(), DXGI_FORMAT_R8G8_UNORM),
++        ) else {
++            return false;
++        };
++        let srvs = [Some(y_srv), Some(uv_srv)];
++        let uavs = [Some(dst_uav)];
++        unsafe {
++            self.context.CSSetShaderResources(0, Some(&srvs));
++            self.context.CSSetUnorderedAccessViews(0, 1, Some(uavs.as_ptr()), None);
++        }
++        let mut ok = true;
++        if rects.is_empty() {
++            if dest.left < dest.right && dest.top < dest.bottom {
++                let w = u32::from(dest.right - dest.left);
++                let h = u32::from(dest.bottom - dest.top);
++                ok = self.write_params(ShaderParams {
++                    p0: [0, 0, u32::from(dest.left), u32::from(dest.top)],
++                    p1: [w, h, 0, 0],
++                    f0: [0.0; 4],
++                });
++                if ok {
++                    self.dispatch(&self.pipes.avc420, w, h);
++                }
++            }
++        } else {
++            for r in rects {
++                if r.left >= r.right || r.top >= r.bottom {
++                    continue;
++                }
++                let w = u32::from(r.right - r.left);
++                let h = u32::from(r.bottom - r.top);
++                if !self.write_params(ShaderParams {
++                    p0: [u32::from(r.left), u32::from(r.top), u32::from(r.left), u32::from(r.top)],
++                    p1: [w, h, 0, 0],
++                    f0: [0.0; 4],
++                }) {
++                    ok = false;
++                    break;
++                }
++                self.dispatch(&self.pipes.avc420, w, h);
++            }
++        }
++        self.clear_cs_bindings();
++        if ok {
++            if let Some(surf) = self.surfaces.get_mut(&surface_id) {
++                surf.painted = true;
++            }
++            if mapped {
++                self.dirty = true;
++            }
++        }
++        ok
++    }
++
++    fn apply_hw_avc444(
++        &mut self,
++        surface_id: u16,
++        layout: Avc444Layout,
++        main: Option<(&dyn HwVideoFrame, &[ExclusiveRectangle])>,
++        auxiliary: Option<(&dyn HwVideoFrame, &[ExclusiveRectangle])>,
++        painted: &[ExclusiveRectangle],
++    ) -> bool {
++        let Some((surf_w, surf_h, has_planes, mapped)) = self
++            .surfaces
++            .get(&surface_id)
++            .map(|s| (s.width, s.height, s.avc444.is_some(), s.mapped))
++        else {
++            return false;
++        };
++        if main.is_none() && !has_planes {
++            return true;
++        }
++        if !self.ensure_avc444(surface_id) {
++            return false;
++        }
++        let (y_srv, y_uav, u_srv, u_uav, v_srv, v_uav, color_uav) = {
++            let s = &self.surfaces[&surface_id];
++            let p = s.avc444.as_ref().unwrap();
++            (
++                p.y_srv.clone(),
++                p.y_uav.clone(),
++                p.u_srv.clone(),
++                p.u_uav.clone(),
++                p.v_srv.clone(),
++                p.v_uav.clone(),
++                s.color_uav.clone(),
++            )
++        };
++
++        if let Some((frame, rects)) = main
++            && !rects.is_empty()
++        {
++            let Some(nv12) = frame.as_any().downcast_ref::<D3D11Nv12Frame>() else {
++                return false;
++            };
++            let (Ok(in_y), Ok(in_uv)) = (
++                create_srv(&self.device, nv12.texture(), DXGI_FORMAT_R8_UNORM),
++                create_srv(&self.device, nv12.texture(), DXGI_FORMAT_R8G8_UNORM),
++            ) else {
++                return false;
++            };
++            let srvs = [Some(in_y), Some(in_uv)];
++            let uavs = [Some(y_uav.clone()), Some(u_uav.clone()), Some(v_uav.clone())];
++            unsafe {
++                self.context.CSSetShaderResources(0, Some(&srvs));
++                self.context.CSSetUnorderedAccessViews(0, 3, Some(uavs.as_ptr()), None);
++            }
++            for r in rects {
++                let left = u32::from(r.left) & !1;
++                let top = u32::from(r.top) & !1;
++                let right = u32::from(r.right.min(surf_w)).next_multiple_of(2);
++                let bottom = u32::from(r.bottom.min(surf_h)).next_multiple_of(2);
++                if left >= right || top >= bottom {
++                    continue;
++                }
++                if !self.write_params(ShaderParams {
++                    p0: [left, top, right - left, bottom - top],
++                    p1: [
++                        u32::from(r.left),
++                        u32::from(r.top),
++                        u32::from(r.right.min(surf_w)),
++                        u32::from(r.bottom.min(surf_h)),
++                    ],
++                    f0: [0.0; 4],
++                }) {
++                    self.clear_cs_bindings();
++                    return false;
++                }
++                self.dispatch(&self.pipes.avc444_main, right - left, bottom - top);
++            }
++            self.clear_cs_bindings();
++        }
++
++        if let Some((frame, rects)) = auxiliary
++            && !rects.is_empty()
++        {
++            let Some(nv12) = frame.as_any().downcast_ref::<D3D11Nv12Frame>() else {
++                return false;
++            };
++            let (Ok(in_y), Ok(in_uv)) = (
++                create_srv(&self.device, nv12.texture(), DXGI_FORMAT_R8_UNORM),
++                create_srv(&self.device, nv12.texture(), DXGI_FORMAT_R8G8_UNORM),
++            ) else {
++                return false;
++            };
++            let padded_w = frame.width().next_multiple_of(16);
++            let half_w = padded_w / 2;
++            let quarter_w = half_w / 2;
++            let srvs = [Some(in_y), Some(in_uv)];
++            let uavs = [None, Some(u_uav), Some(v_uav)];
++            unsafe {
++                self.context.CSSetShaderResources(0, Some(&srvs));
++                self.context.CSSetUnorderedAccessViews(0, 3, Some(uavs.as_ptr()), None);
++            }
++            let pipe = match layout {
++                Avc444Layout::V1 => &self.pipes.avc444_aux_v1,
++                Avc444Layout::V2 => &self.pipes.avc444_aux_v2,
++            };
++            for r in rects {
++                let left = u32::from(r.left) & !1;
++                let top = u32::from(r.top) & !1;
++                let right = u32::from(r.right.min(surf_w)).next_multiple_of(2);
++                let bottom = u32::from(r.bottom.min(surf_h)).next_multiple_of(2);
++                if left >= right || top >= bottom {
++                    continue;
++                }
++                if !self.write_params(ShaderParams {
++                    p0: [left, top, right - left, bottom - top],
++                    p1: [half_w, quarter_w, 0, 0],
++                    f0: [0.0; 4],
++                }) {
++                    self.clear_cs_bindings();
++                    return false;
++                }
++                self.dispatch(pipe, right - left, bottom - top);
++            }
++            self.clear_cs_bindings();
++        }
++
++        if !painted.is_empty() {
++            let srvs = [Some(y_srv), Some(u_srv), Some(v_srv)];
++            let uavs = [Some(color_uav)];
++            unsafe {
++                self.context.CSSetShaderResources(0, Some(&srvs));
++                self.context.CSSetUnorderedAccessViews(0, 1, Some(uavs.as_ptr()), None);
++            }
++            for r in painted {
++                let right = r.right.min(surf_w);
++                let bottom = r.bottom.min(surf_h);
++                if r.left >= right || r.top >= bottom {
++                    continue;
++                }
++                let w = u32::from(right - r.left);
++                let h = u32::from(bottom - r.top);
++                if !self.write_params(ShaderParams {
++                    p0: [u32::from(r.left), u32::from(r.top), w, h],
++                    p1: [0; 4],
++                    f0: [0.0; 4],
++                }) {
++                    self.clear_cs_bindings();
++                    return false;
++                }
++                self.dispatch(&self.pipes.avc444_to_rgba, w, h);
++            }
++            self.clear_cs_bindings();
++            if let Some(surf) = self.surfaces.get_mut(&surface_id) {
++                surf.painted = true;
++            }
++            if mapped {
++                self.dirty = true;
++            }
++        }
++        true
++    }
++
++    fn apply_rgba_region(
++        &mut self,
++        surface_id: u16,
++        dest: &ExclusiveRectangle,
++        rgba: &[u8],
++        source_pitch: usize,
++        source_origin: (u16, u16),
++    ) -> bool {
++        self.upload_patch(
++            surface_id,
++            dest,
++            rgba,
++            source_pitch,
++            source_origin,
++            DXGI_FORMAT_R8G8B8A8_UNORM,
++            false,
++        )
++    }
++
++    fn apply_clearcodec(&mut self, surface_id: u16, dest: &ExclusiveRectangle, bgra_coverage: &[u8]) -> bool {
++        if dest.left >= dest.right || dest.top >= dest.bottom {
++            return true;
++        }
++        let pitch = usize::from(dest.right - dest.left).saturating_mul(4);
++        self.upload_patch(
++            surface_id,
++            dest,
++            bgra_coverage,
++            pitch,
++            (0, 0),
++            DXGI_FORMAT_B8G8R8A8_UNORM,
++            true,
++        )
++    }
++
++    fn solid_fill(&mut self, surface_id: u16, color: &Color, rects: &[ExclusiveRectangle]) -> bool {
++        let Some((surf_w, surf_h, uav, mapped)) = self
++            .surfaces
++            .get(&surface_id)
++            .map(|s| (s.width, s.height, s.color_uav.clone(), s.mapped))
++        else {
++            return false;
++        };
++        let rgb = [
++            f32::from(color.r) / 255.0,
++            f32::from(color.g) / 255.0,
++            f32::from(color.b) / 255.0,
++        ];
++        for r in rects {
++            let right = r.right.min(surf_w);
++            let bottom = r.bottom.min(surf_h);
++            if r.left >= right || r.top >= bottom {
++                continue;
++            }
++            if !self.fill_uav_solid(
++                &uav,
++                u32::from(r.left),
++                u32::from(r.top),
++                u32::from(right - r.left),
++                u32::from(bottom - r.top),
++                rgb,
++            ) {
++                return false;
++            }
++            if let Some(surf) = self.surfaces.get_mut(&surface_id) {
++                surf.painted = true;
++            }
++            if mapped {
++                self.dirty = true;
++            }
++        }
++        true
++    }
++
++    fn surface_to_surface(
++        &mut self,
++        src_id: u16,
++        dst_id: u16,
++        src_rect: &ExclusiveRectangle,
++        dst_points: &[Point],
++    ) -> bool {
++        let Some((src_w, src_h, src_tex)) = self.surfaces.get(&src_id).map(|s| (s.width, s.height, s.color.clone()))
++        else {
++            return false;
++        };
++        let Some((dst_w, dst_h, dst_tex, mapped)) = self
++            .surfaces
++            .get(&dst_id)
++            .map(|s| (s.width, s.height, s.color.clone(), s.mapped))
++        else {
++            return false;
++        };
++        let sr = src_rect.right.min(src_w);
++        let sb = src_rect.bottom.min(src_h);
++        if src_rect.left >= sr || src_rect.top >= sb || dst_points.is_empty() {
++            return true;
++        }
++        let w = u32::from(sr - src_rect.left);
++        let h = u32::from(sb - src_rect.top);
++        let (copy_src, copy_left, copy_top) = if src_id == dst_id {
++            let Ok(scratch) = create_tex_2d(&self.device, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, 0, 0) else {
++                return false;
++            };
++            let box_ = D3D11_BOX {
++                left: u32::from(src_rect.left),
++                top: u32::from(src_rect.top),
++                front: 0,
++                right: u32::from(sr),
++                bottom: u32::from(sb),
++                back: 1,
++            };
++            unsafe {
++                self.context
++                    .CopySubresourceRegion(&scratch, 0, 0, 0, 0, &src_tex, 0, Some(&box_));
++            }
++            (scratch, 0u32, 0u32)
++        } else {
++            (src_tex, u32::from(src_rect.left), u32::from(src_rect.top))
++        };
++        for pt in dst_points {
++            let dx = u32::from(pt.x);
++            let dy = u32::from(pt.y);
++            if dx >= u32::from(dst_w) || dy >= u32::from(dst_h) {
++                continue;
++            }
++            let cw = w.min(u32::from(dst_w) - dx);
++            let ch = h.min(u32::from(dst_h) - dy);
++            if cw == 0 || ch == 0 {
++                continue;
++            }
++            let box_ = D3D11_BOX {
++                left: copy_left,
++                top: copy_top,
++                front: 0,
++                right: copy_left + cw,
++                bottom: copy_top + ch,
++                back: 1,
++            };
++            unsafe {
++                self.context
++                    .CopySubresourceRegion(&dst_tex, 0, dx, dy, 0, &copy_src, 0, Some(&box_));
++            }
++        }
++        if let Some(surf) = self.surfaces.get_mut(&dst_id) {
++            surf.painted = true;
++        }
++        if mapped {
++            self.dirty = true;
++        }
++        true
++    }
++
++    fn surface_to_cache(&mut self, surface_id: u16, cache_slot: u16, src_rect: &ExclusiveRectangle) -> bool {
++        let Some((src_w, src_h, src_tex)) = self
++            .surfaces
++            .get(&surface_id)
++            .map(|s| (s.width, s.height, s.color.clone()))
++        else {
++            return false;
++        };
++        let sr = src_rect.right.min(src_w);
++        let sb = src_rect.bottom.min(src_h);
++        if src_rect.left >= sr || src_rect.top >= sb {
++            return false;
++        }
++        let w = sr - src_rect.left;
++        let h = sb - src_rect.top;
++        if let Some(prev) = self.cache.remove(&cache_slot) {
++            self.budget_used = self.budget_used.saturating_sub(prev.bytes);
++        }
++        let bytes = usize::from(w).saturating_mul(usize::from(h)).saturating_mul(4);
++        if self.budget_used.saturating_add(bytes) > MAX_BUDGET_BYTES {
++            return false;
++        }
++        let Ok(tex) = create_tex_2d(
++            &self.device,
++            u32::from(w),
++            u32::from(h),
++            DXGI_FORMAT_R8G8B8A8_UNORM,
++            0,
++            0,
++        ) else {
++            return false;
++        };
++        let box_ = D3D11_BOX {
++            left: u32::from(src_rect.left),
++            top: u32::from(src_rect.top),
++            front: 0,
++            right: u32::from(sr),
++            bottom: u32::from(sb),
++            back: 1,
++        };
++        unsafe {
++            self.context
++                .CopySubresourceRegion(&tex, 0, 0, 0, 0, &src_tex, 0, Some(&box_));
++        }
++        self.cache.insert(
++            cache_slot,
++            CacheEntry {
++                width: w,
++                height: h,
++                texture: tex,
++                bytes,
++            },
++        );
++        self.budget_used += bytes;
++        true
++    }
++
++    fn cache_to_surface(&mut self, cache_slot: u16, surface_id: u16, dst_points: &[Point]) -> bool {
++        let Some((cw_max, ch_max, src_tex)) = self
++            .cache
++            .get(&cache_slot)
++            .map(|e| (u32::from(e.width), u32::from(e.height), e.texture.clone()))
++        else {
++            return false;
++        };
++        let Some((dst_w, dst_h, dst_tex, mapped)) = self
++            .surfaces
++            .get(&surface_id)
++            .map(|s| (u32::from(s.width), u32::from(s.height), s.color.clone(), s.mapped))
++        else {
++            return false;
++        };
++        for pt in dst_points {
++            let dx = u32::from(pt.x);
++            let dy = u32::from(pt.y);
++            if dx >= dst_w || dy >= dst_h {
++                continue;
++            }
++            let cw = cw_max.min(dst_w - dx);
++            let ch = ch_max.min(dst_h - dy);
++            if cw == 0 || ch == 0 {
++                continue;
++            }
++            let box_ = D3D11_BOX {
++                left: 0,
++                top: 0,
++                front: 0,
++                right: cw,
++                bottom: ch,
++                back: 1,
++            };
++            unsafe {
++                self.context
++                    .CopySubresourceRegion(&dst_tex, 0, dx, dy, 0, &src_tex, 0, Some(&box_));
++            }
++        }
++        if let Some(surf) = self.surfaces.get_mut(&surface_id) {
++            surf.painted = true;
++        }
++        if mapped {
++            self.dirty = true;
++        }
++        true
++    }
++
++    fn evict_cache_entry(&mut self, cache_slot: u16) {
++        if let Some(entry) = self.cache.remove(&cache_slot) {
++            self.budget_used = self.budget_used.saturating_sub(entry.bytes);
++        }
++    }
++
++    fn end_frame(&mut self) -> Option<Box<dyn GpuPresentedFrame>> {
++        if !self.dirty || self.output_ring.is_empty() || self.output_width == 0 || self.output_height == 0 {
++            return None;
++        }
++        if unsafe { self.device.GetDeviceRemovedReason() }.is_err() {
++            warn!("D3D11 GPU compositor device removed");
++            return None;
++        }
++
++        let slot = &self.output_ring[self.ring_index];
++        let out_tex = slot.texture.clone();
++        let out_uav = slot.uav.clone();
++        let out_handle = slot.shared_handle;
++        let out_generation = slot.generation;
++        self.ring_index = (self.ring_index + 1) % self.output_ring.len();
++
++        let (out_w, out_h) = (u32::from(self.output_width), u32::from(self.output_height));
++        let mut fast_covered = false;
++        if self.map_order.len() == 1
++            && let Some(only) = self.surfaces.get(&self.map_order[0])
++            && only.mapped
++            && only.origin_x == 0
++            && only.origin_y == 0
++            && u32::from(only.width) == out_w
++            && u32::from(only.height) == out_h
++            && only.target_w == out_w
++            && only.target_h == out_h
++        {
++            unsafe {
++                self.context.CopyResource(&out_tex, &only.color);
++            }
++            fast_covered = true;
++        }
++
++        if !fast_covered {
++            unsafe {
++                self.context
++                    .ClearUnorderedAccessViewFloat(&out_uav, &[0.0, 0.0, 0.0, 1.0]);
++            }
++            let mapped_ids = self.map_order.clone();
++            for id in mapped_ids {
++                let Some(surf) = self.surfaces.get(&id) else {
++                    continue;
++                };
++                if !surf.mapped || surf.origin_x >= out_w || surf.origin_y >= out_h {
++                    continue;
++                }
++                if surf.target_w == u32::from(surf.width) && surf.target_h == u32::from(surf.height) {
++                    let cw = u32::from(surf.width).min(out_w - surf.origin_x);
++                    let ch = u32::from(surf.height).min(out_h - surf.origin_y);
++                    if cw == 0 || ch == 0 {
++                        continue;
++                    }
++                    let box_ = D3D11_BOX {
++                        left: 0,
++                        top: 0,
++                        front: 0,
++                        right: cw,
++                        bottom: ch,
++                        back: 1,
++                    };
++                    unsafe {
++                        self.context.CopySubresourceRegion(
++                            &out_tex,
++                            0,
++                            surf.origin_x,
++                            surf.origin_y,
++                            0,
++                            &surf.color,
++                            0,
++                            Some(&box_),
++                        );
++                    }
++                } else {
++                    let srvs = [Some(surf.color_srv.clone())];
++                    let uavs = [Some(out_uav.clone())];
++                    let samplers = [Some(self.sampler.clone())];
++                    if !self.write_params(ShaderParams {
++                        p0: [surf.origin_x, surf.origin_y, surf.target_w, surf.target_h],
++                        p1: [u32::from(surf.width), u32::from(surf.height), 0, 0],
++                        f0: [0.0; 4],
++                    }) {
++                        return None;
++                    }
++                    unsafe {
++                        self.context.CSSetShaderResources(0, Some(&srvs));
++                        self.context.CSSetUnorderedAccessViews(0, 1, Some(uavs.as_ptr()), None);
++                        self.context.CSSetSamplers(0, Some(&samplers));
++                    }
++                    self.dispatch(&self.pipes.blit_scaled, surf.target_w, surf.target_h);
++                    self.clear_cs_bindings();
++                }
++            }
++        }
++
++        self.fence_value = self.fence_value.wrapping_add(1);
++        if unsafe { self.fenced_context.Signal(&self.fence, self.fence_value) }.is_err()
++            || unsafe { self.fence.SetEventOnCompletion(self.fence_value, self.fence_event) }.is_err()
++        {
++            return None;
++        }
++        unsafe {
++            self.context.Flush();
++            if WaitForSingleObject(self.fence_event, 64) != WAIT_OBJECT_0
++                || self.device.GetDeviceRemovedReason().is_err()
++            {
++                return None;
++            }
++        }
++        self.dirty = false;
++        Some(Box::new(D3D11PresentedFrame {
++            width: self.output_width,
++            height: self.output_height,
++            handle: out_handle,
++            generation: out_generation,
++        }))
++    }
++}
+--- a/crates/ironrdp-egfx-native/src/lib.rs
++++ b/crates/ironrdp-egfx-native/src/lib.rs
+@@ -2,7 +2,29 @@
+ #![doc(html_logo_url = "https://cdnweb.devolutions.net/images/projects/devolutions/logos/devolutions-icon-shadow.svg")]
+ 
+ #[cfg(windows)]
++mod d3d11_compositor;
++#[cfg(windows)]
+ mod media_foundation;
+ 
+ #[cfg(windows)]
+-pub use media_foundation::{MediaFoundationH264Decoder, YuvMatrix};
++pub use d3d11_compositor::{D3D11DecoderOpener, D3D11GpuCompositor, D3D11PresentedFrame};
++#[cfg(windows)]
++pub use media_foundation::{D3D11Nv12Frame, MediaFoundationH264Decoder, YuvMatrix};
++
++#[cfg(target_os = "macos")]
++mod video_toolbox;
++#[cfg(target_os = "macos")]
++pub use video_toolbox::{MetalGpuCompositor, MetalPresentedFrame, VideoToolboxH264Decoder, VtHwFrame};
++
++#[cfg(all(target_os = "linux", paga_vaapi))]
++mod vaapi;
++
++#[cfg(target_os = "linux")]
++pub fn open_vaapi() -> ironrdp_egfx::decode::DecoderResult<Box<dyn ironrdp_egfx::decode::H264Decoder>> {
++    #[cfg(paga_vaapi)]
++    {
++        Ok(Box::new(vaapi::VaapiDecoder::new()?))
++    }
++    #[cfg(not(paga_vaapi))]
++    Err(ironrdp_egfx::decode::DecoderError::msg("VA-API decoder was not built"))
++}
+--- a/crates/ironrdp-egfx-native/src/media_foundation/mfplat.rs
++++ b/crates/ironrdp-egfx-native/src/media_foundation/mfplat.rs
+@@ -0,0 +1,95 @@
++//! Resolve Media Foundation lazily, so Windows installations without the
++//! Media Feature Pack still load the PagaShell DLL and use OpenH264.
++#![allow(non_snake_case)]
++
++use core::ffi::c_void;
++use std::sync::OnceLock;
++
++use windows::Win32::Media::MediaFoundation::{IMFDXGIDeviceManager, IMFMediaBuffer, IMFMediaType, IMFSample};
++use windows::Win32::System::LibraryLoader::{GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW};
++use windows::core::{Error, HRESULT, Interface, Result, s, w};
++
++struct MfPlat {
++    startup: unsafe extern "system" fn(u32, u32) -> HRESULT,
++    shutdown: unsafe extern "system" fn() -> HRESULT,
++    manager: unsafe extern "system" fn(*mut u32, *mut *mut c_void) -> HRESULT,
++    media_type: unsafe extern "system" fn(*mut *mut c_void) -> HRESULT,
++    memory_buffer: unsafe extern "system" fn(u32, *mut *mut c_void) -> HRESULT,
++    sample: unsafe extern "system" fn(*mut *mut c_void) -> HRESULT,
++}
++
++fn load() -> Result<&'static MfPlat> {
++    static LIBRARY: OnceLock<Option<MfPlat>> = OnceLock::new();
++    LIBRARY
++        .get_or_init(|| {
++            let module = unsafe { LoadLibraryExW(w!("mfplat.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) }.ok()?;
++            macro_rules! load {
++                ($symbol:literal, $type:ty) => {{
++                    let address = unsafe { GetProcAddress(module, s!($symbol)) }?;
++                    // The export is from the system DLL and has the signature
++                    // in the matching Windows SDK declaration.
++                    unsafe { core::mem::transmute::<_, $type>(address) }
++                }};
++            }
++            Some(MfPlat {
++                startup: load!("MFStartup", unsafe extern "system" fn(u32, u32) -> HRESULT),
++                shutdown: load!("MFShutdown", unsafe extern "system" fn() -> HRESULT),
++                manager: load!(
++                    "MFCreateDXGIDeviceManager",
++                    unsafe extern "system" fn(*mut u32, *mut *mut c_void) -> HRESULT
++                ),
++                media_type: load!(
++                    "MFCreateMediaType",
++                    unsafe extern "system" fn(*mut *mut c_void) -> HRESULT
++                ),
++                memory_buffer: load!(
++                    "MFCreateMemoryBuffer",
++                    unsafe extern "system" fn(u32, *mut *mut c_void) -> HRESULT
++                ),
++                sample: load!("MFCreateSample", unsafe extern "system" fn(*mut *mut c_void) -> HRESULT),
++            })
++        })
++        .as_ref()
++        .ok_or_else(Error::empty)
++}
++
++fn make_interface<T: Interface>(call: impl FnOnce(*mut *mut c_void) -> HRESULT) -> Result<T> {
++    let mut pointer = core::ptr::null_mut();
++    call(&mut pointer).ok()?;
++    if pointer.is_null() {
++        Err(Error::empty())
++    } else {
++        // A successful constructor returns one owning interface reference.
++        Ok(unsafe { T::from_raw(pointer) })
++    }
++}
++
++pub(super) unsafe fn MFStartup(version: u32, flags: u32) -> Result<()> {
++    unsafe { (load()?.startup)(version, flags) }.ok()
++}
++
++pub(super) unsafe fn MFShutdown() -> Result<()> {
++    unsafe { (load()?.shutdown)() }.ok()
++}
++
++pub(super) fn MFCreateDXGIDeviceManager() -> Result<(u32, IMFDXGIDeviceManager)> {
++    let mut token = 0;
++    let api = load()?;
++    let manager = make_interface(|output| unsafe { (api.manager)(&mut token, output) })?;
++    Ok((token, manager))
++}
++
++pub(super) unsafe fn MFCreateMediaType() -> Result<IMFMediaType> {
++    let api = load()?;
++    make_interface(|output| unsafe { (api.media_type)(output) })
++}
++
++pub(super) unsafe fn MFCreateMemoryBuffer(size: u32) -> Result<IMFMediaBuffer> {
++    let api = load()?;
++    make_interface(|output| unsafe { (api.memory_buffer)(size, output) })
++}
++
++pub(super) unsafe fn MFCreateSample() -> Result<IMFSample> {
++    let api = load()?;
++    make_interface(|output| unsafe { (api.sample)(output) })
++}
+--- a/crates/ironrdp-egfx-native/src/media_foundation.rs
++++ b/crates/ironrdp-egfx-native/src/media_foundation.rs
+@@ -1,24 +1,40 @@
+ //! H.264 decoding with the Media Foundation decoder transform.
+ 
++use core::any::Any;
+ use core::time::Duration;
+ use std::sync::mpsc;
+ use std::thread::{self, JoinHandle};
+ 
+ use ironrdp_egfx::decode::{DecodedFrame, DecoderError, DecoderResult, H264Decoder, Yuv420Frame};
++use ironrdp_egfx::gpu::HwVideoFrame;
+ use ironrdp_egfx::pdu::{avc_to_annex_b_into, is_avc_format};
+ use tracing::{debug, warn};
++use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
++use windows::Win32::Graphics::Direct3D10::ID3D10Multithread;
++use windows::Win32::Graphics::Direct3D11::{
++    D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION,
++    D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
++    ID3D11VideoDevice,
++};
++use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_SAMPLE_DESC};
+ use windows::Win32::Media::MediaFoundation::{
+-    CLSID_MSH264DecoderMFT, IMFMediaType, IMFSample, IMFTransform, MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT,
+-    MF_E_TRANSFORM_STREAM_CHANGE, MF_LOW_LATENCY, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE,
+-    MF_MT_SUBTYPE, MF_VERSION, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video,
+-    MFSTARTUP_NOSOCKET, MFShutdown, MFStartup, MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
+-    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFVideoFormat_H264,
+-    MFVideoFormat_NV12,
++    CLSID_MSH264DecoderMFT, IMF2DBuffer, IMFDXGIBuffer, IMFDXGIDeviceManager, IMFMediaType, IMFSample, IMFTransform,
++    MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_LOW_LATENCY,
++    MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SA_D3D11_AWARE, MF_VERSION,
++    MFMediaType_Video, MFSTARTUP_NOSOCKET, MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
++    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
++    MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFVideoFormat_H264, MFVideoFormat_NV12,
+ };
+ use windows::Win32::System::Com::{
+     CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
+ };
++use windows::core::Interface as _;
+ 
++mod mfplat;
++use mfplat::{
++    MFCreateDXGIDeviceManager, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFShutdown, MFStartup,
++};
++
+ /// Longest time a decode waits for the worker thread. Pictures normally decode in milliseconds,
+ /// and the caller is blocked meanwhile.
+ const DECODE_TIMEOUT: Duration = Duration::from_secs(1);
+@@ -27,7 +43,7 @@
+ /// Starting COM, Media Foundation and the transform cold can take seconds on a loaded machine.
+ /// The graphics pipeline creates its decoder once per connection and loses H.264 for the whole
+ /// session when this expires, so it allows for that rather than for the usual start.
+-const START_TIMEOUT: Duration = Duration::from_secs(10);
++const START_TIMEOUT: Duration = Duration::from_secs(2);
+ /// Spacing of the synthetic sample times, in 100-ns units (30 frames per second).
+ const SAMPLE_DURATION: i64 = 333_333;
+ 
+@@ -43,8 +59,39 @@
+     }
+ }
+ 
++/// GPU-resident D3D11 NV12 video picture produced by Media Foundation on a shared device.
++pub struct D3D11Nv12Frame {
++    texture: ID3D11Texture2D,
++    width: u32,
++    height: u32,
++}
++
++// The shared D3D11 device has ID3D10Multithread::SetMultithreadProtected(true).
++unsafe impl Send for D3D11Nv12Frame {}
++
++impl D3D11Nv12Frame {
++    pub fn texture(&self) -> &ID3D11Texture2D {
++        &self.texture
++    }
++}
++
++impl HwVideoFrame for D3D11Nv12Frame {
++    fn width(&self) -> u32 {
++        self.width
++    }
++
++    fn height(&self) -> u32 {
++        self.height
++    }
++
++    fn as_any(&self) -> &dyn Any {
++        self
++    }
++}
++
+ enum Command {
+     Decode(Vec<u8>, mpsc::SyncSender<DecoderResult<Picture>>),
++    DecodeHw(Vec<u8>, mpsc::SyncSender<DecoderResult<D3D11Nv12Frame>>),
+     Reset,
+ }
+ 
+@@ -62,6 +109,7 @@
+     commands: Option<mpsc::Sender<Command>>,
+     thread: Option<JoinHandle<()>>,
+     matrix: YuvMatrix,
++    shared_device: bool,
+ }
+ 
+ impl MediaFoundationH264Decoder {
+@@ -69,25 +117,35 @@
+     ///
+     /// Fails when Media Foundation or its H.264 decoder is unavailable.
+     pub fn new(matrix: YuvMatrix) -> DecoderResult<Self> {
++        Self::new_with_device(matrix, None)
++    }
++
++    /// Creates a decoder bound to `shared_device` when provided, enabling
++    /// zero-readback [`H264Decoder::decode_hw`] output on that D3D11 device.
++    pub fn new_with_device(matrix: YuvMatrix, shared_device: Option<ID3D11Device>) -> DecoderResult<Self> {
++        let has_shared = shared_device.is_some();
++        // COM interfaces are safe to move into the multithreaded worker when multithread-protected.
++        let device_raw = shared_device.map(|device| device.into_raw() as usize);
+         let (commands, command_receiver) = mpsc::channel();
+         let (ready, ready_receiver) = mpsc::sync_channel(1);
+         let thread = thread::Builder::new()
+             .name("h264-decoder".to_owned())
+-            .spawn(move || worker_main(&command_receiver, &ready))
++            .spawn(move || {
++                let device = device_raw.map(|raw| unsafe { ID3D11Device::from_raw(raw as *mut core::ffi::c_void) });
++                worker_main(&command_receiver, &ready, device);
++            })
+             .map_err(|error| DecoderError::new("failed to spawn the H.264 decoder thread", error))?;
+         match ready_receiver.recv_timeout(START_TIMEOUT) {
+             Ok(Ok(())) => Ok(Self {
+                 commands: Some(commands),
+                 thread: Some(thread),
+                 matrix,
++                shared_device: has_shared,
+             }),
+-            Ok(Err(error)) => {
+-                let _ = thread.join();
+-                Err(DecoderError::new(
+-                    "failed to create the Media Foundation H.264 decoder",
+-                    error,
+-                ))
+-            }
++            Ok(Err(error)) => Err(DecoderError::new(
++                "failed to create the Media Foundation H.264 decoder",
++                error,
++            )),
+             Err(_) => Err(DecoderError::msg(
+                 "the Media Foundation H.264 decoder did not start in time",
+             )),
+@@ -114,9 +172,38 @@
+             }
+         }
+     }
++
++    fn decode_hw_picture(&mut self, data: &[u8]) -> DecoderResult<D3D11Nv12Frame> {
++        let commands = self
++            .commands
++            .as_ref()
++            .ok_or_else(|| DecoderError::msg("the H.264 decoder thread has stopped"))?;
++        let (reply, response) = mpsc::sync_channel(1);
++        commands
++            .send(Command::DecodeHw(data.to_vec(), reply))
++            .map_err(|_| DecoderError::msg("the H.264 decoder thread has stopped"))?;
++        match response.recv_timeout(DECODE_TIMEOUT) {
++            Ok(result) => result,
++            Err(_) => {
++                self.commands = None;
++                drop(self.thread.take());
++                Err(DecoderError::msg("the H.264 decoder did not answer and was abandoned"))
++            }
++        }
++    }
+ }
+ 
+ impl H264Decoder for MediaFoundationH264Decoder {
++    fn supports_hw_frame(&self) -> bool {
++        self.shared_device
++    }
++
++    fn decode_hw(&mut self, data: &[u8]) -> DecoderResult<Option<Box<dyn HwVideoFrame>>> {
++        if !self.shared_device {
++            return Ok(None);
++        }
++        Ok(Some(Box::new(self.decode_hw_picture(data)?)))
++    }
+     fn decode(&mut self, data: &[u8]) -> DecoderResult<DecodedFrame> {
+         let Picture { pixels, format } = self.decode_picture(data)?;
+         let (Ok(width), Ok(height)) = (usize::try_from(format.width), usize::try_from(format.height)) else {
+@@ -127,6 +214,34 @@
+         Ok(DecodedFrame::new(rgba, format.width, format.height))
+     }
+ 
++    fn decode_avc420(&mut self, data: &[u8], rgba: &mut Vec<u8>) -> DecoderResult<(u32, u32)> {
++        let Picture {
++            pixels,
++            format: OutputFormat { width, height, stride },
++        } = self.decode_picture(data)?;
++        let stride = stride as u32;
++        let luma_len = stride as usize * height as usize;
++        let (y, uv) = pixels.split_at(luma_len);
++        rgba.resize(width as usize * height as usize * 4, 0);
++        yuv::yuv_nv12_to_rgba(
++            &yuv::YuvBiPlanarImage {
++                y_plane: y,
++                y_stride: stride,
++                uv_plane: uv,
++                uv_stride: stride,
++                width,
++                height,
++            },
++            rgba,
++            width * 4,
++            yuv::YuvRange::Full,
++            yuv::YuvStandardMatrix::Bt709,
++            yuv::YuvConversionMode::Balanced,
++        )
++        .map_err(|error| DecoderError::new("convert D3D11 NV12", error))?;
++        Ok((width, height))
++    }
++
+     fn decode_yuv420(&mut self, data: &[u8]) -> DecoderResult<Yuv420Frame> {
+         let Picture { pixels, format } = self.decode_picture(data)?;
+         nv12_to_yuv420(&pixels, format)
+@@ -147,13 +262,17 @@
+     fn drop(&mut self) {
+         // Closing the command channel ends the worker after its current picture.
+         self.commands = None;
+-        if let Some(thread) = self.thread.take() {
+-            let _ = thread.join();
+-        }
++        // A driver may stall during reset or shutdown. Never join its thread
++        // from the RDP session; dropping the channel lets it finish normally.
++        drop(self.thread.take());
+     }
+ }
+ 
+-fn worker_main(commands: &mpsc::Receiver<Command>, ready: &mpsc::SyncSender<Result<(), windows::core::Error>>) {
++fn worker_main(
++    commands: &mpsc::Receiver<Command>,
++    ready: &mpsc::SyncSender<Result<(), windows::core::Error>>,
++    shared_device: Option<ID3D11Device>,
++) {
+     let _media_foundation = match MediaFoundationThread::initialize() {
+         Ok(media_foundation) => media_foundation,
+         Err(error) => {
+@@ -161,7 +280,7 @@
+             return;
+         }
+     };
+-    let mut transform = match Transform::create() {
++    let mut transform = match Transform::create(shared_device) {
+         Ok(transform) => transform,
+         Err(error) => {
+             let _ = ready.send(Err(error));
+@@ -174,8 +293,11 @@
+     while let Ok(command) = commands.recv() {
+         match command {
+             Command::Decode(data, reply) => {
+-                let _ = reply.send(transform.decode(&data));
++                let _ = reply.send(transform.decode(data));
+             }
++            Command::DecodeHw(data, reply) => {
++                let _ = reply.send(transform.decode_hw(data));
++            }
+             Command::Reset => transform.flush(),
+         }
+     }
+@@ -218,22 +340,27 @@
+ /// The decoder transform. Lives on the worker thread only.
+ struct Transform {
+     transform: IMFTransform,
+-    output: OutputFormat,
++    _device_manager: IMFDXGIDeviceManager,
++    hw_device: Option<(ID3D11Device, ID3D11DeviceContext)>,
++    hw_pool: [Option<(u32, u32, ID3D11Texture2D)>; 3],
++    hw_pool_index: usize,
++    output: Option<OutputFormat>,
+     sample_time: i64,
+     annex_b: Vec<u8>,
+ }
+ 
+ impl Transform {
+-    fn create() -> windows::core::Result<Self> {
++    fn create(shared_device: Option<ID3D11Device>) -> windows::core::Result<Self> {
+         // SAFETY: COM is initialized on the worker thread.
+         let transform: IMFTransform = unsafe { CoCreateInstance(&CLSID_MSH264DecoderMFT, None, CLSCTX_INPROC_SERVER) }?;
+         // SAFETY: valid transform.
+-        if let Ok(attributes) = unsafe { transform.GetAttributes() } {
+-            // SAFETY: valid attribute store; low-latency mode returns each picture with its sample.
+-            if let Err(error) = unsafe { attributes.SetUINT32(&MF_LOW_LATENCY, 1) } {
+-                debug!(%error, "H.264 decoder rejected low-latency mode");
+-            }
++        let attributes = unsafe { transform.GetAttributes() }?;
++        if unsafe { attributes.GetUINT32(&MF_SA_D3D11_AWARE) }? == 0 {
++            return Err(windows::core::Error::empty());
+         }
++        unsafe { attributes.SetUINT32(&MF_LOW_LATENCY, 1) }?;
++        let (device_manager, hw_device) = create_device_manager(shared_device)?;
++        unsafe { transform.ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, device_manager.as_raw() as usize) }?;
+ 
+         // SAFETY: creates an empty media type.
+         let input = unsafe { MFCreateMediaType() }?;
+@@ -251,48 +378,128 @@
+         unsafe { transform.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0) }?;
+         Ok(Self {
+             transform,
++            _device_manager: device_manager,
++            hw_device,
++            hw_pool: [None, None, None],
++            hw_pool_index: 0,
+             output,
+             sample_time: 0,
+             annex_b: Vec::new(),
+         })
+     }
+ 
+-    fn decode(&mut self, data: &[u8]) -> DecoderResult<Picture> {
+-        let data = if is_avc_format(data) {
+-            avc_to_annex_b_into(data, &mut self.annex_b);
++    fn decode_sample(&mut self, data: Vec<u8>) -> DecoderResult<(IMFSample, OutputFormat)> {
++        let converted = is_avc_format(&data);
++        let data = if converted {
++            avc_to_annex_b_into(&data, &mut self.annex_b);
+             core::mem::take(&mut self.annex_b)
+         } else {
+-            data.to_vec()
++            data
+         };
+         let sample = self
+             .input_sample(&data)
+             .map_err(|error| DecoderError::new("failed to prepare the H.264 sample", error))?;
+-        self.annex_b = data;
++        if converted {
++            self.annex_b = data;
++        }
+ 
+-        let mut frames = Vec::new();
++        let timestamp = unsafe { sample.GetSampleTime() }
++            .map_err(|error| DecoderError::new("failed to timestamp the H.264 sample", error))?;
+         // SAFETY: valid transform and sample.
+         match unsafe { self.transform.ProcessInput(0, &sample, 0) } {
+             Ok(()) => {}
+             Err(error) if error.code() == MF_E_NOTACCEPTING => {
+                 // Collect the pending pictures, then retry.
+-                frames.extend(self.drain()?);
++                let _ = self.drain(timestamp)?;
+                 // SAFETY: as above.
+                 unsafe { self.transform.ProcessInput(0, &sample, 0) }
+                     .map_err(|error| DecoderError::new("the H.264 decoder rejected the sample", error))?;
+             }
+             Err(error) => return Err(DecoderError::new("the H.264 decoder rejected the sample", error)),
+         }
+-        frames.extend(self.drain()?);
+-        frames
+-            .pop()
++        self.drain(timestamp)?
+             .ok_or_else(|| DecoderError::msg("the H.264 decoder returned no picture"))
+     }
+ 
++    fn decode(&mut self, data: Vec<u8>) -> DecoderResult<Picture> {
++        let (picture, format) = self.decode_sample(data)?;
++        let pixels = sample_bytes(&picture, format)
++            .map_err(|error| DecoderError::new("failed to read a D3D11 H.264 picture", error))?;
++        Ok(Picture { pixels, format })
++    }
++
++    fn decode_hw(&mut self, data: Vec<u8>) -> DecoderResult<D3D11Nv12Frame> {
++        let (picture, format) = self.decode_sample(data)?;
++        let Some((device, context)) = self.hw_device.as_ref() else {
++            return Err(DecoderError::msg("H.264 decoder has no shared D3D11 device"));
++        };
++        let buffer = unsafe { picture.GetBufferByIndex(0) }
++            .map_err(|error| DecoderError::new("failed to access D3D11 H.264 output buffer", error))?;
++        let surface = buffer
++            .cast::<IMFDXGIBuffer>()
++            .map_err(|error| DecoderError::new("H.264 output buffer is not a DXGI surface", error))?;
++        let mut raw_tex = core::ptr::null_mut();
++        unsafe { surface.GetResource(&ID3D11Texture2D::IID, &mut raw_tex) }
++            .map_err(|error| DecoderError::new("failed to obtain D3D11 H.264 texture", error))?;
++        if raw_tex.is_null() {
++            return Err(DecoderError::msg("D3D11 H.264 output texture was null"));
++        }
++        let src_tex = unsafe { ID3D11Texture2D::from_raw(raw_tex) };
++        let subresource = unsafe { surface.GetSubresourceIndex() }
++            .map_err(|error| DecoderError::new("failed to read D3D11 H.264 subresource index", error))?;
++
++        let tex_w = format.width.next_multiple_of(2);
++        let tex_h = format.height.next_multiple_of(2);
++        let slot_index = self.hw_pool_index;
++        self.hw_pool_index = (slot_index + 1) % self.hw_pool.len();
++        let slot = &mut self.hw_pool[slot_index];
++        let dst_tex = match slot {
++            Some((w, h, tex)) if *w == tex_w && *h == tex_h => tex.clone(),
++            _ => {
++                let desc = D3D11_TEXTURE2D_DESC {
++                    Width: tex_w,
++                    Height: tex_h,
++                    MipLevels: 1,
++                    ArraySize: 1,
++                    Format: DXGI_FORMAT_NV12,
++                    SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
++                    Usage: D3D11_USAGE_DEFAULT,
++                    BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
++                    CPUAccessFlags: 0,
++                    MiscFlags: 0,
++                };
++                let mut created = None;
++                unsafe { device.CreateTexture2D(&desc, None, Some(&mut created)) }
++                    .map_err(|error| DecoderError::new("failed to allocate GPU NV12 texture", error))?;
++                let tex = created.ok_or_else(|| DecoderError::msg("failed to allocate GPU NV12 texture"))?;
++                *slot = Some((tex_w, tex_h, tex.clone()));
++                tex
++            }
++        };
++        let box_ = D3D11_BOX {
++            left: 0,
++            top: 0,
++            front: 0,
++            right: tex_w,
++            bottom: tex_h,
++            back: 1,
++        };
++        unsafe {
++            context.CopySubresourceRegion(&dst_tex, 0, 0, 0, 0, &src_tex, subresource, Some(&box_));
++        }
++        Ok(D3D11Nv12Frame {
++            texture: dst_tex,
++            width: format.width,
++            height: format.height,
++        })
++    }
++
+     fn flush(&mut self) {
+         // SAFETY: valid transform.
+         if let Err(error) = unsafe { self.transform.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0) } {
+             warn!(%error, "Failed to flush the H.264 decoder");
+         }
++        let _ = unsafe { self.transform.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0) };
+     }
+ 
+     fn input_sample(&mut self, data: &[u8]) -> windows::core::Result<IMFSample> {
+@@ -323,13 +530,15 @@
+     }
+ 
+     /// Returns the pictures the transform has ready.
+-    fn drain(&mut self) -> DecoderResult<Vec<Picture>> {
+-        let mut frames = Vec::new();
+-        loop {
++    fn drain(&mut self, timestamp: i64) -> DecoderResult<Option<(IMFSample, OutputFormat)>> {
++        let mut frame = None;
++        for _ in 0..32 {
+             // SAFETY: valid transform.
+             let info = unsafe { self.transform.GetOutputStreamInfo(0) }
+                 .map_err(|error| DecoderError::new("failed to query the H.264 decoder output", error))?;
+-            let provides_samples = info.dwFlags & flag_bits(MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0) != 0;
++            let provides_samples = info.dwFlags
++                & flag_bits(MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0)
++                != 0;
+             let output_sample = if provides_samples {
+                 None
+             } else {
+@@ -352,7 +561,7 @@
+             drop(core::mem::ManuallyDrop::into_inner(output.pEvents));
+             match result {
+                 Ok(()) => {}
+-                Err(error) if error.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(frames),
++                Err(error) if error.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(frame),
+                 Err(error) if error.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
+                     self.output = select_output(&self.transform)
+                         .map_err(|error| DecoderError::new("failed to follow an H.264 format change", error))?;
+@@ -364,18 +573,62 @@
+             let Some(picture) = picture else {
+                 continue;
+             };
+-            let pixels =
+-                sample_bytes(&picture).map_err(|error| DecoderError::new("failed to read an H.264 picture", error))?;
+-            frames.push(Picture {
+-                pixels,
+-                format: self.output,
+-            });
++            // AVC444 uses two consecutive pictures with distinct roles.
++            // Never pair the current metadata with a delayed decoded picture.
++            if unsafe { picture.GetSampleTime() }.ok() != Some(timestamp) {
++                continue;
++            }
++            let format = match self.output {
++                Some(format) => format,
++                None => {
++                    let media_type = unsafe { self.transform.GetOutputCurrentType(0) }
++                        .map_err(|error| DecoderError::new("failed to query the H.264 output type", error))?;
++                    read_output_format(&media_type).ok_or_else(|| DecoderError::msg("H.264 output has no size"))?
++                }
++            };
++            frame = Some((picture, format));
+         }
++        Err(DecoderError::msg("the H.264 decoder did not complete its output"))
+     }
+ }
+ 
++fn create_device_manager(
++    shared_device: Option<ID3D11Device>,
++) -> windows::core::Result<(IMFDXGIDeviceManager, Option<(ID3D11Device, ID3D11DeviceContext)>)> {
++    let (device, hw_device) = match shared_device {
++        Some(device) => {
++            let context = unsafe { device.GetImmediateContext() }?;
++            (device.clone(), Some((device, context)))
++        }
++        None => {
++            let mut device = None;
++            // No WARP fallback: this path is for a physical video device only.
++            unsafe {
++                D3D11CreateDevice(
++                    None,
++                    D3D_DRIVER_TYPE_HARDWARE,
++                    Default::default(),
++                    D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
++                    None,
++                    D3D11_SDK_VERSION,
++                    Some(&mut device),
++                    None,
++                    None,
++                )?;
++            }
++            (device.ok_or_else(windows::core::Error::empty)?, None)
++        }
++    };
++    let _video = device.cast::<ID3D11VideoDevice>()?;
++    let multithread = device.cast::<ID3D10Multithread>()?;
++    let _ = unsafe { multithread.SetMultithreadProtected(true) };
++    let (token, manager) = MFCreateDXGIDeviceManager()?;
++    unsafe { manager.ResetDevice(&device, token) }?;
++    Ok((manager, hw_device))
++}
++
+ /// Selects the NV12 output type and returns its layout.
+-fn select_output(transform: &IMFTransform) -> windows::core::Result<OutputFormat> {
++fn select_output(transform: &IMFTransform) -> windows::core::Result<Option<OutputFormat>> {
+     for index in 0u32.. {
+         // SAFETY: valid transform; enumeration ends with an error.
+         let candidate: IMFMediaType = unsafe { transform.GetOutputAvailableType(0, index) }?;
+@@ -385,21 +638,27 @@
+         }
+         // SAFETY: valid transform and media type.
+         unsafe { transform.SetOutputType(0, &candidate, 0) }?;
+-        // SAFETY: valid media type and static key.
+-        let frame_size = unsafe { candidate.GetUINT64(&MF_MT_FRAME_SIZE) }?;
+-        let width = u32::try_from(frame_size >> 32).map_err(|_| windows::core::Error::empty())?;
+-        let height = u32::try_from(frame_size & 0xFFFF_FFFF).map_err(|_| windows::core::Error::empty())?;
+-        // SAFETY: valid media type and static key.
+-        let stride = unsafe { candidate.GetUINT32(&MF_MT_DEFAULT_STRIDE) }
+-            .ok()
+-            .and_then(|stride| usize::try_from(stride).ok())
+-            .filter(|stride| *stride != 0 && *stride < 1 << 16)
+-            .unwrap_or_else(|| usize::try_from(width).unwrap_or(0));
+-        return Ok(OutputFormat { width, height, stride });
++        // Some transforms omit dimensions until they receive the first SPS.
++        return Ok(read_output_format(&candidate));
+     }
+     Err(windows::core::Error::empty())
+ }
+ 
++fn read_output_format(media_type: &IMFMediaType) -> Option<OutputFormat> {
++    let frame_size = unsafe { media_type.GetUINT64(&MF_MT_FRAME_SIZE) }.ok()?;
++    let width = (frame_size >> 32) as u32;
++    let height = frame_size as u32;
++    if width == 0 || height == 0 || u64::from(width) * u64::from(height) > 16_777_216 {
++        return None;
++    }
++    let stride = unsafe { media_type.GetUINT32(&MF_MT_DEFAULT_STRIDE) }
++        .ok()
++        .map(|stride| stride as usize)
++        .filter(|stride| (1..=usize::from(u16::MAX)).contains(stride))
++        .unwrap_or(width.div_ceil(2) as usize * 2);
++    Some(OutputFormat { width, height, stride })
++}
++
+ fn output_sample(size: u32) -> windows::core::Result<IMFSample> {
+     // SAFETY: creates an empty sample.
+     let sample = unsafe { MFCreateSample() }?;
+@@ -410,23 +669,29 @@
+     Ok(sample)
+ }
+ 
+-fn sample_bytes(sample: &IMFSample) -> windows::core::Result<Vec<u8>> {
+-    // SAFETY: valid sample.
+-    let buffer = unsafe { sample.ConvertToContiguousBuffer() }?;
+-    let mut pointer = core::ptr::null_mut();
+-    let mut length = 0u32;
+-    // SAFETY: valid buffer; out pointers are valid locals.
+-    unsafe { buffer.Lock(&mut pointer, None, Some(&mut length)) }?;
+-    let data = usize::try_from(length)
+-        .ok()
+-        .filter(|_| !pointer.is_null())
+-        .map(|length| {
+-            // SAFETY: the locked buffer holds `length` readable bytes until `Unlock`.
+-            unsafe { core::slice::from_raw_parts(pointer, length) }.to_vec()
+-        });
+-    // SAFETY: balances the successful `Lock`.
+-    unsafe { buffer.Unlock() }?;
+-    data.ok_or_else(windows::core::Error::empty)
++fn sample_bytes(sample: &IMFSample, format: OutputFormat) -> windows::core::Result<Vec<u8>> {
++    let buffer = unsafe { sample.GetBufferByIndex(0) }?;
++    // A system-memory sample is not this backend's D3D11 path.
++    let _surface = buffer.cast::<IMFDXGIBuffer>()?;
++    let buffer = buffer.cast::<IMF2DBuffer>()?;
++    let (width, height) = (u64::from(format.width), u64::from(format.height));
++    let length = unsafe { buffer.GetContiguousLength() }? as usize;
++    let required = format
++        .stride
++        .saturating_mul(height as usize + height.div_ceil(2) as usize);
++    if width == 0
++        || height == 0
++        || width * height > 16_777_216
++        || format.stride < width.div_ceil(2) as usize * 2
++        || required > length
++        || length > 64 * 1024 * 1024
++    {
++        return Err(windows::core::Error::empty());
++    }
++    let mut data = vec![0; length];
++    // Read back the packed NV12 planes for the EGFX surface compositor.
++    unsafe { buffer.ContiguousCopyTo(&mut data) }?;
++    Ok(data)
+ }
+ 
+ /// Splits an NV12 picture into the planes of a YUV 4:2:0 picture.
+--- a/crates/ironrdp-egfx-native/src/metal_compositor.m
++++ b/crates/ironrdp-egfx-native/src/metal_compositor.m
+@@ -0,0 +1,1247 @@
++#import <CoreVideo/CoreVideo.h>
++#import <Foundation/Foundation.h>
++#import <Metal/Metal.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <string.h>
++
++typedef struct {
++  uint16_t left;
++  uint16_t top;
++  uint16_t right;
++  uint16_t bottom;
++} PagaMetalRect;
++
++typedef struct {
++  uint16_t x;
++  uint16_t y;
++} PagaMetalPoint;
++
++static const size_t kMaxBudgetBytes = 256u * 1024u * 1024u;
++static const uint32_t kMaxOutputPixels = 16777216u;
++
++static NSString* const kMetalShaderSource = @
++"#include <metal_stdlib>\n"
++"using namespace metal;\n"
++"\n"
++"struct Avc420Params {\n"
++"  uint src_x;\n"
++"  uint src_y;\n"
++"  uint dst_x;\n"
++"  uint dst_y;\n"
++"  uint width;\n"
++"  uint height;\n"
++"};\n"
++"\n"
++"struct Avc444MainParams {\n"
++"  uint area_left;\n"
++"  uint area_top;\n"
++"  uint area_width;\n"
++"  uint area_height;\n"
++"  uint rect_left;\n"
++"  uint rect_top;\n"
++"  uint rect_right;\n"
++"  uint rect_bottom;\n"
++"};\n"
++"\n"
++"struct Avc444AuxParams {\n"
++"  uint area_left;\n"
++"  uint area_top;\n"
++"  uint area_width;\n"
++"  uint area_height;\n"
++"  uint half_w;\n"
++"  uint quarter_w;\n"
++"};\n"
++"\n"
++"struct RectParams {\n"
++"  uint x;\n"
++"  uint y;\n"
++"  uint width;\n"
++"  uint height;\n"
++"};\n"
++"\n"
++"struct SolidFillParams {\n"
++"  uint x;\n"
++"  uint y;\n"
++"  uint width;\n"
++"  uint height;\n"
++"  float r;\n"
++"  float g;\n"
++"  float b;\n"
++"};\n"
++"\n"
++"struct BlitScaledParams {\n"
++"  uint dst_x;\n"
++"  uint dst_y;\n"
++"  uint dst_w;\n"
++"  uint dst_h;\n"
++"  uint src_w;\n"
++"  uint src_h;\n"
++"};\n"
++"\n"
++"static inline float4 egfx_yuv_to_rgba(int y, int u, int v) {\n"
++"  int luma = 256 * y;\n"
++"  int uu = u - 128;\n"
++"  int vv = v - 128;\n"
++"  int r = clamp((luma + 403 * vv) >> 8, 0, 255);\n"
++"  int g = clamp((luma - 48 * uu - 120 * vv) >> 8, 0, 255);\n"
++"  int b = clamp((luma + 475 * uu) >> 8, 0, 255);\n"
++"  return float4(float(r) / 255.0f, float(g) / 255.0f, float(b) / 255.0f, 1.0f);\n"
++"}\n"
++"\n"
++"static inline int reverse_filter(int avg, int right, int below, int diag) {\n"
++"  int rev = clamp(4 * avg - right - below - diag, 0, 255);\n"
++"  return abs(rev - avg) < 30 ? avg : rev;\n"
++"}\n"
++"\n"
++"kernel void avc420_to_bgra(\n"
++"    texture2d<float, access::read> y_tex [[texture(0)]],\n"
++"    texture2d<float, access::read> uv_tex [[texture(1)]],\n"
++"    texture2d<float, access::write> dst_tex [[texture(2)]],\n"
++"    constant Avc420Params& p [[buffer(0)]],\n"
++"    uint2 gid [[thread_position_in_grid]]) {\n"
++"  if (gid.x >= p.width || gid.y >= p.height) return;\n"
++"  uint sx = p.src_x + gid.x;\n"
++"  uint sy = p.src_y + gid.y;\n"
++"  uint dx = p.dst_x + gid.x;\n"
++"  uint dy = p.dst_y + gid.y;\n"
++"  if (sx >= y_tex.get_width() || sy >= y_tex.get_height() ||\n"
++"      dx >= dst_tex.get_width() || dy >= dst_tex.get_height()) {\n"
++"    return;\n"
++"  }\n"
++"  uint cx = min(sx >> 1, uv_tex.get_width() - 1);\n"
++"  uint cy = min(sy >> 1, uv_tex.get_height() - 1);\n"
++"  int y = int(round(y_tex.read(uint2(sx, sy)).r * 255.0f));\n"
++"  float2 uv = uv_tex.read(uint2(cx, cy)).rg;\n"
++"  int u = int(round(uv.x * 255.0f));\n"
++"  int v = int(round(uv.y * 255.0f));\n"
++"  dst_tex.write(egfx_yuv_to_rgba(y, u, v), uint2(dx, dy));\n"
++"}\n"
++"\n"
++"kernel void avc444_apply_main(\n"
++"    texture2d<float, access::read> y_in [[texture(0)]],\n"
++"    texture2d<float, access::read> uv_in [[texture(1)]],\n"
++"    texture2d<float, access::write> y_out [[texture(2)]],\n"
++"    texture2d<float, access::write> u_out [[texture(3)]],\n"
++"    texture2d<float, access::write> v_out [[texture(4)]],\n"
++"    constant Avc444MainParams& p [[buffer(0)]],\n"
++"    uint2 gid [[thread_position_in_grid]]) {\n"
++"  if (gid.x >= p.area_width || gid.y >= p.area_height) return;\n"
++"  uint col = p.area_left + gid.x;\n"
++"  uint row = p.area_top + gid.y;\n"
++"  if (col >= y_in.get_width() || row >= y_in.get_height() ||\n"
++"      col >= y_out.get_width() || row >= y_out.get_height()) {\n"
++"    return;\n"
++"  }\n"
++"  if (col >= p.rect_left && col < p.rect_right &&\n"
++"      row >= p.rect_top && row < p.rect_bottom) {\n"
++"    float luma = y_in.read(uint2(col, row)).r;\n"
++"    y_out.write(float4(luma, 0.0f, 0.0f, 1.0f), uint2(col, row));\n"
++"  }\n"
++"  uint cx = min(col >> 1, uv_in.get_width() - 1);\n"
++"  uint cy = min(row >> 1, uv_in.get_height() - 1);\n"
++"  float2 uv = uv_in.read(uint2(cx, cy)).rg;\n"
++"  u_out.write(float4(uv.x, 0.0f, 0.0f, 1.0f), uint2(col, row));\n"
++"  v_out.write(float4(uv.y, 0.0f, 0.0f, 1.0f), uint2(col, row));\n"
++"}\n"
++"\n"
++"kernel void avc444_apply_aux_v1(\n"
++"    texture2d<float, access::read> y_aux [[texture(0)]],\n"
++"    texture2d<float, access::read> uv_aux [[texture(1)]],\n"
++"    texture2d<float, access::write> u_out [[texture(2)]],\n"
++"    texture2d<float, access::write> v_out [[texture(3)]],\n"
++"    constant Avc444AuxParams& p [[buffer(0)]],\n"
++"    uint2 gid [[thread_position_in_grid]]) {\n"
++"  if (gid.x >= p.area_width || gid.y >= p.area_height) return;\n"
++"  uint col = p.area_left + gid.x;\n"
++"  uint row = p.area_top + gid.y;\n"
++"  if (col >= u_out.get_width() || row >= u_out.get_height()) return;\n"
++"  if ((row & 1u) == 1u) {\n"
++"    uint u_row = (row - (row & 15u)) + ((row & 15u) >> 1);\n"
++"    uint v_row = u_row + 8u;\n"
++"    if (col < y_aux.get_width() && v_row < y_aux.get_height()) {\n"
++"      float u_val = y_aux.read(uint2(col, u_row)).r;\n"
++"      float v_val = y_aux.read(uint2(col, v_row)).r;\n"
++"      u_out.write(float4(u_val, 0.0f, 0.0f, 1.0f), uint2(col, row));\n"
++"      v_out.write(float4(v_val, 0.0f, 0.0f, 1.0f), uint2(col, row));\n"
++"    }\n"
++"  } else if ((col & 1u) == 1u) {\n"
++"    uint cx = col >> 1;\n"
++"    uint cy = row >> 1;\n"
++"    if (cx < uv_aux.get_width() && cy < uv_aux.get_height()) {\n"
++"      float2 uv = uv_aux.read(uint2(cx, cy)).rg;\n"
++"      u_out.write(float4(uv.x, 0.0f, 0.0f, 1.0f), uint2(col, row));\n"
++"      v_out.write(float4(uv.y, 0.0f, 0.0f, 1.0f), uint2(col, row));\n"
++"    }\n"
++"  }\n"
++"}\n"
++"\n"
++"kernel void avc444_apply_aux_v2(\n"
++"    texture2d<float, access::read> y_aux [[texture(0)]],\n"
++"    texture2d<float, access::read> uv_aux [[texture(1)]],\n"
++"    texture2d<float, access::write> u_out [[texture(2)]],\n"
++"    texture2d<float, access::write> v_out [[texture(3)]],\n"
++"    constant Avc444AuxParams& p [[buffer(0)]],\n"
++"    uint2 gid [[thread_position_in_grid]]) {\n"
++"  if (gid.x >= p.area_width || gid.y >= p.area_height) return;\n"
++"  uint col = p.area_left + gid.x;\n"
++"  uint row = p.area_top + gid.y;\n"
++"  if (col >= u_out.get_width() || row >= u_out.get_height()) return;\n"
++"  if ((col & 1u) == 1u) {\n"
++"    uint ux = col >> 1;\n"
++"    uint vx = p.half_w + ux;\n"
++"    if (vx < y_aux.get_width() && row < y_aux.get_height()) {\n"
++"      float u_val = y_aux.read(uint2(ux, row)).r;\n"
++"      float v_val = y_aux.read(uint2(vx, row)).r;\n"
++"      u_out.write(float4(u_val, 0.0f, 0.0f, 1.0f), uint2(col, row));\n"
++"      v_out.write(float4(v_val, 0.0f, 0.0f, 1.0f), uint2(col, row));\n"
++"    }\n"
++"  } else if ((row & 1u) == 1u) {\n"
++"    uint ux = col >> 2;\n"
++"    uint vx = p.quarter_w + ux;\n"
++"    uint cy = row >> 1;\n"
++"    if (vx < uv_aux.get_width() && cy < uv_aux.get_height()) {\n"
++"      float u_val, v_val;\n"
++"      if ((col & 3u) == 0u) {\n"
++"        u_val = uv_aux.read(uint2(ux, cy)).r;\n"
++"        v_val = uv_aux.read(uint2(vx, cy)).r;\n"
++"      } else {\n"
++"        u_val = uv_aux.read(uint2(ux, cy)).g;\n"
++"        v_val = uv_aux.read(uint2(vx, cy)).g;\n"
++"      }\n"
++"      u_out.write(float4(u_val, 0.0f, 0.0f, 1.0f), uint2(col, row));\n"
++"      v_out.write(float4(v_val, 0.0f, 0.0f, 1.0f), uint2(col, row));\n"
++"    }\n"
++"  }\n"
++"}\n"
++"\n"
++"kernel void avc444_to_bgra(\n"
++"    texture2d<float, access::read> y_tex [[texture(0)]],\n"
++"    texture2d<float, access::read> u_tex [[texture(1)]],\n"
++"    texture2d<float, access::read> v_tex [[texture(2)]],\n"
++"    texture2d<float, access::write> dst_tex [[texture(3)]],\n"
++"    constant RectParams& p [[buffer(0)]],\n"
++"    uint2 gid [[thread_position_in_grid]]) {\n"
++"  if (gid.x >= p.width || gid.y >= p.height) return;\n"
++"  uint col = p.x + gid.x;\n"
++"  uint row = p.y + gid.y;\n"
++"  if (col >= dst_tex.get_width() || row >= dst_tex.get_height() ||\n"
++"      col >= y_tex.get_width() || row >= y_tex.get_height()) {\n"
++"    return;\n"
++"  }\n"
++"  int y = int(round(y_tex.read(uint2(col, row)).r * 255.0f));\n"
++"  int u = int(round(u_tex.read(uint2(col, row)).r * 255.0f));\n"
++"  int v = int(round(v_tex.read(uint2(col, row)).r * 255.0f));\n"
++"  if (((row & 1u) == 0u) && ((col & 1u) == 0u) &&\n"
++"      (col + 1u) < u_tex.get_width() && (row + 1u) < u_tex.get_height()) {\n"
++"    int ur = int(round(u_tex.read(uint2(col + 1u, row)).r * 255.0f));\n"
++"    int ub = int(round(u_tex.read(uint2(col, row + 1u)).r * 255.0f));\n"
++"    int ud = int(round(u_tex.read(uint2(col + 1u, row + 1u)).r * 255.0f));\n"
++"    u = reverse_filter(u, ur, ub, ud);\n"
++"    int vr = int(round(v_tex.read(uint2(col + 1u, row)).r * 255.0f));\n"
++"    int vb = int(round(v_tex.read(uint2(col, row + 1u)).r * 255.0f));\n"
++"    int vd = int(round(v_tex.read(uint2(col + 1u, row + 1u)).r * 255.0f));\n"
++"    v = reverse_filter(v, vr, vb, vd);\n"
++"  }\n"
++"  dst_tex.write(egfx_yuv_to_rgba(y, u, v), uint2(col, row));\n"
++"}\n"
++"\n"
++"kernel void copy_opaque(\n"
++"    texture2d<float, access::read> src_tex [[texture(0)]],\n"
++"    texture2d<float, access::write> dst_tex [[texture(1)]],\n"
++"    constant RectParams& p [[buffer(0)]],\n"
++"    uint2 gid [[thread_position_in_grid]]) {\n"
++"  if (gid.x >= p.width || gid.y >= p.height) return;\n"
++"  uint dx = p.x + gid.x;\n"
++"  uint dy = p.y + gid.y;\n"
++"  if (dx >= dst_tex.get_width() || dy >= dst_tex.get_height()) return;\n"
++"  float4 c = src_tex.read(gid);\n"
++"  dst_tex.write(float4(c.rgb, 1.0f), uint2(dx, dy));\n"
++"}\n"
++"\n"
++"kernel void clearcodec_composite(\n"
++"    texture2d<float, access::read> src_tex [[texture(0)]],\n"
++"    texture2d<float, access::write> dst_tex [[texture(1)]],\n"
++"    constant RectParams& p [[buffer(0)]],\n"
++"    uint2 gid [[thread_position_in_grid]]) {\n"
++"  if (gid.x >= p.width || gid.y >= p.height) return;\n"
++"  uint dx = p.x + gid.x;\n"
++"  uint dy = p.y + gid.y;\n"
++"  if (dx >= dst_tex.get_width() || dy >= dst_tex.get_height()) return;\n"
++"  float4 c = src_tex.read(gid);\n"
++"  if (c.a > 0.0f) {\n"
++"    dst_tex.write(float4(c.rgb, 1.0f), uint2(dx, dy));\n"
++"  }\n"
++"}\n"
++"\n"
++"kernel void solid_fill(\n"
++"    texture2d<float, access::write> dst_tex [[texture(0)]],\n"
++"    constant SolidFillParams& p [[buffer(0)]],\n"
++"    uint2 gid [[thread_position_in_grid]]) {\n"
++"  if (gid.x >= p.width || gid.y >= p.height) return;\n"
++"  uint dx = p.x + gid.x;\n"
++"  uint dy = p.y + gid.y;\n"
++"  if (dx >= dst_tex.get_width() || dy >= dst_tex.get_height()) return;\n"
++"  dst_tex.write(float4(p.r, p.g, p.b, 1.0f), uint2(dx, dy));\n"
++"}\n"
++"\n"
++"kernel void blit_scaled(\n"
++"    texture2d<float, access::sample> src_tex [[texture(0)]],\n"
++"    texture2d<float, access::write> dst_tex [[texture(1)]],\n"
++"    constant BlitScaledParams& p [[buffer(0)]],\n"
++"    uint2 gid [[thread_position_in_grid]]) {\n"
++"  if (gid.x >= p.dst_w || gid.y >= p.dst_h) return;\n"
++"  uint dx = p.dst_x + gid.x;\n"
++"  uint dy = p.dst_y + gid.y;\n"
++"  if (dx >= dst_tex.get_width() || dy >= dst_tex.get_height()) return;\n"
++"  constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::linear);\n"
++"  float2 uv = float2((float(gid.x) + 0.5f) / float(p.dst_w),\n"
++"                     (float(gid.y) + 0.5f) / float(p.dst_h));\n"
++"  float4 c = src_tex.sample(s, uv);\n"
++"  dst_tex.write(float4(c.rgb, 1.0f), uint2(dx, dy));\n"
++"}\n";
++
++@interface PagaMetalSurface : NSObject
++@property(nonatomic, assign) uint16_t surfaceId;
++@property(nonatomic, assign) uint16_t width;
++@property(nonatomic, assign) uint16_t height;
++@property(nonatomic, strong) id<MTLTexture> color;
++@property(nonatomic, strong) id<MTLTexture> avcY;
++@property(nonatomic, strong) id<MTLTexture> avcU;
++@property(nonatomic, strong) id<MTLTexture> avcV;
++@property(nonatomic, assign) size_t bytes;
++@property(nonatomic, assign) BOOL mapped;
++@property(nonatomic, assign) uint32_t originX;
++@property(nonatomic, assign) uint32_t originY;
++@property(nonatomic, assign) uint32_t targetW;
++@property(nonatomic, assign) uint32_t targetH;
++@property(nonatomic, assign) BOOL painted;
++@end
++
++@implementation PagaMetalSurface
++@end
++
++@interface PagaMetalCacheEntry : NSObject
++@property(nonatomic, assign) uint16_t width;
++@property(nonatomic, assign) uint16_t height;
++@property(nonatomic, strong) id<MTLTexture> texture;
++@property(nonatomic, assign) size_t bytes;
++@end
++
++@implementation PagaMetalCacheEntry
++@end
++
++@interface PagaMetalState : NSObject {
++ @public
++  id<MTLDevice> device;
++  id<MTLCommandQueue> queue;
++  CVMetalTextureCacheRef textureCache;
++  id<MTLComputePipelineState> avc420Pipe;
++  id<MTLComputePipelineState> avc444MainPipe;
++  id<MTLComputePipelineState> avc444AuxV1Pipe;
++  id<MTLComputePipelineState> avc444AuxV2Pipe;
++  id<MTLComputePipelineState> avc444ToBgraPipe;
++  id<MTLComputePipelineState> copyOpaquePipe;
++  id<MTLComputePipelineState> clearCodecPipe;
++  id<MTLComputePipelineState> solidFillPipe;
++  id<MTLComputePipelineState> blitScaledPipe;
++  NSMutableDictionary<NSNumber*, PagaMetalSurface*>* surfaces;
++  NSMutableArray<NSNumber*>* mapOrder;
++  NSMutableDictionary<NSNumber*, PagaMetalCacheEntry*>* cache;
++  size_t budgetUsed;
++  uint16_t outputWidth;
++  uint16_t outputHeight;
++  CVPixelBufferPoolRef outputPool;
++  id<MTLCommandBuffer> pendingCmd;
++  BOOL dirty;
++}
++@end
++
++@implementation PagaMetalState
++- (void)dealloc {
++  if (pendingCmd) {
++    [pendingCmd commit];
++    [pendingCmd waitUntilCompleted];
++    pendingCmd = nil;
++  }
++  if (outputPool) {
++    CVPixelBufferPoolRelease(outputPool);
++    outputPool = NULL;
++  }
++  if (textureCache) {
++    CFRelease(textureCache);
++    textureCache = NULL;
++  }
++}
++@end
++
++typedef struct {
++  uint32_t src_x, src_y, dst_x, dst_y, width, height;
++} Avc420Params;
++
++typedef struct {
++  uint32_t area_left, area_top, area_width, area_height;
++  uint32_t rect_left, rect_top, rect_right, rect_bottom;
++} Avc444MainParams;
++
++typedef struct {
++  uint32_t area_left, area_top, area_width, area_height;
++  uint32_t half_w, quarter_w;
++} Avc444AuxParams;
++
++typedef struct {
++  uint32_t x, y, width, height;
++} RectParams;
++
++typedef struct {
++  uint32_t x, y, width, height;
++  float r, g, b;
++} SolidFillParams;
++
++typedef struct {
++  uint32_t dst_x, dst_y, dst_w, dst_h, src_w, src_h;
++} BlitScaledParams;
++
++static id<MTLComputePipelineState> make_pipeline(id<MTLDevice> device, id<MTLLibrary> lib,
++                                                 NSString* name) {
++  id<MTLFunction> fn = [lib newFunctionWithName:name];
++  if (!fn) return nil;
++  NSError* err = nil;
++  return [device newComputePipelineStateWithFunction:fn error:&err];
++}
++
++static void dispatch_2d(id<MTLComputeCommandEncoder> enc, id<MTLComputePipelineState> pipe,
++                        uint32_t width, uint32_t height) {
++  if (width == 0 || height == 0) return;
++  MTLSize tg = MTLSizeMake(16, 16, 1);
++  MTLSize grid = MTLSizeMake((width + 15u) / 16u, (height + 15u) / 16u, 1);
++  [enc setComputePipelineState:pipe];
++  [enc dispatchThreadgroups:grid threadsPerThreadgroup:tg];
++}
++
++static id<MTLCommandBuffer> ensure_cmd(PagaMetalState* s) {
++  if (!s->pendingCmd) {
++    s->pendingCmd = [s->queue commandBuffer];
++  }
++  return s->pendingCmd;
++}
++
++static id<MTLTexture> make_texture(id<MTLDevice> device, MTLPixelFormat fmt,
++                                   uint32_t width, uint32_t height, MTLTextureUsage usage,
++                                   MTLStorageMode storage) {
++  MTLTextureDescriptor* desc =
++      [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:fmt
++                                                         width:width
++                                                        height:height
++                                                     mipmapped:NO];
++  desc.usage = usage;
++  desc.storageMode = storage;
++  return [device newTextureWithDescriptor:desc];
++}
++
++static bool fill_texture_solid(PagaMetalState* s, id<MTLTexture> tex,
++                               uint32_t x, uint32_t y, uint32_t w, uint32_t h,
++                               float r, float g, float b) {
++  id<MTLCommandBuffer> cmd = ensure_cmd(s);
++  if (!cmd) return false;
++  id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
++  if (!enc) return false;
++  SolidFillParams p = {x, y, w, h, r, g, b};
++  [enc setTexture:tex atIndex:0];
++  [enc setBytes:&p length:sizeof(p) atIndex:0];
++  dispatch_2d(enc, s->solidFillPipe, w, h);
++  [enc endEncoding];
++  return true;
++}
++
++static bool wrap_nv12(PagaMetalState* s, CVPixelBufferRef pb,
++                      CVMetalTextureRef* out_y, CVMetalTextureRef* out_uv) {
++  *out_y = NULL;
++  *out_uv = NULL;
++  if (!pb || CVPixelBufferGetPlaneCount(pb) != 2) return false;
++  size_t y_w = CVPixelBufferGetWidthOfPlane(pb, 0);
++  size_t y_h = CVPixelBufferGetHeightOfPlane(pb, 0);
++  size_t uv_w = CVPixelBufferGetWidthOfPlane(pb, 1);
++  size_t uv_h = CVPixelBufferGetHeightOfPlane(pb, 1);
++  if (!y_w || !y_h || !uv_w || !uv_h) return false;
++  CVReturn r1 = CVMetalTextureCacheCreateTextureFromImage(
++      kCFAllocatorDefault, s->textureCache, pb, NULL, MTLPixelFormatR8Unorm, y_w, y_h, 0, out_y);
++  CVReturn r2 = CVMetalTextureCacheCreateTextureFromImage(
++      kCFAllocatorDefault, s->textureCache, pb, NULL, MTLPixelFormatRG8Unorm, uv_w, uv_h, 1, out_uv);
++  if (r1 != kCVReturnSuccess || r2 != kCVReturnSuccess || !*out_y || !*out_uv) {
++    if (*out_y) CFRelease(*out_y);
++    if (*out_uv) CFRelease(*out_uv);
++    *out_y = NULL;
++    *out_uv = NULL;
++    return false;
++  }
++  return true;
++}
++
++static bool ensure_avc444_planes(PagaMetalState* s, PagaMetalSurface* surf) {
++  if (surf.avcY && surf.avcU && surf.avcV) return true;
++  uint32_t pw = ((uint32_t)surf.width + 15u) & ~15u;
++  uint32_t ph = ((uint32_t)surf.height + 15u) & ~15u;
++  size_t extra = (size_t)pw * (size_t)ph * 3u;
++  if (s->budgetUsed + extra > kMaxBudgetBytes) return false;
++  MTLTextureUsage usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
++  id<MTLTexture> y = make_texture(s->device, MTLPixelFormatR8Unorm, pw, ph, usage, MTLStorageModePrivate);
++  id<MTLTexture> u = make_texture(s->device, MTLPixelFormatR8Unorm, pw, ph, usage, MTLStorageModePrivate);
++  id<MTLTexture> v = make_texture(s->device, MTLPixelFormatR8Unorm, pw, ph, usage, MTLStorageModePrivate);
++  if (!y || !u || !v) return false;
++  // Initialize Y=0, U=128/255, V=128/255.
++  if (!fill_texture_solid(s, y, 0, 0, pw, ph, 0.0f, 0.0f, 0.0f) ||
++      !fill_texture_solid(s, u, 0, 0, pw, ph, 128.0f / 255.0f, 0.0f, 0.0f) ||
++      !fill_texture_solid(s, v, 0, 0, pw, ph, 128.0f / 255.0f, 0.0f, 0.0f)) {
++    return false;
++  }
++  surf.avcY = y;
++  surf.avcU = u;
++  surf.avcV = v;
++  surf.bytes += extra;
++  s->budgetUsed += extra;
++  return true;
++}
++
++static void mark_painted(PagaMetalState* s, PagaMetalSurface* surf) {
++  surf.painted = YES;
++  if (surf.mapped) s->dirty = YES;
++}
++
++void* paga_metal_compositor_new(void) {
++  @autoreleasepool {
++    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
++    if (!device) return NULL;
++    id<MTLCommandQueue> queue = [device newCommandQueue];
++    if (!queue) return NULL;
++    CVMetalTextureCacheRef cache = NULL;
++    if (CVMetalTextureCacheCreate(kCFAllocatorDefault, NULL, device, NULL, &cache) !=
++            kCVReturnSuccess ||
++        !cache) {
++      return NULL;
++    }
++    NSError* err = nil;
++    id<MTLLibrary> lib = [device newLibraryWithSource:kMetalShaderSource options:nil error:&err];
++    if (!lib) {
++      CFRelease(cache);
++      return NULL;
++    }
++    PagaMetalState* s = [[PagaMetalState alloc] init];
++    s->device = device;
++    s->queue = queue;
++    s->textureCache = cache;
++    s->avc420Pipe = make_pipeline(device, lib, @"avc420_to_bgra");
++    s->avc444MainPipe = make_pipeline(device, lib, @"avc444_apply_main");
++    s->avc444AuxV1Pipe = make_pipeline(device, lib, @"avc444_apply_aux_v1");
++    s->avc444AuxV2Pipe = make_pipeline(device, lib, @"avc444_apply_aux_v2");
++    s->avc444ToBgraPipe = make_pipeline(device, lib, @"avc444_to_bgra");
++    s->copyOpaquePipe = make_pipeline(device, lib, @"copy_opaque");
++    s->clearCodecPipe = make_pipeline(device, lib, @"clearcodec_composite");
++    s->solidFillPipe = make_pipeline(device, lib, @"solid_fill");
++    s->blitScaledPipe = make_pipeline(device, lib, @"blit_scaled");
++    if (!s->avc420Pipe || !s->avc444MainPipe || !s->avc444AuxV1Pipe ||
++        !s->avc444AuxV2Pipe || !s->avc444ToBgraPipe || !s->copyOpaquePipe ||
++        !s->clearCodecPipe || !s->solidFillPipe || !s->blitScaledPipe) {
++      return NULL;
++    }
++    s->surfaces = [NSMutableDictionary dictionary];
++    s->mapOrder = [NSMutableArray array];
++    s->cache = [NSMutableDictionary dictionary];
++    s->budgetUsed = 0;
++    s->outputWidth = 0;
++    s->outputHeight = 0;
++    s->outputPool = NULL;
++    s->pendingCmd = nil;
++    s->dirty = NO;
++    return (void*)CFBridgingRetain(s);
++  }
++}
++
++void paga_metal_compositor_free(void* handle) {
++  if (!handle) return;
++  @autoreleasepool {
++    PagaMetalState* s = (__bridge_transfer PagaMetalState*)handle;
++    (void)s;
++  }
++}
++
++bool paga_metal_compositor_reset(void* handle, uint32_t width, uint32_t height) {
++  if (!handle || width == 0 || height == 0 || width > UINT16_MAX || height > UINT16_MAX ||
++      (uint64_t)width * (uint64_t)height > kMaxOutputPixels) {
++    return false;
++  }
++  @autoreleasepool {
++    PagaMetalState* s = (__bridge PagaMetalState*)handle;
++    if (s->pendingCmd) {
++      [s->pendingCmd commit];
++      [s->pendingCmd waitUntilCompleted];
++      s->pendingCmd = nil;
++    }
++    for (PagaMetalSurface* surf in [s->surfaces allValues]) {
++      if (s->budgetUsed >= surf.bytes) s->budgetUsed -= surf.bytes;
++    }
++    [s->surfaces removeAllObjects];
++    [s->mapOrder removeAllObjects];
++    s->dirty = NO;
++    if (s->outputWidth != (uint16_t)width || s->outputHeight != (uint16_t)height || !s->outputPool) {
++      if (s->outputPool) {
++        CVPixelBufferPoolRelease(s->outputPool);
++        s->outputPool = NULL;
++      }
++      NSDictionary* attrs = @{
++        (id)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA),
++        (id)kCVPixelBufferWidthKey : @(width),
++        (id)kCVPixelBufferHeightKey : @(height),
++        (id)kCVPixelBufferIOSurfacePropertiesKey : @{},
++        (id)kCVPixelBufferMetalCompatibilityKey : @YES,
++      };
++      if (CVPixelBufferPoolCreate(kCFAllocatorDefault, NULL, (__bridge CFDictionaryRef)attrs,
++                                  &s->outputPool) != kCVReturnSuccess ||
++          !s->outputPool) {
++        s->outputWidth = 0;
++        s->outputHeight = 0;
++        return false;
++      }
++      s->outputWidth = (uint16_t)width;
++      s->outputHeight = (uint16_t)height;
++    }
++    return true;
++  }
++}
++
++bool paga_metal_compositor_create_surface(void* handle, uint16_t surface_id, uint16_t width, uint16_t height) {
++  if (!handle || width == 0 || height == 0) return false;
++  @autoreleasepool {
++    PagaMetalState* s = (__bridge PagaMetalState*)handle;
++    NSNumber* key = @(surface_id);
++    PagaMetalSurface* existing = s->surfaces[key];
++    if (existing) {
++      if (s->budgetUsed >= existing.bytes) s->budgetUsed -= existing.bytes;
++      [s->surfaces removeObjectForKey:key];
++      [s->mapOrder removeObject:key];
++    }
++    size_t bytes = (size_t)width * (size_t)height * 4u;
++    if (s->budgetUsed + bytes > kMaxBudgetBytes) return false;
++    MTLTextureUsage usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
++    id<MTLTexture> tex =
++        make_texture(s->device, MTLPixelFormatBGRA8Unorm, width, height, usage, MTLStorageModePrivate);
++    if (!tex) return false;
++    if (!fill_texture_solid(s, tex, 0, 0, width, height, 0.0f, 0.0f, 0.0f)) return false;
++    PagaMetalSurface* surf = [[PagaMetalSurface alloc] init];
++    surf.surfaceId = surface_id;
++    surf.width = width;
++    surf.height = height;
++    surf.color = tex;
++    surf.bytes = bytes;
++    surf.mapped = NO;
++    surf.painted = NO;
++    s->surfaces[key] = surf;
++    s->budgetUsed += bytes;
++    return true;
++  }
++}
++
++void paga_metal_compositor_delete_surface(void* handle, uint16_t surface_id) {
++  if (!handle) return;
++  @autoreleasepool {
++    PagaMetalState* s = (__bridge PagaMetalState*)handle;
++    NSNumber* key = @(surface_id);
++    PagaMetalSurface* surf = s->surfaces[key];
++    if (surf) {
++      if (surf.mapped && surf.painted) s->dirty = YES;
++      if (s->budgetUsed >= surf.bytes) s->budgetUsed -= surf.bytes;
++      [s->surfaces removeObjectForKey:key];
++      [s->mapOrder removeObject:key];
++    }
++  }
++}
++
++bool paga_metal_compositor_map_surface(void* handle, uint16_t surface_id, uint32_t origin_x,
++                                       uint32_t origin_y, uint32_t target_w, uint32_t target_h) {
++  if (!handle) return false;
++  @autoreleasepool {
++    PagaMetalState* s = (__bridge PagaMetalState*)handle;
++    NSNumber* key = @(surface_id);
++    PagaMetalSurface* surf = s->surfaces[key];
++    if (!surf) return false;
++    surf.mapped = YES;
++    surf.originX = origin_x;
++    surf.originY = origin_y;
++    surf.targetW = target_w ? target_w : surf.width;
++    surf.targetH = target_h ? target_h : surf.height;
++    [s->mapOrder removeObject:key];
++    [s->mapOrder addObject:key];
++    if (surf.painted) s->dirty = YES;
++    return true;
++  }
++}
++
++void paga_metal_compositor_unmap_surface(void* handle, uint16_t surface_id) {
++  if (!handle) return;
++  @autoreleasepool {
++    PagaMetalState* s = (__bridge PagaMetalState*)handle;
++    NSNumber* key = @(surface_id);
++    PagaMetalSurface* surf = s->surfaces[key];
++    if (surf && surf.mapped) {
++      surf.mapped = NO;
++      [s->mapOrder removeObject:key];
++      if (surf.painted) s->dirty = YES;
++    }
++  }
++}
++
++bool paga_metal_compositor_apply_avc420(void* handle, uint16_t surface_id, CVPixelBufferRef pb,
++                                        PagaMetalRect dest, const PagaMetalRect* rects,
++                                        size_t rect_count) {
++  if (!handle || !pb) return false;
++  @autoreleasepool {
++    PagaMetalState* s = (__bridge PagaMetalState*)handle;
++    PagaMetalSurface* surf = s->surfaces[@(surface_id)];
++    if (!surf) return false;
++    CVMetalTextureRef yRef = NULL, uvRef = NULL;
++    if (!wrap_nv12(s, pb, &yRef, &uvRef)) return false;
++    id<MTLTexture> yTex = CVMetalTextureGetTexture(yRef);
++    id<MTLTexture> uvTex = CVMetalTextureGetTexture(uvRef);
++    id<MTLCommandBuffer> cmd = ensure_cmd(s);
++    id<MTLComputeCommandEncoder> enc = cmd ? [cmd computeCommandEncoder] : nil;
++    bool ok = false;
++    if (yTex && uvTex && enc) {
++      [enc setTexture:yTex atIndex:0];
++      [enc setTexture:uvTex atIndex:1];
++      [enc setTexture:surf.color atIndex:2];
++      if (rect_count == 0) {
++        if (dest.left < dest.right && dest.top < dest.bottom) {
++          uint32_t w = dest.right - dest.left;
++          uint32_t h = dest.bottom - dest.top;
++          Avc420Params p = {0, 0, dest.left, dest.top, w, h};
++          [enc setBytes:&p length:sizeof(p) atIndex:0];
++          dispatch_2d(enc, s->avc420Pipe, w, h);
++        }
++      } else {
++        for (size_t i = 0; i < rect_count; ++i) {
++          PagaMetalRect r = rects[i];
++          if (r.left >= r.right || r.top >= r.bottom) continue;
++          uint32_t w = r.right - r.left;
++          uint32_t h = r.bottom - r.top;
++          Avc420Params p = {r.left, r.top, r.left, r.top, w, h};
++          [enc setBytes:&p length:sizeof(p) atIndex:0];
++          dispatch_2d(enc, s->avc420Pipe, w, h);
++        }
++      }
++      [enc endEncoding];
++      // Keep the VideoToolbox IOSurface alive until the command buffer finishes.
++      CVPixelBufferRef retainedPb = CVPixelBufferRetain(pb);
++      CVMetalTextureRef retainedY = (CVMetalTextureRef)CFRetain(yRef);
++      CVMetalTextureRef retainedUv = (CVMetalTextureRef)CFRetain(uvRef);
++      [cmd addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull _cb) {
++        (void)_cb;
++        CFRelease(retainedUv);
++        CFRelease(retainedY);
++        CVPixelBufferRelease(retainedPb);
++      }];
++      mark_painted(s, surf);
++      ok = true;
++    }
++    CFRelease(uvRef);
++    CFRelease(yRef);
++    return ok;
++  }
++}
++
++bool paga_metal_compositor_apply_avc444(void* handle, uint16_t surface_id, bool is_v2,
++                                        CVPixelBufferRef main_pb, const PagaMetalRect* main_rects,
++                                        size_t main_count, CVPixelBufferRef aux_pb,
++                                        const PagaMetalRect* aux_rects, size_t aux_count,
++                                        const PagaMetalRect* painted, size_t painted_count) {
++  if (!handle) return false;
++  @autoreleasepool {
++    PagaMetalState* s = (__bridge PagaMetalState*)handle;
++    PagaMetalSurface* surf = s->surfaces[@(surface_id)];
++    if (!surf) return false;
++    if (!main_pb && (!surf.avcY || !surf.avcU || !surf.avcV)) {
++      // Chroma-only update before any luma picture: ignore safely.
++      return true;
++    }
++    if (!ensure_avc444_planes(s, surf)) return false;
++
++    id<MTLCommandBuffer> cmd = ensure_cmd(s);
++    if (!cmd) return false;
++
++    if (main_pb && main_count > 0) {
++      CVMetalTextureRef yRef = NULL, uvRef = NULL;
++      if (!wrap_nv12(s, main_pb, &yRef, &uvRef)) return false;
++      id<MTLTexture> yTex = CVMetalTextureGetTexture(yRef);
++      id<MTLTexture> uvTex = CVMetalTextureGetTexture(uvRef);
++      id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
++      if (!yTex || !uvTex || !enc) {
++        CFRelease(uvRef);
++        CFRelease(yRef);
++        return false;
++      }
++      [enc setTexture:yTex atIndex:0];
++      [enc setTexture:uvTex atIndex:1];
++      [enc setTexture:surf.avcY atIndex:2];
++      [enc setTexture:surf.avcU atIndex:3];
++      [enc setTexture:surf.avcV atIndex:4];
++      for (size_t i = 0; i < main_count; ++i) {
++        PagaMetalRect r = main_rects[i];
++        uint32_t left = (uint32_t)r.left & ~1u;
++        uint32_t top = (uint32_t)r.top & ~1u;
++        uint32_t right = (((uint32_t)(r.right < surf.width ? r.right : surf.width) + 1u) & ~1u);
++        uint32_t bottom = (((uint32_t)(r.bottom < surf.height ? r.bottom : surf.height) + 1u) & ~1u);
++        if (left >= right || top >= bottom) continue;
++        Avc444MainParams p = {
++            left,
++            top,
++            right - left,
++            bottom - top,
++            r.left,
++            r.top,
++            r.right < surf.width ? r.right : surf.width,
++            r.bottom < surf.height ? r.bottom : surf.height,
++        };
++        [enc setBytes:&p length:sizeof(p) atIndex:0];
++        dispatch_2d(enc, s->avc444MainPipe, p.area_width, p.area_height);
++      }
++      [enc endEncoding];
++      CVPixelBufferRef retainedPb = CVPixelBufferRetain(main_pb);
++      CVMetalTextureRef retainedY = (CVMetalTextureRef)CFRetain(yRef);
++      CVMetalTextureRef retainedUv = (CVMetalTextureRef)CFRetain(uvRef);
++      [cmd addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull _cb) {
++        (void)_cb;
++        CFRelease(retainedUv);
++        CFRelease(retainedY);
++        CVPixelBufferRelease(retainedPb);
++      }];
++      CFRelease(uvRef);
++      CFRelease(yRef);
++    }
++
++    if (aux_pb && aux_count > 0) {
++      CVMetalTextureRef yRef = NULL, uvRef = NULL;
++      if (!wrap_nv12(s, aux_pb, &yRef, &uvRef)) return false;
++      id<MTLTexture> yTex = CVMetalTextureGetTexture(yRef);
++      id<MTLTexture> uvTex = CVMetalTextureGetTexture(uvRef);
++      id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
++      if (!yTex || !uvTex || !enc) {
++        CFRelease(uvRef);
++        CFRelease(yRef);
++        return false;
++      }
++      uint32_t padded_w = (((uint32_t)CVPixelBufferGetWidth(aux_pb) + 15u) & ~15u);
++      uint32_t half_w = padded_w >> 1;
++      uint32_t quarter_w = half_w >> 1;
++      [enc setTexture:yTex atIndex:0];
++      [enc setTexture:uvTex atIndex:1];
++      [enc setTexture:surf.avcU atIndex:2];
++      [enc setTexture:surf.avcV atIndex:3];
++      id<MTLComputePipelineState> pipe = is_v2 ? s->avc444AuxV2Pipe : s->avc444AuxV1Pipe;
++      for (size_t i = 0; i < aux_count; ++i) {
++        PagaMetalRect r = aux_rects[i];
++        uint32_t left = (uint32_t)r.left & ~1u;
++        uint32_t top = (uint32_t)r.top & ~1u;
++        uint32_t right = (((uint32_t)(r.right < surf.width ? r.right : surf.width) + 1u) & ~1u);
++        uint32_t bottom = (((uint32_t)(r.bottom < surf.height ? r.bottom : surf.height) + 1u) & ~1u);
++        if (left >= right || top >= bottom) continue;
++        Avc444AuxParams p = {left, top, right - left, bottom - top, half_w, quarter_w};
++        [enc setBytes:&p length:sizeof(p) atIndex:0];
++        dispatch_2d(enc, pipe, p.area_width, p.area_height);
++      }
++      [enc endEncoding];
++      CVPixelBufferRef retainedPb = CVPixelBufferRetain(aux_pb);
++      CVMetalTextureRef retainedY = (CVMetalTextureRef)CFRetain(yRef);
++      CVMetalTextureRef retainedUv = (CVMetalTextureRef)CFRetain(uvRef);
++      [cmd addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull _cb) {
++        (void)_cb;
++        CFRelease(retainedUv);
++        CFRelease(retainedY);
++        CVPixelBufferRelease(retainedPb);
++      }];
++      CFRelease(uvRef);
++      CFRelease(yRef);
++    }
++
++    if (painted_count > 0) {
++      id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
++      if (!enc) return false;
++      [enc setTexture:surf.avcY atIndex:0];
++      [enc setTexture:surf.avcU atIndex:1];
++      [enc setTexture:surf.avcV atIndex:2];
++      [enc setTexture:surf.color atIndex:3];
++      for (size_t i = 0; i < painted_count; ++i) {
++        PagaMetalRect r = painted[i];
++        uint32_t right = r.right < surf.width ? r.right : surf.width;
++        uint32_t bottom = r.bottom < surf.height ? r.bottom : surf.height;
++        if (r.left >= right || r.top >= bottom) continue;
++        RectParams p = {r.left, r.top, right - r.left, bottom - r.top};
++        [enc setBytes:&p length:sizeof(p) atIndex:0];
++        dispatch_2d(enc, s->avc444ToBgraPipe, p.width, p.height);
++      }
++      [enc endEncoding];
++      mark_painted(s, surf);
++    }
++    return true;
++  }
++}
++
++static bool upload_patch_with_pipe(PagaMetalState* s, PagaMetalSurface* surf, PagaMetalRect dest,
++                                   const uint8_t* pixels, size_t pitch, uint16_t src_x,
++                                   uint16_t src_y, MTLPixelFormat src_fmt,
++                                   id<MTLComputePipelineState> pipe) {
++  uint32_t right = dest.right < surf.width ? dest.right : surf.width;
++  uint32_t bottom = dest.bottom < surf.height ? dest.bottom : surf.height;
++  if (dest.left >= right || dest.top >= bottom) return true;
++  uint32_t w = right - dest.left;
++  uint32_t h = bottom - dest.top;
++  id<MTLTexture> staging = make_texture(s->device, src_fmt, w, h, MTLTextureUsageShaderRead,
++                                        MTLStorageModeShared);
++  if (!staging) return false;
++  const uint8_t* origin = pixels + (size_t)src_y * pitch + (size_t)src_x * 4u;
++  [staging replaceRegion:MTLRegionMake2D(0, 0, w, h)
++             mipmapLevel:0
++               withBytes:origin
++             bytesPerRow:pitch];
++  id<MTLCommandBuffer> cmd = ensure_cmd(s);
++  if (!cmd) return false;
++  id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
++  if (!enc) return false;
++  RectParams p = {dest.left, dest.top, w, h};
++  [enc setTexture:staging atIndex:0];
++  [enc setTexture:surf.color atIndex:1];
++  [enc setBytes:&p length:sizeof(p) atIndex:0];
++  dispatch_2d(enc, pipe, w, h);
++  [enc endEncoding];
++  mark_painted(s, surf);
++  return true;
++}
++
++bool paga_metal_compositor_apply_rgba(void* handle, uint16_t surface_id, PagaMetalRect dest,
++                                      const uint8_t* rgba, size_t pitch, uint16_t src_x,
++                                      uint16_t src_y) {
++  if (!handle || !rgba) return false;
++  @autoreleasepool {
++    PagaMetalState* s = (__bridge PagaMetalState*)handle;
++    PagaMetalSurface* surf = s->surfaces[@(surface_id)];
++    if (!surf) return false;
++    return upload_patch_with_pipe(s, surf, dest, rgba, pitch, src_x, src_y,
++                                  MTLPixelFormatRGBA8Unorm, s->copyOpaquePipe);
++  }
++}
++
++bool paga_metal_compositor_apply_clearcodec(void* handle, uint16_t surface_id, PagaMetalRect dest,
++                                            const uint8_t* bgra_coverage) {
++  if (!handle || !bgra_coverage) return false;
++  @autoreleasepool {
++    PagaMetalState* s = (__bridge PagaMetalState*)handle;
++    PagaMetalSurface* surf = s->surfaces[@(surface_id)];
++    if (!surf) return false;
++    if (dest.left >= dest.right || dest.top >= dest.bottom) return true;
++    size_t pitch = (size_t)(dest.right - dest.left) * 4u;
++    return upload_patch_with_pipe(s, surf, dest, bgra_coverage, pitch, 0, 0,
++                                  MTLPixelFormatBGRA8Unorm, s->clearCodecPipe);
++  }
++}
++
++bool paga_metal_compositor_solid_fill(void* handle, uint16_t surface_id, uint8_t r, uint8_t g, uint8_t b,
++                                      const PagaMetalRect* rects, size_t rect_count) {
++  if (!handle) return false;
++  @autoreleasepool {
++    PagaMetalState* s = (__bridge PagaMetalState*)handle;
++    PagaMetalSurface* surf = s->surfaces[@(surface_id)];
++    if (!surf) return false;
++    float rf = (float)r / 255.0f;
++    float gf = (float)g / 255.0f;
++    float bf = (float)b / 255.0f;
++    for (size_t i = 0; i < rect_count; ++i) {
++      PagaMetalRect rect = rects[i];
++      uint32_t right = rect.right < surf.width ? rect.right : surf.width;
++      uint32_t bottom = rect.bottom < surf.height ? rect.bottom : surf.height;
++      if (rect.left >= right || rect.top >= bottom) continue;
++      if (!fill_texture_solid(s, surf.color, rect.left, rect.top, right - rect.left,
++                              bottom - rect.top, rf, gf, bf)) {
++        return false;
++      }
++      mark_painted(s, surf);
++    }
++    return true;
++  }
++}
++
++bool paga_metal_compositor_surface_to_surface(void* handle, uint16_t src_id, uint16_t dst_id,
++                                              PagaMetalRect src_rect, const PagaMetalPoint* dsts,
++                                              size_t dst_count) {
++  if (!handle) return false;
++  @autoreleasepool {
++    PagaMetalState* s = (__bridge PagaMetalState*)handle;
++    PagaMetalSurface* src = s->surfaces[@(src_id)];
++    PagaMetalSurface* dst = s->surfaces[@(dst_id)];
++    if (!src || !dst) return false;
++    uint32_t sr = src_rect.right < src.width ? src_rect.right : src.width;
++    uint32_t sb = src_rect.bottom < src.height ? src_rect.bottom : src.height;
++    if (src_rect.left >= sr || src_rect.top >= sb || dst_count == 0) return true;
++    uint32_t w = sr - src_rect.left;
++    uint32_t h = sb - src_rect.top;
++    id<MTLCommandBuffer> cmd = ensure_cmd(s);
++    if (!cmd) return false;
++    id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
++    if (!blit) return false;
++
++    id<MTLTexture> copySrc = src.color;
++    uint32_t copySrcX = src_rect.left;
++    uint32_t copySrcY = src_rect.top;
++    if (src_id == dst_id) {
++      id<MTLTexture> scratch =
++          make_texture(s->device, MTLPixelFormatBGRA8Unorm, w, h,
++                       MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite, MTLStorageModePrivate);
++      if (!scratch) {
++        [blit endEncoding];
++        return false;
++      }
++      [blit copyFromTexture:src.color
++                sourceSlice:0
++                sourceLevel:0
++               sourceOrigin:MTLOriginMake(src_rect.left, src_rect.top, 0)
++                 sourceSize:MTLSizeMake(w, h, 1)
++                  toTexture:scratch
++           destinationSlice:0
++           destinationLevel:0
++          destinationOrigin:MTLOriginMake(0, 0, 0)];
++      copySrc = scratch;
++      copySrcX = 0;
++      copySrcY = 0;
++    }
++    for (size_t i = 0; i < dst_count; ++i) {
++      uint32_t dx = dsts[i].x;
++      uint32_t dy = dsts[i].y;
++      if (dx >= dst.width || dy >= dst.height) continue;
++      uint32_t cw = w < (dst.width - dx) ? w : (dst.width - dx);
++      uint32_t ch = h < (dst.height - dy) ? h : (dst.height - dy);
++      if (cw == 0 || ch == 0) continue;
++      [blit copyFromTexture:copySrc
++                sourceSlice:0
++                sourceLevel:0
++               sourceOrigin:MTLOriginMake(copySrcX, copySrcY, 0)
++                 sourceSize:MTLSizeMake(cw, ch, 1)
++                  toTexture:dst.color
++           destinationSlice:0
++           destinationLevel:0
++          destinationOrigin:MTLOriginMake(dx, dy, 0)];
++    }
++    [blit endEncoding];
++    mark_painted(s, dst);
++    return true;
++  }
++}
++
++bool paga_metal_compositor_surface_to_cache(void* handle, uint16_t surface_id, uint16_t slot,
++                                            PagaMetalRect src_rect) {
++  if (!handle) return false;
++  @autoreleasepool {
++    PagaMetalState* s = (__bridge PagaMetalState*)handle;
++    PagaMetalSurface* src = s->surfaces[@(surface_id)];
++    if (!src) return false;
++    uint32_t sr = src_rect.right < src.width ? src_rect.right : src.width;
++    uint32_t sb = src_rect.bottom < src.height ? src_rect.bottom : src.height;
++    if (src_rect.left >= sr || src_rect.top >= sb) return false;
++    uint32_t w = sr - src_rect.left;
++    uint32_t h = sb - src_rect.top;
++    NSNumber* key = @(slot);
++    PagaMetalCacheEntry* prev = s->cache[key];
++    if (prev) {
++      if (s->budgetUsed >= prev.bytes) s->budgetUsed -= prev.bytes;
++      [s->cache removeObjectForKey:key];
++    }
++    size_t bytes = (size_t)w * (size_t)h * 4u;
++    if (s->budgetUsed + bytes > kMaxBudgetBytes) return false;
++    id<MTLTexture> tex =
++        make_texture(s->device, MTLPixelFormatBGRA8Unorm, w, h, MTLTextureUsageShaderRead,
++                     MTLStorageModePrivate);
++    if (!tex) return false;
++    id<MTLCommandBuffer> cmd = ensure_cmd(s);
++    if (!cmd) return false;
++    id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
++    if (!blit) return false;
++    [blit copyFromTexture:src.color
++              sourceSlice:0
++              sourceLevel:0
++             sourceOrigin:MTLOriginMake(src_rect.left, src_rect.top, 0)
++               sourceSize:MTLSizeMake(w, h, 1)
++                toTexture:tex
++         destinationSlice:0
++         destinationLevel:0
++        destinationOrigin:MTLOriginMake(0, 0, 0)];
++    [blit endEncoding];
++    PagaMetalCacheEntry* entry = [[PagaMetalCacheEntry alloc] init];
++    entry.width = (uint16_t)w;
++    entry.height = (uint16_t)h;
++    entry.texture = tex;
++    entry.bytes = bytes;
++    s->cache[key] = entry;
++    s->budgetUsed += bytes;
++    return true;
++  }
++}
++
++bool paga_metal_compositor_cache_to_surface(void* handle, uint16_t slot, uint16_t surface_id,
++                                            const PagaMetalPoint* dsts, size_t dst_count) {
++  if (!handle) return false;
++  @autoreleasepool {
++    PagaMetalState* s = (__bridge PagaMetalState*)handle;
++    PagaMetalCacheEntry* entry = s->cache[@(slot)];
++    PagaMetalSurface* dst = s->surfaces[@(surface_id)];
++    if (!entry || !dst) return false;
++    if (dst_count == 0) return true;
++    id<MTLCommandBuffer> cmd = ensure_cmd(s);
++    if (!cmd) return false;
++    id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
++    if (!blit) return false;
++    for (size_t i = 0; i < dst_count; ++i) {
++      uint32_t dx = dsts[i].x;
++      uint32_t dy = dsts[i].y;
++      if (dx >= dst.width || dy >= dst.height) continue;
++      uint32_t cw = entry.width < (dst.width - dx) ? entry.width : (dst.width - dx);
++      uint32_t ch = entry.height < (dst.height - dy) ? entry.height : (dst.height - dy);
++      if (cw == 0 || ch == 0) continue;
++      [blit copyFromTexture:entry.texture
++                sourceSlice:0
++                sourceLevel:0
++               sourceOrigin:MTLOriginMake(0, 0, 0)
++                 sourceSize:MTLSizeMake(cw, ch, 1)
++                  toTexture:dst.color
++           destinationSlice:0
++           destinationLevel:0
++          destinationOrigin:MTLOriginMake(dx, dy, 0)];
++    }
++    [blit endEncoding];
++    mark_painted(s, dst);
++    return true;
++  }
++}
++
++void paga_metal_compositor_evict_cache(void* handle, uint16_t slot) {
++  if (!handle) return;
++  @autoreleasepool {
++    PagaMetalState* s = (__bridge PagaMetalState*)handle;
++    NSNumber* key = @(slot);
++    PagaMetalCacheEntry* entry = s->cache[key];
++    if (entry) {
++      if (s->budgetUsed >= entry.bytes) s->budgetUsed -= entry.bytes;
++      [s->cache removeObjectForKey:key];
++    }
++  }
++}
++
++CVPixelBufferRef paga_metal_compositor_end_frame(void* handle, uint16_t* out_width,
++                                                 uint16_t* out_height) {
++  if (!handle) return NULL;
++  @autoreleasepool {
++    PagaMetalState* s = (__bridge PagaMetalState*)handle;
++    if (!s->dirty || !s->outputPool || s->outputWidth == 0 || s->outputHeight == 0) {
++      if (s->pendingCmd) {
++        [s->pendingCmd commit];
++        [s->pendingCmd waitUntilCompleted];
++        s->pendingCmd = nil;
++      }
++      return NULL;
++    }
++    NSDictionary* aux = @{(id)kCVPixelBufferPoolAllocationThresholdKey : @(5)};
++    CVPixelBufferRef pb = NULL;
++    if (CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(
++            kCFAllocatorDefault, s->outputPool, (__bridge CFDictionaryRef)aux, &pb) !=
++            kCVReturnSuccess ||
++        !pb) {
++      return NULL;
++    }
++    CVMetalTextureRef outTexRef = NULL;
++    if (CVMetalTextureCacheCreateTextureFromImage(
++            kCFAllocatorDefault, s->textureCache, pb, NULL, MTLPixelFormatBGRA8Unorm,
++            s->outputWidth, s->outputHeight, 0, &outTexRef) != kCVReturnSuccess ||
++        !outTexRef) {
++      CVPixelBufferRelease(pb);
++      return NULL;
++    }
++    id<MTLTexture> outTex = CVMetalTextureGetTexture(outTexRef);
++    id<MTLCommandBuffer> cmd = ensure_cmd(s);
++    if (!outTex || !cmd) {
++      CFRelease(outTexRef);
++      CVPixelBufferRelease(pb);
++      return NULL;
++    }
++
++    // Fast path: single unscaled mapped surface covering the entire output.
++    BOOL fastCovered = NO;
++    if (s->mapOrder.count == 1) {
++      PagaMetalSurface* only = s->surfaces[s->mapOrder[0]];
++      if (only && only.mapped && only.originX == 0 && only.originY == 0 &&
++          only.width == s->outputWidth && only.height == s->outputHeight &&
++          only.targetW == s->outputWidth && only.targetH == s->outputHeight) {
++        id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
++        [blit copyFromTexture:only.color
++                  sourceSlice:0
++                  sourceLevel:0
++                 sourceOrigin:MTLOriginMake(0, 0, 0)
++                   sourceSize:MTLSizeMake(s->outputWidth, s->outputHeight, 1)
++                    toTexture:outTex
++             destinationSlice:0
++             destinationLevel:0
++            destinationOrigin:MTLOriginMake(0, 0, 0)];
++        [blit endEncoding];
++        fastCovered = YES;
++      }
++    }
++
++    if (!fastCovered) {
++      fill_texture_solid(s, outTex, 0, 0, s->outputWidth, s->outputHeight, 0.0f, 0.0f, 0.0f);
++      for (NSNumber* key in s->mapOrder) {
++        PagaMetalSurface* surf = s->surfaces[key];
++        if (!surf || !surf.mapped) continue;
++        if (surf.originX >= s->outputWidth || surf.originY >= s->outputHeight) continue;
++        if (surf.targetW == surf.width && surf.targetH == surf.height) {
++          uint32_t cw = surf.width < (s->outputWidth - surf.originX)
++                            ? surf.width
++                            : (s->outputWidth - surf.originX);
++          uint32_t ch = surf.height < (s->outputHeight - surf.originY)
++                            ? surf.height
++                            : (s->outputHeight - surf.originY);
++          if (cw == 0 || ch == 0) continue;
++          id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
++          [blit copyFromTexture:surf.color
++                    sourceSlice:0
++                    sourceLevel:0
++                   sourceOrigin:MTLOriginMake(0, 0, 0)
++                     sourceSize:MTLSizeMake(cw, ch, 1)
++                      toTexture:outTex
++               destinationSlice:0
++               destinationLevel:0
++              destinationOrigin:MTLOriginMake(surf.originX, surf.originY, 0)];
++          [blit endEncoding];
++        } else {
++          id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
++          BlitScaledParams p = {
++              surf.originX, surf.originY, surf.targetW, surf.targetH, surf.width, surf.height,
++          };
++          [enc setTexture:surf.color atIndex:0];
++          [enc setTexture:outTex atIndex:1];
++          [enc setBytes:&p length:sizeof(p) atIndex:0];
++          dispatch_2d(enc, s->blitScaledPipe, surf.targetW, surf.targetH);
++          [enc endEncoding];
++        }
++      }
++    }
++
++    [cmd commit];
++    [cmd waitUntilCompleted];
++    BOOL failed = (cmd.status == MTLCommandBufferStatusError);
++    s->pendingCmd = nil;
++    CFRelease(outTexRef);
++    CVMetalTextureCacheFlush(s->textureCache, 0);
++    if (failed) {
++      CVPixelBufferRelease(pb);
++      return NULL;
++    }
++    s->dirty = NO;
++    *out_width = s->outputWidth;
++    *out_height = s->outputHeight;
++    return pb;
++  }
++}
+--- a/crates/ironrdp-egfx-native/src/vaapi.c
++++ b/crates/ironrdp-egfx-native/src/vaapi.c
+@@ -0,0 +1,157 @@
++#include <dlfcn.h>
++#include <errno.h>
++#include <libavcodec/avcodec.h>
++#include <libavutil/hwcontext.h>
++#include <libavutil/pixfmt.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
++
++#define STRING_IMPL(value) #value
++#define STRING(value) STRING_IMPL(value)
++
++#define CODEC_FUNCTIONS(F) \
++  F(avcodec_find_decoder) \
++  F(avcodec_get_hw_config) \
++  F(avcodec_alloc_context3) \
++  F(avcodec_open2) \
++  F(avcodec_free_context) \
++  F(avcodec_flush_buffers) \
++  F(avcodec_send_packet) \
++  F(avcodec_receive_frame) \
++  F(av_packet_alloc) \
++  F(av_packet_free) \
++  F(av_packet_unref) \
++  F(av_new_packet)
++
++#define UTIL_FUNCTIONS(F) \
++  F(av_hwdevice_ctx_create) \
++  F(av_hwframe_transfer_data) \
++  F(av_frame_alloc) \
++  F(av_frame_free) \
++  F(av_frame_unref)
++
++typedef struct {
++  void* codec_library;
++  void* util_library;
++#define DECLARE(fn) __typeof__(&fn) fn;
++  CODEC_FUNCTIONS(DECLARE)
++  UTIL_FUNCTIONS(DECLARE)
++#undef DECLARE
++  AVCodecContext* context;
++  AVPacket* packet;
++  AVFrame* hardware;
++  AVFrame* pixels;
++  int64_t timestamp;
++} PagaVaapi;
++
++typedef struct {
++  const uint8_t* planes[3];
++  size_t strides[3];
++  size_t width, height;
++  bool interleaved_chroma;
++} PagaVaapiPicture;
++
++static enum AVPixelFormat select_vaapi(AVCodecContext* context, const enum AVPixelFormat* formats) {
++  (void)context;
++  for (const enum AVPixelFormat* format = formats; *format != AV_PIX_FMT_NONE; ++format) {
++    if (*format == AV_PIX_FMT_VAAPI) return *format;
++  }
++  return AV_PIX_FMT_NONE;
++}
++
++void paga_rdp_vaapi_close(PagaVaapi* decoder) {
++  if (!decoder) return;
++  if (decoder->packet) decoder->av_packet_free(&decoder->packet);
++  if (decoder->hardware) decoder->av_frame_free(&decoder->hardware);
++  if (decoder->pixels) decoder->av_frame_free(&decoder->pixels);
++  if (decoder->context) decoder->avcodec_free_context(&decoder->context);
++  if (decoder->codec_library) dlclose(decoder->codec_library);
++  if (decoder->util_library) dlclose(decoder->util_library);
++  free(decoder);
++}
++
++PagaVaapi* paga_rdp_vaapi_open(void) {
++  PagaVaapi* decoder = calloc(1, sizeof(*decoder));
++  if (!decoder) return NULL;
++  decoder->util_library = dlopen("libavutil.so." STRING(LIBAVUTIL_VERSION_MAJOR), RTLD_NOW | RTLD_LOCAL);
++  decoder->codec_library = dlopen("libavcodec.so." STRING(LIBAVCODEC_VERSION_MAJOR), RTLD_NOW | RTLD_LOCAL);
++  if (!decoder->codec_library || !decoder->util_library) goto fail;
++#define LOAD_CODEC(fn) if (!(decoder->fn = (__typeof__(&fn))dlsym(decoder->codec_library, #fn))) goto fail;
++#define LOAD_UTIL(fn) if (!(decoder->fn = (__typeof__(&fn))dlsym(decoder->util_library, #fn))) goto fail;
++  CODEC_FUNCTIONS(LOAD_CODEC)
++  UTIL_FUNCTIONS(LOAD_UTIL)
++#undef LOAD_CODEC
++#undef LOAD_UTIL
++  const AVCodec* codec = decoder->avcodec_find_decoder(AV_CODEC_ID_H264);
++  if (!codec) goto fail;
++  for (int i = 0;; ++i) {
++    const AVCodecHWConfig* config = decoder->avcodec_get_hw_config(codec, i);
++    if (!config) goto fail;
++    if (config->device_type == AV_HWDEVICE_TYPE_VAAPI &&
++        config->pix_fmt == AV_PIX_FMT_VAAPI &&
++        (config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX)) break;
++  }
++  decoder->context = decoder->avcodec_alloc_context3(codec);
++  if (!decoder->context) goto fail;
++  if (decoder->av_hwdevice_ctx_create(&decoder->context->hw_device_ctx,
++                                      AV_HWDEVICE_TYPE_VAAPI, NULL, NULL, 0) < 0) goto fail;
++  decoder->context->get_format = select_vaapi;
++  decoder->context->flags |= AV_CODEC_FLAG_LOW_DELAY;
++  decoder->context->thread_count = 1;
++  decoder->context->max_pixels = 16777216;
++  if (decoder->avcodec_open2(decoder->context, codec, NULL) < 0) goto fail;
++  decoder->packet = decoder->av_packet_alloc();
++  decoder->hardware = decoder->av_frame_alloc();
++  decoder->pixels = decoder->av_frame_alloc();
++  if (decoder->packet && decoder->hardware && decoder->pixels) return decoder;
++fail:
++  paga_rdp_vaapi_close(decoder);
++  return NULL;
++}
++
++bool paga_rdp_vaapi_decode(PagaVaapi* decoder, const uint8_t* input, size_t size,
++                          PagaVaapiPicture* result) {
++  decoder->av_frame_unref(decoder->pixels);
++  decoder->av_packet_unref(decoder->packet);
++  if (!size || size > INT32_MAX || decoder->av_new_packet(decoder->packet, (int)size) < 0) return false;
++  memcpy(decoder->packet->data, input, size);
++  decoder->packet->pts = decoder->packet->dts = ++decoder->timestamp;
++  if (decoder->avcodec_send_packet(decoder->context, decoder->packet) < 0) return false;
++  decoder->av_packet_unref(decoder->packet);
++  for (int i = 0; i < 16; ++i) {
++    if (decoder->avcodec_receive_frame(decoder->context, decoder->hardware) < 0) return false;
++    if (decoder->hardware->pts == decoder->timestamp) break;
++    decoder->av_frame_unref(decoder->hardware);
++    if (i == 15) return false;
++  }
++  const bool va_surface = decoder->hardware->format == AV_PIX_FMT_VAAPI;
++  const bool copied = va_surface &&
++      decoder->av_hwframe_transfer_data(decoder->pixels, decoder->hardware, 0) == 0;
++  decoder->av_frame_unref(decoder->hardware);
++  if (!copied) return false;
++  AVFrame* frame = decoder->pixels;
++  if (frame->width <= 0 || frame->height <= 0 ||
++      (int64_t)frame->width * frame->height > 16777216 ||
++      frame->width > UINT16_MAX || frame->height > UINT16_MAX) return false;
++  const bool nv12 = frame->format == AV_PIX_FMT_NV12;
++  if (!nv12 && frame->format != AV_PIX_FMT_YUV420P && frame->format != AV_PIX_FMT_YUVJ420P) return false;
++  result->width = (size_t)frame->width;
++  result->height = (size_t)frame->height;
++  result->interleaved_chroma = nv12;
++  const int chroma_width = (frame->width + 1) / 2;
++  for (int plane = 0; plane < (nv12 ? 2 : 3); ++plane) {
++    const int visible_bytes = plane == 0 ? frame->width : chroma_width * (nv12 ? 2 : 1);
++    if (!frame->data[plane] || frame->linesize[plane] < visible_bytes ||
++        frame->linesize[plane] > UINT16_MAX) return false;
++    result->planes[plane] = frame->data[plane];
++    result->strides[plane] = (size_t)frame->linesize[plane];
++  }
++  return true;
++}
++
++void paga_rdp_vaapi_reset(PagaVaapi* decoder) {
++  decoder->avcodec_flush_buffers(decoder->context);
++  decoder->av_frame_unref(decoder->pixels);
++}
+--- a/crates/ironrdp-egfx-native/src/vaapi.rs
++++ b/crates/ironrdp-egfx-native/src/vaapi.rs
+@@ -0,0 +1,164 @@
++use core::{ffi::c_void, marker::PhantomData, ptr::NonNull};
++
++use ironrdp_egfx::decode::{DecodedFrame, DecoderError, DecoderResult, H264Decoder, Yuv420Frame};
++
++#[repr(C)]
++#[derive(Default)]
++struct RawPicture {
++    planes: [*const u8; 3],
++    strides: [usize; 3],
++    width: usize,
++    height: usize,
++    interleaved_chroma: bool,
++}
++
++unsafe extern "C" {
++    fn paga_rdp_vaapi_open() -> *mut c_void;
++    fn paga_rdp_vaapi_decode(decoder: *mut c_void, bytes: *const u8, len: usize, result: *mut RawPicture) -> bool;
++    fn paga_rdp_vaapi_reset(decoder: *mut c_void);
++    fn paga_rdp_vaapi_close(decoder: *mut c_void);
++}
++
++struct Picture<'a> {
++    raw: RawPicture,
++    // Data stays valid until we take another exclusive borrow of the decoder.
++    _decoder: PhantomData<&'a mut VaapiDecoder>,
++}
++
++impl Picture<'_> {
++    fn plane(&self, index: usize) -> &[u8] {
++        let rows = if index == 0 {
++            self.raw.height
++        } else {
++            self.raw.height.div_ceil(2)
++        };
++        // Native decode validates width, height, format, non-null planes and
++        // positive pitch. FFmpeg owns the CPU transfer buffers.
++        unsafe { core::slice::from_raw_parts(self.raw.planes[index], self.raw.strides[index] * rows) }
++    }
++}
++
++pub(crate) struct VaapiDecoder(NonNull<c_void>);
++
++// AVCodecContext is confined to one exclusive caller at any moment. FFmpeg
++// and the VA-API driver manage their own internal thread synchronization.
++unsafe impl Send for VaapiDecoder {}
++
++impl VaapiDecoder {
++    pub fn new() -> DecoderResult<Self> {
++        NonNull::new(unsafe { paga_rdp_vaapi_open() })
++            .map(Self)
++            .ok_or_else(|| DecoderError::msg("VA-API H.264 is not available"))
++    }
++
++    fn picture(&mut self, bytes: &[u8]) -> DecoderResult<Picture<'_>> {
++        let mut raw = RawPicture::default();
++        if !unsafe { paga_rdp_vaapi_decode(self.0.as_ptr(), bytes.as_ptr(), bytes.len(), &mut raw) } {
++            return Err(DecoderError::msg("VA-API returned no matching H.264 frame"));
++        }
++        Ok(Picture {
++            raw,
++            _decoder: PhantomData,
++        })
++    }
++}
++
++impl Drop for VaapiDecoder {
++    fn drop(&mut self) {
++        unsafe { paga_rdp_vaapi_close(self.0.as_ptr()) };
++    }
++}
++
++impl H264Decoder for VaapiDecoder {
++    fn supports_yuv420(&self) -> bool {
++        true
++    }
++
++    fn decode(&mut self, bytes: &[u8]) -> DecoderResult<DecodedFrame> {
++        let mut rgba = Vec::new();
++        let (width, height) = self.decode_avc420(bytes, &mut rgba)?;
++        Ok(DecodedFrame::new(rgba, width, height))
++    }
++
++    fn decode_yuv420(&mut self, bytes: &[u8]) -> DecoderResult<Yuv420Frame> {
++        let picture = self.picture(bytes)?;
++        let width = picture.raw.width;
++        let height = picture.raw.height;
++        let chroma_width = width.div_ceil(2);
++        let chroma_rows = height.div_ceil(2);
++        let mut u = Vec::with_capacity(chroma_width * chroma_rows);
++        let mut v = Vec::with_capacity(chroma_width * chroma_rows);
++        if picture.raw.interleaved_chroma {
++            for row in picture.plane(1).chunks_exact(picture.raw.strides[1]) {
++                for pair in row[..chroma_width * 2].chunks_exact(2) {
++                    u.push(pair[0]);
++                    v.push(pair[1]);
++                }
++            }
++        } else {
++            for row in picture.plane(1).chunks_exact(picture.raw.strides[1]) {
++                u.extend_from_slice(&row[..chroma_width]);
++            }
++            for row in picture.plane(2).chunks_exact(picture.raw.strides[2]) {
++                v.extend_from_slice(&row[..chroma_width]);
++            }
++        }
++        Yuv420Frame::new(
++            width as u16,
++            height as u16,
++            picture.plane(0).to_vec(),
++            picture.raw.strides[0],
++            u,
++            v,
++            chroma_width,
++        )
++    }
++
++    fn decode_avc420(&mut self, bytes: &[u8], rgba: &mut Vec<u8>) -> DecoderResult<(u32, u32)> {
++        let picture = self.picture(bytes)?;
++        let width = picture.raw.width as u32;
++        let height = picture.raw.height as u32;
++        let [y_stride, u_stride, v_stride] = picture.raw.strides.map(|stride| stride as u32);
++        rgba.resize(picture.raw.width * picture.raw.height * 4, 0);
++        let result = if picture.raw.interleaved_chroma {
++            yuv::yuv_nv12_to_rgba(
++                &yuv::YuvBiPlanarImage {
++                    y_plane: picture.plane(0),
++                    uv_plane: picture.plane(1),
++                    y_stride,
++                    uv_stride: u_stride,
++                    width,
++                    height,
++                },
++                rgba,
++                width * 4,
++                yuv::YuvRange::Full,
++                yuv::YuvStandardMatrix::Bt709,
++                yuv::YuvConversionMode::Balanced,
++            )
++        } else {
++            yuv::yuv420_to_rgba(
++                &yuv::YuvPlanarImage {
++                    y_plane: picture.plane(0),
++                    u_plane: picture.plane(1),
++                    v_plane: picture.plane(2),
++                    y_stride,
++                    u_stride,
++                    v_stride,
++                    width,
++                    height,
++                },
++                rgba,
++                width * 4,
++                yuv::YuvRange::Full,
++                yuv::YuvStandardMatrix::Bt709,
++            )
++        };
++        result.map_err(|error| DecoderError::new("convert VA-API H.264 picture", error))?;
++        Ok((width, height))
++    }
++
++    fn reset(&mut self) {
++        unsafe { paga_rdp_vaapi_reset(self.0.as_ptr()) };
++    }
++}
+--- a/crates/ironrdp-egfx-native/src/video_toolbox.c
++++ b/crates/ironrdp-egfx-native/src/video_toolbox.c
+@@ -0,0 +1,193 @@
++#include <CoreMedia/CoreMedia.h>
++#include <CoreVideo/CoreVideo.h>
++#include <VideoToolbox/VideoToolbox.h>
++#include <stdint.h>
++#include <stdlib.h>
++
++typedef struct {
++  VTDecompressionSessionRef session;
++  CMVideoFormatDescriptionRef format;
++  CVPixelBufferRef image;
++  int64_t serial;
++  OSType pixel_format;
++} PagaVideoToolbox;
++
++typedef struct {
++  CVPixelBufferRef image;
++  const uint8_t* y;
++  const uint8_t* uv;
++  size_t y_stride, uv_stride, width, height;
++} PagaVtPlanes;
++
++static void receive_picture(void* context, void* token, OSStatus status,
++                            VTDecodeInfoFlags info, CVImageBufferRef image,
++                            CMTime timestamp, CMTime duration) {
++  PagaVideoToolbox* decoder = context;
++  (void)token;
++  (void)info;
++  (void)duration;
++  // The two consecutive AVC444 views must never be paired with old output.
++  if (status == noErr && image && !decoder->image &&
++      CMTimeCompare(timestamp, CMTimeMake(decoder->serial, 1000)) == 0) {
++    decoder->image = CVPixelBufferRetain(image);
++  }
++}
++
++bool paga_rdp_vt_supported(void) {
++  return VTIsHardwareDecodeSupported(kCMVideoCodecType_H264);
++}
++
++void paga_rdp_vt_close(PagaVideoToolbox* decoder) {
++  if (!decoder) return;
++  if (decoder->session) {
++    VTDecompressionSessionInvalidate(decoder->session);
++    CFRelease(decoder->session);
++  }
++  if (decoder->image) CVPixelBufferRelease(decoder->image);
++  if (decoder->format) CFRelease(decoder->format);
++  free(decoder);
++}
++
++PagaVideoToolbox* paga_rdp_vt_open(const uint8_t* sps, size_t sps_size,
++                                  const uint8_t* pps, size_t pps_size) {
++  const uint8_t* parameters[] = {sps, pps};
++  size_t lengths[] = {sps_size, pps_size};
++  CMVideoFormatDescriptionRef format = NULL;
++  if (CMVideoFormatDescriptionCreateFromH264ParameterSets(
++          NULL, 2, parameters, lengths, 4, &format) != noErr) return NULL;
++  PagaVideoToolbox* decoder = NULL;
++  CFDictionaryRef spec = NULL, output = NULL, iosurface = NULL;
++  CFNumberRef pixel_format = NULL;
++  CMVideoDimensions size = CMVideoFormatDescriptionGetDimensions(format);
++  if (size.width <= 0 || size.height <= 0 || (int64_t)size.width * size.height > 16777216)
++    goto cleanup;
++  const void* spec_key = kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder;
++  const void* spec_value = kCFBooleanTrue;
++  spec = CFDictionaryCreate(NULL, &spec_key, &spec_value, 1, &kCFTypeDictionaryKeyCallBacks,
++                            &kCFTypeDictionaryValueCallBacks);
++  // EGFX interprets the encoded samples as full range even when the SPS
++  // omits its VUI range flag. Ask VideoToolbox for the bitstream's range
++  // so it does not rescale the values before the EGFX YUV conversion.
++  CFTypeRef range = CMFormatDescriptionGetExtension(format, kCMFormatDescriptionExtension_FullRangeVideo);
++  const bool full_range = range && CFEqual(range, kCFBooleanTrue);
++  const OSType image_format = full_range ? kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
++                                        : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
++  int32_t format_number = (int32_t)image_format;
++  pixel_format = CFNumberCreate(NULL, kCFNumberSInt32Type, &format_number);
++  iosurface = CFDictionaryCreate(NULL, NULL, NULL, 0, NULL, NULL);
++  if (!spec || !pixel_format || !iosurface) goto cleanup;
++  const void* keys[] = {
++      kCVPixelBufferPixelFormatTypeKey,
++      kCVPixelBufferIOSurfacePropertiesKey,
++      kCVPixelBufferMetalCompatibilityKey,
++  };
++  const void* values[] = {pixel_format, iosurface, kCFBooleanTrue};
++  output = CFDictionaryCreate(NULL, keys, values, 3, &kCFTypeDictionaryKeyCallBacks,
++                              &kCFTypeDictionaryValueCallBacks);
++  if (!output) goto cleanup;
++  decoder = calloc(1, sizeof(*decoder));
++  if (!decoder) goto cleanup;
++  VTDecompressionOutputCallbackRecord callback = {receive_picture, decoder};
++  if (VTDecompressionSessionCreate(NULL, format, spec, output, &callback, &decoder->session)
++      != noErr) {
++    paga_rdp_vt_close(decoder);
++    decoder = NULL;
++  } else {
++    decoder->pixel_format = image_format;
++    decoder->format = (CMVideoFormatDescriptionRef)CFRetain(format);
++    VTSessionSetProperty(decoder->session, kVTDecompressionPropertyKey_RealTime, kCFBooleanTrue);
++  }
++cleanup:
++  if (output) CFRelease(output);
++  if (iosurface) CFRelease(iosurface);
++  if (pixel_format) CFRelease(pixel_format);
++  if (spec) CFRelease(spec);
++  CFRelease(format);
++  return decoder;
++}
++
++static CVPixelBufferRef decode_raw_image(PagaVideoToolbox* decoder, const uint8_t* data,
++                                         size_t length) {
++  CMBlockBufferRef block = NULL;
++  CMSampleBufferRef sample = NULL;
++  CVPixelBufferRef result = NULL;
++  if (decoder->image || length == 0) return NULL;
++  if (CMBlockBufferCreateWithMemoryBlock(NULL, NULL, length, kCFAllocatorDefault,
++                                        NULL, 0, length, kCMBlockBufferAssureMemoryNowFlag, &block) != noErr ||
++      CMBlockBufferReplaceDataBytes(data, block, 0, length) != noErr)
++    goto cleanup;
++  // Request the picture for this sample without temporal reordering.
++  decoder->serial++;
++  CMSampleTimingInfo timing = {kCMTimeInvalid, CMTimeMake(decoder->serial, 1000), kCMTimeInvalid};
++  if (CMSampleBufferCreateReady(NULL, block, decoder->format, 1, 1, &timing,
++                                1, &length, &sample) != noErr)
++    goto cleanup;
++  VTDecodeInfoFlags info = 0;
++  OSStatus status = VTDecompressionSessionDecodeFrame(decoder->session, sample, 0, NULL, &info);
++  OSStatus waited = VTDecompressionSessionWaitForAsynchronousFrames(decoder->session);
++  if (status != noErr || waited != noErr) goto cleanup;
++  CVPixelBufferRef image = decoder->image;
++  if (!image || CVPixelBufferGetPixelFormatType(image) != decoder->pixel_format ||
++      CVPixelBufferGetPlaneCount(image) != 2)
++    goto cleanup;
++  size_t width = CVPixelBufferGetWidth(image), height = CVPixelBufferGetHeight(image);
++  if (!width || !height || width > UINT16_MAX || height > UINT16_MAX ||
++      width * height > 16777216)
++    goto cleanup;
++  result = image;
++  decoder->image = NULL;
++cleanup:
++  if (decoder->image) {
++    CVPixelBufferRelease(decoder->image);
++    decoder->image = NULL;
++  }
++  if (sample) CFRelease(sample);
++  if (block) CFRelease(block);
++  return result;
++}
++
++CVPixelBufferRef paga_rdp_vt_decode_pixel_buffer(PagaVideoToolbox* decoder, const uint8_t* data,
++                                                 size_t length, size_t* out_width,
++                                                 size_t* out_height) {
++  CVPixelBufferRef image = decode_raw_image(decoder, data, length);
++  if (!image) return NULL;
++  *out_width = CVPixelBufferGetWidth(image);
++  *out_height = CVPixelBufferGetHeight(image);
++  return image;
++}
++
++void paga_rdp_vt_release_pixel_buffer(CVPixelBufferRef image) {
++  if (image) CVPixelBufferRelease(image);
++}
++
++bool paga_rdp_vt_decode(PagaVideoToolbox* decoder, const uint8_t* data, size_t length,
++                        PagaVtPlanes* result) {
++  CVPixelBufferRef image = decode_raw_image(decoder, data, length);
++  if (!image) return false;
++  size_t width = CVPixelBufferGetWidth(image), height = CVPixelBufferGetHeight(image);
++  size_t y_stride = CVPixelBufferGetBytesPerRowOfPlane(image, 0);
++  size_t uv_stride = CVPixelBufferGetBytesPerRowOfPlane(image, 1);
++  if (y_stride < width || uv_stride < ((width + 1) / 2) * 2 ||
++      y_stride > UINT16_MAX || uv_stride > UINT16_MAX ||
++      CVPixelBufferGetHeightOfPlane(image, 0) < height ||
++      CVPixelBufferGetHeightOfPlane(image, 1) < (height + 1) / 2 ||
++      CVPixelBufferLockBaseAddress(image, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess) {
++    CVPixelBufferRelease(image);
++    return false;
++  }
++  const void* y = CVPixelBufferGetBaseAddressOfPlane(image, 0);
++  const void* uv = CVPixelBufferGetBaseAddressOfPlane(image, 1);
++  if (!y || !uv) {
++    CVPixelBufferUnlockBaseAddress(image, kCVPixelBufferLock_ReadOnly);
++    CVPixelBufferRelease(image);
++    return false;
++  }
++  *result = (PagaVtPlanes){image, y, uv, y_stride, uv_stride, width, height};
++  return true;
++}
++
++void paga_rdp_vt_release_frame(CVPixelBufferRef image) {
++  if (!image) return;
++  CVPixelBufferUnlockBaseAddress(image, kCVPixelBufferLock_ReadOnly);
++  CVPixelBufferRelease(image);
++}
+--- a/crates/ironrdp-egfx-native/src/video_toolbox.rs
++++ b/crates/ironrdp-egfx-native/src/video_toolbox.rs
+@@ -0,0 +1,781 @@
++//! Hardware-only VideoToolbox H.264 with zero-readback CVPixelBuffer & Metal GPU composition.
++use core::any::Any;
++use core::ffi::c_void;
++use core::ptr::NonNull;
++use ironrdp_egfx::avc444::Avc444Layout;
++use ironrdp_egfx::decode::{DecodedFrame, DecoderError, DecoderResult, H264Decoder, Yuv420Frame};
++use ironrdp_egfx::gpu::{ExclusiveRectangle, GpuCompositor, GpuPresentedFrame, HwVideoFrame};
++use ironrdp_egfx::pdu::{Color, Point, annex_b_units};
++
++#[repr(C)]
++#[derive(Default)]
++struct Planes {
++    image: *mut c_void,
++    y: *const u8,
++    uv: *const u8,
++    y_stride: usize,
++    uv_stride: usize,
++    width: usize,
++    height: usize,
++}
++
++#[repr(C)]
++#[derive(Clone, Copy)]
++struct MetalRect {
++    left: u16,
++    top: u16,
++    right: u16,
++    bottom: u16,
++}
++
++impl From<&ExclusiveRectangle> for MetalRect {
++    fn from(r: &ExclusiveRectangle) -> Self {
++        Self {
++            left: r.left,
++            top: r.top,
++            right: r.right,
++            bottom: r.bottom,
++        }
++    }
++}
++
++#[repr(C)]
++#[derive(Clone, Copy)]
++struct MetalPoint {
++    x: u16,
++    y: u16,
++}
++
++impl From<&Point> for MetalPoint {
++    fn from(p: &Point) -> Self {
++        Self { x: p.x, y: p.y }
++    }
++}
++
++unsafe extern "C" {
++    fn paga_rdp_vt_supported() -> bool;
++    fn paga_rdp_vt_open(sps: *const u8, sps_len: usize, pps: *const u8, pps_len: usize) -> *mut c_void;
++    fn paga_rdp_vt_decode(context: *mut c_void, bytes: *const u8, len: usize, planes: *mut Planes) -> bool;
++    fn paga_rdp_vt_decode_pixel_buffer(
++        context: *mut c_void,
++        bytes: *const u8,
++        len: usize,
++        width: *mut usize,
++        height: *mut usize,
++    ) -> *mut c_void;
++    fn paga_rdp_vt_release_pixel_buffer(image: *mut c_void);
++    fn paga_rdp_vt_release_frame(image: *mut c_void);
++    fn paga_rdp_vt_close(context: *mut c_void);
++
++    fn paga_metal_compositor_new() -> *mut c_void;
++    fn paga_metal_compositor_free(handle: *mut c_void);
++    fn paga_metal_compositor_reset(handle: *mut c_void, width: u32, height: u32) -> bool;
++    fn paga_metal_compositor_create_surface(handle: *mut c_void, id: u16, width: u16, height: u16) -> bool;
++    fn paga_metal_compositor_delete_surface(handle: *mut c_void, id: u16);
++    fn paga_metal_compositor_map_surface(
++        handle: *mut c_void,
++        id: u16,
++        origin_x: u32,
++        origin_y: u32,
++        target_w: u32,
++        target_h: u32,
++    ) -> bool;
++    fn paga_metal_compositor_unmap_surface(handle: *mut c_void, id: u16);
++    fn paga_metal_compositor_apply_avc420(
++        handle: *mut c_void,
++        id: u16,
++        pb: *mut c_void,
++        dest: MetalRect,
++        rects: *const MetalRect,
++        rect_count: usize,
++    ) -> bool;
++    fn paga_metal_compositor_apply_avc444(
++        handle: *mut c_void,
++        id: u16,
++        is_v2: bool,
++        main_pb: *mut c_void,
++        main_rects: *const MetalRect,
++        main_count: usize,
++        aux_pb: *mut c_void,
++        aux_rects: *const MetalRect,
++        aux_count: usize,
++        painted: *const MetalRect,
++        painted_count: usize,
++    ) -> bool;
++    fn paga_metal_compositor_apply_rgba(
++        handle: *mut c_void,
++        id: u16,
++        dest: MetalRect,
++        rgba: *const u8,
++        pitch: usize,
++        src_x: u16,
++        src_y: u16,
++    ) -> bool;
++    fn paga_metal_compositor_apply_clearcodec(
++        handle: *mut c_void,
++        id: u16,
++        dest: MetalRect,
++        bgra_coverage: *const u8,
++    ) -> bool;
++    fn paga_metal_compositor_solid_fill(
++        handle: *mut c_void,
++        id: u16,
++        r: u8,
++        g: u8,
++        b: u8,
++        rects: *const MetalRect,
++        rect_count: usize,
++    ) -> bool;
++    fn paga_metal_compositor_surface_to_surface(
++        handle: *mut c_void,
++        src_id: u16,
++        dst_id: u16,
++        src_rect: MetalRect,
++        dsts: *const MetalPoint,
++        dst_count: usize,
++    ) -> bool;
++    fn paga_metal_compositor_surface_to_cache(
++        handle: *mut c_void,
++        surface_id: u16,
++        slot: u16,
++        src_rect: MetalRect,
++    ) -> bool;
++    fn paga_metal_compositor_cache_to_surface(
++        handle: *mut c_void,
++        slot: u16,
++        surface_id: u16,
++        dsts: *const MetalPoint,
++        dst_count: usize,
++    ) -> bool;
++    fn paga_metal_compositor_evict_cache(handle: *mut c_void, slot: u16);
++    fn paga_metal_compositor_end_frame(handle: *mut c_void, width: *mut u16, height: *mut u16) -> *mut c_void;
++}
++
++/// GPU-resident VideoToolbox NV12 `CVPixelBuffer` (IOSurface-backed).
++pub struct VtHwFrame {
++    pixel_buffer: NonNull<c_void>,
++    width: u32,
++    height: u32,
++}
++
++// CVPixelBufferRef is thread-safe for read-only IOSurface consumption.
++unsafe impl Send for VtHwFrame {}
++
++impl VtHwFrame {
++    pub fn as_ptr(&self) -> *mut c_void {
++        self.pixel_buffer.as_ptr()
++    }
++}
++
++impl Drop for VtHwFrame {
++    fn drop(&mut self) {
++        unsafe { paga_rdp_vt_release_pixel_buffer(self.pixel_buffer.as_ptr()) };
++    }
++}
++
++impl HwVideoFrame for VtHwFrame {
++    fn width(&self) -> u32 {
++        self.width
++    }
++
++    fn height(&self) -> u32 {
++        self.height
++    }
++
++    fn as_any(&self) -> &dyn Any {
++        self
++    }
++}
++
++/// Metal-composited `CVPixelBuffer` (`kCVPixelFormatType_32BGRA`, IOSurface-backed)
++/// ready for direct zero-copy presentation into Flutter's `FlutterTexture`.
++pub struct MetalPresentedFrame {
++    pixel_buffer: NonNull<c_void>,
++    width: u16,
++    height: u16,
++}
++
++unsafe impl Send for MetalPresentedFrame {}
++
++impl MetalPresentedFrame {
++    /// Raw `CVPixelBufferRef` pointer as `u64` for passing across the runner FFI.
++    /// Valid while `self` is alive; the receiver must `CFRetain` if storing beyond the call.
++    pub fn raw_pixel_buffer(&self) -> u64 {
++        self.pixel_buffer.as_ptr() as usize as u64
++    }
++}
++
++impl Drop for MetalPresentedFrame {
++    fn drop(&mut self) {
++        unsafe { paga_rdp_vt_release_pixel_buffer(self.pixel_buffer.as_ptr()) };
++    }
++}
++
++impl GpuPresentedFrame for MetalPresentedFrame {
++    fn width(&self) -> u16 {
++        self.width
++    }
++
++    fn height(&self) -> u16 {
++        self.height
++    }
++
++    fn as_any(&self) -> &dyn Any {
++        self
++    }
++
++    fn into_any(self: Box<Self>) -> Box<dyn Any + Send> {
++        self
++    }
++}
++
++/// Metal GPU-resident EGFX surface compositor for macOS.
++pub struct MetalGpuCompositor {
++    handle: NonNull<c_void>,
++}
++
++// Exclusively mutated by the EGFX pipeline owner; Metal objects are safe to move across threads.
++unsafe impl Send for MetalGpuCompositor {}
++
++impl MetalGpuCompositor {
++    pub fn new() -> Option<Self> {
++        NonNull::new(unsafe { paga_metal_compositor_new() }).map(|handle| Self { handle })
++    }
++}
++
++impl Drop for MetalGpuCompositor {
++    fn drop(&mut self) {
++        unsafe { paga_metal_compositor_free(self.handle.as_ptr()) };
++    }
++}
++
++impl GpuCompositor for MetalGpuCompositor {
++    fn reset(&mut self, width: u32, height: u32) -> bool {
++        unsafe { paga_metal_compositor_reset(self.handle.as_ptr(), width, height) }
++    }
++
++    fn create_surface(&mut self, id: u16, width: u16, height: u16) -> bool {
++        unsafe { paga_metal_compositor_create_surface(self.handle.as_ptr(), id, width, height) }
++    }
++
++    fn delete_surface(&mut self, id: u16) {
++        unsafe { paga_metal_compositor_delete_surface(self.handle.as_ptr(), id) };
++    }
++
++    fn map_surface_scaled(&mut self, id: u16, origin: (u32, u32), target: (u32, u32)) -> bool {
++        unsafe {
++            paga_metal_compositor_map_surface(self.handle.as_ptr(), id, origin.0, origin.1, target.0, target.1)
++        }
++    }
++
++    fn unmap_surface(&mut self, id: u16) {
++        unsafe { paga_metal_compositor_unmap_surface(self.handle.as_ptr(), id) };
++    }
++
++    fn apply_hw_avc420(
++        &mut self,
++        surface_id: u16,
++        frame: &dyn HwVideoFrame,
++        dest: &ExclusiveRectangle,
++        rects: &[ExclusiveRectangle],
++    ) -> bool {
++        let Some(vt) = frame.as_any().downcast_ref::<VtHwFrame>() else {
++            return false;
++        };
++        let raw_rects: Vec<MetalRect> = rects.iter().map(MetalRect::from).collect();
++        unsafe {
++            paga_metal_compositor_apply_avc420(
++                self.handle.as_ptr(),
++                surface_id,
++                vt.as_ptr(),
++                MetalRect::from(dest),
++                raw_rects.as_ptr(),
++                raw_rects.len(),
++            )
++        }
++    }
++
++    fn apply_hw_avc444(
++        &mut self,
++        surface_id: u16,
++        layout: Avc444Layout,
++        main: Option<(&dyn HwVideoFrame, &[ExclusiveRectangle])>,
++        auxiliary: Option<(&dyn HwVideoFrame, &[ExclusiveRectangle])>,
++        painted: &[ExclusiveRectangle],
++    ) -> bool {
++        let (main_pb, main_rects) = match main {
++            Some((frame, rects)) => {
++                let Some(vt) = frame.as_any().downcast_ref::<VtHwFrame>() else {
++                    return false;
++                };
++                (vt.as_ptr(), rects.iter().map(MetalRect::from).collect::<Vec<_>>())
++            }
++            None => (core::ptr::null_mut(), Vec::new()),
++        };
++        let (aux_pb, aux_rects) = match auxiliary {
++            Some((frame, rects)) => {
++                let Some(vt) = frame.as_any().downcast_ref::<VtHwFrame>() else {
++                    return false;
++                };
++                (vt.as_ptr(), rects.iter().map(MetalRect::from).collect::<Vec<_>>())
++            }
++            None => (core::ptr::null_mut(), Vec::new()),
++        };
++        let painted_rects: Vec<MetalRect> = painted.iter().map(MetalRect::from).collect();
++        unsafe {
++            paga_metal_compositor_apply_avc444(
++                self.handle.as_ptr(),
++                surface_id,
++                matches!(layout, Avc444Layout::V2),
++                main_pb,
++                main_rects.as_ptr(),
++                main_rects.len(),
++                aux_pb,
++                aux_rects.as_ptr(),
++                aux_rects.len(),
++                painted_rects.as_ptr(),
++                painted_rects.len(),
++            )
++        }
++    }
++
++    fn apply_rgba_region(
++        &mut self,
++        surface_id: u16,
++        dest: &ExclusiveRectangle,
++        rgba: &[u8],
++        source_pitch: usize,
++        source_origin: (u16, u16),
++    ) -> bool {
++        if dest.left >= dest.right || dest.top >= dest.bottom {
++            return true;
++        }
++        let width = usize::from(dest.right - dest.left);
++        let height = usize::from(dest.bottom - dest.top);
++        let row_bytes = width.saturating_mul(4);
++        let start = usize::from(source_origin.1)
++            .saturating_mul(source_pitch)
++            .saturating_add(usize::from(source_origin.0).saturating_mul(4));
++        let needed = start
++            .saturating_add(height.saturating_sub(1).saturating_mul(source_pitch))
++            .saturating_add(row_bytes);
++        if source_pitch < row_bytes || needed > rgba.len() {
++            return false;
++        }
++        unsafe {
++            paga_metal_compositor_apply_rgba(
++                self.handle.as_ptr(),
++                surface_id,
++                MetalRect::from(dest),
++                rgba.as_ptr(),
++                source_pitch,
++                source_origin.0,
++                source_origin.1,
++            )
++        }
++    }
++
++    fn apply_clearcodec(&mut self, surface_id: u16, dest: &ExclusiveRectangle, bgra_coverage: &[u8]) -> bool {
++        if dest.left >= dest.right || dest.top >= dest.bottom {
++            return true;
++        }
++        let expected = usize::from(dest.right - dest.left)
++            .saturating_mul(usize::from(dest.bottom - dest.top))
++            .saturating_mul(4);
++        if bgra_coverage.len() < expected {
++            return false;
++        }
++        unsafe {
++            paga_metal_compositor_apply_clearcodec(
++                self.handle.as_ptr(),
++                surface_id,
++                MetalRect::from(dest),
++                bgra_coverage.as_ptr(),
++            )
++        }
++    }
++
++    fn solid_fill(&mut self, surface_id: u16, color: &Color, rects: &[ExclusiveRectangle]) -> bool {
++        let raw_rects: Vec<MetalRect> = rects.iter().map(MetalRect::from).collect();
++        unsafe {
++            paga_metal_compositor_solid_fill(
++                self.handle.as_ptr(),
++                surface_id,
++                color.r,
++                color.g,
++                color.b,
++                raw_rects.as_ptr(),
++                raw_rects.len(),
++            )
++        }
++    }
++
++    fn surface_to_surface(
++        &mut self,
++        src_id: u16,
++        dst_id: u16,
++        src_rect: &ExclusiveRectangle,
++        dst_points: &[Point],
++    ) -> bool {
++        let raw_points: Vec<MetalPoint> = dst_points.iter().map(MetalPoint::from).collect();
++        unsafe {
++            paga_metal_compositor_surface_to_surface(
++                self.handle.as_ptr(),
++                src_id,
++                dst_id,
++                MetalRect::from(src_rect),
++                raw_points.as_ptr(),
++                raw_points.len(),
++            )
++        }
++    }
++
++    fn surface_to_cache(&mut self, surface_id: u16, cache_slot: u16, src_rect: &ExclusiveRectangle) -> bool {
++        unsafe {
++            paga_metal_compositor_surface_to_cache(
++                self.handle.as_ptr(),
++                surface_id,
++                cache_slot,
++                MetalRect::from(src_rect),
++            )
++        }
++    }
++
++    fn cache_to_surface(&mut self, cache_slot: u16, surface_id: u16, dst_points: &[Point]) -> bool {
++        let raw_points: Vec<MetalPoint> = dst_points.iter().map(MetalPoint::from).collect();
++        unsafe {
++            paga_metal_compositor_cache_to_surface(
++                self.handle.as_ptr(),
++                cache_slot,
++                surface_id,
++                raw_points.as_ptr(),
++                raw_points.len(),
++            )
++        }
++    }
++
++    fn evict_cache_entry(&mut self, cache_slot: u16) {
++        unsafe { paga_metal_compositor_evict_cache(self.handle.as_ptr(), cache_slot) };
++    }
++
++    fn end_frame(&mut self) -> Option<Box<dyn GpuPresentedFrame>> {
++        let mut width = 0u16;
++        let mut height = 0u16;
++        let ptr = unsafe { paga_metal_compositor_end_frame(self.handle.as_ptr(), &mut width, &mut height) };
++        let pixel_buffer = NonNull::new(ptr)?;
++        Some(Box::new(MetalPresentedFrame {
++            pixel_buffer,
++            width,
++            height,
++        }))
++    }
++}
++
++impl Drop for Planes {
++    fn drop(&mut self) {
++        unsafe { paga_rdp_vt_release_frame(self.image) };
++    }
++}
++
++impl Planes {
++    fn luma(&self) -> &[u8] {
++        // The native call locked both planes and checked their dimensions.
++        unsafe { core::slice::from_raw_parts(self.y, self.y_stride * self.height) }
++    }
++
++    fn chroma(&self) -> &[u8] {
++        unsafe { core::slice::from_raw_parts(self.uv, self.uv_stride * self.height.div_ceil(2)) }
++    }
++}
++
++pub struct VideoToolboxH264Decoder {
++    context: Option<NonNull<c_void>>,
++    parameter_sets: [Vec<u8>; 2],
++    sample: Vec<u8>,
++}
++
++// The context is accessed only through exclusive calls. Each decode waits
++// for its callbacks to finish before Rust can send the context to a new task.
++unsafe impl Send for VideoToolboxH264Decoder {}
++
++impl VideoToolboxH264Decoder {
++    pub fn new() -> DecoderResult<Self> {
++        if !unsafe { paga_rdp_vt_supported() } {
++            return Err(DecoderError::msg("VideoToolbox has no H.264 hardware decoder"));
++        }
++        Ok(Self {
++            context: None,
++            parameter_sets: Default::default(),
++            sample: Vec::new(),
++        })
++    }
++
++    fn close(&mut self) {
++        if let Some(context) = self.context.take() {
++            unsafe { paga_rdp_vt_close(context.as_ptr()) };
++        }
++    }
++
++    fn prepare_sample(&mut self, bytes: &[u8]) -> DecoderResult<NonNull<c_void>> {
++        self.sample.clear();
++        let mut changed = false;
++        for nal in annex_b_units(bytes) {
++            let kind = nal[0] & 31;
++            if matches!(kind, 7 | 8) {
++                if nal.len() > 16 * 1024 {
++                    return Err(DecoderError::msg("VideoToolbox H.264 parameter set too large"));
++                }
++                let parameters = &mut self.parameter_sets[usize::from(kind - 7)];
++                if parameters.as_slice() != nal {
++                    parameters.clear();
++                    parameters.extend_from_slice(nal);
++                    changed = true;
++                }
++            } else {
++                let len = u32::try_from(nal.len()).map_err(|_| DecoderError::msg("H.264 NAL too large"))?;
++                self.sample.extend_from_slice(&len.to_be_bytes());
++                self.sample.extend_from_slice(nal);
++            }
++        }
++        if self.sample.is_empty() {
++            return Err(DecoderError::msg("Empty H.264 sample"));
++        }
++        if self.context.is_none() || changed {
++            self.close();
++            let [sps, pps] = &self.parameter_sets;
++            if sps.is_empty() || pps.is_empty() {
++                return Err(DecoderError::msg("VideoToolbox requires H.264 SPS and PPS"));
++            }
++            self.context = NonNull::new(unsafe { paga_rdp_vt_open(sps.as_ptr(), sps.len(), pps.as_ptr(), pps.len()) });
++        }
++        self.context
++            .ok_or_else(|| DecoderError::msg("VideoToolbox rejected H.264 configuration"))
++    }
++
++    fn picture(&mut self, bytes: &[u8]) -> DecoderResult<Planes> {
++        let context = self.prepare_sample(bytes)?;
++        let mut planes = Planes::default();
++        if !unsafe { paga_rdp_vt_decode(context.as_ptr(), self.sample.as_ptr(), self.sample.len(), &mut planes) } {
++            return Err(DecoderError::msg("VideoToolbox returned no matching H.264 frame"));
++        }
++        Ok(planes)
++    }
++}
++
++impl Drop for VideoToolboxH264Decoder {
++    fn drop(&mut self) {
++        self.close();
++    }
++}
++
++impl H264Decoder for VideoToolboxH264Decoder {
++    fn supports_yuv420(&self) -> bool {
++        true
++    }
++
++    fn supports_hw_frame(&self) -> bool {
++        true
++    }
++
++    fn decode_hw(&mut self, bytes: &[u8]) -> DecoderResult<Option<Box<dyn HwVideoFrame>>> {
++        let context = self.prepare_sample(bytes)?;
++        let mut width = 0usize;
++        let mut height = 0usize;
++        let ptr = unsafe {
++            paga_rdp_vt_decode_pixel_buffer(
++                context.as_ptr(),
++                self.sample.as_ptr(),
++                self.sample.len(),
++                &mut width,
++                &mut height,
++            )
++        };
++        let pixel_buffer =
++            NonNull::new(ptr).ok_or_else(|| DecoderError::msg("VideoToolbox returned no matching H.264 frame"))?;
++        Ok(Some(Box::new(VtHwFrame {
++            pixel_buffer,
++            width: width as u32,
++            height: height as u32,
++        })))
++    }
++
++    fn decode(&mut self, bytes: &[u8]) -> DecoderResult<DecodedFrame> {
++        let mut rgba = Vec::new();
++        let (width, height) = self.decode_avc420(bytes, &mut rgba)?;
++        Ok(DecodedFrame::new(rgba, width, height))
++    }
++
++    fn decode_avc420(&mut self, bytes: &[u8], rgba: &mut Vec<u8>) -> DecoderResult<(u32, u32)> {
++        let picture = self.picture(bytes)?;
++        let width = picture.width as u32;
++        let height = picture.height as u32;
++        rgba.resize(picture.width * picture.height * 4, 0);
++        yuv::yuv_nv12_to_rgba(
++            &yuv::YuvBiPlanarImage {
++                y_plane: picture.luma(),
++                uv_plane: picture.chroma(),
++                y_stride: picture.y_stride as u32,
++                uv_stride: picture.uv_stride as u32,
++                width,
++                height,
++            },
++            rgba,
++            width * 4,
++            yuv::YuvRange::Full,
++            yuv::YuvStandardMatrix::Bt709,
++            yuv::YuvConversionMode::Balanced,
++        )
++        .map_err(|error| DecoderError::new("convert VideoToolbox NV12", error))?;
++        Ok((width, height))
++    }
++
++    fn decode_yuv420(&mut self, bytes: &[u8]) -> DecoderResult<Yuv420Frame> {
++        let picture = self.picture(bytes)?;
++        let stride = picture.width.div_ceil(2);
++        let mut u = Vec::with_capacity(stride * picture.height.div_ceil(2));
++        let mut v = Vec::with_capacity(u.capacity());
++        for row in picture.chroma().chunks_exact(picture.uv_stride) {
++            for pair in row[..stride * 2].chunks_exact(2) {
++                u.push(pair[0]);
++                v.push(pair[1]);
++            }
++        }
++        Yuv420Frame::new(
++            picture.width as u16,
++            picture.height as u16,
++            picture.luma().to_vec(),
++            picture.y_stride,
++            u,
++            v,
++            stride,
++        )
++    }
++
++    fn reset(&mut self) {
++        self.close();
++        self.parameter_sets.iter_mut().for_each(Vec::clear);
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    unsafe extern "C" {
++        fn CVPixelBufferLockBaseAddress(pb: *mut c_void, flags: u64) -> i32;
++        fn CVPixelBufferUnlockBaseAddress(pb: *mut c_void, flags: u64) -> i32;
++        fn CVPixelBufferGetBaseAddress(pb: *mut c_void) -> *const u8;
++        fn CVPixelBufferGetBytesPerRow(pb: *mut c_void) -> usize;
++    }
++
++    fn read_bgra_pixel(frame: &MetalPresentedFrame, x: usize, y: usize) -> [u8; 4] {
++        let pb = frame.raw_pixel_buffer() as usize as *mut c_void;
++        assert_eq!(unsafe { CVPixelBufferLockBaseAddress(pb, 1) }, 0);
++        let base = unsafe { CVPixelBufferGetBaseAddress(pb) };
++        let stride = unsafe { CVPixelBufferGetBytesPerRow(pb) };
++        let px = unsafe {
++            let p = base.add(y * stride + x * 4);
++            [*p, *p.add(1), *p.add(2), *p.add(3)]
++        };
++        assert_eq!(unsafe { CVPixelBufferUnlockBaseAddress(pb, 1) }, 0);
++        px
++    }
++
++    #[test]
++    fn metal_compositor_renders_solid_rgba_clearcodec_scroll_and_cache_to_cvpixelbuffer() {
++        let Some(mut gpu) = MetalGpuCompositor::new() else {
++            return; // Headless CI without Metal device.
++        };
++        assert!(gpu.reset(64, 64));
++        assert!(gpu.create_surface(1, 64, 64));
++        assert!(gpu.map_surface_scaled(1, (0, 0), (64, 64)));
++
++        // SolidFill (r=10, g=20, b=30) -> BGRA [30, 20, 10, 255]
++        let bg = Color {
++            b: 30,
++            g: 20,
++            r: 10,
++            xa: 0,
++        };
++        assert!(gpu.solid_fill(
++            1,
++            &bg,
++            &[ExclusiveRectangle {
++                left: 0,
++                top: 0,
++                right: 64,
++                bottom: 64,
++            }],
++        ));
++
++        // RGBA patch (r=200, g=100, b=50, a=0) -> forced opaque BGRA [50, 100, 200, 255]
++        let rgba = [200u8, 100, 50, 0].repeat(4 * 4);
++        assert!(gpu.apply_rgba_region(
++            1,
++            &ExclusiveRectangle {
++                left: 4,
++                top: 4,
++                right: 8,
++                bottom: 8,
++            },
++            &rgba,
++            16,
++            (0, 0),
++        ));
++
++        // ClearCodec BGRA coverage patch: pixel (0,0) alpha=0 (preserved), pixel (1,0) alpha=255 (replaced)
++        let clear = [
++            0u8, 0, 0, 0, // skipped -> preserves (4,4) RGBA patch
++            90, 80, 70, 255, // painted -> BGRA [90, 80, 70, 255]
++        ];
++        assert!(gpu.apply_clearcodec(
++            1,
++            &ExclusiveRectangle {
++                left: 4,
++                top: 4,
++                right: 6,
++                bottom: 5,
++            },
++            &clear,
++        ));
++
++        // Overlapping self-copy (SurfaceToSurface) & Cache round-trip
++        assert!(gpu.surface_to_surface(
++            1,
++            1,
++            &ExclusiveRectangle {
++                left: 4,
++                top: 4,
++                right: 8,
++                bottom: 8,
++            },
++            &[Point { x: 6, y: 4 }],
++        ));
++        assert!(gpu.surface_to_cache(
++            1,
++            7,
++            &ExclusiveRectangle {
++                left: 6,
++                top: 4,
++                right: 10,
++                bottom: 8,
++            },
++        ));
++        assert!(gpu.cache_to_surface(7, 1, &[Point { x: 32, y: 32 }]));
++
++        let presented = gpu.end_frame().expect("expected Metal CVPixelBuffer frame");
++        assert_eq!((presented.width(), presented.height()), (64, 64));
++        let metal = presented
++            .as_any()
++            .downcast_ref::<MetalPresentedFrame>()
++            .expect("MetalPresentedFrame");
++
++        assert_eq!(read_bgra_pixel(metal, 0, 0), [30, 20, 10, 255]);
++        assert_eq!(read_bgra_pixel(metal, 4, 4), [50, 100, 200, 255]);
++        assert_eq!(read_bgra_pixel(metal, 5, 4), [90, 80, 70, 255]);
++        assert_eq!(read_bgra_pixel(metal, 6, 4), [50, 100, 200, 255]);
++        assert_eq!(read_bgra_pixel(metal, 7, 4), [90, 80, 70, 255]);
++        assert_eq!(read_bgra_pixel(metal, 32, 32), [50, 100, 200, 255]);
++        assert_eq!(read_bgra_pixel(metal, 33, 32), [90, 80, 70, 255]);
++    }
++}

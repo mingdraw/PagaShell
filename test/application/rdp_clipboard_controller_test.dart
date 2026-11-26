@@ -11,9 +11,9 @@ void main() {
   late FakeLocalClipboard local;
   late RdpClipboardController controller;
   late List<String> errors;
-  void initialize() {
+  void initialize([FakeLocalClipboard? clipboard]) {
     session = FakeClipboardSession();
-    local = FakeLocalClipboard();
+    local = clipboard ?? FakeLocalClipboard();
     errors = [];
     controller = RdpClipboardController(
       session: session,
@@ -41,6 +41,84 @@ void main() {
     await tester.pump(const Duration(milliseconds: 500));
     expect(session.clipboardChanges.last.files, ['/tmp/中文.txt', '/tmp/folder']);
     expect(errors, isEmpty);
+    controller.dispose();
+    await tester.pump();
+  });
+
+  testWidgets('有原生通知时不轮询，忙碌期间的复制也会重新读取', (tester) async {
+    final clipboard = _ObservableClipboard();
+    initialize(clipboard);
+    addTearDown(clipboard.events.close);
+    controller.setActive(true);
+    await tester.pump();
+    final initialReads = clipboard.reads;
+    await tester.pump(const Duration(seconds: 2));
+    expect(clipboard.reads, initialReads);
+
+    final olderRead = Completer<ClipboardSnapshot>();
+    clipboard.onRead = () => olderRead.future;
+    clipboard.copy(const ClipboardContent(text: 'first copy'));
+    final olderSnapshot = clipboard.current;
+    await tester.pump();
+    expect(clipboard.reads, initialReads + 1);
+    clipboard.onRead = null;
+    clipboard.copy(const ClipboardContent(text: 'latest copy'));
+    olderRead.complete(olderSnapshot);
+    await tester.pump();
+    expect(session.clipboardChanges.map((content) => content.text), [
+      'initial',
+      'first copy',
+      'latest copy',
+    ]);
+
+    controller.setForeground(false);
+    clipboard.copy(const ClipboardContent(text: 'copy in another app'));
+    await tester.pump();
+    expect(session.clipboardChanges, hasLength(3));
+    controller.setForeground(true);
+    await tester.pump();
+    expect(session.clipboardChanges.last.text, 'copy in another app');
+    expect(errors, isEmpty);
+    controller.dispose();
+    await tester.pump();
+  });
+
+  testWidgets('原生通知早于写入回执时不将远端剪贴板传回', (tester) async {
+    final clipboard = _ObservableClipboard();
+    initialize(clipboard);
+    addTearDown(clipboard.events.close);
+    controller.setActive(true);
+    await tester.pump();
+
+    final writeReply = Completer<void>();
+    clipboard.writeReply = writeReply.future;
+    session.clipboardOutput.add(
+      const RdpClipboardEvent(
+        kind: RdpClipboardEventKind.text,
+        content: ClipboardContent(text: 'remote copy'),
+      ),
+    );
+    await tester.pump();
+    expect(clipboard.current.content.text, 'remote copy');
+    expect(session.clipboardChanges.single.text, 'initial');
+    writeReply.complete();
+    await tester.pump();
+    expect(session.clipboardChanges.single.text, 'initial');
+    expect(errors, isEmpty);
+    controller.dispose();
+    await tester.pump();
+  });
+
+  testWidgets('原生订阅失败时回退到轮询', (tester) async {
+    final clipboard = _ObservableClipboard();
+    initialize(clipboard);
+    addTearDown(clipboard.events.close);
+    controller.setActive(true);
+    await tester.pump();
+    clipboard.events.addError(StateError('no clipboard listener'));
+    clipboard.copy(const ClipboardContent(text: 'observed by poll'));
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(session.clipboardChanges.last.text, 'observed by poll');
     controller.dispose();
     await tester.pump();
   });
@@ -301,4 +379,32 @@ void main() {
     controller.dispose();
     await tester.pump();
   });
+}
+
+class _ObservableClipboard extends FakeLocalClipboard
+    implements ObservableLocalClipboard {
+  final events = StreamController<void>.broadcast(sync: true);
+  Future<void>? writeReply;
+
+  @override
+  Stream<void> get changes => events.stream;
+
+  @override
+  void copy(ClipboardContent content) {
+    super.copy(content);
+    events.add(null);
+  }
+
+  @override
+  Future<ClipboardSnapshot?> write(
+    ClipboardContent content, {
+    required String expectedChangeId,
+  }) async {
+    final snapshot = await super.write(
+      content,
+      expectedChangeId: expectedChangeId,
+    );
+    await writeReply;
+    return snapshot;
+  }
 }

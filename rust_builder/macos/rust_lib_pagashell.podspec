@@ -22,6 +22,7 @@ A new Flutter FFI plugin project.
   s.dependency 'FlutterMacOS'
   # Rust's static archive includes zlib and OpenH264's C++ objects.
   s.libraries = 'z', 'c++'
+  s.frameworks = 'CoreFoundation', 'CoreMedia', 'CoreVideo', 'Foundation', 'Metal', 'VideoToolbox'
 
   s.platform = :osx, '10.11'
   s.pod_target_xcconfig = { 'DEFINES_MODULE' => 'YES' }

@@ -16,6 +16,7 @@ class DriftSettingsRepository implements SettingsRepository {
   static const _sidebarStateKey = 'sidebar_state';
   static const _closeTerminalOnDisconnectKey = 'close_terminal_on_disconnect';
   static const _minimizeToTrayOnCloseKey = 'minimize_to_tray_on_close';
+  static const _rdpPerformanceModeKey = 'rdp_performance_mode';
   static const _automaticUpdatesKey = 'automatic_updates';
   static const _proxySettingsKey = 'proxy_settings';
   static const _customQuickCommandsKey = 'custom_quick_commands';
@@ -64,6 +65,24 @@ class DriftSettingsRepository implements SettingsRepository {
     )..where((s) => s.key.equals(_automaticUpdatesKey))).getSingleOrNull();
     return row == null || row.value == 'true';
   }
+
+  @override
+  Future<bool?> readRdpPerformanceMode() async {
+    final row = await (_db.select(
+      _db.appSettings,
+    )..where((s) => s.key.equals(_rdpPerformanceModeKey))).getSingleOrNull();
+    return row == null ? null : row.value == 'true';
+  }
+
+  @override
+  Future<void> saveRdpPerformanceMode(bool enabled) => _db
+      .into(_db.appSettings)
+      .insertOnConflictUpdate(
+        AppSettingsCompanion.insert(
+          key: _rdpPerformanceModeKey,
+          value: enabled.toString(),
+        ),
+      );
 
   @override
   Future<void> saveAutomaticUpdates(bool enabled) => _db

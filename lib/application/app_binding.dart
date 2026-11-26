@@ -113,7 +113,12 @@ class AppBinding extends Bindings {
     final sessions = Get.put<SessionController>(
       SessionController(
         engine: sshEngine,
-        rdpEngine: const RustRdpEngine(),
+        rdpEngine: RustRdpEngine(
+          performanceMode: () async {
+            await settings.ready;
+            return settings.rdpPerformanceMode.value;
+          },
+        ),
         vncEngine: const RustVncEngine(),
         knownHosts: knownHosts,
         transfers: transfers,

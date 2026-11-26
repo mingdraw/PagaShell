@@ -3,7 +3,6 @@ use std::sync::{Arc, LazyLock};
 
 use anyhow::{bail, Result};
 use ironrdp::connector::{self, Credentials};
-use ironrdp::graphics::image_processing::PixelFormat;
 use ironrdp::pdu;
 use ironrdp::session::image::DecodedImage;
 use tokio_rustls::rustls;
@@ -17,15 +16,11 @@ pub(crate) fn validate_desktop_size(width: u16, height: u16) -> Result<()> {
 
 pub(crate) fn new_image(size: connector::DesktopSize) -> Result<DecodedImage> {
     validate_desktop_size(size.width, size.height)?;
-    Ok(DecodedImage::new(
-        PixelFormat::RgbA32,
-        size.width,
-        size.height,
-    ))
+    Ok(DecodedImage::new_opaque_rgba(size.width, size.height))
 }
 
 pub(crate) fn config() -> connector::Config {
-    use pdu::gcc::{ConnectionType, KeyboardType};
+    use pdu::gcc::{ConnectionType, KeyboardType, RdpVersion};
     use pdu::rdp::capability_sets::{MajorPlatformType, RailSupportLevel};
     use pdu::rdp::client_info::{CompressionType, PerformanceFlags, TimezoneInfo};
     connector::Config {
@@ -45,6 +40,12 @@ pub(crate) fn config() -> connector::Config {
         },
         monitor_layout: None,
         desktop_scale_factor: 0,
+        desktop_physical_size: None,
+        desktop_orientation: None,
+        device_scale_factor: None,
+        monitor_extended_layout: None,
+        relative_mouse_input: false,
+        rdp_version: RdpVersion::V5_PLUS,
         keyboard_type: KeyboardType::IBM_ENHANCED,
         keyboard_subtype: 0,
         keyboard_layout: 0,
@@ -56,7 +57,13 @@ pub(crate) fn config() -> connector::Config {
         client_build: 0,
         client_name: "PagaShell".into(),
         client_dir: "C:\\Windows\\System32\\mstscax.dll".into(),
-        platform: MajorPlatformType::UNIX,
+        platform: if cfg!(target_os = "windows") {
+            MajorPlatformType::WINDOWS
+        } else if cfg!(target_os = "macos") {
+            MajorPlatformType::MACINTOSH
+        } else {
+            MajorPlatformType::UNIX
+        },
         enable_server_pointer: false,
         request_data: None,
         autologon: true,
@@ -66,6 +73,7 @@ pub(crate) fn config() -> connector::Config {
         pointer_software_rendering: false,
         multitransport_flags: None,
         support_dyn_vc_gfx_protocol: false,
+        enable_gdi_caches: false,
         performance_flags: PerformanceFlags::default(),
         hardware_id: None,
         license_cache: None,
@@ -74,6 +82,28 @@ pub(crate) fn config() -> connector::Config {
         work_dir: String::new(),
         remote_application_mode: false,
         rail_support_level: RailSupportLevel::empty(),
+    }
+}
+
+#[derive(Default)]
+#[cfg_attr(any(windows, test), derive(serde::Serialize, serde::Deserialize))]
+pub(crate) struct ClientPreferences {
+    pub keyboard_layout: Option<u32>,
+    pub performance_mode: bool,
+}
+
+impl ClientPreferences {
+    pub fn apply_to(&self, config: &mut connector::Config) {
+        use pdu::rdp::client_info::PerformanceFlags;
+        if let Some(layout) = self.keyboard_layout {
+            config.keyboard_layout = layout;
+        }
+        if self.performance_mode {
+            config.connection_type = pdu::gcc::ConnectionType::Wan;
+            config.performance_flags |= PerformanceFlags::DISABLE_WALLPAPER
+                | PerformanceFlags::DISABLE_THEMING
+                | PerformanceFlags::DISABLE_CURSOR_SHADOW;
+        }
     }
 }
 
@@ -255,5 +285,96 @@ mod tests {
             missing_roots.certificate_error().as_deref(),
             Some("trustStoreUnavailable")
         );
+    }
+
+    #[test]
+    fn gdi_caches_capability_flag_toggles_order_bitmap_glyph_and_offscreen_caps() {
+        use ironrdp::connector::connection_activation::ConnectionActivationSequence;
+        use ironrdp::connector::Sequence as _;
+        use ironrdp::core::{decode, encode_vec, WriteBuf};
+        use ironrdp::pdu::mcs::{McsMessage, SendDataIndication};
+        use ironrdp::pdu::rdp::capability_sets::{
+            CapabilitySet, ClientConfirmActive, DemandActive, GlyphSupportLevel, OrderSupportIndex,
+            ServerDemandActive,
+        };
+        use ironrdp::pdu::rdp::headers::{ShareControlHeader, ShareControlPdu};
+        use ironrdp::pdu::x224::X224;
+
+        let run_exchange = |enable_gdi_caches: bool| -> ClientConfirmActive {
+            let mut cfg = config();
+            cfg.enable_gdi_caches = enable_gdi_caches;
+            let mut seq = ConnectionActivationSequence::new(cfg, 1003, 1001);
+            let demand = ShareControlHeader {
+                share_control_pdu: ShareControlPdu::ServerDemandActive(ServerDemandActive {
+                    pdu: DemandActive {
+                        source_descriptor: "RDP".into(),
+                        capability_sets: vec![],
+                    },
+                }),
+                pdu_source: 1001,
+                share_id: 1,
+            };
+            let sdi = SendDataIndication {
+                initiator_id: 1001,
+                channel_id: 1003,
+                user_data: encode_vec(&demand).unwrap().into(),
+            };
+            let demand_bytes = encode_vec(&X224(sdi)).unwrap();
+            let mut reply_buf = WriteBuf::new();
+            seq.step(&demand_bytes, None, &mut reply_buf).unwrap();
+            let McsMessage::SendDataRequest(sdr) =
+                decode::<X224<McsMessage<'_>>>(reply_buf.filled())
+                    .unwrap()
+                    .0
+            else {
+                panic!("expected SendDataRequest");
+            };
+            let header: ShareControlHeader = decode(&sdr.user_data).unwrap();
+            let ShareControlPdu::ClientConfirmActive(confirm) = header.share_control_pdu else {
+                panic!("expected ClientConfirmActive");
+            };
+            confirm
+        };
+
+        let enabled = run_exchange(true);
+        let caps = &enabled.pdu.capability_sets;
+        assert!(caps
+            .iter()
+            .any(|c| matches!(c, CapabilitySet::BitmapCacheRev2(bc) if bc.num_cell_caches == 3)));
+        assert!(caps.iter().any(|c| matches!(
+            c,
+            CapabilitySet::GlyphCache(gc) if gc.glyph_support_level == GlyphSupportLevel::Full
+        )));
+        assert!(caps.iter().any(|c| matches!(
+            c,
+            CapabilitySet::OffscreenBitmapCache(oc) if oc.is_supported && oc.cache_size == 7680
+        )));
+        let mut order = caps
+            .iter()
+            .find_map(|c| match c {
+                CapabilitySet::Order(o) => Some(o.clone()),
+                _ => None,
+            })
+            .expect("Order capability set");
+        assert!(order.get_support_flag(OrderSupportIndex::MemBlt));
+        assert!(order.get_support_flag(OrderSupportIndex::ScrBlt));
+        assert!(order.get_support_flag(OrderSupportIndex::Fast));
+        assert!(order.get_support_flag(OrderSupportIndex::FastGlyph));
+        assert!(order.get_support_flag(OrderSupportIndex::Index));
+
+        let disabled = run_exchange(false);
+        assert!(disabled
+            .pdu
+            .capability_sets
+            .iter()
+            .any(|c| matches!(c, CapabilitySet::BitmapCache(_))));
+        assert!(disabled.pdu.capability_sets.iter().any(|c| matches!(
+            c,
+            CapabilitySet::GlyphCache(gc) if gc.glyph_support_level == GlyphSupportLevel::None
+        )));
+        assert!(disabled.pdu.capability_sets.iter().any(|c| matches!(
+            c,
+            CapabilitySet::OffscreenBitmapCache(oc) if !oc.is_supported
+        )));
     }
 }

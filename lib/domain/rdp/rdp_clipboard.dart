@@ -33,6 +33,11 @@ abstract interface class LocalClipboard {
   });
 }
 
+abstract interface class ObservableLocalClipboard implements LocalClipboard {
+  /// Null when the platform has no clipboard change notifications.
+  Stream<void>? get changes;
+}
+
 enum RdpClipboardEventKind { ready, text, files, receiving, error }
 
 class RdpClipboardEvent {

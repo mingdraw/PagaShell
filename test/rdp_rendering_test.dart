@@ -50,6 +50,47 @@ void main() {
               as RdpSurfacePainter)
           .surface;
 
+  testWidgets('Windows 纹理元数据切换视口，完整像素帧可切回图集', (tester) async {
+    final session = FakeRdpSession();
+    final errors = <String>[];
+    await tester.pumpWidget(
+      ShadcnTestApp(
+        home: RdpDesktopPanel(
+          session: session,
+          active: true,
+          onError: errors.add,
+        ),
+      ),
+    );
+    session.output.add(
+      RdpFrame(
+        width: 4,
+        height: 3,
+        rgba: Uint8List(0),
+        patchWidth: 0,
+        patchHeight: 0,
+        textureId: 123,
+      ),
+    );
+    await tester.pump();
+    expect(tester.widget<Texture>(find.byType(Texture)).textureId, 123);
+    expect(find.byKey(const ValueKey('rdp-desktop-image')), findsNothing);
+
+    session.output.add(
+      RdpFrame(
+        width: 4,
+        height: 3,
+        rgba: Uint8List.fromList(List.filled(4 * 3 * 4, 255)),
+      ),
+    );
+    await settlePixels(tester);
+    expect(find.byType(Texture), findsNothing);
+    expect(current(tester).hasImage, isTrue);
+    expect(errors, isEmpty);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await session.close();
+  });
+
   testWidgets('局部像素更新保留其余画面，跳帧恢复和分辨率变化可完整替换', (tester) async {
     final session = FakeRdpSession();
     final errors = <String>[];

@@ -1,0 +1,40 @@
+[package]
+name = "ironrdp-rdpeudp-tokio"
+version = "0.2.0"
+description = "Tokio driver wiring RDP-UDP, TLS and the multitransport tunnel into a usable transport"
+readme = "README.md"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Devolutions/IronRDP"
+
+[lib]
+doctest = false
+
+[features]
+rustls-aws-lc-rs = ["tokio-rustls/aws_lc_rs"]
+rustls-ring = ["tokio-rustls/ring"]
+ice = ["dep:webrtc-ice", "dep:webrtc-util"]
+
+[dependencies]
+ironrdp-async = { git = "https://github.com/Devolutions/IronRDP", rev = "85e88c2424d8c36407f81540cc1f3cf8d3436a7d", version = "0.12" }
+ironrdp-core = { git = "https://github.com/Devolutions/IronRDP", rev = "85e88c2424d8c36407f81540cc1f3cf8d3436a7d", version = "0.3", features = ["std"] }
+ironrdp-error = { git = "https://github.com/Devolutions/IronRDP", rev = "85e88c2424d8c36407f81540cc1f3cf8d3436a7d", version = "0.2" }
+ironrdp-pdu = { git = "https://github.com/Devolutions/IronRDP", rev = "85e88c2424d8c36407f81540cc1f3cf8d3436a7d", version = "0.11", features = ["std"] }
+ironrdp-rdpemt = { git = "https://github.com/Devolutions/IronRDP", rev = "85e88c2424d8c36407f81540cc1f3cf8d3436a7d", version = "0.1", features = ["std"] }
+ironrdp-rdpeudp = { git = "https://github.com/Devolutions/IronRDP", rev = "85e88c2424d8c36407f81540cc1f3cf8d3436a7d", version = "0.1", features = ["std"] }
+ironrdp-tls = { git = "https://github.com/Devolutions/IronRDP", rev = "85e88c2424d8c36407f81540cc1f3cf8d3436a7d", version = "0.3.0", default-features = false, features = ["rustls-verifier"] }
+bytes = "1"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+sha2 = "0.10"
+tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "tls12"] }
+tracing = { version = "0.1", features = ["log"] }
+webrtc-ice = { version = "0.17.2", optional = true }
+webrtc-util = { version = "0.17.1", default-features = false, features = ["conn"], optional = true }
+
+[dev-dependencies]
+proptest = "1"
+rcgen = "0.14"
+rstest = "0.26"
+turn = "0.17.2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
