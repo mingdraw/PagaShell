@@ -10,6 +10,7 @@ import '../../domain/entities/sidebar_state.dart';
 import '../../domain/repositories/settings_repository.dart';
 import '../../domain/terminal/quick_command.dart';
 import '../../domain/vault/secret_store.dart';
+import 'settings_load_error.dart';
 
 class ProxySettingsException implements Exception {
   const ProxySettingsException(this.message);
@@ -62,9 +63,11 @@ class SettingsController extends GetxController {
   final savingAutomaticUpdates = false.obs;
   final proxySettings = const AppProxySettings().obs;
   final proxyLoadFailed = false.obs;
+  final proxyLoadError = Rxn<SettingsLoadError>();
   final savingProxySettings = false.obs;
   final customQuickCommandGroups = <QuickCommandCategory>[].obs;
   final quickCommandsLoadFailed = false.obs;
+  final quickCommandsLoadError = Rxn<SettingsLoadError>();
   final savingQuickCommands = false.obs;
   late final Future<void> ready = _load();
   Future<void> _pendingSave = Future<void>.value();
@@ -134,18 +137,30 @@ class SettingsController extends GetxController {
       ),
       _repository.readProxySettings().then<void>(
         (saved) {
-          if (!isClosed) proxySettings.value = saved;
+          if (!isClosed) {
+            proxySettings.value = saved;
+            proxyLoadError.value = null;
+          }
         },
-        onError: (Object _) {
-          if (!isClosed) proxyLoadFailed.value = true;
+        onError: (Object error) {
+          if (!isClosed) {
+            proxyLoadFailed.value = true;
+            proxyLoadError.value = SettingsLoadError.from(error);
+          }
         },
       ),
       _repository.readCustomQuickCommandGroups().then<void>(
         (saved) {
-          if (!isClosed) customQuickCommandGroups.assignAll(saved);
+          if (!isClosed) {
+            customQuickCommandGroups.assignAll(saved);
+            quickCommandsLoadError.value = null;
+          }
         },
-        onError: (Object _) {
-          if (!isClosed) quickCommandsLoadFailed.value = true;
+        onError: (Object error) {
+          if (!isClosed) {
+            quickCommandsLoadFailed.value = true;
+            quickCommandsLoadError.value = SettingsLoadError.from(error);
+          }
         },
       ),
     ).wait;
@@ -340,11 +355,17 @@ class SettingsController extends GetxController {
   }
 
   Future<void> reloadProxySettings() => _queueProxy(() async {
-    final saved = await _repository.readProxySettings();
-    if (isClosed) return;
-    proxySettings.value = saved;
-    proxyLoadFailed.value = false;
-    await _cleanProxySecrets();
+    try {
+      final saved = await _repository.readProxySettings();
+      if (isClosed) return;
+      proxySettings.value = saved;
+      proxyLoadFailed.value = false;
+      proxyLoadError.value = null;
+      await _cleanProxySecrets();
+    } on Object catch (error) {
+      if (!isClosed) proxyLoadError.value = SettingsLoadError.from(error);
+      rethrow;
+    }
   }, allowFailedLoad: true);
 
   Future<void> saveProxySettings({
@@ -492,10 +513,18 @@ class SettingsController extends GetxController {
 
   Future<void> reloadCustomQuickCommandGroups() =>
       _queueQuickCommands<void>(() async {
-        final saved = await _repository.readCustomQuickCommandGroups();
-        if (isClosed) return;
-        customQuickCommandGroups.assignAll(saved);
-        quickCommandsLoadFailed.value = false;
+        try {
+          final saved = await _repository.readCustomQuickCommandGroups();
+          if (isClosed) return;
+          customQuickCommandGroups.assignAll(saved);
+          quickCommandsLoadFailed.value = false;
+          quickCommandsLoadError.value = null;
+        } on Object catch (error) {
+          if (!isClosed) {
+            quickCommandsLoadError.value = SettingsLoadError.from(error);
+          }
+          rethrow;
+        }
       }, allowFailedLoad: true);
 
   Future<QuickCommandCategory> addQuickCommandGroup(String title) =>

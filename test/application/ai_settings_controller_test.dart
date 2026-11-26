@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pagashell/application/ai/ai_settings_controller.dart';
+import 'package:pagashell/application/settings/settings_load_error.dart';
 import 'package:pagashell/domain/ai/ai_model.dart';
 import 'package:pagashell/infrastructure/db/app_database.dart';
 import 'package:pagashell/infrastructure/db/drift_ai_settings_repository.dart';
@@ -202,7 +203,7 @@ void main() {
     expect(repository.value.selectedModel?.name, 'Provider');
   });
 
-  test('读取失败阻止默认配置覆盖，重试后可以继续保存', () async {
+  test('读取失败阻止默认配置覆盖，记录脱敏失败原因，重试后清除并可继续保存', () async {
     final repository = InMemoryAiSettingsRepository()..failRead = true;
     final controller = AiSettingsController(
       repository: repository,
@@ -210,12 +211,47 @@ void main() {
     );
     await controller.ready;
     expect(controller.loadFailed.value, isTrue);
+    expect(controller.loadError.value?.key, '内部错误（@type）');
     await expectLater(save(controller), throwsA(isA<AiSettingsException>()));
     expect(repository.value.models, isEmpty);
     repository.failRead = false;
     await controller.reload();
+    expect(controller.loadFailed.value, isFalse);
+    expect(controller.loadError.value, isNull);
     await save(controller);
     expect(repository.value.models, hasLength(1));
+  });
+
+  test('SettingsLoadError 正确分类常见数据库异常且不泄露路径与敏感信息', () {
+    expect(
+      SettingsLoadError.from(const FormatException('raw secret')).key,
+      '本地配置格式无效',
+    );
+    expect(
+      SettingsLoadError.from(
+        StateError('SqliteException(5): database is locked'),
+      ).key,
+      '本地数据库正被占用',
+    );
+    expect(
+      SettingsLoadError.from(
+        StateError(
+          r'SqliteException(14): unable to open database file C:\Users\alice\Documents\pagashell.sqlite',
+        ),
+      ).key,
+      '无法打开本地数据库文件',
+    );
+    final code = SettingsLoadError.from(
+      StateError('SqliteException(1): duplicate column name: rdp_domain'),
+    );
+    expect(code.key, '本地数据库错误（SQLite @code）');
+    expect(code.params, {'code': '1'});
+    expect(
+      SettingsLoadError.from(
+        ArgumentError('Failed to load dynamic library sqlite3.dll'),
+      ).key,
+      '本地 SQLite 运行库不可用',
+    );
   });
 
   test('设置关闭 SQLite 再打开后恢复，API Key 不出现在数据库内容中', () async {

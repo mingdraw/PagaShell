@@ -1,13 +1,17 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pagashell/domain/entities/app_proxy_settings.dart';
 import 'package:pagashell/domain/entities/forward_port.dart';
 import 'package:pagashell/domain/entities/host.dart';
 import 'package:pagashell/domain/entities/proxy_config.dart';
 import 'package:pagashell/infrastructure/db/app_database.dart';
+import 'package:pagashell/infrastructure/db/drift_ai_settings_repository.dart';
 import 'package:pagashell/infrastructure/db/drift_host_repository.dart';
 import 'package:pagashell/infrastructure/db/drift_host_tree_repository.dart';
+import 'package:pagashell/infrastructure/db/drift_settings_repository.dart';
 import 'package:pagashell/infrastructure/db/in_memory_folder_repository.dart';
 import 'package:pagashell/infrastructure/db/in_memory_host_repository.dart';
 import 'package:pagashell/infrastructure/db/in_memory_host_tree_repository.dart';
@@ -225,5 +229,76 @@ void main() {
     expect(journalMode.toString().toLowerCase(), 'wal');
     expect(synchronous, 1);
     expect(busyTimeout, 5000);
+  });
+
+  test('旧版 v0.2.2 DELETE 模式数据库及已含目标列的重复迁移均可正常打开并读取设置', () async {
+    final dir = await Directory.systemTemp.createTemp(
+      'pagashell-v022-upgrade-',
+    );
+    addTearDown(() => dir.delete(recursive: true));
+    final file = File('${dir.path}/pagashell.sqlite');
+
+    // 模拟 v0.2.2（schema 13、DELETE 模式）保存的旧库。
+    final legacy = AppDatabase.forTesting(NativeDatabase(file));
+    await legacy
+        .into(legacy.appSettings)
+        .insertOnConflictUpdate(
+          AppSettingsCompanion.insert(
+            key: DriftAiSettingsRepository.settingsKey,
+            value: jsonEncode({
+              'models': [
+                {
+                  'id': 'm1',
+                  'name': 'OpenAI Chat Completions',
+                  'format': 'openai',
+                  'baseUrl': 'https://api.example.test/v1',
+                  'model': 'gpt-4o',
+                  'secretRef': 'ai-api-legacy',
+                },
+              ],
+              'selectedModelId': 'm1',
+              'panelVisible': false,
+              'panelWidth': 360.0,
+              'pendingSecretDeletes': <String>[],
+              'reasoningEffort': 'auto',
+              'accessMode': 'requestApproval',
+            }),
+          ),
+        );
+    await legacy.customStatement(
+      'ALTER TABLE identities DROP COLUMN rdp_domain',
+    );
+    await legacy.customStatement('PRAGMA journal_mode = DELETE;');
+    await legacy.customStatement('PRAGMA user_version = 13;');
+    await legacy.close();
+
+    // 通过与生产相同的后台连接路径升级并读取 AI / 代理 / 常用指令设置。
+    final upgraded = AppDatabase.openAt(dir.path);
+    final ai = await DriftAiSettingsRepository(upgraded).read();
+    final settings = DriftSettingsRepository(upgraded);
+    final proxy = await settings.readProxySettings();
+    final quickCommands = await settings.readCustomQuickCommandGroups();
+    expect(ai.selectedModel?.model, 'gpt-4o');
+    expect(proxy.mode, AppProxyMode.auto);
+    expect(quickCommands, isEmpty);
+    await upgraded.close();
+
+    // 模拟部分迁移或版本回退后列已存在但 user_version 仍为 13 的场景：升级必须幂等。
+    final partial = AppDatabase.forTesting(NativeDatabase(file));
+    await partial.customStatement('PRAGMA user_version = 13;');
+    await partial.close();
+
+    final recovered = AppDatabase.openAt(dir.path);
+    addTearDown(recovered.close);
+    expect(
+      (await DriftAiSettingsRepository(recovered).read()).selectedModel?.id,
+      'm1',
+    );
+    final userVersion =
+        (await recovered.customSelect('PRAGMA user_version;').getSingle())
+            .data
+            .values
+            .first;
+    expect(userVersion, 14);
   });
 }

@@ -456,6 +456,18 @@ class _SettingsDialogState extends State<SettingsDialog> {
               Column(
                 children: [
                   Text('AI 设置读取失败，请重试'.tr),
+                  if (_settings.loadError.value case final failure?) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      failure.key.trParams(failure.params),
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: shadcn.Theme.of(context)
+                            .colorScheme
+                            .mutedForeground,
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 12),
                   shadcn.OutlineButton(
                     onPressed: () async {
@@ -550,6 +562,16 @@ class _SettingsDialogState extends State<SettingsDialog> {
       return Column(
         children: [
           Text('代理设置读取失败，请重试'.tr),
+          if (_appSettings.proxyLoadError.value case final failure?) ...[
+            const SizedBox(height: 6),
+            Text(
+              failure.key.trParams(failure.params),
+              style: TextStyle(
+                fontSize: 12,
+                color: shadcn.Theme.of(context).colorScheme.mutedForeground,
+              ),
+            ),
+          ],
           const SizedBox(height: 12),
           shadcn.OutlineButton(
             onPressed: () async {

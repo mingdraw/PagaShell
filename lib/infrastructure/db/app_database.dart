@@ -1,3 +1,5 @@
+import 'dart:io' show Platform;
+
 import 'package:drift/drift.dart';
 import 'package:drift_flutter/drift_flutter.dart';
 import 'package:flutter/foundation.dart' show visibleForTesting;
@@ -125,40 +127,49 @@ class AppDatabase extends _$AppDatabase {
   @override
   MigrationStrategy get migration => MigrationStrategy(
     onUpgrade: (m, from, to) async {
-      // 先添加新列，后面的历史迁移会使用生成的整行查询。
-      if (from < 14) await m.addColumn(identities, identities.rdpDomain);
-      if (from < 13) await m.addColumn(hosts, hosts.proxyConfigJson);
-      if (from < 2) await m.createTable(knownHosts);
-      if (from < 3) await m.createTable(appSettings);
+      // 先补齐新列（均按实际 schema 幂等检查），后面的历史迁移会使用生成的整行查询。
+      if (from < 14) {
+        await _addColumnIfMissing(m, identities, identities.rdpDomain);
+      }
+      if (from < 13) {
+        await _addColumnIfMissing(m, hosts, hosts.proxyConfigJson);
+      }
+      if (from < 2) await _createTableIfMissing(m, knownHosts);
+      if (from < 3) await _createTableIfMissing(m, appSettings);
       if (from < 4) {
-        await m.createTable(identityFolders);
-        await m.addColumn(identities, identities.folderId);
-        await m.addColumn(identities, identities.sortOrder);
+        await _createTableIfMissing(m, identityFolders);
+        await _addColumnIfMissing(m, identities, identities.folderId);
+        await _addColumnIfMissing(m, identities, identities.sortOrder);
       }
       if (from < 5) {
-        await m.addColumn(folders, folders.isGateway);
-        await m.addColumn(hosts, hosts.isGateway);
-        await m.addColumn(hosts, hosts.gatewayId);
+        await _addColumnIfMissing(m, folders, folders.isGateway);
+        await _addColumnIfMissing(m, hosts, hosts.isGateway);
+        await _addColumnIfMissing(m, hosts, hosts.gatewayId);
       }
       if (from < 8) {
-        await m.addColumn(hosts, hosts.forwardPortsJson);
+        await _addColumnIfMissing(m, hosts, hosts.forwardPortsJson);
         // 未发布版本的独立转发配置已停用，不迁移旧数据。
         await customStatement('DROP TABLE IF EXISTS forward_rules');
         await customStatement('DROP TABLE IF EXISTS forward_folders');
       }
       if (from < 9) {
-        await m.addColumn(hosts, hosts.gatewayType);
-        await m.addColumn(hosts, hosts.rdpDomain);
-        await m.alterTable(
-          TableMigration(knownHosts, newColumns: [knownHosts.protocol]),
-        );
+        await _addColumnIfMissing(m, hosts, hosts.gatewayType);
+        await _addColumnIfMissing(m, hosts, hosts.rdpDomain);
+        if (!await _hasColumn(
+          knownHosts.actualTableName,
+          knownHosts.protocol.$name,
+        )) {
+          await m.alterTable(
+            TableMigration(knownHosts, newColumns: [knownHosts.protocol]),
+          );
+        }
       }
       if (from < 10) {
-        await m.addColumn(hosts, hosts.pageClientId);
-        await m.addColumn(hosts, hosts.pageServerFingerprint);
+        await _addColumnIfMissing(m, hosts, hosts.pageClientId);
+        await _addColumnIfMissing(m, hosts, hosts.pageServerFingerprint);
       }
       if (from < 11) {
-        await m.addColumn(identities, identities.serviceType);
+        await _addColumnIfMissing(m, identities, identities.serviceType);
         final rows = await select(identities).get();
         final hostsUsingCredentials = await (select(
           hosts,
@@ -168,7 +179,7 @@ class AppDatabase extends _$AppDatabase {
           if (h.isGateway && h.gatewayType != 'ssh') continue;
           final type = h.isGateway
               ? ServiceType.ssh
-              : ServiceType.values.byName(h.gatewayType);
+              : _parseLegacyServiceType(h.gatewayType);
           (usage[h.identityId!] ??= {}).add(type);
         }
         final converted = IdentityProtocolMigration([
@@ -202,7 +213,7 @@ class AppDatabase extends _$AppDatabase {
           if (h.isGateway && h.gatewayType != 'ssh') continue;
           final type = h.isGateway
               ? ServiceType.ssh
-              : ServiceType.values.byName(h.gatewayType);
+              : _parseLegacyServiceType(h.gatewayType);
           final identityId = converted.bindings[(h.identityId!, type)];
           if (identityId != null && identityId != h.identityId) {
             await (update(hosts)..where((row) => row.id.equals(h.id))).write(
@@ -218,22 +229,76 @@ class AppDatabase extends _$AppDatabase {
     },
   );
 
+  static ServiceType _parseLegacyServiceType(String raw) =>
+      ServiceType.values.where((type) => type.name == raw).firstOrNull ??
+      ServiceType.ssh;
+
+  Future<bool> _hasTable(String name) async {
+    final row = await customSelect(
+      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+      variables: [Variable.withString(name)],
+    ).getSingleOrNull();
+    return row != null;
+  }
+
+  Future<bool> _hasColumn(String table, String column) async {
+    final rows = await customSelect('PRAGMA table_info("$table")').get();
+    return rows.any((row) => row.read<String>('name') == column);
+  }
+
+  Future<void> _createTableIfMissing(
+    Migrator m,
+    TableInfo<Table, Object?> table,
+  ) async {
+    if (!await _hasTable(table.actualTableName)) {
+      await m.createTable(table);
+    }
+  }
+
+  Future<void> _addColumnIfMissing(
+    Migrator m,
+    TableInfo<Table, Object?> table,
+    GeneratedColumn<Object> column,
+  ) async {
+    if (!await _hasColumn(table.actualTableName, column.$name)) {
+      await m.addColumn(table, column);
+    }
+  }
+
+  static Future<String?> _skipTempDirectory() async => null;
+
+  static final _defaultNativeOptions = DriftNativeOptions(
+    databaseDirectory: ApplicationDirectories.database,
+    // Windows 下 SQLite 默认使用内存临时存储和原生 Win32 GetTempPathW，
+    // 跳过写入 sqlite3_temp_directory 全局指针可避免跨 isolate/路径异常。
+    tempDirectoryPath: Platform.isWindows ? _skipTempDirectory : null,
+    setup: (db) {
+      // 必须先设置 busy_timeout，再尝试切换 WAL，避免从旧版 DELETE 模式升级或
+      // Windows 杀软/OneDrive/残留进程短暂占用时直接报 SQLITE_BUSY 导致整库打不开。
+      db.execute('PRAGMA busy_timeout = 5000;');
+      try {
+        db
+          ..execute('PRAGMA journal_mode = WAL;')
+          ..execute('PRAGMA synchronous = NORMAL;');
+      } on Object {
+        // 网络盘、OneDrive 等不支持 WAL -shm 的目录降级保留默认日志模式，不阻断打开。
+      }
+    },
+  );
+
   static QueryExecutor _open({
     Future<Object> Function()? directory,
     String? tempDirectory,
   }) => driftDatabase(
     name: 'pagashell',
-    native: DriftNativeOptions(
-      databaseDirectory: directory ?? ApplicationDirectories.database,
-      tempDirectoryPath: tempDirectory == null
-          ? null
-          : () async => tempDirectory,
-      setup: (db) {
-        db
-          ..execute('PRAGMA journal_mode = WAL;')
-          ..execute('PRAGMA synchronous = NORMAL;')
-          ..execute('PRAGMA busy_timeout = 5000;');
-      },
-    ),
+    native: directory == null && tempDirectory == null
+        ? _defaultNativeOptions
+        : DriftNativeOptions(
+            databaseDirectory: directory ?? ApplicationDirectories.database,
+            tempDirectoryPath: tempDirectory == null
+                ? (Platform.isWindows ? _skipTempDirectory : null)
+                : () async => tempDirectory,
+            setup: _defaultNativeOptions.setup,
+          ),
   );
 }

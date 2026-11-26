@@ -8,6 +8,7 @@ import '../../domain/ai/ai_model.dart';
 import '../../domain/mcp/mcp_models.dart';
 import '../../domain/repositories/ai_settings_repository.dart';
 import '../../domain/vault/secret_store.dart';
+import '../settings/settings_load_error.dart';
 
 class AiSettingsException implements Exception {
   const AiSettingsException(this.message);
@@ -24,6 +25,7 @@ class AiSettingsController extends GetxController {
   final state = const AiSettings().obs;
   final isLoaded = false.obs;
   final loadFailed = false.obs;
+  final loadError = Rxn<SettingsLoadError>();
   late final Future<void> ready = _load();
   Future<void> _pending = Future<void>.value();
 
@@ -36,18 +38,30 @@ class AiSettingsController extends GetxController {
   Future<void> _load() async {
     try {
       final saved = await _repository.read();
-      if (!isClosed) state.value = saved;
-    } on Object {
-      if (!isClosed) loadFailed.value = true;
+      if (!isClosed) {
+        state.value = saved;
+        loadError.value = null;
+      }
+    } on Object catch (error) {
+      if (!isClosed) {
+        loadFailed.value = true;
+        loadError.value = SettingsLoadError.from(error);
+      }
     }
     if (!isClosed) isLoaded.value = true;
   }
 
   Future<void> reload() => _queue(() async {
-    final saved = await _repository.read();
-    state.value = saved;
-    loadFailed.value = false;
-    await _cleanSecrets();
+    try {
+      final saved = await _repository.read();
+      state.value = saved;
+      loadFailed.value = false;
+      loadError.value = null;
+      await _cleanSecrets();
+    } on Object catch (error) {
+      if (!isClosed) loadError.value = SettingsLoadError.from(error);
+      rethrow;
+    }
   }, allowFailedLoad: true);
 
   Future<void> _queue(

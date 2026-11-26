@@ -350,6 +350,14 @@ class _QuickCommandsSettingsSectionState
           child: Column(
             children: [
               Text('常用指令读取失败，请重试'.tr),
+              if (_settings.quickCommandsLoadError.value
+                  case final failure?) ...[
+                const SizedBox(height: 6),
+                Text(
+                  failure.key.trParams(failure.params),
+                  style: TextStyle(fontSize: 12, color: colors.mutedForeground),
+                ),
+              ],
               const SizedBox(height: 12),
               shadcn.OutlineButton(
                 onPressed: () async {

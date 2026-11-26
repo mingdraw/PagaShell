@@ -89,6 +89,7 @@ void main() {
     );
     await corrupted.ready;
     expect(corrupted.proxyLoadFailed.value, isTrue);
+    expect(corrupted.proxyLoadError.value?.key, '本地配置格式无效');
     await expectLater(
       corrupted.saveProxySettings(mode: AppProxyMode.off),
       throwsA(isA<ProxySettingsException>()),
