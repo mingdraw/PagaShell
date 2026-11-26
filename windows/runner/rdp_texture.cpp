@@ -308,8 +308,8 @@ class RdpTextureRegistry::Impl {
                                          std::unique_ptr<Result> result) {
       int64_t raw = -1;
       if (const Value* value = call.arguments()) {
-        if (const auto* small = std::get_if<int32_t>(value)) raw = *small;
-        if (const auto* big = std::get_if<int64_t>(value)) raw = *big;
+        if (const auto* value32 = std::get_if<int32_t>(value)) raw = *value32;
+        if (const auto* value64 = std::get_if<int64_t>(value)) raw = *value64;
       }
       if (raw <= 0 || raw > std::numeric_limits<uint32_t>::max()) {
         result->Error("rdp_texture", "Invalid RDP session ID");

@@ -5,7 +5,7 @@ use std::sync::{Arc, LazyLock};
 use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
-#[cfg(any(test, not(any(windows, target_os = "macos"))))]
+#[cfg(test)]
 use crate::api::desktop::DesktopFrame;
 use crate::api::desktop::{DesktopCursor, DesktopHandshake, DesktopInputEvent};
 use crate::desktop_clipboard::{Clipboard, Command as ClipboardCommand};
@@ -627,6 +627,7 @@ pub(crate) async fn authenticate_with_gpu(
     Ok(())
 }
 
+#[cfg(any(windows, target_os = "macos"))]
 pub(crate) async fn disable_gpu(id: u32) {
     if let Ok(entry) = session(id).await {
         entry.gpu_disable.send_replace(true);
@@ -695,7 +696,7 @@ pub(crate) async fn frame_delivery(id: u32, after: u32) -> Result<Option<FrameDe
     }
 }
 
-#[cfg(any(test, not(any(windows, target_os = "macos"))))]
+#[cfg(test)]
 pub(crate) async fn frame(id: u32, after: u32) -> Result<Option<DesktopFrame>> {
     Ok(frame_delivery(id, after)
         .await?

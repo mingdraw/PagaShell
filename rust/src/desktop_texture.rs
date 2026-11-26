@@ -61,6 +61,7 @@ impl Presenter {
         CONSUMERS.lock().ok()?.get(&session).cloned().map(Self)
     }
 
+    #[cfg(any(target_os = "macos", test))]
     pub fn supports_gpu(&self) -> bool {
         self.0
             .submit_gpu
@@ -75,6 +76,7 @@ impl Presenter {
     }
 
     /// Submit a GPU-resident surface handle synchronously without CPU readback.
+    #[cfg(any(windows, target_os = "macos", test))]
     pub fn submit_gpu(
         &self,
         frame: &mut DesktopFrame,
