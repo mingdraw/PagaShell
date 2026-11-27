@@ -202,6 +202,39 @@ class UpdaterHelperTests(unittest.TestCase):
             executable.write_text("#!/bin/sh\n" + body, encoding="utf-8")
             executable.chmod(0o755)
 
+    def pause_first_parent_probe(self):
+        # Hold the first liveness probe while the app commits and exits.
+        if WINDOWS:
+            hook = "New-Item -ItemType File -Path (Join-Path $work 'ready')"
+            barrier = r"""
+function Get-Process {
+  [CmdletBinding()]
+  param([int]$Id)
+  $probe = Join-Path $work 'checking-parent'
+  if (-not (Test-Path -LiteralPath $probe)) {
+    New-Item -ItemType File -Path $probe | Out-Null
+    while (-not (Test-Path -LiteralPath (Join-Path $work 'resume-parent-probe'))) {
+      Start-Sleep -Milliseconds 20
+    }
+  }
+  Microsoft.PowerShell.Management\Get-Process -Id $Id -ErrorAction SilentlyContinue
+}
+"""
+        else:
+            hook = ': > "$work/ready"'
+            barrier = """
+kill() {
+  if [ "$2" = "$parent_process" ] && [ ! -f "$work/checking-parent" ]; then
+    : > "$work/checking-parent"
+    while [ ! -f "$work/resume-parent-probe" ]; do sleep 0.02; done
+  fi
+  command kill "$@"
+}
+"""
+        script = self.script.read_text(encoding="utf-8")
+        self.assertEqual(script.count(hook), 1)
+        self.script.write_text(script.replace(hook, barrier + hook, 1), encoding="utf-8")
+
     def test_commit_waits_for_application_exit_then_restarts_and_removes_backup(self):
         self.make_restart_fixture(self.source)
         child = self.start_watcher()
@@ -221,8 +254,11 @@ class UpdaterHelperTests(unittest.TestCase):
     def test_early_launch_exit_restores_original_installation(self):
         self.make_restart_fixture(self.target)
         self.make_restart_fixture(self.source, crash=True)
+        self.pause_first_parent_probe()
         child = self.start_watcher()
-        self.assertNotEqual(self.commit_and_exit(child), 0, self.watcher_log())
+        self.wait_for(self.work / "checking-parent", child=child)
+        resume = self.work / "resume-parent-probe"
+        self.assertNotEqual(self.commit_and_exit(child, resume=resume), 0, self.watcher_log())
         self.wait_for(self.target / "launched")
         self.assertEqual((self.target / "version").read_text(), "old")
         self.assertEqual((self.work / "error").read_text().strip(), "launch-failed")
@@ -315,10 +351,12 @@ class UpdaterHelperTests(unittest.TestCase):
                                                          '"$work/open" -n "$target"'),
             encoding="utf-8")
 
-    def commit_and_exit(self, child):
+    def commit_and_exit(self, child, *, resume=None):
         (self.work / "commit").touch()
         self.parent.terminate()
         self.parent.wait(timeout=10)
+        if resume is not None:
+            resume.touch()
         return child.wait(timeout=20)
 
     @unittest.skipUnless(sys.platform == "darwin", "macOS watcher cleanup")

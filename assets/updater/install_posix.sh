@@ -100,7 +100,11 @@ launch_app() {
 while [ ! -f "$work/commit" ]; do
   [ ! -f "$work/cancel" ] || exit 0
   # Saving data or an exit confirmation can take arbitrarily long.
-  kill -0 "$parent_process" 2>/dev/null || exit 0
+  if ! kill -0 "$parent_process" 2>/dev/null; then
+    # The app may have written commit after the loop condition was checked.
+    [ -f "$work/commit" ] || exit 0
+    break
+  fi
   sleep 0.1
 done
 attempt=0

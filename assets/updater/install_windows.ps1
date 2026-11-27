@@ -100,7 +100,11 @@ function Invoke-Transaction([string]$Action) {
 New-Item -ItemType File -Path (Join-Path $work 'ready') -Force | Out-Null
 while (-not (Test-Path -LiteralPath (Join-Path $work 'commit'))) {
   if (Test-Path -LiteralPath (Join-Path $work 'cancel')) { return }
-  if ($null -eq (Get-Process -Id $config.parentPid -ErrorAction SilentlyContinue)) { return }
+  if ($null -eq (Get-Process -Id $config.parentPid -ErrorAction SilentlyContinue)) {
+    # The app may have written commit after the loop condition was checked.
+    if (-not (Test-Path -LiteralPath (Join-Path $work 'commit'))) { return }
+    break
+  }
   Start-Sleep -Milliseconds 100
 }
 $timer = [Diagnostics.Stopwatch]::StartNew()
