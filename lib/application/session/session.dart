@@ -2,6 +2,7 @@ import 'package:pagashell/terminal/core.dart';
 
 import '../../domain/entities/host.dart';
 import '../../domain/proxy/dynamic_proxy_engine.dart';
+import '../../domain/proxy/system_proxy.dart';
 import '../../domain/rdp/rdp_engine.dart';
 import '../../domain/ssh/docker_manager.dart';
 import '../../domain/ssh/host_key.dart';
@@ -64,6 +65,7 @@ class Session {
     this.engineSession,
     this.forwardSession,
     this.proxySession,
+    this.chainedUpstream,
     this.terminal,
     this.hostKeyReview,
     this.hostKeyFailure,
@@ -109,6 +111,7 @@ class Session {
   final SshEngineSession? engineSession;
   final PortForwardSession? forwardSession;
   final DynamicProxySession? proxySession;
+  final UpstreamProxyConfig? chainedUpstream;
   final RdpEngineSession? desktopSession;
 
   /// Flutter 终端视图/输入接口；真实 SSH 使用 Rust 内核的显示适配器。
@@ -123,31 +126,37 @@ class Session {
     SshEngineSession? engineSession,
     PortForwardSession? forwardSession,
     DynamicProxySession? proxySession,
+    UpstreamProxyConfig? chainedUpstream,
+    bool clearChainedUpstream = false,
     Terminal? terminal,
     HostKeyReview? hostKeyReview,
     HostKeyReview? hostKeyFailure,
     RdpEngineSession? desktopSession,
     RdpPasswordRequest? passwordRequest,
   }) {
+    final nextPhase = phase ?? this.phase;
     return Session(
       id: id,
       host: host ?? this.host,
       loginUsername: loginUsername ?? this.loginUsername,
       kind: kind,
-      phase: phase ?? this.phase,
+      phase: nextPhase,
       error: clearError ? null : (error ?? this.error),
       engineSession: engineSession ?? this.engineSession,
       forwardSession: forwardSession ?? this.forwardSession,
       proxySession: proxySession ?? this.proxySession,
+      chainedUpstream: clearChainedUpstream || nextPhase != SessionPhase.ready
+          ? null
+          : (chainedUpstream ?? this.chainedUpstream),
       desktopSession: desktopSession ?? this.desktopSession,
       terminal: terminal ?? this.terminal,
-      hostKeyReview: (phase ?? this.phase) == SessionPhase.hostKeyPending
+      hostKeyReview: nextPhase == SessionPhase.hostKeyPending
           ? hostKeyReview ?? this.hostKeyReview
           : null,
-      hostKeyFailure: (phase ?? this.phase) == SessionPhase.failed
+      hostKeyFailure: nextPhase == SessionPhase.failed
           ? hostKeyFailure ?? this.hostKeyFailure
           : null,
-      passwordRequest: switch (phase ?? this.phase) {
+      passwordRequest: switch (nextPhase) {
         SessionPhase.credentialsPending ||
         SessionPhase.failed => passwordRequest ?? this.passwordRequest,
         _ => null,
@@ -165,6 +174,7 @@ class Session {
       other.kind == kind &&
       other.phase == phase &&
       other.error == error &&
+      other.chainedUpstream == chainedUpstream &&
       other.dockerTarget == dockerTarget &&
       other.hostKeyReview == hostKeyReview &&
       other.hostKeyFailure == hostKeyFailure &&
@@ -178,6 +188,7 @@ class Session {
     kind,
     phase,
     error,
+    chainedUpstream,
     hostKeyReview,
     hostKeyFailure,
     passwordRequest,

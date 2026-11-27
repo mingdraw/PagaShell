@@ -66,8 +66,7 @@ class LinuxSystemProxy implements SystemProxyBackend {
     return (result.stdout as String).replaceFirst(RegExp(r'\r?\n$'), '');
   }
 
-  @override
-  Future<void> enable(String owner, ProxyConfig config) async {
+  void _checkEnvironmentAndDesktop() {
     if (_change != null) {
       throw const SystemProxyException('系统代理已被占用，请先停止其他代理或取消自动设置');
     }
@@ -82,11 +81,7 @@ class LinuxSystemProxy implements SystemProxyBackend {
     if (variables.any((key) => (_environment[key] ?? '').trim().isNotEmpty)) {
       throw const SystemProxyException('系统代理已被占用，请先停止其他代理或取消自动设置');
     }
-    final desktop =
-        (_environment['XDG_CURRENT_DESKTOP'] ??
-                _environment['DESKTOP_SESSION'] ??
-                '')
-            .toLowerCase();
+    final desktop = _desktop();
     if (desktop.isNotEmpty &&
         ![
           'kde',
@@ -98,12 +93,34 @@ class LinuxSystemProxy implements SystemProxyBackend {
         ].any(desktop.contains)) {
       throw const SystemProxyException('当前系统不支持自动设置网络代理，请手动设置');
     }
+  }
+
+  String _desktop() =>
+      (_environment['XDG_CURRENT_DESKTOP'] ??
+              _environment['DESKTOP_SESSION'] ??
+              '')
+          .toLowerCase();
+
+  @override
+  Future<UpstreamProxyConfig?> inspectUpstream(ProxyConfig config) async {
+    _checkEnvironmentAndDesktop();
+    final desktop = _desktop();
     final change = desktop.contains('kde') || desktop.contains('plasma')
         ? await _kde(config)
-        : await _gnome(config);
+        : await _gnome(config, checkWritable: false);
+    return change.inspect();
+  }
+
+  @override
+  Future<UpstreamProxyConfig?> enable(String owner, ProxyConfig config) async {
+    _checkEnvironmentAndDesktop();
+    final desktop = _desktop();
+    final change = desktop.contains('kde') || desktop.contains('plasma')
+        ? await _kde(config)
+        : await _gnome(config, checkWritable: true);
     _change = change;
     _owner = owner;
-    await change.enable();
+    return change.enable();
   }
 
   @override
@@ -114,7 +131,95 @@ class LinuxSystemProxy implements SystemProxyBackend {
     _owner = null;
   }
 
-  Future<_LinuxProxyChange> _gnome(ProxyConfig config) async {
+  static String _unquoteGSettings(String? raw) {
+    if (raw == null) return '';
+    final trimmed = raw.trim();
+    if (trimmed.length >= 2 &&
+        ((trimmed.startsWith("'") && trimmed.endsWith("'")) ||
+            (trimmed.startsWith('"') && trimmed.endsWith('"')))) {
+      return trimmed.substring(1, trimmed.length - 1).trim();
+    }
+    return trimmed;
+  }
+
+  static List<String> _parseGSettingsList(String? raw) {
+    if (raw == null) return const [];
+    var text = raw.trim();
+    if (text.startsWith('@as ')) text = text.substring(4).trim();
+    if (!text.startsWith('[') || !text.endsWith(']')) return const [];
+    final inner = text.substring(1, text.length - 1).trim();
+    if (inner.isEmpty) return const [];
+    final items = <String>[];
+    for (final part in inner.split(',')) {
+      final unquoted = _unquoteGSettings(part);
+      if (unquoted.isNotEmpty) items.add(unquoted);
+    }
+    return List.unmodifiable(items);
+  }
+
+  static bool _isLoopbackHost(String rawHost) {
+    var host = rawHost.trim().toLowerCase();
+    if (host.startsWith('[') && host.endsWith(']')) {
+      host = host.substring(1, host.length - 1);
+    }
+    while (host.endsWith('.')) {
+      host = host.substring(0, host.length - 1);
+    }
+    if (host == 'localhost' || host.endsWith('.localhost') || host == '::1') {
+      return true;
+    }
+    final ip = InternetAddress.tryParse(host);
+    return ip != null && ip.isLoopback;
+  }
+
+  static bool _conflictsWithLocalPorts(
+    UpstreamProxyConfig upstream,
+    ProxyConfig config,
+  ) {
+    final localPorts = <int>{
+      if (config.httpEnabled) config.httpPort,
+      if (config.httpsEnabled) config.httpsPort,
+      if (config.socks5Enabled) config.socks5Port,
+    };
+    bool hits(UpstreamProxyEndpoint? ep) =>
+        ep != null && _isLoopbackHost(ep.host) && localPorts.contains(ep.port);
+    return hits(upstream.http) || hits(upstream.https) || hits(upstream.socks5);
+  }
+
+  static UpstreamProxyEndpoint? _parseKdeProxyUrl(
+    String? raw, {
+    required UpstreamProxyProtocol defaultProtocol,
+  }) {
+    final text = (raw ?? '').trim();
+    if (text.isEmpty) return null;
+    if (text.contains('@')) {
+      throw const SystemProxyException('当前系统代理启用了认证或反向排除规则，暂不支持串联，请取消串联或手动配置');
+    }
+    final normalized = text.contains('://') ? text : 'http://$text';
+    final uri = Uri.tryParse(normalized);
+    if (uri == null || uri.host.isEmpty || uri.port < 1 || uri.port > 65535) {
+      throw const SystemProxyException('系统代理已被占用，请先停止其他代理或取消自动设置');
+    }
+    if (uri.userInfo.isNotEmpty) {
+      throw const SystemProxyException('当前系统代理启用了认证或反向排除规则，暂不支持串联，请取消串联或手动配置');
+    }
+    final protocol = switch (uri.scheme.toLowerCase()) {
+      'http' || 'https' => UpstreamProxyProtocol.http,
+      'socks' || 'socks5' || 'socks5h' => UpstreamProxyProtocol.socks5,
+      '' => defaultProtocol,
+      _ => throw const SystemProxyException('系统代理已被占用，请先停止其他代理或取消自动设置'),
+    };
+    return UpstreamProxyEndpoint(
+      protocol: protocol,
+      host: uri.host,
+      port: uri.port,
+    );
+  }
+
+  Future<_LinuxProxyChange> _gnome(
+    ProxyConfig config, {
+    required bool checkWritable,
+  }) async {
     final tool = await _executable('gsettings');
     if (tool == null) throw const SystemProxyException('当前系统不支持自动设置网络代理，请手动设置');
     final schemas = (await _command(tool, [
@@ -151,9 +256,11 @@ class LinuxSystemProxy implements SystemProxyBackend {
       return value == '@as []' ? '[]' : value;
     }
 
-    for (final key in desired.keys) {
-      if (await _command(tool, ['writable', ...key.split('|')]) != 'true') {
-        throw const SystemProxyException('没有修改系统代理的权限，请授权后重试');
+    if (checkWritable) {
+      for (final key in desired.keys) {
+        if (await _command(tool, ['writable', ...key.split('|')]) != 'true') {
+          throw const SystemProxyException('没有修改系统代理的权限，请授权后重试');
+        }
       }
     }
     return _LinuxProxyChange(
@@ -180,7 +287,61 @@ class LinuxSystemProxy implements SystemProxyBackend {
       write: (key, value) async {
         await _command(tool, ['set', ...key.split('|'), value!]);
       },
-      conflict: (values) => values['$base|mode'] != "'none'",
+      extractUpstream: (values) {
+        final mode = values['$base|mode'];
+        if (mode == "'none'") return null;
+        if (!config.chainSystemProxy) {
+          throw const SystemProxyException('系统代理已被占用，请先停止其他代理或取消自动设置');
+        }
+        if (mode == "'auto'") {
+          throw const SystemProxyException(
+            '当前系统正在使用 PAC 自动代理脚本，暂不支持串联，请先关闭 PAC 或取消自动设置',
+          );
+        }
+        if (mode != "'manual'") {
+          throw const SystemProxyException('系统代理已被占用，请先停止其他代理或取消自动设置');
+        }
+        if (values['$base.http|use-authentication']?.trim() == 'true') {
+          throw const SystemProxyException(
+            '当前系统代理启用了认证或反向排除规则，暂不支持串联，请取消串联或手动配置',
+          );
+        }
+        UpstreamProxyEndpoint? readEndpoint(
+          String name,
+          UpstreamProxyProtocol protocol,
+        ) {
+          final host = _unquoteGSettings(values['$base.$name|host']);
+          final port =
+              int.tryParse((values['$base.$name|port'] ?? '').trim()) ?? 0;
+          if (host.isEmpty || port <= 0) return null;
+          if (port > 65535 || host.contains('@')) {
+            throw const SystemProxyException('系统代理已被占用，请先停止其他代理或取消自动设置');
+          }
+          return UpstreamProxyEndpoint(
+            protocol: protocol,
+            host: host,
+            port: port,
+          );
+        }
+
+        final http = readEndpoint('http', UpstreamProxyProtocol.http);
+        final useSame = values['$base|use-same-proxy']?.trim() == 'true';
+        final https = useSame
+            ? http
+            : readEndpoint('https', UpstreamProxyProtocol.http);
+        final socks5 = readEndpoint('socks', UpstreamProxyProtocol.socks5);
+        final upstream = UpstreamProxyConfig(
+          http: http,
+          https: https,
+          socks5: socks5,
+          bypass: _parseGSettingsList(values['$base|ignore-hosts']),
+        );
+        if (!upstream.hasEndpoint) return null;
+        if (_conflictsWithLocalPorts(upstream, config)) {
+          throw const SystemProxyException('已有系统代理端口与当前动态代理冲突，请修改监听端口后重试');
+        }
+        return upstream;
+      },
       reload: () async {},
     );
   }
@@ -254,7 +415,59 @@ class LinuxSystemProxy implements SystemProxyBackend {
           if (value == null) '--delete' else value,
         ]);
       },
-      conflict: (values) => (values['ProxyType'] ?? '0') != '0',
+      extractUpstream: (values) {
+        final mode = values['ProxyType'] ?? '0';
+        if (mode == '0') return null;
+        if (!config.chainSystemProxy) {
+          throw const SystemProxyException('系统代理已被占用，请先停止其他代理或取消自动设置');
+        }
+        if (mode == '2') {
+          throw const SystemProxyException(
+            '当前系统正在使用 PAC 自动代理脚本，暂不支持串联，请先关闭 PAC 或取消自动设置',
+          );
+        }
+        if (mode == '3') {
+          // WPAD auto-detect without PAC: temporarily replace and restore on stop.
+          return null;
+        }
+        if (mode != '1') {
+          throw const SystemProxyException('系统代理已被占用，请先停止其他代理或取消自动设置');
+        }
+        if ((values['ReversedException'] ?? '').trim().toLowerCase() ==
+            'true') {
+          throw const SystemProxyException(
+            '当前系统代理启用了认证或反向排除规则，暂不支持串联，请取消串联或手动配置',
+          );
+        }
+        final http = _parseKdeProxyUrl(
+          values['httpProxy'],
+          defaultProtocol: UpstreamProxyProtocol.http,
+        );
+        final https = _parseKdeProxyUrl(
+          values['httpsProxy'],
+          defaultProtocol: UpstreamProxyProtocol.http,
+        );
+        final socks5 = _parseKdeProxyUrl(
+          values['socksProxy'],
+          defaultProtocol: UpstreamProxyProtocol.socks5,
+        );
+        final bypass = (values['NoProxyFor'] ?? '')
+            .split(RegExp(r'[,;]'))
+            .map((part) => part.trim())
+            .where((part) => part.isNotEmpty)
+            .toList(growable: false);
+        final upstream = UpstreamProxyConfig(
+          http: http,
+          https: https,
+          socks5: socks5,
+          bypass: bypass,
+        );
+        if (!upstream.hasEndpoint) return null;
+        if (_conflictsWithLocalPorts(upstream, config)) {
+          throw const SystemProxyException('已有系统代理端口与当前动态代理冲突，请修改监听端口后重试');
+        }
+        return upstream;
+      },
       reload: () async {
         await _command(bus, [
           '--session',
@@ -276,7 +489,7 @@ class _LinuxProxyChange {
     required this.usesListener,
     required this.read,
     required this.write,
-    required this.conflict,
+    required this.extractUpstream,
     required this.reload,
   });
   final Map<String, String?> desired;
@@ -285,7 +498,7 @@ class _LinuxProxyChange {
   final bool Function(Map<String, String?>) usesListener;
   final Future<String?> Function(String) read;
   final Future<void> Function(String, String?) write;
-  final bool Function(Map<String, String?>) conflict;
+  final UpstreamProxyConfig? Function(Map<String, String?>) extractUpstream;
   final Future<void> Function() reload;
   Map<String, String?>? _before;
   final Set<String> _attempted = {};
@@ -294,11 +507,14 @@ class _LinuxProxyChange {
     for (final key in desired.keys) key: await read(key),
   };
 
-  Future<void> enable() async {
+  Future<UpstreamProxyConfig?> inspect() async {
     final before = await _readAll();
-    if (conflict(before)) {
-      throw const SystemProxyException('系统代理已被占用，请先停止其他代理或取消自动设置');
-    }
+    return extractUpstream(before);
+  }
+
+  Future<UpstreamProxyConfig?> enable() async {
+    final before = await _readAll();
+    final upstream = extractUpstream(before);
     _before = before;
     for (final key in desired.keys) {
       if (await read(key) != before[key]) {
@@ -317,6 +533,7 @@ class _LinuxProxyChange {
       throw const SystemProxyException('系统代理已被占用，请先停止其他代理或取消自动设置');
     }
     await reload();
+    return upstream;
   }
 
   Future<bool> _matchesExpected() async {

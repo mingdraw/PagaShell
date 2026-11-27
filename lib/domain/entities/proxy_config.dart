@@ -1,5 +1,7 @@
 import 'dart:io';
 
+import '../proxy/system_proxy.dart';
+
 enum ProxyMode { rule, global }
 
 enum ProxyRuleType { ip, domainExact, domainPrefix, domainSuffix }
@@ -53,6 +55,7 @@ class ProxyConfig {
     this.socks5Enabled = false,
     this.socks5Port = 1080,
     this.autoSystemProxy = false,
+    this.chainSystemProxy = true,
     this.rules = const [],
   });
 
@@ -64,6 +67,7 @@ class ProxyConfig {
   final bool socks5Enabled;
   final int socks5Port;
   final bool autoSystemProxy;
+  final bool chainSystemProxy;
   final List<ProxyRule> rules;
 
   void validate({bool forStart = false}) {
@@ -88,10 +92,11 @@ class ProxyConfig {
       httpsPort == other.httpsPort &&
       socks5Enabled == other.socks5Enabled &&
       socks5Port == other.socks5Port &&
-      autoSystemProxy == other.autoSystemProxy;
+      autoSystemProxy == other.autoSystemProxy &&
+      chainSystemProxy == other.chainSystemProxy;
 
   /// Only listener/routing settings cross the strict Rust configuration boundary.
-  Map<String, Object?> toEngineJson() => {
+  Map<String, Object?> toEngineJson({UpstreamProxyConfig? upstream}) => {
     'mode': mode.name,
     'httpEnabled': httpEnabled,
     'httpPort': httpPort,
@@ -100,11 +105,14 @@ class ProxyConfig {
     'socks5Enabled': socks5Enabled,
     'socks5Port': socks5Port,
     'rules': rules.map((r) => r.toJson()).toList(),
+    if (upstream != null && upstream.hasEndpoint)
+      'upstream': upstream.toEngineJson(),
   };
 
   Map<String, Object?> toJson() => {
     ...toEngineJson(),
     'autoSystemProxy': autoSystemProxy,
+    'chainSystemProxy': chainSystemProxy,
   };
 
   factory ProxyConfig.fromJson(Map<String, dynamic> json) {
@@ -119,6 +127,7 @@ class ProxyConfig {
       socks5Enabled: json['socks5Enabled'] as bool? ?? false,
       socks5Port: json['socks5Port'] as int? ?? 1080,
       autoSystemProxy: json['autoSystemProxy'] as bool? ?? false,
+      chainSystemProxy: json['chainSystemProxy'] as bool? ?? true,
       rules: List.unmodifiable(
         (json['rules'] as List<dynamic>? ?? []).map(
           (r) => ProxyRule.fromJson(r as Map<String, dynamic>),

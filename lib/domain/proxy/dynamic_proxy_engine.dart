@@ -1,12 +1,14 @@
 import '../entities/proxy_config.dart';
 import '../ssh/host_key.dart';
 import '../ssh/ssh_engine.dart';
+import 'system_proxy.dart';
 
 abstract interface class DynamicProxyEngine {
   /// Binds all enabled listeners atomically through the selected gateway.
   Future<DynamicProxySession> startProxy(
     ProxyConfig config, {
     SshGateway? gateway,
+    UpstreamProxyConfig? upstream,
     HostKeyVerifier? verifyHostKey,
     Future<void>? cancelled,
   });
@@ -26,5 +28,8 @@ abstract interface class DynamicProxyTrafficSource {
 
 abstract interface class DynamicProxyHotReload {
   /// 热更新运行中动态代理的模式与规则，不重建本地监听端口，不中断已有隧道。
-  Future<void> updateRouting(ProxyConfig config);
+  Future<void> updateRouting(
+    ProxyConfig config, {
+    UpstreamProxyConfig? upstream,
+  });
 }

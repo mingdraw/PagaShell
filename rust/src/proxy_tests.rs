@@ -272,7 +272,7 @@ async fn direct_proxy_dials_the_same_addresses_it_used_for_ip_rules() {
     // Only the cached addresses can reach this server. Resolving the original
     // host again would fail rather than connecting to the listener.
     let mut stream = router
-        .connect("direct.invalid", address.port())
+        .connect("direct.invalid", address.port(), TrafficKind::Https)
         .await
         .unwrap();
     stream.write_all(b"OK").await.unwrap();
@@ -930,6 +930,297 @@ async fn proxy_http_pool_reuses_keepalive_upstream_and_respects_connection_close
 
     proxy.stop().await;
     server.abort();
+}
+
+#[tokio::test]
+async fn proxy_chains_http_connect_and_socks_to_http_upstream_with_bypass_and_loop_guard() {
+    // Mock HTTP upstream proxy (like Clash/v2rayN) handling both absolute-URI HTTP
+    // forwarding and CONNECT tunnels (with early pipelined target bytes).
+    let upstream_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let upstream_port = upstream_listener.local_addr().unwrap().port();
+    let upstream_requests = Arc::new(StdMutex::new(Vec::<String>::new()));
+    let captured = upstream_requests.clone();
+    let upstream_server = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = upstream_listener.accept().await {
+            let captured = captured.clone();
+            tokio::spawn(async move {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 1024];
+                let header_end = loop {
+                    let Ok(n) = stream.read(&mut chunk).await else {
+                        return;
+                    };
+                    if n == 0 {
+                        return;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break pos + 4;
+                    }
+                };
+                let head = String::from_utf8_lossy(&buf[..header_end]);
+                let first_line = head.lines().next().unwrap_or("").to_owned();
+                captured.lock().unwrap().push(first_line.clone());
+                if first_line.starts_with("CONNECT ") {
+                    // Send 200 OK + early target greeting in the same write to test PrefixedStream.
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 200 Connection Established\r\n\r\nHELLO-FROM-UPSTREAM:",
+                        )
+                        .await;
+                    let mut req = [0u8; 4];
+                    if stream.read_exact(&mut req).await.is_ok() {
+                        let _ = stream.write_all(&req).await;
+                    }
+                    let _ = stream.shutdown().await;
+                } else {
+                    let body = format!("upstream:{first_line}");
+                    let reply = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(reply.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                }
+            });
+        }
+    });
+
+    let proxy_port = port().await;
+    // Reject self-loop when upstream points at PagaShell's own listening port.
+    let loop_cfg = json!({
+        "mode": "rule",
+        "httpEnabled": true,
+        "httpPort": proxy_port,
+        "httpsEnabled": true,
+        "httpsPort": proxy_port,
+        "socks5Enabled": true,
+        "socks5Port": proxy_port,
+        "rules": [],
+        "upstream": {
+            "http": {"protocol": "http", "host": "127.0.0.1", "port": proxy_port},
+            "https": {"protocol": "http", "host": "localhost", "port": proxy_port},
+            "bypass": []
+        }
+    })
+    .to_string();
+    assert!(start(&loop_cfg, None, Some(unavailable_page(1)))
+        .await
+        .is_err());
+
+    let cfg = json!({
+        "mode": "rule",
+        "httpEnabled": true,
+        "httpPort": proxy_port,
+        "httpsEnabled": true,
+        "httpsPort": proxy_port,
+        "socks5Enabled": true,
+        "socks5Port": proxy_port,
+        "rules": [
+            {"type": "ip", "value": "10.110.167.11"},
+            {"type": "domainSuffix", "value": "sslip.io"}
+        ],
+        "upstream": {
+            "http": {"protocol": "http", "host": "127.0.0.1", "port": upstream_port},
+            "https": {"protocol": "http", "host": "127.0.0.1", "port": upstream_port},
+            "bypass": ["localhost", "127.*", "10.*", "169.254/16", "*.local", "<local>"],
+            "excludeSimpleHostnames": true
+        }
+    })
+    .to_string();
+    let proxy = start(&cfg, None, Some(unavailable_page(1))).await.unwrap();
+
+    // 1. Plain HTTP unmatched external domain (even with IP gateway rules and no local DNS!)
+    //    routes to HTTP upstream using absolute-form URI without failing DNS.
+    let (headers, body) =
+        http_get_status_and_body(proxy_port, "external.unresolvable.invalid", "/hello").await;
+    assert!(headers.starts_with("HTTP/1.1 200"), "{headers}");
+    assert_eq!(
+        body,
+        "upstream:GET http://external.unresolvable.invalid/hello HTTP/1.1"
+    );
+
+    // 2. HTTPS CONNECT unmatched domain tunnels through HTTP upstream and preserves early bytes.
+    let mut tun = tunnel(proxy_port, "api.unresolvable.invalid:443").await;
+    let mut greeting = [0u8; 20];
+    tun.read_exact(&mut greeting).await.unwrap();
+    assert_eq!(&greeting, b"HELLO-FROM-UPSTREAM:");
+    tun.write_all(b"PING").await.unwrap();
+    let mut echoed = [0u8; 4];
+    tun.read_exact(&mut echoed).await.unwrap();
+    assert_eq!(&echoed, b"PING");
+
+    // 3. SOCKS5 unmatched domain falls back to HTTP CONNECT upstream when only HTTP upstream exists.
+    let mut socks = socks_connect(proxy_port, "socks.unresolvable.invalid", 8443).await;
+    let mut socks_greeting = [0u8; 20];
+    socks.read_exact(&mut socks_greeting).await.unwrap();
+    assert_eq!(&socks_greeting, b"HELLO-FROM-UPSTREAM:");
+    socks.write_all(b"PONG").await.unwrap();
+    let mut socks_echoed = [0u8; 4];
+    socks.read_exact(&mut socks_echoed).await.unwrap();
+    assert_eq!(&socks_echoed, b"PONG");
+
+    // 4. Matched gateway rules MUST go to Gateway (here unavailable -> 502), NOT upstream.
+    let before_count = upstream_requests.lock().unwrap().len();
+    assert!(http_request(proxy_port, "10.110.167.11:31288")
+        .await
+        .starts_with("HTTP/1.1 502"));
+    assert!(http_request(proxy_port, "app.sslip.io:80")
+        .await
+        .starts_with("HTTP/1.1 502"));
+    assert_eq!(upstream_requests.lock().unwrap().len(), before_count);
+
+    // 5. Bypass rules (loopback, 10.*, macOS 169.254/16, *.local, simple hostname)
+    //    go Direct instead of upstream.
+    let (local_origin, mut local_rx) = origin().await;
+    assert!(http_request(proxy_port, &local_origin.address.to_string())
+        .await
+        .starts_with("HTTP/1.1 200"));
+    assert!(local_rx.recv().await.is_some());
+    assert_eq!(upstream_requests.lock().unwrap().len(), before_count);
+
+    let routing = proxy.router.current_routing();
+    assert!(matches!(
+        proxy
+            .router
+            .route_with(&routing, "10.1.2.3", 80, TrafficKind::Http)
+            .await
+            .unwrap(),
+        Route::Direct
+    ));
+    assert!(matches!(
+        proxy
+            .router
+            .route_with(&routing, "169.254.12.34", 80, TrafficKind::Http)
+            .await
+            .unwrap(),
+        Route::Direct
+    ));
+    proxy.router.dns.put(
+        "printer.local".into(),
+        Arc::new([IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50))]),
+        Instant::now() + DNS_TTL,
+    );
+    proxy.router.dns.put(
+        "intranet".into(),
+        Arc::new([IpAddr::V4(Ipv4Addr::new(192, 168, 1, 51))]),
+        Instant::now() + DNS_TTL,
+    );
+    assert!(matches!(
+        proxy
+            .router
+            .route_with(&routing, "printer.local", 80, TrafficKind::Http)
+            .await
+            .unwrap(),
+        Route::Resolved(_)
+    ));
+    assert!(matches!(
+        proxy
+            .router
+            .route_with(&routing, "intranet", 80, TrafficKind::Http)
+            .await
+            .unwrap(),
+        Route::Resolved(_)
+    ));
+    assert!(matches!(
+        proxy
+            .router
+            .route_with(&routing, "10.110.167.11", 31288, TrafficKind::Http)
+            .await
+            .unwrap(),
+        Route::Gateway
+    ));
+    assert!(matches!(
+        proxy
+            .router
+            .route_with(&routing, "example.com", 443, TrafficKind::Https)
+            .await
+            .unwrap(),
+        Route::Upstream(_)
+    ));
+
+    // 6. Hot-reload rejects self-loop upstream without clobbering active routing.
+    assert!(proxy.update_routing(&loop_cfg).is_err());
+
+    proxy.stop().await;
+    upstream_server.abort();
+}
+
+#[tokio::test]
+async fn proxy_chains_to_socks5_upstream() {
+    // Minimal RFC 1928 SOCKS5 mock server echoing the requested domain and port.
+    let upstream_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let upstream_port = upstream_listener.local_addr().unwrap().port();
+    let upstream_server = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = upstream_listener.accept().await {
+            tokio::spawn(async move {
+                let mut greeting = [0u8; 3];
+                if stream.read_exact(&mut greeting).await.is_err() || greeting != [5, 1, 0] {
+                    return;
+                }
+                let _ = stream.write_all(&[5, 0]).await;
+                let mut header = [0u8; 4];
+                if stream.read_exact(&mut header).await.is_err() || header[0] != 5 || header[1] != 1
+                {
+                    return;
+                }
+                let host = match header[3] {
+                    3 => {
+                        let Ok(len) = stream.read_u8().await else {
+                            return;
+                        };
+                        let mut bytes = vec![0u8; len as usize];
+                        if stream.read_exact(&mut bytes).await.is_err() {
+                            return;
+                        }
+                        String::from_utf8_lossy(&bytes).into_owned()
+                    }
+                    _ => return,
+                };
+                let Ok(port) = stream.read_u16().await else {
+                    return;
+                };
+                let _ = stream.write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0]).await;
+                let payload = format!("socks5:{host}:{port}");
+                let _ = stream.write_all(payload.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            });
+        }
+    });
+
+    let proxy_port = port().await;
+    let cfg = json!({
+        "mode": "rule",
+        "httpEnabled": true,
+        "httpPort": proxy_port,
+        "httpsEnabled": true,
+        "httpsPort": proxy_port,
+        "socks5Enabled": true,
+        "socks5Port": proxy_port,
+        "rules": [],
+        "upstream": {
+            "socks5": {"protocol": "socks5", "host": "127.0.0.1", "port": upstream_port},
+            "bypass": ["localhost"]
+        }
+    })
+    .to_string();
+    let proxy = start(&cfg, None, Some(unavailable_page(1))).await.unwrap();
+
+    // HTTPS CONNECT through SOCKS5 upstream receives remote hostname via ATYP=3.
+    let mut tun = tunnel(proxy_port, "remote.example.invalid:443").await;
+    let mut out = String::new();
+    tun.read_to_string(&mut out).await.unwrap();
+    assert_eq!(out, "socks5:remote.example.invalid:443");
+
+    // SOCKS5 client through SOCKS5 upstream also forwards remote hostname.
+    let mut socks = socks_connect(proxy_port, "socks.example.invalid", 9000).await;
+    let mut socks_out = String::new();
+    socks.read_to_string(&mut socks_out).await.unwrap();
+    assert_eq!(socks_out, "socks5:socks.example.invalid:9000");
+
+    proxy.stop().await;
+    upstream_server.abort();
 }
 
 #[tokio::test]

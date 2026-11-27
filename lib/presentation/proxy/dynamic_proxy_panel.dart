@@ -59,7 +59,7 @@ class _DynamicProxyPanelState extends State<DynamicProxyPanel> {
   final _http = TextEditingController();
   final _socks = TextEditingController();
   late ProxyMode _mode;
-  late bool _httpEnabled, _socksEnabled, _autoSystemProxy;
+  late bool _httpEnabled, _socksEnabled, _autoSystemProxy, _chainSystemProxy;
   int _lastValidHttpPort = 18080;
   int _lastValidSocksPort = 1080;
   List<_RuleEditor> _rules = [];
@@ -85,6 +85,7 @@ class _DynamicProxyPanelState extends State<DynamicProxyPanel> {
     _httpEnabled = config.httpEnabled || config.httpsEnabled;
     _socksEnabled = config.socks5Enabled;
     _autoSystemProxy = config.autoSystemProxy;
+    _chainSystemProxy = config.chainSystemProxy;
     // 兼容旧配置：只启用 HTTPS 时沿用其端口，否则优先沿用 HTTP 端口。
     _lastValidHttpPort = !config.httpEnabled && config.httpsEnabled
         ? config.httpsPort
@@ -178,6 +179,7 @@ class _DynamicProxyPanelState extends State<DynamicProxyPanel> {
       socks5Enabled: _socksEnabled,
       socks5Port: socksPort,
       autoSystemProxy: _autoSystemProxy,
+      chainSystemProxy: _chainSystemProxy,
       rules: _ruleDraft(),
     );
     config.validate();
@@ -674,6 +676,17 @@ class _DynamicProxyPanelState extends State<DynamicProxyPanel> {
               key: const ValueKey('proxy-locked-hint'),
               style: TextStyle(fontSize: 12, color: colors.mutedForeground),
             ),
+            if (session.chainedUpstream case final upstream?
+                when upstream.hasEndpoint) ...[
+              const SizedBox(height: 4),
+              Text(
+                '未命中规则转发至原系统代理：@target（停止后自动恢复）'.trParams({
+                  'target': upstream.displaySummary,
+                }),
+                key: const ValueKey('proxy-chained-upstream-hint'),
+                style: TextStyle(fontSize: 12, color: colors.mutedForeground),
+              ),
+            ],
             if (session.proxySession
                 case final DynamicProxyTrafficSource source)
               ProxyTrafficStatus(
@@ -785,21 +798,45 @@ class _DynamicProxyPanelState extends State<DynamicProxyPanel> {
           const SizedBox(height: 12),
           Builder(
             builder: (context) {
-              final autoSystemProxy = shadcn.Checkbox(
-                key: const ValueKey('proxy-auto-system'),
-                state: _autoSystemProxy
-                    ? shadcn.CheckboxState.checked
-                    : shadcn.CheckboxState.unchecked,
-                onChanged: listenerEditable
-                    ? (state) {
-                        setState(
-                          () => _autoSystemProxy =
-                              state == shadcn.CheckboxState.checked,
-                        );
-                        _changed();
-                      }
-                    : null,
-                trailing: Text('自动设置系统网络代理'.tr),
+              final autoSystemProxy = Wrap(
+                spacing: 16,
+                runSpacing: 8,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  shadcn.Checkbox(
+                    key: const ValueKey('proxy-auto-system'),
+                    state: _autoSystemProxy
+                        ? shadcn.CheckboxState.checked
+                        : shadcn.CheckboxState.unchecked,
+                    onChanged: listenerEditable
+                        ? (state) {
+                            setState(
+                              () => _autoSystemProxy =
+                                  state == shadcn.CheckboxState.checked,
+                            );
+                            _changed();
+                          }
+                        : null,
+                    trailing: Text('自动设置系统网络代理'.tr),
+                  ),
+                  if (_autoSystemProxy)
+                    shadcn.Checkbox(
+                      key: const ValueKey('proxy-chain-system'),
+                      state: _chainSystemProxy
+                          ? shadcn.CheckboxState.checked
+                          : shadcn.CheckboxState.unchecked,
+                      onChanged: listenerEditable
+                          ? (state) {
+                              setState(
+                                () => _chainSystemProxy =
+                                    state == shadcn.CheckboxState.checked,
+                              );
+                              _changed();
+                            }
+                          : null,
+                      trailing: Text('串联已有系统代理（与 Clash / v2rayN 共存）'.tr),
+                    ),
+                ],
               );
               final platform = shadcn.Theme.of(context).platform;
               final envCommand = _terminalProxyCommand(platform);

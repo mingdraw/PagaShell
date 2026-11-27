@@ -71,6 +71,7 @@ class _CountingSshEngine implements SshEngine, DynamicProxyEngine {
   Future<DynamicProxySession> startProxy(
     ProxyConfig config, {
     SshGateway? gateway,
+    UpstreamProxyConfig? upstream,
     HostKeyVerifier? verifyHostKey,
     Future<void>? cancelled,
   }) async {
@@ -123,6 +124,9 @@ class _FailRestoreLease implements SystemProxyLease {
   int restoreCalls = 0;
 
   @override
+  UpstreamProxyConfig? get chainedUpstream => null;
+
+  @override
   Future<void> enable() async {}
 
   @override
@@ -137,6 +141,10 @@ class _FailRestoreLease implements SystemProxyLease {
 class _FakeSystemProxy implements SystemProxy {
   _FakeSystemProxy(this.lease);
   final _FailRestoreLease lease;
+
+  @override
+  Future<UpstreamProxyConfig?> inspectUpstream(ProxyConfig config) async =>
+      null;
 
   @override
   SystemProxyLease createLease(ProxyConfig config) => lease;

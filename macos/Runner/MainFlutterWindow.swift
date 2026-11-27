@@ -341,7 +341,7 @@ class MainFlutterWindow: NSWindow {
 /// SystemConfiguration serializes commits with other network preference writers.
 /// Snapshots remain in memory and are restored only while our values still match.
 private final class MacSystemProxy {
-  private enum Failure: Error { case conflict, permission, unavailable }
+  private enum Failure: Error { case conflict, pacUnsupported, chainLoop, permission, unavailable }
   private struct Snapshot {
     let serviceID: String
     let before: [String: Any]?
@@ -383,6 +383,28 @@ private final class MacSystemProxy {
       }
       return
     }
+    if call.method == "inspectUpstream" {
+      guard let args = call.arguments as? [String: Any] else {
+        result(FlutterError(code: "proxy_failed", message: "Invalid proxy request", details: nil))
+        return
+      }
+      queue.async {
+        do {
+          let ports = ["HTTP": args["httpPort"] as? Int ?? 0,
+                       "HTTPS": args["httpsPort"] as? Int ?? 0,
+                       "SOCKS": args["socksPort"] as? Int ?? 0]
+          guard ports.values.allSatisfy({ (0...65535).contains($0) }), ports.values.contains(where: { $0 > 0 }) else {
+            throw Failure.unavailable
+          }
+          let chainExisting = args["chainExisting"] as? Bool ?? false
+          let upstream = try self.inspectUpstream(ports: ports, chainExisting: chainExisting)
+          DispatchQueue.main.async { result(upstream) }
+        } catch {
+          DispatchQueue.main.async { result(self.flutterError(for: error)) }
+        }
+      }
+      return
+    }
     guard let args = call.arguments as? [String: Any], let id = args["owner"] as? String,
           call.method == "enable" || call.method == "restore" else {
       result(FlutterMethodNotImplemented)
@@ -397,46 +419,151 @@ private final class MacSystemProxy {
           guard ports.values.allSatisfy({ (0...65535).contains($0) }), ports.values.contains(where: { $0 > 0 }) else {
             throw Failure.unavailable
           }
-          try self.enable(id, ports: ports)
+          let chainExisting = args["chainExisting"] as? Bool ?? false
+          let upstream = try self.enable(id, ports: ports, chainExisting: chainExisting)
+          DispatchQueue.main.async { result(upstream) }
         } else {
           try self.restore(id)
+          DispatchQueue.main.async { result(nil) }
         }
-        DispatchQueue.main.async { result(nil) }
       } catch {
-        let code: String
-        switch error {
-        case Failure.conflict: code = "proxy_conflict"
-        case Failure.permission: code = "proxy_permission"
-        default: code = "proxy_failed"
-        }
-        // Never return PAC URLs, credentials or the contents of a proxy snapshot.
-        DispatchQueue.main.async { result(FlutterError(code: code, message: "System proxy operation failed", details: nil)) }
+        DispatchQueue.main.async { result(self.flutterError(for: error)) }
       }
     }
   }
 
+  private func flutterError(for error: Error) -> FlutterError {
+    let code: String
+    switch error {
+    case Failure.conflict: code = "proxy_conflict"
+    case Failure.pacUnsupported: code = "proxy_chain_pac_unsupported"
+    case Failure.chainLoop: code = "proxy_chain_loop"
+    case Failure.permission: code = "proxy_permission"
+    default: code = "proxy_failed"
+    }
+    // Never return PAC URLs, credentials or the contents of a proxy snapshot.
+    return FlutterError(code: code, message: "System proxy operation failed", details: nil)
+  }
+
+  private func isEnabled(_ values: [String: Any], _ key: String) -> Bool {
+    (values[key] as? NSNumber)?.boolValue == true
+  }
+
   private func hasProxy(_ values: [String: Any]) -> Bool {
-    if Self.enableKeys.contains(where: { (values[$0] as? NSNumber)?.boolValue == true }) { return true }
+    if Self.enableKeys.contains(where: { isEnabled(values, $0) }) { return true }
     if let scoped = values["__SCOPED__"] as? [String: [String: Any]], scoped.values.contains(where: hasProxy) { return true }
     if let supplemental = values["__SUPPLEMENTAL__"] as? [[String: Any]], supplemental.contains(where: hasProxy) { return true }
     return false
   }
 
-  private func activeServices(_ prefs: SCPreferences) throws -> [SCNetworkService] {
+  private func isLoopbackHost(_ rawHost: String) -> Bool {
+    var host = rawHost.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if host.hasPrefix("["), host.hasSuffix("]") {
+      host = String(host.dropFirst().dropLast())
+    }
+    while host.hasSuffix(".") { host.removeLast() }
+    if host == "localhost" || host.hasSuffix(".localhost") || host == "::1" { return true }
+    let parts = host.split(separator: ".", omittingEmptySubsequences: false)
+    if parts.count == 4, parts.first == "127",
+       parts.allSatisfy({ part in
+         guard let value = Int(part), (0...255).contains(value) else { return false }
+         return true
+       }) {
+      return true
+    }
+    return false
+  }
+
+  private func extractUpstream(from values: [String: Any], localPorts: Set<Int>, chainExisting: Bool) throws -> [String: Any]? {
+    if !chainExisting {
+      if hasProxy(values) { throw Failure.conflict }
+      return nil
+    }
+    if isEnabled(values, "ProxyAutoConfigEnable") { throw Failure.pacUnsupported }
+    for unsupported in ["FTPEnable", "GopherEnable", "RTSPEnable"] {
+      if isEnabled(values, unsupported) { throw Failure.conflict }
+    }
+    var result: [String: Any] = [:]
+    func capture(enableKey: String, hostKey: String, portKey: String, outputKey: String, protocolName: String) throws {
+      guard isEnabled(values, enableKey) else { return }
+      guard let rawHost = values[hostKey] as? String,
+            let port = (values[portKey] as? NSNumber)?.intValue,
+            (1...65535).contains(port) else {
+        throw Failure.conflict
+      }
+      let host = rawHost.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !host.isEmpty, !host.contains("@") else { throw Failure.conflict }
+      if isLoopbackHost(host) && localPorts.contains(port) {
+        throw Failure.chainLoop
+      }
+      result[outputKey] = ["protocol": protocolName, "host": host, "port": port]
+    }
+    try capture(enableKey: "HTTPEnable", hostKey: "HTTPProxy", portKey: "HTTPPort", outputKey: "http", protocolName: "http")
+    try capture(enableKey: "HTTPSEnable", hostKey: "HTTPSProxy", portKey: "HTTPSPort", outputKey: "https", protocolName: "http")
+    try capture(enableKey: "SOCKSEnable", hostKey: "SOCKSProxy", portKey: "SOCKSPort", outputKey: "socks5", protocolName: "socks5")
+    if result.isEmpty { return nil }
+    let exceptions = (values["ExceptionsList"] as? [String] ?? [])
+      .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+      .filter { !$0.isEmpty }
+    result["bypass"] = exceptions
+    result["excludeSimpleHostnames"] = isEnabled(values, "ExcludeSimpleHostnames")
+    return result
+  }
+
+  private func activeServices(_ prefs: SCPreferences, chainExisting: Bool) throws -> [SCNetworkService] {
     guard let store = SCDynamicStoreCreate(nil, "PagaShell" as CFString, nil, nil),
           let all = SCNetworkServiceCopyAll(prefs) as? [SCNetworkService] else { throw Failure.unavailable }
     var primary = Set<String>()
+    var primaryInterfaces = Set<String>()
     for family in ["IPv4", "IPv6"] {
-      if let state = SCDynamicStoreCopyValue(store, "State:/Network/Global/\(family)" as CFString) as? [String: Any],
-         let id = state["PrimaryService"] as? String { primary.insert(id) }
+      if let state = SCDynamicStoreCopyValue(store, "State:/Network/Global/\(family)" as CFString) as? [String: Any] {
+        if let id = state["PrimaryService"] as? String { primary.insert(id) }
+        if let iface = state["PrimaryInterface"] as? String { primaryInterfaces.insert(iface) }
+      }
     }
     let services = all.filter { service in
       guard SCNetworkServiceGetEnabled(service), let id = SCNetworkServiceGetServiceID(service) else { return false }
       return primary.contains(id as String)
     }
     guard !services.isEmpty else { throw Failure.unavailable }
-    if let effective = SCDynamicStoreCopyProxies(store) as? [String: Any], hasProxy(effective) { throw Failure.conflict }
+    if let effective = SCDynamicStoreCopyProxies(store) as? [String: Any] {
+      if !chainExisting {
+        if hasProxy(effective) { throw Failure.conflict }
+      } else {
+        if isEnabled(effective, "ProxyAutoConfigEnable") { throw Failure.pacUnsupported }
+        if let supplemental = effective["__SUPPLEMENTAL__"] as? [[String: Any]],
+           supplemental.contains(where: hasProxy) {
+          throw Failure.conflict
+        }
+        if let scoped = effective["__SCOPED__"] as? [String: [String: Any]] {
+          for (iface, dict) in scoped {
+            if isEnabled(dict, "ProxyAutoConfigEnable") { throw Failure.pacUnsupported }
+            if !primaryInterfaces.contains(iface) && hasProxy(dict) {
+              throw Failure.conflict
+            }
+          }
+        }
+      }
+    }
     return services
+  }
+
+  private func inspectUpstream(ports: [String: Int], chainExisting: Bool) throws -> [String: Any]? {
+    guard owner == nil else { throw Failure.conflict }
+    guard let readOnly = SCPreferencesCreate(nil, "PagaShell" as CFString, nil) else { throw Failure.unavailable }
+    let localPorts = Set(ports.values.filter { $0 > 0 })
+    let services = try activeServices(readOnly, chainExisting: chainExisting)
+    var captured: [String: Any]?
+    for service in services {
+      if let proto = SCNetworkServiceCopyProtocol(service, kSCNetworkProtocolTypeProxies),
+         let values = SCNetworkProtocolGetConfiguration(proto) as? [String: Any] {
+        if let upstream = try extractUpstream(from: values, localPorts: localPorts, chainExisting: chainExisting),
+           captured == nil {
+          captured = upstream
+        }
+      }
+    }
+    return captured
   }
 
   private func authorizedPreferences() throws -> SCPreferences {
@@ -459,15 +586,11 @@ private final class MacSystemProxy {
     return prefs
   }
 
-  private func enable(_ id: String, ports: [String: Int]) throws {
+  private func enable(_ id: String, ports: [String: Int], chainExisting: Bool) throws -> [String: Any]? {
     guard owner == nil else { throw Failure.conflict }
-    guard let readOnly = SCPreferencesCreate(nil, "PagaShell" as CFString, nil) else { throw Failure.unavailable }
-    // Avoid prompting for authorization when another proxy is already active.
-    let initialServices = try activeServices(readOnly)
-    for service in initialServices {
-      if let proto = SCNetworkServiceCopyProtocol(service, kSCNetworkProtocolTypeProxies),
-         let values = SCNetworkProtocolGetConfiguration(proto) as? [String: Any], hasProxy(values) { throw Failure.conflict }
-    }
+    let localPorts = Set(ports.values.filter { $0 > 0 })
+    // Avoid prompting for authorization when an unsupported conflict exists.
+    _ = try inspectUpstream(ports: ports, chainExisting: chainExisting)
     let prefs = try authorizedPreferences()
     preferences = prefs
     SCPreferencesSynchronize(prefs)
@@ -475,13 +598,24 @@ private final class MacSystemProxy {
     defer { SCPreferencesUnlock(prefs) }
     SCPreferencesSynchronize(prefs)
     let services: [SCNetworkService]
-    do { services = try activeServices(prefs) } catch { clear(); throw error }
+    do { services = try activeServices(prefs, chainExisting: chainExisting) } catch { clear(); throw error }
     var changes: [(SCNetworkProtocol, Snapshot)] = []
+    var captured: [String: Any]?
     for service in services {
       guard let proto = SCNetworkServiceCopyProtocol(service, kSCNetworkProtocolTypeProxies),
             let serviceID = SCNetworkServiceGetServiceID(service) else { clear(); throw Failure.unavailable }
       let before = SCNetworkProtocolGetConfiguration(proto) as? [String: Any]
-      if let before = before, hasProxy(before) { clear(); throw Failure.conflict }
+      if let before = before {
+        do {
+          if let upstream = try extractUpstream(from: before, localPorts: localPorts, chainExisting: chainExisting),
+             captured == nil {
+            captured = upstream
+          }
+        } catch {
+          clear()
+          throw error
+        }
+      }
       var installed = before ?? [:]
       for key in Self.enableKeys { installed[key] = 0 }
       installed["ExceptionsList"] = [String]()
@@ -499,6 +633,7 @@ private final class MacSystemProxy {
       guard SCNetworkProtocolSetConfiguration(proto, snapshot.installed as CFDictionary) else { throw Failure.unavailable }
     }
     guard SCPreferencesCommitChanges(prefs), SCPreferencesApplyChanges(prefs) else { throw Failure.unavailable }
+    return captured
   }
 
   private func restore(_ id: String) throws {

@@ -760,7 +760,10 @@ class SessionController extends GetxController {
     }
     final handle = _runtimes[id]?.proxyHandle ?? session.proxySession;
     if (handle case final DynamicProxyHotReload reloader) {
-      await reloader.updateRouting(config);
+      await reloader.updateRouting(
+        config,
+        upstream: _runtimes[id]?.chainedUpstream,
+      );
       return;
     }
     throw StateError('请先停止动态代理再编辑配置');
@@ -818,14 +821,50 @@ class SessionController extends GetxController {
               ended(error is SshEngineException ? error.message : '动态代理监听已断开'),
         ),
       );
+      UpstreamProxyConfig? chainedUpstream;
       if (!cancellation.isCompleted && host.proxyConfig.autoSystemProxy) {
         final systemProxy = _systemProxy;
         if (systemProxy == null) {
           throw const SystemProxyException('当前系统不支持自动设置网络代理，请手动设置');
         }
+        final previewUpstream = await systemProxy.inspectUpstream(
+          host.proxyConfig,
+        );
+        if (cancellation.isCompleted ||
+            _disposed ||
+            _find(id) == null ||
+            _find(id)?.phase == SessionPhase.stopping) {
+          await _releaseProxyResources(id);
+          return;
+        }
+        if (previewUpstream != null && previewUpstream.hasEndpoint) {
+          if (proxy case final DynamicProxyHotReload reloader) {
+            await reloader.updateRouting(
+              host.proxyConfig,
+              upstream: previewUpstream,
+            );
+          }
+        }
+        if (cancellation.isCompleted ||
+            _disposed ||
+            _find(id) == null ||
+            _find(id)?.phase == SessionPhase.stopping) {
+          await _releaseProxyResources(id);
+          return;
+        }
         final lease = systemProxy.createLease(host.proxyConfig);
         _runtimes[id]?.systemProxyLease = lease;
         await lease.enable();
+        chainedUpstream = lease.chainedUpstream;
+        if (chainedUpstream != previewUpstream) {
+          if (proxy case final DynamicProxyHotReload reloader) {
+            await reloader.updateRouting(
+              host.proxyConfig,
+              upstream: chainedUpstream,
+            );
+          }
+        }
+        _runtimes[id]?.chainedUpstream = chainedUpstream;
       }
       if (cancellation.isCompleted ||
           _disposed ||
@@ -836,7 +875,11 @@ class SessionController extends GetxController {
       }
       _update(
         id,
-        (s) => s.copyWith(phase: SessionPhase.ready, proxySession: proxy),
+        (s) => s.copyWith(
+          phase: SessionPhase.ready,
+          proxySession: proxy,
+          chainedUpstream: chainedUpstream,
+        ),
       );
     } on Object catch (e) {
       Object failure = e;
@@ -2224,6 +2267,7 @@ class SessionController extends GetxController {
       await lease.restore();
     }
     _runtimes[id]?.systemProxyLease = null;
+    _runtimes[id]?.chainedUpstream = null;
     _runtimes[id]?.proxyRestoreFailed = false;
     _markCloseStep(id, SessionCloseStep.dynamicProxy);
     final proxy = _runtimes[id]?.proxyHandle;

@@ -97,7 +97,9 @@ void main() {
     );
     expect(ProxyConfig.fromJson(config.toJson()).toJson(), config.toJson());
     expect(ProxyConfig.fromJson({}).autoSystemProxy, isFalse);
+    expect(ProxyConfig.fromJson({}).chainSystemProxy, isTrue);
     expect(config.toEngineJson().containsKey('autoSystemProxy'), isFalse);
+    expect(config.toEngineJson().containsKey('chainSystemProxy'), isFalse);
   });
 
   test('旧直连配置读取为规则模式并保留协议、端口和规则', () {

@@ -81,4 +81,48 @@ int main() {
   Check(ManualOwner({kDirect, installed.server, L""}, installed) ==
             ManualProxyOwner::kOther,
         "ignore stored addresses when manual proxy is disabled");
+
+  // Upstream chaining parsing, loop protection, and WPAD + manual proxy restore.
+  const Settings clash_active{
+      kDirect | kManual | kAutoDetect, L"127.0.0.1:7897",
+      L"localhost;127.*;10.*;172.16.*;<local>"};
+  UpstreamProxy upstream;
+  Check(ParseUpstream(clash_active, &upstream) && upstream.HasEndpoint(),
+        "parse active Clash/v2rayN single-server proxy");
+  Check(upstream.http.has_value() && upstream.https.has_value() &&
+            !upstream.socks5.has_value() && upstream.http->host == L"127.0.0.1" &&
+            upstream.http->port == 7897 && upstream.http->protocol == L"http",
+        "single-server proxy applies to both HTTP and HTTPS");
+  Check(upstream.bypass.size() == 5 && upstream.bypass[2] == L"10.*" &&
+            upstream.bypass[4] == L"<local>",
+        "preserve original Windows ProxyOverride entries");
+  Check(ConflictsWithLocalPorts(upstream, 7897, 7897, 0),
+        "reject self-loop when upstream uses the same loopback port");
+  Check(!ConflictsWithLocalPorts(upstream, 18080, 18080, 1080),
+        "allow chaining when upstream uses a different port");
+
+  const auto chained_installed = LocalSettings(clash_active, 18080, 18080);
+  Check(chained_installed.flags == (kDirect | kManual),
+        "clear WPAD while PagaShell manual proxy is active");
+  const auto restored_clash =
+      RestoreManual(chained_installed, clash_active, chained_installed);
+  Check(restored_clash == clash_active,
+        "restore previous Clash proxy, bypass list, and WPAD flag");
+
+  const Settings per_scheme{
+      kDirect | kManual,
+      L"http=127.0.0.1:10809;https=http://localhost:10809;socks=socks5://[::1]:10808",
+      L"*.corp"};
+  Check(ParseUpstream(per_scheme, &upstream) && upstream.http.has_value() &&
+            upstream.https.has_value() && upstream.socks5.has_value() &&
+            upstream.socks5->host == L"::1" && upstream.socks5->port == 10808,
+        "parse per-scheme WinINet upstream endpoints");
+  Check(ConflictsWithLocalPorts(upstream, 18080, 18080, 10808),
+        "detect IPv6 loopback self-loop");
+  Check(!ParseUpstream({kDirect | kManual, L"user:pass@127.0.0.1:7897", L""},
+                       &upstream),
+        "reject authenticated upstream proxy");
+  Check(!ParseUpstream({kDirect | kManual, L"socks=socks4://127.0.0.1:1080", L""},
+                       &upstream),
+        "reject unsupported SOCKS4 upstream scheme");
 }

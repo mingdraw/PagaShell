@@ -29,6 +29,7 @@ class _SessionRuntime {
   Completer<void>? proxyStarting;
   DynamicProxySession? proxyHandle;
   SystemProxyLease? systemProxyLease;
+  UpstreamProxyConfig? chainedUpstream;
   bool proxyRestoreFailed = false;
   Future<void>? tabCloseRequest;
 

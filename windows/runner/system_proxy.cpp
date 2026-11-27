@@ -13,10 +13,17 @@ static_assert(windows_proxy::kDirect == PROXY_TYPE_DIRECT &&
 
 using Value = flutter::EncodableValue;
 using Map = flutter::EncodableMap;
+using List = flutter::EncodableList;
 using Result = flutter::MethodResult<Value>;
 const Value* Argument(const Map& map, const char* name) {
   const auto found = map.find(Value(name));
   return found == map.end() ? nullptr : &found->second;
+}
+bool BoolArg(const Map& map, const char* name) {
+  const auto* value = Argument(map, name);
+  if (!value) return false;
+  const auto* flag = std::get_if<bool>(value);
+  return flag ? *flag : false;
 }
 int Port(const Map& map, const char* name) {
   const auto* value = Argument(map, name);
@@ -72,6 +79,30 @@ std::string WideToUtf8(const std::wstring& wide) {
   WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()),
                       out.data(), needed, nullptr, nullptr);
   return out;
+}
+
+Value EncodeEndpoint(const windows_proxy::UpstreamEndpoint& endpoint) {
+  return Value(Map{
+      {Value("protocol"), Value(WideToUtf8(endpoint.protocol))},
+      {Value("host"), Value(WideToUtf8(endpoint.host))},
+      {Value("port"), Value(endpoint.port)},
+  });
+}
+
+Value EncodeUpstream(const windows_proxy::UpstreamProxy& upstream) {
+  if (!upstream.HasEndpoint()) return Value();
+  Map out;
+  if (upstream.http) out[Value("http")] = EncodeEndpoint(*upstream.http);
+  if (upstream.https) out[Value("https")] = EncodeEndpoint(*upstream.https);
+  if (upstream.socks5) out[Value("socks5")] = EncodeEndpoint(*upstream.socks5);
+  List bypass;
+  bypass.reserve(upstream.bypass.size());
+  for (const auto& rule : upstream.bypass) {
+    bypass.emplace_back(WideToUtf8(rule));
+  }
+  out[Value("bypass")] = Value(std::move(bypass));
+  out[Value("excludeSimpleHostnames")] = Value(false);
+  return Value(std::move(out));
 }
 
 bool WildcardMatch(const std::string& pattern, const std::string& text) {
@@ -263,6 +294,64 @@ void SystemNetworkProxy::Handle(const flutter::MethodCall<Value>& call,
     }));
     return;
   }
+  if (call.method_name() == "inspectUpstream") {
+    if (!args) {
+      result->Error("proxy_failed", "Invalid proxy request");
+      return;
+    }
+    const int http = Port(*args, "httpPort"), https = Port(*args, "httpsPort"),
+              socks = Port(*args, "socksPort");
+    if (http < 0 || http > 65535 || https < 0 || https > 65535 || socks < 0 ||
+        socks > 65535 || !(http || https || socks)) {
+      result->Error("proxy_failed", "Invalid proxy ports");
+      return;
+    }
+    if (!(http || https)) {
+      result->Error("proxy_windows_http_required",
+                    "Windows system proxy requires HTTP(S); configure SOCKS5 manually");
+      return;
+    }
+    const bool chain_existing = BoolArg(*args, "chainExisting");
+    Settings current;
+    WinInetError err;
+    if (!Read(&current, &err)) {
+      result->Error(ErrorCodeFor(err),
+                    FormatWinInetError("Could not read system proxy", err));
+      return;
+    }
+    if (!owner_.empty()) {
+      result->Error("proxy_conflict", "A system proxy is already active");
+      return;
+    }
+    windows_proxy::UpstreamProxy upstream;
+    if (!chain_existing) {
+      if (current.flags & windows_proxy::kActive) {
+        result->Error("proxy_conflict", "A system proxy is already active");
+        return;
+      }
+    } else {
+      if (current.flags & windows_proxy::kPac) {
+        result->Error("proxy_chain_pac_unsupported",
+                      "Active PAC script cannot be chained");
+        return;
+      }
+      if (current.flags & windows_proxy::kManual) {
+        if (!windows_proxy::ParseUpstream(current, &upstream)) {
+          result->Error("proxy_conflict",
+                        "Existing system proxy cannot be chained");
+          return;
+        }
+        if (windows_proxy::ConflictsWithLocalPorts(upstream, http, https,
+                                                   socks)) {
+          result->Error("proxy_chain_loop",
+                        "Existing system proxy uses the same local port");
+          return;
+        }
+      }
+    }
+    result->Success(EncodeUpstream(upstream));
+    return;
+  }
   const auto* id_value = args ? Argument(*args, "owner") : nullptr;
   const auto* id = id_value ? std::get_if<std::string>(id_value) : nullptr;
   if (!args || !id) { result->Error("proxy_failed", "Invalid proxy request"); return; }
@@ -313,14 +402,39 @@ void SystemNetworkProxy::Handle(const flutter::MethodCall<Value>& call,
                   "Windows system proxy requires HTTP(S); configure SOCKS5 manually");
     return;
   }
+  const bool chain_existing = BoolArg(*args, "chainExisting");
   Settings current;
   WinInetError err;
   if (!Read(&current, &err)) {
     result->Error(ErrorCodeFor(err), FormatWinInetError("Could not read system proxy", err));
     return;
   }
-  if (!owner_.empty() || (current.flags & windows_proxy::kActive)) {
+  if (!owner_.empty()) {
     result->Error("proxy_conflict", "A system proxy is already active"); return;
+  }
+  windows_proxy::UpstreamProxy upstream;
+  if (!chain_existing) {
+    if (current.flags & windows_proxy::kActive) {
+      result->Error("proxy_conflict", "A system proxy is already active"); return;
+    }
+  } else {
+    if (current.flags & windows_proxy::kPac) {
+      result->Error("proxy_chain_pac_unsupported",
+                    "Active PAC script cannot be chained");
+      return;
+    }
+    if (current.flags & windows_proxy::kManual) {
+      if (!windows_proxy::ParseUpstream(current, &upstream)) {
+        result->Error("proxy_conflict",
+                      "Existing system proxy cannot be chained");
+        return;
+      }
+      if (windows_proxy::ConflictsWithLocalPorts(upstream, http, https, socks)) {
+        result->Error("proxy_chain_loop",
+                      "Existing system proxy uses the same local port");
+        return;
+      }
+    }
   }
   const auto desired = windows_proxy::LocalSettings(current, http, https);
   owner_ = *id;
@@ -348,5 +462,5 @@ void SystemNetworkProxy::Handle(const flutter::MethodCall<Value>& call,
     result->Error("proxy_failed", oss.str());
     return;
   }
-  result->Success();
+  result->Success(EncodeUpstream(upstream));
 }

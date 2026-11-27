@@ -48,13 +48,18 @@ class _Proxy implements DynamicProxySession, DynamicProxyHotReload {
   bool reportDoneOnClose = true;
   Future<void>? _closing;
   final reloadedConfigs = <ProxyConfig>[];
+  final reloadedUpstreams = <UpstreamProxyConfig?>[];
   Object? reloadError;
   @override
   Future<void> get done => ended.future;
   @override
-  Future<void> updateRouting(ProxyConfig config) async {
+  Future<void> updateRouting(
+    ProxyConfig config, {
+    UpstreamProxyConfig? upstream,
+  }) async {
     if (reloadError != null) throw reloadError!;
     reloadedConfigs.add(config);
+    reloadedUpstreams.add(upstream);
   }
 
   @override
@@ -92,6 +97,7 @@ class _Engine implements SshEngine, DynamicProxyEngine {
   Future<DynamicProxySession> startProxy(
     ProxyConfig config, {
     SshGateway? gateway,
+    UpstreamProxyConfig? upstream,
     HostKeyVerifier? verifyHostKey,
     Future<void>? cancelled,
   }) async {
@@ -132,10 +138,18 @@ class _SystemBackend implements SystemProxyBackend {
   Completer<void>? enableGate;
   Completer<void>? restoreGate;
   bool enableFails = false, restoreFails = false;
+  UpstreamProxyConfig? previewUpstream;
+  UpstreamProxyConfig? enabledUpstream;
   String? owner;
   void Function()? onEnable;
+
   @override
-  Future<void> enable(String owner, ProxyConfig config) async {
+  Future<UpstreamProxyConfig?> inspectUpstream(ProxyConfig config) async {
+    return config.chainSystemProxy ? previewUpstream : null;
+  }
+
+  @override
+  Future<UpstreamProxyConfig?> enable(String owner, ProxyConfig config) async {
     events.add('enable');
     onEnable?.call();
     await enableGate?.future;
@@ -143,6 +157,9 @@ class _SystemBackend implements SystemProxyBackend {
     if (enableFails) {
       throw const SystemProxyException('自动设置系统代理失败，请检查系统设置或取消自动设置');
     }
+    return config.chainSystemProxy
+        ? (enabledUpstream ?? previewUpstream)
+        : null;
   }
 
   @override
@@ -1073,6 +1090,88 @@ void main() {
     await tester.pumpAndSettle();
     expect(clashScript, findsOneWidget);
     expect(v2rayConfig, findsOneWidget);
+    await sessions.closeAll();
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('串联已有系统代理在启用前预注入上游、界面展示提示并在规则热更新时保留', (tester) async {
+    const clashUpstream = UpstreamProxyConfig(
+      http: UpstreamProxyEndpoint(
+        protocol: UpstreamProxyProtocol.http,
+        host: '127.0.0.1',
+        port: 7897,
+      ),
+      https: UpstreamProxyEndpoint(
+        protocol: UpstreamProxyProtocol.http,
+        host: '127.0.0.1',
+        port: 7897,
+      ),
+      bypass: ['localhost', '10.*'],
+    );
+    final backend = _SystemBackend()..previewUpstream = clashUpstream;
+    final (engine, _, sessions) = await pump(
+      tester,
+      systemProxy: DesktopSystemProxy(backend: backend),
+    );
+    final chainedGateway = _gateway.copyWith(
+      proxyConfig: const ProxyConfig(
+        mode: ProxyMode.rule,
+        autoSystemProxy: true,
+        chainSystemProxy: true,
+        rules: [ProxyRule(type: ProxyRuleType.ip, value: '10.110.167.11')],
+      ),
+    );
+    await Get.find<GatewayController>().saveProxyConfig(
+      _gateway.id,
+      chainedGateway.proxyConfig,
+    );
+    sessions.openProxy(chainedGateway);
+    await tester.pumpAndSettle();
+
+    final chainBox = find.byKey(const ValueKey('proxy-chain-system'));
+    expect(chainBox, findsOneWidget);
+    expect(
+      tester.widget<shadcn.Checkbox>(chainBox).state,
+      shadcn.CheckboxState.checked,
+    );
+
+    backend.onEnable = () {
+      // Upstream must already be pushed to the listener before OS proxy flips.
+      expect(engine.proxies.single.reloadedUpstreams, [clashUpstream]);
+    };
+    await tester.tap(find.text('启动代理'));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey('proxy-chained-upstream-hint')),
+      findsOneWidget,
+    );
+    expect(find.textContaining('127.0.0.1:7897'), findsOneWidget);
+    expect(tester.widget<shadcn.Checkbox>(chainBox).onChanged, isNull);
+
+    // Hot-reloading rules while running must keep the chained upstream intact.
+    await Get.find<GatewayController>().saveProxyConfig(
+      _gateway.id,
+      ProxyConfig.fromJson({
+        ...chainedGateway.proxyConfig.toJson(),
+        'rules': [
+          const ProxyRule(
+            type: ProxyRuleType.domainSuffix,
+            value: 'sslip.io',
+          ).toJson(),
+        ],
+      }),
+    );
+    await tester.pumpAndSettle();
+    expect(engine.proxies.single.reloadedUpstreams.last, clashUpstream);
+
+    await tester.tap(find.text('停止代理'));
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('proxy-chained-upstream-hint')),
+      findsNothing,
+    );
+    expect(backend.events, ['enable', 'restore']);
     await sessions.closeAll();
     await tester.pumpAndSettle();
   });

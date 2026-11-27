@@ -133,6 +133,7 @@ void main() {
     expect(enable['httpPort'], 19080);
     expect(enable['httpsPort'], 19080);
     expect(enable['socksPort'], 19081);
+    expect(enable['chainExisting'], isTrue);
     expect(
       (calls.last.arguments as Map<Object?, Object?>)['owner'],
       enable['owner'],
@@ -142,16 +143,27 @@ void main() {
       'httpPort',
       'httpsPort',
       'socksPort',
+      'chainExisting',
     });
   });
 
-  test('原生接口按错误码映射冲突、权限、Windows 仅 SOCKS5 与通用失败提示', () async {
+  test('原生接口解析串联上游并按错误码映射提示', () async {
     const channel = MethodChannel('pagashell/system_proxy_errors_test');
-    var currentCode = 'proxy_failed';
+    String? currentCode;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, (call) async {
-          if (call.method == 'enable') {
-            throw PlatformException(code: currentCode, message: 'native error');
+          if (currentCode case final code?
+              when call.method == 'enable' ||
+                  call.method == 'inspectUpstream') {
+            throw PlatformException(code: code, message: 'native error');
+          }
+          if (call.method == 'inspectUpstream' || call.method == 'enable') {
+            return {
+              'http': {'protocol': 'http', 'host': '127.0.0.1', 'port': 7897},
+              'https': {'protocol': 'http', 'host': '127.0.0.1', 'port': 7897},
+              'bypass': ['localhost', '10.*'],
+              'excludeSimpleHostnames': true,
+            };
           }
           return null;
         });
@@ -159,11 +171,26 @@ void main() {
       () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(channel, null),
     );
+    final proxy = DesktopSystemProxy(
+      backend: const NativeSystemProxy(channel: channel),
+    );
+    final inspected = await proxy.inspectUpstream(const ProxyConfig());
+    expect(inspected?.displaySummary, '127.0.0.1:7897');
+    expect(inspected?.bypass, ['localhost', '10.*']);
+    expect(inspected?.excludeSimpleHostnames, isTrue);
+    final chainedLease = proxy.createLease(const ProxyConfig());
+    await chainedLease.enable();
+    expect(chainedLease.chainedUpstream, inspected);
+    await chainedLease.restore();
+
     final cases = <String, String>{
       'proxy_conflict': '系统代理已被占用，请先停止其他代理或取消自动设置',
       'proxy_permission': '没有修改系统代理的权限，请授权后重试',
       'proxy_windows_http_required':
           'Windows 自动设置系统代理需启用 HTTP(S)，或取消自动设置后手动配置 SOCKS5',
+      'proxy_chain_pac_unsupported':
+          '当前系统正在使用 PAC 自动代理脚本，暂不支持串联，请先关闭 PAC 或取消自动设置',
+      'proxy_chain_loop': '已有系统代理端口与当前动态代理冲突，请修改监听端口后重试',
       'proxy_failed': '自动设置系统代理失败，请检查系统设置或取消自动设置',
     };
     for (final entry in cases.entries) {
@@ -216,9 +243,11 @@ void main() {
   }
 
   for (final active in ["'manual'", "'auto'"]) {
-    test('GNOME 既有 $active 代理冲突不写配置', () async {
+    test('GNOME 关闭串联时既有 $active 代理冲突不写配置', () async {
       final desktop = _Desktop()..values['$_base|mode'] = active;
-      final lease = desktop.service().createLease(const ProxyConfig());
+      final lease = desktop.service().createLease(
+        const ProxyConfig(chainSystemProxy: false),
+      );
       await expectLater(lease.enable(), throwsA(isA<SystemProxyException>()));
       await lease.restore();
       expect(desktop.writes, isEmpty);
@@ -226,15 +255,128 @@ void main() {
   }
 
   for (final mode in ['1', '2', '3', '4']) {
-    test('KDE 已有静态/PAC/WPAD/环境代理 $mode 不覆盖', () async {
+    test('KDE 关闭串联时已有静态/PAC/WPAD/环境代理 $mode 不覆盖', () async {
       final desktop = _Desktop(kde: true)..values['ProxyType'] = mode;
-      final lease = desktop.service().createLease(const ProxyConfig());
+      final lease = desktop.service().createLease(
+        const ProxyConfig(chainSystemProxy: false),
+      );
       await expectLater(lease.enable(), throwsA(isA<SystemProxyException>()));
       await lease.restore();
       expect(desktop.writes, isEmpty);
       expect(desktop.values['ProxyType'], mode);
     });
   }
+
+  test('GNOME 串联已有手动代理（Clash/v2rayN）并在停止时完整恢复，拒绝 PAC/认证/同端口回环', () async {
+    final desktop = _Desktop()
+      ..values['$_base|mode'] = "'manual'"
+      ..values['$_base|use-same-proxy'] = 'true'
+      ..values['$_base.http|use-authentication'] = 'false'
+      ..values['$_base.http|host'] = "'127.0.0.1'"
+      ..values['$_base.http|port'] = '7897'
+      ..values['$_base.socks|host'] = "''"
+      ..values['$_base.socks|port'] = '0'
+      ..values['$_base|ignore-hosts'] = "['localhost', '10.0.0.0/8']";
+    final before = Map<String, String>.of(desktop.values);
+    final service = desktop.service();
+    final inspected = await service.inspectUpstream(const ProxyConfig());
+    expect(inspected?.http?.address, '127.0.0.1:7897');
+    expect(inspected?.https?.address, '127.0.0.1:7897');
+    expect(inspected?.bypass, ['localhost', '10.0.0.0/8']);
+
+    // Reject self-loop when PagaShell uses the same local port as upstream.
+    await expectLater(
+      service.inspectUpstream(
+        const ProxyConfig(httpPort: 7897, httpsPort: 7897),
+      ),
+      throwsA(
+        isA<SystemProxyException>().having(
+          (e) => e.message,
+          'message',
+          '已有系统代理端口与当前动态代理冲突，请修改监听端口后重试',
+        ),
+      ),
+    );
+
+    final lease = service.createLease(const ProxyConfig());
+    await lease.enable();
+    expect(lease.chainedUpstream, inspected);
+    expect(desktop.values['$_base.http|port'], '18080');
+    expect(desktop.values['$_base|ignore-hosts'], '[]');
+    await lease.restore();
+    expect(desktop.values, before);
+
+    // Reject PAC and authenticated upstream in chaining mode.
+    desktop.values['$_base|mode'] = "'auto'";
+    await expectLater(
+      service.inspectUpstream(const ProxyConfig()),
+      throwsA(
+        isA<SystemProxyException>().having(
+          (e) => e.message,
+          'message',
+          contains('PAC'),
+        ),
+      ),
+    );
+    desktop.values['$_base|mode'] = "'manual'";
+    desktop.values['$_base.http|use-authentication'] = 'true';
+    await expectLater(
+      service.inspectUpstream(const ProxyConfig()),
+      throwsA(
+        isA<SystemProxyException>().having(
+          (e) => e.message,
+          'message',
+          contains('认证'),
+        ),
+      ),
+    );
+  });
+
+  test('KDE 串联已有手动代理与 WPAD 并在停止时完整恢复，拒绝 PAC 与反向排除', () async {
+    final desktop = _Desktop(kde: true)
+      ..values.addAll({
+        'ProxyType': '1',
+        'httpProxy': 'http://127.0.0.1:10809',
+        'httpsProxy': 'http://127.0.0.1:10809',
+        'NoProxyFor': 'localhost,10.*',
+        'ReversedException': 'false',
+      });
+    final before = Map<String, String>.of(desktop.values);
+    final service = desktop.service();
+    final lease = service.createLease(const ProxyConfig());
+    await lease.enable();
+    expect(lease.chainedUpstream?.displaySummary, '127.0.0.1:10809');
+    expect(lease.chainedUpstream?.bypass, ['localhost', '10.*']);
+    expect(desktop.values['httpProxy'], 'http://127.0.0.1:18080');
+    await lease.restore();
+    expect(desktop.values, before);
+
+    // WPAD-only (ProxyType=3) is temporarily replaced and restored on stop.
+    desktop.values
+      ..clear()
+      ..['ProxyType'] = '3';
+    final wpadLease = service.createLease(const ProxyConfig());
+    await wpadLease.enable();
+    expect(wpadLease.chainedUpstream, isNull);
+    expect(desktop.values['ProxyType'], '1');
+    await wpadLease.restore();
+    expect(desktop.values['ProxyType'], '3');
+
+    // PAC (ProxyType=2) and ReversedException=true are rejected.
+    desktop.values['ProxyType'] = '2';
+    await expectLater(
+      service.inspectUpstream(const ProxyConfig()),
+      throwsA(isA<SystemProxyException>()),
+    );
+    desktop.values
+      ..['ProxyType'] = '1'
+      ..['httpProxy'] = 'http://127.0.0.1:10809'
+      ..['ReversedException'] = 'true';
+    await expectLater(
+      service.inspectUpstream(const ProxyConfig()),
+      throwsA(isA<SystemProxyException>()),
+    );
+  });
 
   for (final kde in [false, true]) {
     test('${kde ? 'KDE' : 'GNOME'} 其他应用接管后停止不覆盖其配置', () async {

@@ -226,6 +226,47 @@ int main() {
         "verify_empty_manual_restored");
   std::cout << "PASS [empty_manual_leftover_rollback]\n";
 
+  // Chain over an active Clash/v2rayN manual proxy + WPAD, then restore cleanly.
+  const Settings clash_before{
+      windows_proxy::kDirect | windows_proxy::kManual |
+          windows_proxy::kAutoDetect,
+      L"127.0.0.1:7897", L"localhost;127.*;10.*;172.16.*;<local>"};
+  Check(WriteWinInet(clash_before, &err), "seed_active_clash_wpad");
+  Settings read_clash;
+  Check(ReadWinInet(&read_clash, &err) && read_clash == clash_before,
+        "read_active_clash_wpad");
+  windows_proxy::UpstreamProxy parsed_clash;
+  Check(windows_proxy::ParseUpstream(read_clash, &parsed_clash) &&
+            parsed_clash.http.has_value() && parsed_clash.http->port == 7897 &&
+            parsed_clash.https.has_value() && parsed_clash.https->port == 7897 &&
+            parsed_clash.bypass.size() == 5,
+        "parse_active_clash_upstream");
+  Check(!windows_proxy::ConflictsWithLocalPorts(parsed_clash, 18080, 18080,
+                                                1080),
+        "clash_port_does_not_conflict");
+  const auto chained_desired = LocalSettings(read_clash, 18080, 18080);
+  Check(chained_desired.flags ==
+            (windows_proxy::kDirect | windows_proxy::kManual),
+        "chained_clears_wpad");
+  Check(WriteWinInet(chained_desired, &err), "write_chained_desired");
+  Settings chained_verified;
+  Check(ReadWinInet(&chained_verified, &err) &&
+            MatchesInstalled(chained_verified, chained_desired),
+        "verify_chained_desired");
+  const auto restored_clash =
+      RestoreManual(chained_verified, read_clash, chained_desired);
+  Check(WriteWinInet(restored_clash, &err), "write_restored_clash");
+  Settings after_clash;
+  Check(ReadWinInet(&after_clash, &err) && after_clash == clash_before,
+        "verify_clash_and_wpad_restored",
+        "got=(" + FormatSettings(after_clash) + ")");
+  std::cout << "PASS [chain_active_clash_and_wpad_roundtrip]\n";
+
+  // WPAD-only default Windows setting without manual proxy or PAC.
+  TestRoundTrip("wpad_only_roundtrip",
+                {windows_proxy::kDirect | windows_proxy::kAutoDetect, L"", L""},
+                18080, 18080);
+
   // Restore runner's original WinINet state.
   WriteWinInetPac(had_pac ? initial_pac.c_str() : L"");
   WriteWinInet(initial, &err);

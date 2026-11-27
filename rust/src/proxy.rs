@@ -35,6 +35,8 @@ use crate::page::PageConnector;
 const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
 const HEADER_TIMEOUT: Duration = Duration::from_secs(15);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
+const UPSTREAM_DNS_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const UPSTREAM_CONNECT_MAX_HEADER: usize = 16 * 1024;
 const DNS_TTL: Duration = Duration::from_secs(30);
 const DNS_CACHE_LIMIT: usize = 256;
 const HAPPY_EYEBALLS_DELAY: Duration = Duration::from_millis(250);
@@ -179,6 +181,31 @@ struct RuleSpec {
     value: String,
 }
 
+#[derive(Clone, Copy, Deserialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase")]
+enum UpstreamProtocol {
+    Http,
+    Socks5,
+}
+
+#[derive(Clone, Deserialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UpstreamEndpoint {
+    protocol: UpstreamProtocol,
+    host: String,
+    port: u16,
+}
+
+#[derive(Clone, Default, Deserialize, PartialEq, Eq, Debug)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+struct UpstreamConfig {
+    http: Option<UpstreamEndpoint>,
+    https: Option<UpstreamEndpoint>,
+    socks5: Option<UpstreamEndpoint>,
+    bypass: Vec<String>,
+    exclude_simple_hostnames: bool,
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 struct Config {
@@ -190,6 +217,7 @@ struct Config {
     socks5_enabled: bool,
     socks5_port: u16,
     rules: Vec<RuleSpec>,
+    upstream: Option<UpstreamConfig>,
 }
 
 impl Default for Config {
@@ -203,8 +231,301 @@ impl Default for Config {
             socks5_enabled: false,
             socks5_port: 1080,
             rules: Vec::new(),
+            upstream: None,
         }
     }
+}
+
+fn normalize_host(host: &str) -> String {
+    let trimmed = host.trim();
+    let unbracketed = trimmed
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(trimmed);
+    unbracketed.trim_end_matches('.').to_ascii_lowercase()
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    let normalized = normalize_host(host);
+    if normalized == "localhost" || normalized.ends_with(".localhost") {
+        return true;
+    }
+    normalized
+        .parse::<IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback())
+}
+
+fn wildcard_match(pattern: &str, text: &str) -> bool {
+    let p = pattern.as_bytes();
+    let t = text.as_bytes();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let mut star = None;
+    let mut match_ti = 0usize;
+    while ti < t.len() {
+        if pi < p.len() && p[pi] == t[ti] {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == b'*' {
+            star = Some(pi);
+            pi += 1;
+            match_ti = ti;
+        } else if let Some(star_pos) = star {
+            pi = star_pos + 1;
+            match_ti += 1;
+            ti = match_ti;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == b'*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+fn parse_ip_or_shorthand_cidr(text: &str) -> Option<IpNet> {
+    if let Ok(net) = text.parse::<IpNet>() {
+        return Some(net.trunc());
+    }
+    if let Ok(ip) = text.parse::<IpAddr>() {
+        return Some(IpNet::from(ip));
+    }
+    let (addr_part, prefix_part) = text.split_once('/')?;
+    let prefix = prefix_part.parse::<u8>().ok()?;
+    if prefix > 32 {
+        return None;
+    }
+    let parts: Vec<&str> = addr_part.split('.').collect();
+    if parts.is_empty() || parts.len() > 4 {
+        return None;
+    }
+    let mut octets = [0u8; 4];
+    for (idx, part) in parts.iter().enumerate() {
+        octets[idx] = part.parse::<u8>().ok()?;
+    }
+    let ip = IpAddr::V4(Ipv4Addr::from(octets));
+    IpNet::new(ip, prefix).ok().map(|net| net.trunc())
+}
+
+struct BypassPattern {
+    host: String,
+    port: Option<u16>,
+    is_ip: bool,
+}
+
+#[derive(Default)]
+struct UpstreamBypass {
+    networks: Vec<IpNet>,
+    patterns: Vec<BypassPattern>,
+    exclude_simple_hostnames: bool,
+}
+
+impl UpstreamBypass {
+    fn parse(entries: &[String], exclude_simple_hostnames: bool) -> Self {
+        let mut bypass = Self {
+            exclude_simple_hostnames,
+            ..Self::default()
+        };
+        for raw in entries {
+            let trimmed = raw.trim().to_ascii_lowercase();
+            if trimmed.is_empty() || trimmed == "<-loopback>" {
+                continue;
+            }
+            if trimmed == "<local>" {
+                bypass.exclude_simple_hostnames = true;
+                continue;
+            }
+            if let Some(net) = parse_ip_or_shorthand_cidr(&trimmed) {
+                bypass.networks.push(net);
+                continue;
+            }
+            let (host_part, port) = if let Some(rest) = trimmed.strip_prefix('[') {
+                if let Some((ip, after)) = rest.split_once(']') {
+                    let port = after.strip_prefix(':').and_then(|p| p.parse::<u16>().ok());
+                    (ip.to_owned(), port)
+                } else {
+                    (trimmed, None)
+                }
+            } else if trimmed.matches(':').count() == 1 {
+                if let Some((host, p)) = trimmed.split_once(':') {
+                    if let Ok(parsed_port) = p.parse::<u16>() {
+                        (host.to_owned(), Some(parsed_port))
+                    } else {
+                        (trimmed, None)
+                    }
+                } else {
+                    (trimmed, None)
+                }
+            } else {
+                (trimmed, None)
+            };
+            let host = host_part.trim_end_matches('.').to_owned();
+            if host.is_empty() {
+                continue;
+            }
+            let is_ip = host.parse::<IpAddr>().is_ok();
+            if is_ip && port.is_none() {
+                if let Ok(ip) = host.parse::<IpAddr>() {
+                    bypass.networks.push(IpNet::from(ip));
+                    continue;
+                }
+            }
+            bypass.patterns.push(BypassPattern { host, port, is_ip });
+        }
+        bypass
+    }
+
+    fn matches(&self, normalized_host: &str, port: u16) -> bool {
+        let target_ip = normalized_host.parse::<IpAddr>().ok();
+        if self.exclude_simple_hostnames && target_ip.is_none() && !normalized_host.contains('.') {
+            return true;
+        }
+        if let Some(ip) = target_ip {
+            if self.networks.iter().any(|net| net.contains(&ip)) {
+                return true;
+            }
+        }
+        for rule in &self.patterns {
+            if rule.port.is_some_and(|p| p != port) {
+                continue;
+            }
+            if rule.host == "*" {
+                return true;
+            }
+            if rule.host.contains('*') {
+                if wildcard_match(&rule.host, normalized_host) {
+                    return true;
+                }
+                if let Some(suffix) = rule.host.strip_prefix("*.") {
+                    if !suffix.contains('*') && normalized_host == suffix {
+                        return true;
+                    }
+                }
+                continue;
+            }
+            if let Some(suffix) = rule.host.strip_prefix('.') {
+                if normalized_host == suffix
+                    || normalized_host
+                        .strip_suffix(suffix)
+                        .is_some_and(|prefix| prefix.ends_with('.'))
+                {
+                    return true;
+                }
+                continue;
+            }
+            if normalized_host == rule.host {
+                return true;
+            }
+            if target_ip.is_none()
+                && !rule.is_ip
+                && normalized_host
+                    .strip_suffix(rule.host.as_str())
+                    .is_some_and(|prefix| prefix.ends_with('.'))
+            {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+struct UpstreamRouter {
+    http: Option<UpstreamEndpoint>,
+    https: Option<UpstreamEndpoint>,
+    socks5: Option<UpstreamEndpoint>,
+    bypass: UpstreamBypass,
+}
+
+impl UpstreamRouter {
+    fn validate_endpoint(
+        endpoint: UpstreamEndpoint,
+        local_ports: &HashSet<u16>,
+    ) -> Result<UpstreamEndpoint> {
+        let host = normalize_host(&endpoint.host);
+        ensure!(
+            !host.is_empty()
+                && host.len() <= 253
+                && endpoint.port > 0
+                && !host
+                    .bytes()
+                    .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
+                && !host.contains('@')
+                && !host.contains('/'),
+            "上游系统代理配置无效"
+        );
+        if is_loopback_host(&host) && local_ports.contains(&endpoint.port) {
+            bail!("已有系统代理端口与当前动态代理冲突，请修改监听端口后重试");
+        }
+        Ok(UpstreamEndpoint {
+            protocol: endpoint.protocol,
+            host,
+            port: endpoint.port,
+        })
+    }
+
+    fn parse(spec: Option<UpstreamConfig>, local_ports: &HashSet<u16>) -> Result<Option<Self>> {
+        let Some(spec) = spec else {
+            return Ok(None);
+        };
+        let http = spec
+            .http
+            .map(|ep| Self::validate_endpoint(ep, local_ports))
+            .transpose()?;
+        let https = spec
+            .https
+            .map(|ep| Self::validate_endpoint(ep, local_ports))
+            .transpose()?;
+        let socks5 = spec
+            .socks5
+            .map(|ep| Self::validate_endpoint(ep, local_ports))
+            .transpose()?;
+        if http.is_none() && https.is_none() && socks5.is_none() {
+            return Ok(None);
+        }
+        let bypass = UpstreamBypass::parse(&spec.bypass, spec.exclude_simple_hostnames);
+        Ok(Some(Self {
+            http,
+            https,
+            socks5,
+            bypass,
+        }))
+    }
+
+    fn endpoint_for(&self, kind: TrafficKind) -> Option<&UpstreamEndpoint> {
+        match kind {
+            TrafficKind::Http => self.http.as_ref().or(self.socks5.as_ref()),
+            TrafficKind::Https => self
+                .https
+                .as_ref()
+                .or(self.http.as_ref())
+                .or(self.socks5.as_ref()),
+            TrafficKind::Socks5 => self
+                .socks5
+                .as_ref()
+                .or(self.https.as_ref())
+                .or(self.http.as_ref()),
+        }
+    }
+
+    fn matches_own_endpoint(&self, normalized_host: &str, port: u16) -> bool {
+        [&self.http, &self.https, &self.socks5]
+            .into_iter()
+            .flatten()
+            .any(|ep| ep.port == port && ep.host == normalized_host)
+    }
+
+    fn is_bypassed(&self, normalized_host: &str, port: u16) -> bool {
+        is_loopback_host(normalized_host)
+            || self.matches_own_endpoint(normalized_host, port)
+            || self.bypass.matches(normalized_host, port)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TrafficKind {
+    Http,
+    Https,
+    Socks5,
 }
 
 enum Rule {
@@ -389,6 +710,207 @@ impl AsyncWrite for MeteredStream {
     }
 }
 
+struct PrefixedStream {
+    prefix: Vec<u8>,
+    pos: usize,
+    io: TcpStream,
+}
+
+impl AsyncRead for PrefixedStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if self.pos < self.prefix.len() {
+            let remaining = &self.prefix[self.pos..];
+            let count = remaining.len().min(buf.remaining());
+            buf.put_slice(&remaining[..count]);
+            self.pos += count;
+            if self.pos == self.prefix.len() {
+                self.prefix = Vec::new();
+                self.pos = 0;
+            }
+            return Poll::Ready(Ok(()));
+        }
+        Pin::new(&mut self.io).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for PrefixedStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.io).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.io).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.io).poll_shutdown(cx)
+    }
+}
+
+fn format_authority(host: &str, port: u16) -> String {
+    if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+async fn connect_upstream_tcp(endpoint: &UpstreamEndpoint, dns: &DnsCache) -> Result<TcpStream> {
+    let stream = if let Ok(ip) = endpoint.host.parse::<IpAddr>() {
+        TcpStream::connect(SocketAddr::new(ip, endpoint.port)).await?
+    } else {
+        let addresses = dns.resolve(&endpoint.host, endpoint.port).await?;
+        connect_happy_eyeballs(&addresses).await?
+    };
+    stream.set_nodelay(true)?;
+    Ok(stream)
+}
+
+async fn connect_http_tunnel(
+    endpoint: &UpstreamEndpoint,
+    target_host: &str,
+    target_port: u16,
+    dns: &DnsCache,
+) -> Result<Stream> {
+    let mut stream = connect_upstream_tcp(endpoint, dns)
+        .await
+        .context("无法连接上游系统代理")?;
+    let authority = format_authority(target_host, target_port);
+    let request = format!(
+        "CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\nProxy-Connection: keep-alive\r\n\r\n"
+    );
+    stream.write_all(request.as_bytes()).await?;
+    let mut buf = Vec::with_capacity(512);
+    let mut chunk = [0u8; 1024];
+    let header_end = loop {
+        let n = stream.read(&mut chunk).await?;
+        ensure!(n > 0, "上游代理连接意外关闭");
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            break pos + 4;
+        }
+        ensure!(
+            buf.len() <= UPSTREAM_CONNECT_MAX_HEADER,
+            "上游代理响应头过大"
+        );
+    };
+    let status_line_end = buf[..header_end]
+        .windows(2)
+        .position(|w| w == b"\r\n")
+        .context("上游代理响应无效")?;
+    let status_line = std::str::from_utf8(&buf[..status_line_end]).context("上游代理响应无效")?;
+    let mut parts = status_line.split_whitespace();
+    let version = parts.next().context("上游代理响应无效")?;
+    let status: u16 = parts
+        .next()
+        .context("上游代理响应无效")?
+        .parse()
+        .context("上游代理响应无效")?;
+    ensure!(
+        version.starts_with("HTTP/1.") && (200..300).contains(&status),
+        "上游代理拒绝建立隧道 ({status})"
+    );
+    if header_end < buf.len() {
+        Ok(Box::new(PrefixedStream {
+            prefix: buf.split_off(header_end),
+            pos: 0,
+            io: stream,
+        }))
+    } else {
+        Ok(Box::new(stream))
+    }
+}
+
+async fn connect_socks5_tunnel(
+    endpoint: &UpstreamEndpoint,
+    target_host: &str,
+    target_port: u16,
+    dns: &DnsCache,
+) -> Result<Stream> {
+    let mut stream = connect_upstream_tcp(endpoint, dns)
+        .await
+        .context("无法连接上游系统代理")?;
+    stream.write_all(&[5, 1, 0]).await?;
+    let mut method_reply = [0u8; 2];
+    stream.read_exact(&mut method_reply).await?;
+    ensure!(
+        method_reply[0] == 5 && method_reply[1] == 0,
+        "上游 SOCKS5 代理需要认证或握手失败"
+    );
+    let mut request = Vec::with_capacity(target_host.len() + 10);
+    request.extend_from_slice(&[5, 1, 0]);
+    if let Ok(ipv4) = target_host.parse::<Ipv4Addr>() {
+        request.push(1);
+        request.extend_from_slice(&ipv4.octets());
+    } else if let Ok(ipv6) = target_host.parse::<Ipv6Addr>() {
+        request.push(4);
+        request.extend_from_slice(&ipv6.octets());
+    } else {
+        let host_bytes = target_host.as_bytes();
+        ensure!(
+            !host_bytes.is_empty() && host_bytes.len() <= 255,
+            "无效的代理目标域名"
+        );
+        request.push(3);
+        request.push(host_bytes.len() as u8);
+        request.extend_from_slice(host_bytes);
+    }
+    request.extend_from_slice(&target_port.to_be_bytes());
+    stream.write_all(&request).await?;
+    let mut header = [0u8; 4];
+    stream.read_exact(&mut header).await?;
+    ensure!(
+        header[0] == 5 && header[1] == 0,
+        "上游 SOCKS5 代理连接目标失败"
+    );
+    match header[3] {
+        1 => {
+            let mut addr = [0u8; 4];
+            stream.read_exact(&mut addr).await?;
+        }
+        4 => {
+            let mut addr = [0u8; 16];
+            stream.read_exact(&mut addr).await?;
+        }
+        3 => {
+            let len = stream.read_u8().await? as usize;
+            let mut domain = vec![0u8; len];
+            stream.read_exact(&mut domain).await?;
+        }
+        _ => bail!("上游 SOCKS5 代理返回了不支持的地址类型"),
+    }
+    let mut bound_port = [0u8; 2];
+    stream.read_exact(&mut bound_port).await?;
+    Ok(Box::new(stream))
+}
+
+async fn connect_via_upstream(
+    endpoint: &UpstreamEndpoint,
+    target_host: &str,
+    target_port: u16,
+    dns: &DnsCache,
+) -> Result<Stream> {
+    match endpoint.protocol {
+        UpstreamProtocol::Http => {
+            connect_http_tunnel(endpoint, target_host, target_port, dns).await
+        }
+        UpstreamProtocol::Socks5 => {
+            connect_socks5_tunnel(endpoint, target_host, target_port, dns).await
+        }
+    }
+}
+
 enum Gateway {
     Ssh(SshGatewayHandle),
     Page(PageConnector),
@@ -398,11 +920,18 @@ enum Route {
     Gateway,
     Direct,
     Resolved(Arc<[SocketAddr]>),
+    Upstream(UpstreamEndpoint),
+}
+
+enum HttpPlan {
+    HttpUpstream(UpstreamEndpoint),
+    Origin(Route),
 }
 
 struct RoutingTable {
     mode: Mode,
     rules: RuleIndex,
+    upstream: Option<UpstreamRouter>,
     version: u64,
 }
 
@@ -541,7 +1070,7 @@ impl DnsCache {
     }
 }
 
-type HttpPoolKey = (String, u16, u64);
+type HttpPoolKey = (String, u16, u64, bool);
 
 struct PooledHttp {
     sender: hyper::client::conn::http1::SendRequest<Incoming>,
@@ -624,6 +1153,7 @@ impl HttpPool {
 
 pub(crate) struct Router {
     routing: StdRwLock<Arc<RoutingTable>>,
+    local_ports: HashSet<u16>,
     gateway: Option<Gateway>,
     traffic: Arc<Traffic>,
     dns: DnsCache,
@@ -631,13 +1161,26 @@ pub(crate) struct Router {
 }
 
 impl Router {
+    #[cfg(test)]
     fn new(mode: Mode, rules: impl IntoIterator<Item = Rule>, gateway: Option<Gateway>) -> Self {
+        Self::with_upstream(mode, rules, None, HashSet::new(), gateway)
+    }
+
+    fn with_upstream(
+        mode: Mode,
+        rules: impl IntoIterator<Item = Rule>,
+        upstream: Option<UpstreamRouter>,
+        local_ports: HashSet<u16>,
+        gateway: Option<Gateway>,
+    ) -> Self {
         Self {
             routing: StdRwLock::new(Arc::new(RoutingTable {
                 mode,
                 rules: rules.into_iter().collect(),
+                upstream,
                 version: 1,
             })),
+            local_ports,
             gateway,
             traffic: Arc::default(),
             dns: DnsCache::default(),
@@ -653,7 +1196,12 @@ impl Router {
         self.routing.read().unwrap().version
     }
 
-    fn update_routing(&self, mode: Mode, rules: impl IntoIterator<Item = Rule>) {
+    fn update_routing(
+        &self,
+        mode: Mode,
+        rules: impl IntoIterator<Item = Rule>,
+        upstream: Option<UpstreamRouter>,
+    ) {
         let index: RuleIndex = rules.into_iter().collect();
         {
             let mut guard = self.routing.write().unwrap();
@@ -661,6 +1209,7 @@ impl Router {
             *guard = Arc::new(RoutingTable {
                 mode,
                 rules: index,
+                upstream,
                 version: next_version,
             });
         }
@@ -674,19 +1223,46 @@ impl Router {
     #[cfg(test)]
     async fn route(&self, host: &str, port: u16) -> Result<Route> {
         let routing = self.current_routing();
-        self.route_with(&routing, host, port).await
+        self.route_with(&routing, host, port, TrafficKind::Https)
+            .await
     }
 
-    async fn route_with(&self, routing: &RoutingTable, host: &str, port: u16) -> Result<Route> {
+    fn fallback_route(
+        routing: &RoutingTable,
+        normalized: &str,
+        port: u16,
+        kind: TrafficKind,
+        resolved: Option<Arc<[SocketAddr]>>,
+    ) -> Route {
+        if let Some(upstream) = &routing.upstream {
+            if !upstream.is_bypassed(normalized, port) {
+                if let Some(endpoint) = upstream.endpoint_for(kind) {
+                    return Route::Upstream(endpoint.clone());
+                }
+            }
+        }
+        match resolved {
+            Some(addresses) => Route::Resolved(addresses),
+            None => Route::Direct,
+        }
+    }
+
+    async fn route_with(
+        &self,
+        routing: &RoutingTable,
+        host: &str,
+        port: u16,
+        kind: TrafficKind,
+    ) -> Result<Route> {
         if routing.mode == Mode::Global {
             return Ok(Route::Gateway);
         }
-        let normalized = host.trim_end_matches('.').to_ascii_lowercase();
+        let normalized = normalize_host(host);
         if let Ok(ip) = normalized.parse::<IpAddr>() {
             return Ok(if routing.rules.ip_matches(ip) {
                 Route::Gateway
             } else {
-                Route::Direct
+                Self::fallback_route(routing, &normalized, port, kind, None)
             });
         }
         if routing.rules.domain_matches(&normalized) {
@@ -695,7 +1271,27 @@ impl Router {
         // Only IP rules need DNS before routing. A domain match retains DNS on
         // the gateway; direct access reuses the very addresses we evaluated.
         if routing.rules.networks.is_empty() {
-            return Ok(Route::Direct);
+            return Ok(Self::fallback_route(routing, &normalized, port, kind, None));
+        }
+        if let Some(upstream) = &routing.upstream {
+            if !upstream.is_bypassed(&normalized, port) {
+                if let Some(endpoint) = upstream.endpoint_for(kind) {
+                    // When chaining to an upstream proxy, local DNS may not be able
+                    // to resolve external domains. Probe briefly for gateway IP
+                    // matches, and pass the original hostname upstream otherwise.
+                    if let Ok(Ok(addresses)) =
+                        timeout(UPSTREAM_DNS_PROBE_TIMEOUT, self.resolve(host, port)).await
+                    {
+                        if addresses
+                            .iter()
+                            .any(|address| routing.rules.ip_matches(address.ip()))
+                        {
+                            return Ok(Route::Gateway);
+                        }
+                    }
+                    return Ok(Route::Upstream(endpoint.clone()));
+                }
+            }
         }
         let addresses = self.resolve(host, port).await?;
         if addresses
@@ -704,55 +1300,104 @@ impl Router {
         {
             Ok(Route::Gateway)
         } else {
-            Ok(Route::Resolved(addresses))
+            Ok(Self::fallback_route(
+                routing,
+                &normalized,
+                port,
+                kind,
+                Some(addresses),
+            ))
         }
     }
 
-    async fn connect(&self, host: &str, port: u16) -> Result<Stream> {
-        self.connect_with_version(host, port)
-            .await
-            .map(|(stream, _)| stream)
-    }
-
-    async fn connect_with_version(&self, host: &str, port: u16) -> Result<(Stream, u64)> {
+    async fn connect(&self, host: &str, port: u16, kind: TrafficKind) -> Result<Stream> {
         let routing = self.current_routing();
-        let version = routing.version;
         let deadline = Instant::now() + OPEN_TIMEOUT;
         let io = timeout_at(deadline, async {
-            let direct = match self.route_with(&routing, host, port).await? {
-                Route::Gateway => {
-                    // A selected gateway failure is never retried using direct access.
-                    return match self.gateway.as_ref().context("所选网关不可用")? {
-                        Gateway::Ssh(gateway) => Ok(Box::new(
-                            gateway.open_direct_tcpip(host.to_owned(), port).await?,
-                        ) as Stream),
-                        Gateway::Page(gateway) => {
-                            Ok(Box::new(gateway.connect(host, port, deadline).await?) as Stream)
-                        }
-                    };
-                }
-                Route::Direct => {
-                    if let Ok(ip) = host.trim_end_matches('.').parse::<IpAddr>() {
-                        TcpStream::connect(SocketAddr::new(ip, port)).await?
-                    } else {
-                        let addresses = self.resolve(host, port).await?;
-                        connect_happy_eyeballs(&addresses).await?
-                    }
-                }
-                Route::Resolved(addresses) => connect_happy_eyeballs(&addresses).await?,
-            };
-            direct.set_nodelay(true)?;
-            Ok::<_, anyhow::Error>(Box::new(direct) as Stream)
+            let route = self.route_with(&routing, host, port, kind).await?;
+            self.dial_route(route, host, port, deadline).await
         })
         .await
         .context("代理目标连接超时")??;
-        Ok((
-            Box::new(MeteredStream {
-                io,
-                traffic: self.traffic.clone(),
-            }),
-            version,
-        ))
+        Ok(Box::new(MeteredStream {
+            io,
+            traffic: self.traffic.clone(),
+        }))
+    }
+
+    async fn dial_route(
+        &self,
+        route: Route,
+        host: &str,
+        port: u16,
+        deadline: Instant,
+    ) -> Result<Stream> {
+        let direct = match route {
+            Route::Gateway => {
+                // A selected gateway failure is never retried using direct access.
+                return match self.gateway.as_ref().context("所选网关不可用")? {
+                    Gateway::Ssh(gateway) => Ok(Box::new(
+                        gateway.open_direct_tcpip(host.to_owned(), port).await?,
+                    ) as Stream),
+                    Gateway::Page(gateway) => {
+                        Ok(Box::new(gateway.connect(host, port, deadline).await?) as Stream)
+                    }
+                };
+            }
+            Route::Upstream(endpoint) => {
+                return connect_via_upstream(&endpoint, host, port, &self.dns).await;
+            }
+            Route::Direct => {
+                if let Ok(ip) = normalize_host(host).parse::<IpAddr>() {
+                    TcpStream::connect(SocketAddr::new(ip, port)).await?
+                } else {
+                    let addresses = self.resolve(host, port).await?;
+                    connect_happy_eyeballs(&addresses).await?
+                }
+            }
+            Route::Resolved(addresses) => connect_happy_eyeballs(&addresses).await?,
+        };
+        direct.set_nodelay(true)?;
+        Ok(Box::new(direct) as Stream)
+    }
+
+    async fn resolve_http_plan(&self, host: &str, port: u16) -> Result<(HttpPlan, u64)> {
+        let routing = self.current_routing();
+        let version = routing.version;
+        let route = timeout(
+            OPEN_TIMEOUT,
+            self.route_with(&routing, host, port, TrafficKind::Http),
+        )
+        .await
+        .context("代理目标连接超时")??;
+        let plan = match route {
+            Route::Upstream(endpoint) if endpoint.protocol == UpstreamProtocol::Http => {
+                HttpPlan::HttpUpstream(endpoint)
+            }
+            other => HttpPlan::Origin(other),
+        };
+        Ok((plan, version))
+    }
+
+    async fn dial_http_plan(&self, plan: HttpPlan, host: &str, port: u16) -> Result<Stream> {
+        let deadline = Instant::now() + OPEN_TIMEOUT;
+        let io = timeout_at(deadline, async {
+            match plan {
+                HttpPlan::HttpUpstream(endpoint) => {
+                    let stream = connect_upstream_tcp(&endpoint, &self.dns)
+                        .await
+                        .context("无法连接上游系统代理")?;
+                    Ok::<_, anyhow::Error>(Box::new(stream) as Stream)
+                }
+                HttpPlan::Origin(route) => self.dial_route(route, host, port, deadline).await,
+            }
+        })
+        .await
+        .context("代理目标连接超时")??;
+        Ok(Box::new(MeteredStream {
+            io,
+            traffic: self.traffic.clone(),
+        }))
     }
 }
 
@@ -792,7 +1437,8 @@ pub(crate) fn update_routing(router: &Router, json: &str) -> Result<()> {
         .into_iter()
         .map(Rule::parse)
         .collect::<Result<Vec<_>>>()?;
-    router.update_routing(config.mode, rules);
+    let upstream = UpstreamRouter::parse(config.upstream, &router.local_ports)?;
+    router.update_routing(config.mode, rules, upstream);
     Ok(())
 }
 
@@ -809,26 +1455,6 @@ pub(crate) async fn start(
     );
     ensure!(config.rules.len() <= 10000, "代理规则过多");
     ensure!(ssh_id.is_none() || page.is_none(), "网关配置无效");
-    let ssh_monitor = if let Some(id) = ssh_id {
-        Some(ssh_gateway_handle(id).await?)
-    } else {
-        None
-    };
-    let gateway = ssh_monitor
-        .clone()
-        .map(Gateway::Ssh)
-        .or(page.map(PageConnector::new).transpose()?.map(Gateway::Page));
-    ensure!(gateway.is_some(), "所选网关不可用");
-    let router = Arc::new(Router::new(
-        config.mode,
-        config
-            .rules
-            .into_iter()
-            .map(Rule::parse)
-            .collect::<Result<Vec<_>>>()?,
-        gateway,
-    ));
-    let traffic = router.traffic.clone();
     let mut ports = BTreeMap::<u16, u8>::new();
     for (enabled, port, kind) in [
         (config.http_enabled, config.http_port, HTTP),
@@ -840,6 +1466,31 @@ pub(crate) async fn start(
         }
     }
     ensure!(!ports.is_empty(), "请至少启用一种代理协议");
+    let local_ports: HashSet<u16> = ports.keys().copied().collect();
+    let upstream = UpstreamRouter::parse(config.upstream, &local_ports)?;
+    let rules = config
+        .rules
+        .into_iter()
+        .map(Rule::parse)
+        .collect::<Result<Vec<_>>>()?;
+    let ssh_monitor = if let Some(id) = ssh_id {
+        Some(ssh_gateway_handle(id).await?)
+    } else {
+        None
+    };
+    let gateway = ssh_monitor
+        .clone()
+        .map(Gateway::Ssh)
+        .or(page.map(PageConnector::new).transpose()?.map(Gateway::Page));
+    ensure!(gateway.is_some(), "所选网关不可用");
+    let router = Arc::new(Router::with_upstream(
+        config.mode,
+        rules,
+        upstream,
+        local_ports,
+        gateway,
+    ));
+    let traffic = router.traffic.clone();
     let mut listeners = Vec::new();
     for (port, protocols) in ports {
         // Dropping this vector rolls back every successful bind on any failure.
@@ -1155,7 +1806,7 @@ async fn http(
                 "Invalid CONNECT destination\n",
             ));
         };
-        let Ok(mut target) = router.connect(&host, port).await else {
+        let Ok(mut target) = router.connect(&host, port, TrafficKind::Https).await else {
             return Ok(response(
                 StatusCode::BAD_GATEWAY,
                 "Proxy target connection failed\n",
@@ -1198,43 +1849,52 @@ async fn http(
             "Invalid HTTP destination\n",
         ));
     };
-    let authority = req.uri().authority().unwrap().as_str().to_owned();
+    let raw_authority = req.uri().authority().unwrap().as_str().to_owned();
     let path = req
         .uri()
         .path_and_query()
         .map_or("/", |p| p.as_str())
         .to_owned();
-    *req.uri_mut() = path.parse().unwrap_or_else(|_| Uri::from_static("/"));
     strip_hop_headers(req.headers_mut());
-    let Ok(host_header) = HeaderValue::from_str(&authority) else {
+    let Ok(host_header) = HeaderValue::from_str(&raw_authority) else {
         return Ok(response(StatusCode::BAD_REQUEST, "Invalid Host\n"));
     };
     req.headers_mut().insert(HOST, host_header);
     let req_is_http11 = req.version() == Version::HTTP_11;
-    let normalized_host = host.trim_end_matches('.').to_ascii_lowercase();
+    let normalized_host = normalize_host(&host);
     let result = async {
-        let initial_version = router.routing_version();
-        let initial_key = (normalized_host.clone(), port, initial_version);
+        let (plan, used_version) = router.resolve_http_plan(&host, port).await?;
+        let pool_key = match &plan {
+            HttpPlan::HttpUpstream(ep) => {
+                let absolute = format!("http://{raw_authority}{path}");
+                *req.uri_mut() = absolute.parse().context("Invalid proxy URI")?;
+                (ep.host.clone(), ep.port, used_version, true)
+            }
+            HttpPlan::Origin(_) => {
+                *req.uri_mut() = path.parse().unwrap_or_else(|_| Uri::from_static("/"));
+                (normalized_host, port, used_version, false)
+            }
+        };
         let mut reused = None;
         if req_is_http11 {
-            while let Some(mut candidate) = router.http_pool.take(&initial_key) {
+            while let Some(mut candidate) = router.http_pool.take(&pool_key) {
                 if candidate.ready().await.is_ok() {
                     reused = Some(candidate);
                     break;
                 }
             }
         }
-        let (mut sender, pool_key) = if let Some(sender) = reused {
-            (sender, initial_key)
+        let mut sender = if let Some(sender) = reused {
+            sender
         } else {
-            let (target, used_version) = router.connect_with_version(&host, port).await?;
+            let target = router.dial_http_plan(plan, &host, port).await?;
             let (mut sender, connection) =
                 hyper::client::conn::http1::handshake(TokioIo::new(target)).await?;
             spawn(&tracker, &token, async move {
                 let _ = connection.await;
             });
             sender.ready().await?;
-            (sender, (normalized_host, port, used_version))
+            sender
         };
         let response = timeout(RESPONSE_TIMEOUT, sender.send_request(req)).await??;
         Ok::<_, anyhow::Error>((response, sender, pool_key))
@@ -1322,7 +1982,10 @@ async fn socks(mut socket: TcpStream, router: Arc<Router>) -> Result<()> {
         Ok::<_, anyhow::Error>((host, port))
     })
     .await??;
-    match router.connect(&target.0, target.1).await {
+    match router
+        .connect(&target.0, target.1, TrafficKind::Socks5)
+        .await
+    {
         Ok(mut target) => {
             socket.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
             copy_bidirectional_with_sizes(&mut socket, &mut target, TUNNEL_BUFFER, TUNNEL_BUFFER)

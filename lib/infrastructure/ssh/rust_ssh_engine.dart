@@ -15,6 +15,7 @@ import '../../domain/entities/identity.dart';
 import '../../domain/entities/proxy_config.dart';
 import '../../domain/entities/small_text_file.dart';
 import '../../domain/proxy/dynamic_proxy_engine.dart';
+import '../../domain/proxy/system_proxy.dart';
 import '../../domain/rdp/rdp_clipboard.dart';
 import '../../domain/rdp/rdp_engine.dart';
 import '../../domain/rdp/rdp_network_stats.dart';
@@ -71,6 +72,7 @@ class RustSshEngine
   Future<DynamicProxySession> startProxy(
     ProxyConfig config, {
     SshGateway? gateway,
+    UpstreamProxyConfig? upstream,
     HostKeyVerifier? verifyHostKey,
     Future<void>? cancelled,
   }) async {
@@ -114,7 +116,7 @@ class RustSshEngine
       }
       checkCancelled();
       id = await proxy.proxyStart(
-        configJson: jsonEncode(config.toEngineJson()),
+        configJson: jsonEncode(config.toEngineJson(upstream: upstream)),
         sshGatewayId: sshGateway?._sessionId,
         pageGateway: gateway.host.gatewayType == GatewayType.page
             ? _pageSettings(gateway)
@@ -1879,12 +1881,15 @@ class _RustProxySession
   }
 
   @override
-  Future<void> updateRouting(ProxyConfig config) async {
+  Future<void> updateRouting(
+    ProxyConfig config, {
+    UpstreamProxyConfig? upstream,
+  }) async {
     config.validate();
     try {
       await proxy.proxyUpdateRules(
         proxyId: id,
-        configJson: jsonEncode(config.toEngineJson()),
+        configJson: jsonEncode(config.toEngineJson(upstream: upstream)),
       );
     } on AnyhowException catch (e) {
       throw SshEngineException(e.message.split('\n').first, e);
