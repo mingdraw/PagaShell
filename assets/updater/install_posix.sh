@@ -124,9 +124,7 @@ if ! launch_app; then
 fi
 # Keep the backup available until the replacement has launched. Use the same
 # authorization as installation when its directory requires administrator access.
-if [ "$platform" = macos ]; then
-  run_transaction cleanup || echo backup-cleanup-failed > "$work/error"
-fi
+run_transaction cleanup || echo backup-cleanup-failed > "$work/error"
 : > "$work/complete"
 rm -rf "$work/stage"
 rm -f "$work"/pagashell_*

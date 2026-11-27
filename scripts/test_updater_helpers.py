@@ -181,23 +181,29 @@ class UpdaterHelperTests(unittest.TestCase):
         self.assertEqual((self.target / "version").read_text(), "newer")
         self.assertEqual((self.backup / "version").read_text(), "new")
 
-    def test_commit_waits_for_application_exit_then_restarts(self):
+    def make_restart_fixture(self, directory, *, crash=False):
         if WINDOWS:
-            # A tiny managed GUI executable records restart without using PagaShell.
-            code = ('using System; using System.IO; public class Fixture { '
-                    'public static void Main() { File.WriteAllText(Path.Combine('
-                    'AppDomain.CurrentDomain.BaseDirectory, "launched"), "ok"); }}')
+            body = (
+                'Environment.Exit(17);' if crash else
+                'File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "launched"), "ok"); '
+                'System.Threading.Thread.Sleep(2000);'
+            )
+            code = 'using System; using System.IO; public class Fixture { public static void Main() { ' + body + ' } }'
             compile_script = self.work / "compile.ps1"
             compile_script.write_text(
                 "param([string]$Output)\n$ErrorActionPreference = 'Stop'\nAdd-Type -TypeDefinition '" + code +
                 "' -OutputAssembly $Output -OutputType WindowsApplication\n", encoding="utf-8")
             compiler = self.command("Apply")[:5]
-            subprocess.run([*compiler, "-File", str(compile_script), "-Output", str(self.source / "pagashell.exe")],
+            subprocess.run([*compiler, "-File", str(compile_script), "-Output", str(directory / "pagashell.exe")],
                            check=True, capture_output=True, timeout=30)
         else:
-            executable = self.source / "pagashell"
-            executable.write_text('#!/bin/sh\ncd "$(dirname "$0")"\n: > launched\nsleep 2\n', encoding="utf-8")
+            executable = directory / "pagashell"
+            body = 'exit 17\n' if crash else 'cd "$(dirname "$0")"\n: > launched\nsleep 2\n'
+            executable.write_text("#!/bin/sh\n" + body, encoding="utf-8")
             executable.chmod(0o755)
+
+    def test_commit_waits_for_application_exit_then_restarts_and_removes_backup(self):
+        self.make_restart_fixture(self.source)
         child = self.start_watcher()
         (self.work / "commit").touch()
         time.sleep(0.3)
@@ -208,6 +214,31 @@ class UpdaterHelperTests(unittest.TestCase):
         self.wait_for(self.target / "launched")
         self.assertTrue((self.work / "complete").exists())
         self.assertEqual((self.target / "version").read_text(), "new")
+        self.assertFalse(self.backup.exists())
+        self.assertFalse(self.marker.exists())
+        self.assertFalse((self.work / "error").exists())
+
+    def test_early_launch_exit_restores_original_installation(self):
+        self.make_restart_fixture(self.target)
+        self.make_restart_fixture(self.source, crash=True)
+        child = self.start_watcher()
+        self.assertNotEqual(self.commit_and_exit(child), 0, self.watcher_log())
+        self.wait_for(self.target / "launched")
+        self.assertEqual((self.target / "version").read_text(), "old")
+        self.assertEqual((self.work / "error").read_text().strip(), "launch-failed")
+        self.assertFalse((self.work / "complete").exists())
+        self.assertFalse(self.backup.exists())
+        self.assertFalse(self.marker.exists())
+
+    def test_cleanup_requires_current_installation_and_managed_marker(self):
+        self.target.rename(self.backup)
+        self.marker.touch()
+        self.run_helper("Cleanup", success=False)
+        self.assertEqual((self.backup / "version").read_text(), "old")
+        self.assertTrue(self.marker.exists())
+        self.marker.unlink()
+        self.target.mkdir()
+        self.run_helper("Cleanup", success=False)
         self.assertEqual((self.backup / "version").read_text(), "old")
 
     @unittest.skipUnless(sys.platform == "darwin", "macOS copy operation")

@@ -55,13 +55,14 @@ Future<void> main(List<String> arguments) async {
       'Startup failure changed the app.',
     );
   });
-  await _run('watcher survives app exit, installs and restarts', (
+  await _run('watcher survives app exit, restarts and removes the backup', (
     fixture,
   ) async {
     const program =
         'using System; using System.IO; public class Fixture { '
         'public static void Main() { File.WriteAllText(Path.Combine('
-        'AppDomain.CurrentDomain.BaseDirectory, "launched"), "ok"); }}';
+        'AppDomain.CurrentDomain.BaseDirectory, "launched"), "ok"); '
+        'System.Threading.Thread.Sleep(2000); }}';
     final executable = File('${fixture.source.path}\\pagashell.exe');
     final compilation = await Process.run(_powershell, [
       '-NoProfile',
@@ -90,11 +91,11 @@ Future<void> main(List<String> arguments) async {
       await fixture.waitFor(fixture.file('complete'));
       await fixture.waitFor(File('${fixture.target.path}\\launched'));
       _check(await fixture.version() == 'new', 'Update was not installed.');
+      final backup = '${fixture.target.path}.pagashell-backup';
+      _check(!Directory(backup).existsSync(), 'Update backup was retained.');
       _check(
-        await File('${fixture.target.path}.pagashell-backup\\version')
-                .readAsString() ==
-            'old',
-        'Missing original installation backup.',
+        !File('$backup.marker').existsSync(),
+        'Backup marker was retained.',
       );
     } finally {
       parent.kill();

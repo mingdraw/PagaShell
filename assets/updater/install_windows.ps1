@@ -1,5 +1,5 @@
 param(
-  [ValidateSet('Watch', 'Apply', 'Rollback', 'Extract')][string]$Mode = 'Watch',
+  [ValidateSet('Watch', 'Apply', 'Rollback', 'Cleanup', 'Extract')][string]$Mode = 'Watch',
   [Parameter(Mandatory = $true)][string]$ConfigPath
 )
 $ErrorActionPreference = 'Stop'
@@ -36,6 +36,17 @@ if ($Mode -ne 'Watch') {
   New-Item -ItemType Directory -Path $lock -ErrorAction Stop | Out-Null
   $moved = $false
   try {
+    if ($Mode -eq 'Cleanup') {
+      if (-not (Test-Path -LiteralPath $target -PathType Container) -or
+          -not (Test-Path -LiteralPath $marker -PathType Leaf)) {
+        throw 'Missing installation or backup marker'
+      }
+      if (Test-Path -LiteralPath $backup) {
+        Remove-Item -LiteralPath $backup -Recurse -Force
+      }
+      Remove-Item -LiteralPath $marker -Force
+      return
+    }
     if ($Mode -eq 'Rollback') {
       if (-not (Test-Path -LiteralPath $marker)) { throw 'Missing backup marker' }
       Move-Item -LiteralPath $target -Destination $incoming
@@ -111,12 +122,25 @@ try {
 }
 try {
   # This watcher is not elevated; the restarted application keeps the user's identity.
-  Start-Process -FilePath (Join-Path $target 'pagashell.exe') -WorkingDirectory $target
+  $application = Start-Process -FilePath (Join-Path $target 'pagashell.exe') -WorkingDirectory $target -PassThru
+  try {
+    # CreateProcess can succeed even if the application exits during startup.
+    if ($application.WaitForExit(1000)) { throw "Application exited during startup: $($application.ExitCode)" }
+  } finally {
+    $application.Dispose()
+  }
 } catch {
   'launch-failed' | Set-Content -LiteralPath (Join-Path $work 'error')
   Invoke-Transaction 'Rollback'
   Start-Process -FilePath (Join-Path $target 'pagashell.exe') -WorkingDirectory $target
   throw
+}
+try {
+  Invoke-Transaction 'Cleanup'
+} catch {
+  # The replacement is already running; a cleanup failure is not a reason to roll it back.
+  'backup-cleanup-failed' | Set-Content -LiteralPath (Join-Path $work 'error')
+  $_ | Out-String | Add-Content -LiteralPath (Join-Path $work 'helper.log') -Encoding UTF8
 }
 New-Item -ItemType File -Path (Join-Path $work 'complete') -Force | Out-Null
 # A successful installation must not fail because a temporary file is already
