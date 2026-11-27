@@ -100,9 +100,14 @@ void main() {
     expect(find.text('终端字号'), findsNothing);
     await tester.tap(find.widgetWithText(shadcn.TabItem, '终端'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('13 px'));
+    await tester.tap(find.text('13 pt'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('16 px').last);
+    await tester.scrollUntilVisible(
+      find.text('16 pt'),
+      80,
+      scrollable: find.byType(Scrollable).last,
+    );
+    await tester.tap(find.text('16 pt').last);
     await tester.pumpAndSettle();
 
     expect(Get.find<SettingsController>().terminalFontSize.value, 16);

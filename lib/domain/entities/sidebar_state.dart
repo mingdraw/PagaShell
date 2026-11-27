@@ -6,8 +6,10 @@ class SidebarState {
   static const double defaultWidth = 264;
   static const double minWidth = 200;
   static const double maxWidth = 420;
+
+  /// 终端字号（单位：pt）。
   static const double defaultTerminalFontSize = 13;
-  static const double minTerminalFontSize = 10;
+  static const double minTerminalFontSize = 8;
   static const double maxTerminalFontSize = 24;
 
   SidebarState({

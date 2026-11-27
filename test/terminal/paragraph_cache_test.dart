@@ -16,6 +16,11 @@ void main() {
       ParagraphCache.glyphKey(content, 0xFFFFFFFF, 0),
       ParagraphCache.glyphKey(content, 0xFFFFFFFE, 0),
       ParagraphCache.glyphKey(content, 0xFFFFFFFF, ParagraphCache.bold),
+      ParagraphCache.glyphKey(
+        content,
+        0xFFFFFFFF,
+        ParagraphCache.strikethrough,
+      ),
       ParagraphCache.glyphKey(content + 1, 0xFFFFFFFF, 0),
       ParagraphCache.glyphKey(
         0x41 | (2 << CellContent.widthShift),
@@ -23,7 +28,7 @@ void main() {
         0,
       ),
     };
-    expect(keys, hasLength(5));
+    expect(keys, hasLength(6));
   });
 
   test('超出容量时淘汰最久未用的条目并释放', () {

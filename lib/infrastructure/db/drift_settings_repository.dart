@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io' show Platform;
 
 import '../../domain/entities/app_proxy_settings.dart';
 import '../../domain/entities/app_theme_mode.dart';
@@ -8,9 +9,12 @@ import '../../domain/terminal/quick_command.dart';
 import 'app_database.dart';
 
 class DriftSettingsRepository implements SettingsRepository {
-  DriftSettingsRepository(this._db);
+  DriftSettingsRepository(this._db, {bool? isMacOS})
+    : _isMacOS = isMacOS ?? Platform.isMacOS;
 
   final AppDatabase _db;
+  final bool _isMacOS;
+  static const _terminalFontSizeUnitPt = 'pt';
   static const _themeModeKey = 'theme_mode';
   static const _languageCodeKey = 'language_code';
   static const _sidebarStateKey = 'sidebar_state';
@@ -141,12 +145,16 @@ class DriftSettingsRepository implements SettingsRepository {
       final recentHosts = decoded['recentHosts'];
       final width = decoded['width'];
       final terminalFontSize = decoded['terminalFontSize'];
+      final terminalFontSizeUnit = decoded['terminalFontSizeUnit'];
+      final resolvedTerminalFontSize = terminalFontSize is num
+          ? (terminalFontSizeUnit == _terminalFontSizeUnitPt || _isMacOS
+                ? terminalFontSize.toDouble()
+                : (terminalFontSize.toDouble() * 72.0 / 96.0).roundToDouble())
+          : SidebarState.defaultTerminalFontSize;
       return SidebarState(
         visible: decoded['visible'] is bool ? decoded['visible'] as bool : true,
         width: width is num ? width.toDouble() : SidebarState.defaultWidth,
-        terminalFontSize: terminalFontSize is num
-            ? terminalFontSize.toDouble()
-            : SidebarState.defaultTerminalFontSize,
+        terminalFontSize: resolvedTerminalFontSize,
         sections: {
           for (final section in SidebarSection.values)
             if (sections is Map<String, dynamic> &&
@@ -180,6 +188,7 @@ class DriftSettingsRepository implements SettingsRepository {
             'visible': state.visible,
             'width': state.width,
             'terminalFontSize': state.terminalFontSize,
+            'terminalFontSizeUnit': _terminalFontSizeUnitPt,
             'sections': {
               for (final entry in state.sections.entries)
                 entry.key.name: entry.value,

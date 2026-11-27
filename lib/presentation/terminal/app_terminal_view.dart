@@ -95,17 +95,50 @@ class AppTerminalViewState extends State<AppTerminalView> {
     'PingFang SC',
     'Microsoft YaHei',
     'Noto Sans Mono CJK SC',
+    'Apple Color Emoji',
+    'Segoe UI Emoji',
     'Noto Color Emoji',
     'monospace',
   ];
 
-  TerminalStyle _styleFor(double fontSize) {
-    if (_cachedFontSize == fontSize && _cachedTextStyle != null) {
+  static final _terminalTheme = TerminalTheme(
+    cursor: TerminalThemes.defaultTheme.cursor,
+    selection: TerminalThemes.defaultTheme.selection,
+    foreground: TerminalThemes.defaultTheme.foreground,
+    background: AppTheme.terminalBackground,
+    black: TerminalThemes.defaultTheme.black,
+    red: TerminalThemes.defaultTheme.red,
+    green: TerminalThemes.defaultTheme.green,
+    yellow: TerminalThemes.defaultTheme.yellow,
+    blue: TerminalThemes.defaultTheme.blue,
+    magenta: TerminalThemes.defaultTheme.magenta,
+    cyan: TerminalThemes.defaultTheme.cyan,
+    white: TerminalThemes.defaultTheme.white,
+    brightBlack: TerminalThemes.defaultTheme.brightBlack,
+    brightRed: TerminalThemes.defaultTheme.brightRed,
+    brightGreen: TerminalThemes.defaultTheme.brightGreen,
+    brightYellow: TerminalThemes.defaultTheme.brightYellow,
+    brightBlue: TerminalThemes.defaultTheme.brightBlue,
+    brightMagenta: TerminalThemes.defaultTheme.brightMagenta,
+    brightCyan: TerminalThemes.defaultTheme.brightCyan,
+    brightWhite: TerminalThemes.defaultTheme.brightWhite,
+    searchHitBackground: TerminalThemes.defaultTheme.searchHitBackground,
+    searchHitBackgroundCurrent:
+        TerminalThemes.defaultTheme.searchHitBackgroundCurrent,
+    searchHitForeground: TerminalThemes.defaultTheme.searchHitForeground,
+  );
+
+  TerminalStyle _styleFor(double fontSizePt, TargetPlatform platform) {
+    final logicalFontSize = terminalFontSizeToLogicalPixels(
+      fontSizePt,
+      platform,
+    );
+    if (_cachedFontSize == logicalFontSize && _cachedTextStyle != null) {
       return _cachedTextStyle!;
     }
-    _cachedFontSize = fontSize;
+    _cachedFontSize = logicalFontSize;
     return _cachedTextStyle = TerminalStyle(
-      fontSize: fontSize,
+      fontSize: logicalFontSize,
       fontFamily: 'FiraCode Nerd Font Mono',
       fontFamilyFallback: _terminalFontFamilyFallback,
     );
@@ -611,14 +644,16 @@ class AppTerminalViewState extends State<AppTerminalView> {
     );
   }
 
-  Widget _pane(double fontSize) {
+  Widget _pane(double fontSizePt) {
     final terminal = widget.terminal;
+    final platform = shadcn.Theme.of(context).platform;
     final pane = TerminalPane(
       terminal,
       key: _paneKey,
       focusNode: widget.focusNode,
       active: widget.active,
       backgroundColor: AppTheme.terminalBackground,
+      theme: _terminalTheme,
       selectionEdgeExtent: AppTheme.terminalSelectionEdgeExtent,
       selectionScrollInterval: AppTheme.terminalSelectionScrollInterval,
       onPaste: (text) => _handlePaste(terminal, text),
@@ -628,7 +663,7 @@ class AppTerminalViewState extends State<AppTerminalView> {
       onUserInput: widget.active && widget.canInput ? widget.onUserInput : null,
       onScrollPositionChanged: _onScrollChanged,
       showScrollbar: true,
-      textStyle: _styleFor(fontSize),
+      textStyle: _styleFor(fontSizePt, platform),
     );
     final body = Stack(
       fit: StackFit.expand,
@@ -668,7 +703,9 @@ class AppTerminalViewState extends State<AppTerminalView> {
                     vertical: 4,
                   ),
                   child: Text(
-                    '终端字号：@size'.trParams({'size': size.toStringAsFixed(0)}),
+                    '终端字号：@size'.trParams({
+                      'size': '${size.toStringAsFixed(0)} pt',
+                    }),
                     style: const TextStyle(
                       fontSize: 12,
                       color: AppTheme.terminalForeground,

@@ -9,6 +9,22 @@ import '../navigation/app_notice.dart';
 class TerminalSettingsSection extends StatelessWidget {
   const TerminalSettingsSection({super.key});
 
+  static const _fontSizePresets = <int>[
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    18,
+    20,
+    22,
+    24,
+  ];
+
   @override
   Widget build(BuildContext context) {
     final settings = Get.find<SettingsController>();
@@ -16,6 +32,9 @@ class TerminalSettingsSection extends StatelessWidget {
     final closeLabel = '断开后自动关闭窗格'.tr;
     return Obx(() {
       final fontSize = settings.terminalFontSize.value.round();
+      final sizes = _fontSizePresets.contains(fontSize)
+          ? _fontSizePresets
+          : ([..._fontSizePresets, fontSize]..sort());
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -24,8 +43,8 @@ class TerminalSettingsSection extends StatelessWidget {
             label: '终端字号'.tr,
             initialValue: fontSize,
             items: [
-              for (final size in [10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24])
-                AppSelectOption(value: size, child: Text('$size px')),
+              for (final size in sizes)
+                AppSelectOption(value: size, child: Text('$size pt')),
             ],
             onChanged: (value) async {
               if (value == null) return;

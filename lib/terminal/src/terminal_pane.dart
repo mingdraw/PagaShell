@@ -16,6 +16,7 @@ class TerminalPane extends StatefulWidget {
     required this.focusNode,
     required this.active,
     this.backgroundColor = const Color(0xff000000),
+    this.theme = TerminalThemes.defaultTheme,
     this.textStyle = const TerminalStyle(fontSize: 13, fontFamily: 'monospace'),
     this.selectionEdgeExtent = 24,
     this.selectionScrollInterval = const Duration(milliseconds: 40),
@@ -33,6 +34,7 @@ class TerminalPane extends StatefulWidget {
   final FocusNode focusNode;
   final bool active;
   final Color backgroundColor;
+  final TerminalTheme theme;
   final TerminalStyle textStyle;
   final double selectionEdgeExtent;
   final Duration selectionScrollInterval;
@@ -383,6 +385,7 @@ class TerminalPaneState extends State<TerminalPane> {
       scrollController: _scroll,
       focusNode: widget.focusNode,
       autofocus: widget.active,
+      theme: widget.theme,
       backgroundOpacity: 0,
       padding: const EdgeInsets.all(4),
       textStyle: widget.textStyle,

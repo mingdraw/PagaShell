@@ -28,6 +28,7 @@ import 'package:pagashell/presentation/components/app_text_form_field.dart';
 import 'package:pagashell/presentation/shell/command_palette.dart';
 import 'package:pagashell/presentation/terminal/docker_manager_panel.dart';
 import 'package:pagashell/presentation/theme/app_theme.dart';
+import 'package:pagashell/terminal/src/ui/render.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
 import 'support/docker_fixture.dart';
@@ -2708,6 +2709,7 @@ void main() {
       final before = source.processReads;
       await tester.tap(_button('toolbar-processes'));
       await tester.pumpAndSettle();
+      await tester.pump(RenderTerminal.resizeInterval);
       expect(details, findsNothing);
       expect(state.widget.terminal.viewWidth, terminalWidth);
       await tester.pump(const Duration(seconds: 6));

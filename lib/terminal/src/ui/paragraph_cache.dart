@@ -22,17 +22,18 @@ class ParagraphCache {
   static const bold = 1;
   static const italic = 2;
   static const underline = 4;
+  static const strikethrough = 8;
 
   /// 单码点字形的键。[content] 为单元格的码点与宽度位（24 位），
-  /// [color] 为 ARGB32，[styleFlags] 为 [bold]/[italic]/[underline] 组合。
+  /// [color] 为 ARGB32，[styleFlags] 为 [bold]/[italic]/[underline]/[strikethrough] 组合。
   @pragma('vm:prefer-inline')
   static int glyphKey(int content, int color, int styleFlags) =>
-      (color << 27) | (styleFlags << 24) | (content & 0xFFFFFF);
+      (color << 28) | (styleFlags << 24) | (content & 0xFFFFFF);
 
   /// 组合字符的样式部分。
   @pragma('vm:prefer-inline')
   static int clusterStyle(int color, int styleFlags) =>
-      (color << 3) | styleFlags;
+      (color << 4) | styleFlags;
 
   Paragraph? glyph(int key) => _touch(_glyphs, key);
 
@@ -46,8 +47,15 @@ class ParagraphCache {
       _put(_clusters, (text, style), paragraph);
 
   /// 排版 [text]，供 [putGlyph] / [putCluster] 缓存。
-  static Paragraph layout(String text, TextStyle style, TextScaler scaler) {
-    final builder = ParagraphBuilder(style.getParagraphStyle());
+  static Paragraph layout(
+    String text,
+    TextStyle style,
+    TextScaler scaler, {
+    ParagraphStyle? paragraphStyle,
+  }) {
+    final builder = ParagraphBuilder(
+      paragraphStyle ?? style.getParagraphStyle(),
+    );
     builder.pushStyle(style.getTextStyle(textScaler: scaler));
     builder.addText(text);
     final paragraph = builder.build();

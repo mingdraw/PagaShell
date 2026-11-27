@@ -260,4 +260,48 @@ void main() {
         );
     await expectLater(repository.readProxySettings(), throwsFormatException);
   });
+
+  test('终端字号按 pt 持久化，旧版无单位配置按平台平滑迁移', () async {
+    final db = AppDatabase.forTesting(NativeDatabase.memory());
+    addTearDown(db.close);
+
+    // 旧版未写入 terminalFontSizeUnit（原为逻辑像素）：
+    // macOS 1:1 保留；Windows/Linux 从 96 DPI 逻辑像素换算为最近的 pt。
+    await db
+        .into(db.appSettings)
+        .insertOnConflictUpdate(
+          AppSettingsCompanion.insert(
+            key: 'sidebar_state',
+            value: '{"terminalFontSize":16}',
+          ),
+        );
+    final macLegacy = await DriftSettingsRepository(
+      db,
+      isMacOS: true,
+    ).readSidebarState();
+    final winLegacy = await DriftSettingsRepository(
+      db,
+      isMacOS: false,
+    ).readSidebarState();
+    expect(macLegacy.terminalFontSize, 16);
+    expect(winLegacy.terminalFontSize, 12);
+
+    // 新版写入带 unit='pt' 后，各平台原样读取 pt 值。
+    final writer = DriftSettingsRepository(db, isMacOS: false);
+    await writer.saveSidebarState(SidebarState(terminalFontSize: 14));
+    expect(
+      (await DriftSettingsRepository(
+        db,
+        isMacOS: true,
+      ).readSidebarState()).terminalFontSize,
+      14,
+    );
+    expect(
+      (await DriftSettingsRepository(
+        db,
+        isMacOS: false,
+      ).readSidebarState()).terminalFontSize,
+      14,
+    );
+  });
 }
