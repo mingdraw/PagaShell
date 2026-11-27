@@ -6,6 +6,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use crate::api::desktop::{
     DesktopClipboardEvent, DesktopFrame, DesktopHandshake, DesktopInputEvent, DesktopNetworkStats,
 };
+use crate::api::vnc::VncInputEvent;
 
 pub(super) const VERSION: u32 = 1;
 pub(super) const MAX_IN_FLIGHT: usize = 16;
@@ -55,11 +56,15 @@ pub(super) enum Request {
         version: u32,
         host: String,
         port: u16,
+        #[serde(default)]
+        username: String,
         password: String,
         page_gateway: Option<crate::api::page::PageGateway>,
     },
     VncConnectTunnel {
         version: u32,
+        #[serde(default)]
+        username: String,
         password: String,
         tunnel_handle: u64,
     },
@@ -94,6 +99,7 @@ pub(super) enum Request {
         y: u16,
         text: String,
     },
+    VncInputBatch(Vec<VncInputEvent>),
     InputBatch(Vec<DesktopInputEvent>),
     Resize {
         width: u16,
@@ -251,11 +257,13 @@ mod tests {
                 version: VERSION,
                 host: "vnc.internal".into(),
                 port: 5900,
+                username: "mac-user".into(),
                 password: "pw".into(),
                 page_gateway: Some(gateway),
             },
             Request::VncConnectTunnel {
                 version: VERSION,
+                username: "mac-user".into(),
                 password: "pw".into(),
                 tunnel_handle: 0x5678,
             },
@@ -267,6 +275,13 @@ mod tests {
                 y: 0,
                 text: String::new(),
             },
+            Request::VncInputBatch(vec![VncInputEvent {
+                pointer: true,
+                code: 0,
+                flags: 0x0800,
+                x: 10,
+                y: 20,
+            }]),
         ];
         for (index, body) in requests.into_iter().enumerate() {
             write(
@@ -311,6 +326,10 @@ mod tests {
                 code: 0x0100_4e2d,
                 ..
             }
+        ));
+        assert!(matches!(
+            read::<Request>(&mut reader).await.unwrap().body,
+            Request::VncInputBatch(events) if events.len() == 1 && events[0].pointer && events[0].x == 10
         ));
     }
 

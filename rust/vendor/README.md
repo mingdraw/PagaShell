@@ -59,6 +59,23 @@ future IronRDP rebases:
      certificate.
    - Exposes lock-free `UdpTransport::stats()` (`UdpTransportStats`) for real-time
      smoothed RTT and packet retransmission telemetry.
+7. `0007-vnc-rs-apple-ard-and-macos-screen-sharing.patch` (based on `vnc-rs 0.6.0`)
+   - Negotiates `RFB 003.889` (macOS Screen Sharing) as RFB 3.8 instead of
+     downgrading to RFB 3.3, and detects Apple servers for native Option/Command
+     modifier mapping.
+   - Implements Apple Remote Desktop Security Type `30` (Diffie-Hellman + MD5 +
+     AES-128-ECB) with fixed-width big-endian zero padding, random credential
+     padding, and graceful handling of immediate EOF after `SecurityResult = 1`.
+   - Keeps native 32-bit true-color server pixel formats (LE BGRA / BE xRGB)
+     without forcing `SetPixelFormat`, safely skips `SetColorMapEntries`, and
+     raises the framebuffer pixel cap to 24M pixels for 5K/6K Retina displays.
+   - Replaces per-byte ZRLE zlib decompression with a reusable 32 KiB buffered
+     `ZlibReader`, coalesces multi-tile ZRLE rectangles into a single `RawImage`,
+     adds opt-in `VncEvent::FrameComplete` & configurable output channel capacity,
+     makes `VncClient::input`, `input_batch`, and `close` lock-free wrt
+     `recv_event`, coalesces queued client socket writes in a 128 KiB I/O loop,
+     adds dynamic mid-session `set_pixel_format` (including `PixelFormat::rgb565`
+     and 16-bit cursor decoding), and preserves UTF-8 / ISO 8859-1 clipboard text.
 
 ## Testing & rebasing
 

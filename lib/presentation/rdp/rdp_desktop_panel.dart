@@ -255,11 +255,14 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
       for (final event in events) {
         if (_failed) return;
         await switch (event) {
-          RdpKeyInput() => session.key(
-            event.scanCode,
-            down: event.down,
-            extended: event.extended,
-          ),
+          RdpKeyInput() =>
+            session is VncEngineSession
+                ? session.keySymbol(event.scanCode, down: event.down)
+                : session.key(
+                    event.scanCode,
+                    down: event.down,
+                    extended: event.extended,
+                  ),
           RdpPointerInput() => session.pointer(
             event.x,
             event.y,
@@ -423,7 +426,7 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
       } on Object catch (error) {
         if (mounted && widget.active) {
           AppNotice.error(
-            error is SshEngineException ? error.message : '无法切换 RDP 画质模式，请重试',
+            error is SshEngineException ? error.message : '无法切换画质模式，请重试',
           );
         }
       }
@@ -496,7 +499,7 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     final vncSession = widget.session;
     if (vncSession is VncEngineSession) {
       for (final symbol in _vncPressed.values) {
-        _send(() => vncSession.keySymbol(symbol, down: false));
+        _inputs.addEvent(RdpKeyInput(symbol, down: false));
       }
       _vncPressed.clear();
     }
@@ -514,7 +517,10 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     if (!widget.active) return KeyEventResult.ignored;
     // Defer macOS Command so Cmd+C/X/V does not send a Windows-key tap.
     // Other Command combinations retain the ordinary Windows scan-code path.
-    if (_clipboard != null && defaultTargetPlatform == TargetPlatform.macOS) {
+    // VNC preserves native Super/Command keysyms (important for remote macOS).
+    if (widget.session is! VncEngineSession &&
+        _clipboard != null &&
+        defaultTargetPlatform == TargetPlatform.macOS) {
       final physical = event.physicalKey;
       if (physical == PhysicalKeyboardKey.metaLeft ||
           physical == PhysicalKeyboardKey.metaRight) {
@@ -586,13 +592,32 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     }
     final vncSession = widget.session;
     if (vncSession is VncEngineSession) {
+      // A modifier sent before composition must still be released remotely.
+      if (!_vncPressed.containsKey(event.physicalKey) &&
+          _localTextInput.handlesKey(event)) {
+        return KeyEventResult.skipRemainingHandlers;
+      }
       final down = event is! KeyUpEvent;
       final symbol = down
           ? _vncPressed[event.physicalKey] ?? vncKeySymbol(event)
           : _vncPressed.remove(event.physicalKey);
       if (symbol == null) return KeyEventResult.ignored;
       if (down) _vncPressed[event.physicalKey] = symbol;
-      _send(() => vncSession.keySymbol(symbol, down: down));
+      final clipboard = _clipboard;
+      final isPaste =
+          down &&
+          event is KeyDownEvent &&
+          event.physicalKey == PhysicalKeyboardKey.keyV &&
+          (HardwareKeyboard.instance.isControlPressed ||
+              HardwareKeyboard.instance.isMetaPressed);
+      if (isPaste && clipboard != null) {
+        _send(() async {
+          if (!await clipboard.syncBeforePaste()) return;
+          await _writeInputs([RdpKeyInput(symbol, down: true)]);
+        });
+      } else {
+        _inputs.addEvent(RdpKeyInput(symbol, down: down));
+      }
       return KeyEventResult.handled;
     }
     final scan = rdpScanCode(event.physicalKey);
@@ -762,11 +787,14 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     _resizeDebounce?.cancel();
     setState(() => _resolution = resolution);
     final target = resolution ?? _viewport;
-    if (target != null) unawaited(_resize(target));
+    if (target != null) unawaited(_resize(target, userInitiated: true));
     _focus.requestFocus();
   }
 
-  Future<void> _resize(RdpResolution target) async {
+  Future<void> _resize(
+    RdpResolution target, {
+    bool userInitiated = false,
+  }) async {
     if (_resizeBusy ||
         !widget.active ||
         _failed ||
@@ -789,7 +817,7 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
         return;
       }
       if (!sent) {
-        _resizeFailed('远端不支持动态分辨率，已保留当前画面');
+        _resizeFailed('远端不支持动态分辨率，已保留当前画面', notify: userInitiated);
       } else {
         _resizeConfirmation = Timer(const Duration(seconds: 8), () {
           if (mounted &&
@@ -812,7 +840,7 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     }
   }
 
-  void _resizeFailed(String message) {
+  void _resizeFailed(String message, {bool notify = true}) {
     _resizeConfirmation?.cancel();
     _resizeDebounce?.cancel();
     setState(() {
@@ -820,7 +848,7 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
       _awaitingResolution = null;
       _resolution = RdpResolution(_surface.width, _surface.height);
     });
-    if (widget.active) AppNotice.error(message);
+    if (notify && widget.active) AppNotice.error(message);
   }
 
   void _secureAttention() {
@@ -989,25 +1017,24 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
             ],
           ),
         ),
-      if (widget.session is! VncEngineSession)
-        AppMenuButton<bool>(
-          key: const ValueKey('rdp-keyboard-mode'),
-          enabled: widget.active && !_failed,
-          semanticLabel: '键盘输入模式'.tr,
-          tooltip: '键盘输入模式'.tr,
-          selectedValue: _useLocalIme,
-          items: [(false, '远端键盘'.tr), (true, '本机输入法'.tr)],
-          onSelected: _selectKeyboardMode,
-          onMenuVisibilityChanged: _menuVisibilityChanged,
-          icon: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text((_useLocalIme ? '本机输入法' : '远端键盘').tr),
-              const SizedBox(width: 4),
-              const AppIcon(AppIcons.chevronDown, size: 14),
-            ],
-          ),
+      AppMenuButton<bool>(
+        key: const ValueKey('rdp-keyboard-mode'),
+        enabled: widget.active && !_failed,
+        semanticLabel: '键盘输入模式'.tr,
+        tooltip: '键盘输入模式'.tr,
+        selectedValue: _useLocalIme,
+        items: [(false, '远端键盘'.tr), (true, '本机输入法'.tr)],
+        onSelected: _selectKeyboardMode,
+        onMenuVisibilityChanged: _menuVisibilityChanged,
+        icon: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text((_useLocalIme ? '本机输入法' : '远端键盘').tr),
+            const SizedBox(width: 4),
+            const AppIcon(AppIcons.chevronDown, size: 14),
+          ],
         ),
+      ),
       AppIconButton(
         key: const ValueKey('rdp-type-clipboard'),
         semanticLabel: '键入剪贴板文本'.tr,

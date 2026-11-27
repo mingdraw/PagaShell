@@ -89,7 +89,7 @@ class Host {
 
   /// 形如 `user@host:port` 的展示地址。
   String get address => isVnc
-      ? '$hostname:$port'
+      ? (username.isEmpty ? '$hostname:$port' : '$username@$hostname:$port')
       : port == 22
       ? '$username@$hostname'
       : '$username@$hostname:$port';

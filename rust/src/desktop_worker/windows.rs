@@ -26,6 +26,7 @@ use crate::api::desktop::{
     DesktopWorkerStarted,
 };
 use crate::api::page::PageGateway;
+use crate::api::vnc::VncInputEvent;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(35);
 // RDP authentication and activation can each take up to 30s.
@@ -261,6 +262,7 @@ impl Worker {
         &self,
         host: String,
         port: u16,
+        username: String,
         password: String,
         ssh_gateway_id: Option<u32>,
         page_gateway: Option<PageGateway>,
@@ -269,6 +271,7 @@ impl Worker {
             let tunnel_handle = self.open_ssh_tunnel(gateway_id, host, port).await?;
             Request::VncConnectTunnel {
                 version: VERSION,
+                username,
                 password,
                 tunnel_handle,
             }
@@ -277,6 +280,7 @@ impl Worker {
                 version: VERSION,
                 host,
                 port,
+                username,
                 password,
                 page_gateway,
             }
@@ -325,17 +329,18 @@ impl Worker {
         Ok(())
     }
 
-    pub(crate) async fn vnc_frame(&self, after: u32) -> Result<Option<DesktopFrame>> {
-        self.frame_inner(None, after).await
+    pub(crate) async fn vnc_frame(&self, session: u32, after: u32) -> Result<Option<DesktopFrame>> {
+        self.frame_inner(Some(session), true, after).await
     }
 
     pub(crate) async fn frame(&self, session: u32, after: u32) -> Result<Option<DesktopFrame>> {
-        self.frame_inner(Some(session), after).await
+        self.frame_inner(Some(session), false, after).await
     }
 
     async fn frame_inner(
         &self,
         texture_session: Option<u32>,
+        is_vnc: bool,
         mut after: u32,
     ) -> Result<Option<DesktopFrame>> {
         let mut slot = self.frame.lock().await;
@@ -361,8 +366,12 @@ impl Worker {
                         *slot = Some(current);
                         return Ok(None);
                     };
-                    crate::rdp::validate_desktop_size(frame.width, frame.height)
-                        .map_err(|_| self.protocol_error())?;
+                    if is_vnc {
+                        crate::vnc::validate_desktop_size(frame.width, frame.height)
+                    } else {
+                        crate::rdp::validate_desktop_size(frame.width, frame.height)
+                    }
+                    .map_err(|_| self.protocol_error())?;
                     let len = usize::from(frame.bitmap_width)
                         .checked_mul(usize::from(frame.bitmap_height))
                         .and_then(|pixels| pixels.checked_mul(4))
@@ -477,6 +486,10 @@ impl Worker {
             text,
         })
         .await
+    }
+
+    pub(crate) async fn vnc_input_batch(&self, events: Vec<VncInputEvent>) -> Result<()> {
+        self.done(Request::VncInputBatch(events)).await
     }
 
     pub(crate) async fn input(

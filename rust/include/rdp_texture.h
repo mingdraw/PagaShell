@@ -63,7 +63,7 @@ static inline bool PagaRdpFrameIsFull(const PagaRdpFrameView* frame) {
 // backing image.
 static inline bool PagaRdpFrameHasValidPixels(const PagaRdpFrameView* frame) {
   if (!frame->rgba || !frame->width || !frame->height ||
-      (size_t)frame->width * frame->height > 16777216 ||
+      (size_t)frame->width * frame->height > 24000000 ||
       frame->rgba_len != (size_t)frame->bitmap_width * frame->bitmap_height * 4 ||
       frame->tile_count > 8192 || (frame->tile_count && !frame->tiles) ||
       (!frame->tile_count && !PagaRdpFrameIsFull(frame))) {

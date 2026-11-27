@@ -19,6 +19,7 @@ Future<void> vncWorkerConnect({
   required int sessionId,
   required String host,
   required int port,
+  required String username,
   required String password,
   int? sshGatewayId,
   PageGateway? pageGateway,
@@ -26,6 +27,7 @@ Future<void> vncWorkerConnect({
   sessionId: sessionId,
   host: host,
   port: port,
+  username: username,
   password: password,
   sshGatewayId: sshGatewayId,
   pageGateway: pageGateway,
@@ -34,12 +36,14 @@ Future<void> vncWorkerConnect({
 Future<int> vncConnect({
   required String host,
   required int port,
+  required String username,
   required String password,
   int? sshGatewayId,
   PageGateway? pageGateway,
 }) => RustLib.instance.api.crateApiVncVncConnect(
   host: host,
   port: port,
+  username: username,
   password: password,
   sshGatewayId: sshGatewayId,
   pageGateway: pageGateway,
@@ -72,5 +76,93 @@ Future<void> vncInput({
   text: text,
 );
 
+/// Send ordered VNC keyboard and pointer events in one batched call.
+Future<void> vncInputBatch({
+  required int sessionId,
+  required List<VncInputEvent> events,
+}) => RustLib.instance.api.crateApiVncVncInputBatch(
+  sessionId: sessionId,
+  events: events,
+);
+
+/// Returns the latest VNC network latency, speed, packet loss, and adaptive quality snapshot.
+Future<DesktopNetworkStats> vncNetworkStats({required int sessionId}) =>
+    RustLib.instance.api.crateApiVncVncNetworkStats(sessionId: sessionId);
+
+/// Selects the VNC adaptive quality policy: 0 = Auto, 1 = High, 2 = Balanced, 3 = Low.
+Future<void> vncSetQualityMode({required int sessionId, required int mode}) =>
+    RustLib.instance.api.crateApiVncVncSetQualityMode(
+      sessionId: sessionId,
+      mode: mode,
+    );
+
+/// Requests a VNC ExtendedDesktopSize resize. False means the server does not support it.
+Future<bool> vncResize({
+  required int sessionId,
+  required int width,
+  required int height,
+}) => RustLib.instance.api.crateApiVncVncResize(
+  sessionId: sessionId,
+  width: width,
+  height: height,
+);
+
+Future<void> vncClipboardActive({
+  required int sessionId,
+  required bool active,
+}) => RustLib.instance.api.crateApiVncVncClipboardActive(
+  sessionId: sessionId,
+  active: active,
+);
+
+Future<void> vncClipboardUpdate({required int sessionId, String? text}) =>
+    RustLib.instance.api.crateApiVncVncClipboardUpdate(
+      sessionId: sessionId,
+      text: text,
+    );
+
+Future<DesktopClipboardEvent?> vncClipboardEvent({
+  required int sessionId,
+  required int afterSequence,
+}) => RustLib.instance.api.crateApiVncVncClipboardEvent(
+  sessionId: sessionId,
+  afterSequence: afterSequence,
+);
+
 Future<void> vncDisconnect({required int sessionId}) =>
     RustLib.instance.api.crateApiVncVncDisconnect(sessionId: sessionId);
+
+class VncInputEvent {
+  final bool pointer;
+  final int code;
+  final int flags;
+  final int x;
+  final int y;
+
+  const VncInputEvent({
+    required this.pointer,
+    required this.code,
+    required this.flags,
+    required this.x,
+    required this.y,
+  });
+
+  @override
+  int get hashCode =>
+      pointer.hashCode ^
+      code.hashCode ^
+      flags.hashCode ^
+      x.hashCode ^
+      y.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is VncInputEvent &&
+          runtimeType == other.runtimeType &&
+          pointer == other.pointer &&
+          code == other.code &&
+          flags == other.flags &&
+          x == other.x &&
+          y == other.y;
+}

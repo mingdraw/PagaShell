@@ -8,5 +8,9 @@ abstract interface class VncEngineSession implements RdpEngineSession {
 }
 
 class VncAuthenticationException extends DesktopAuthenticationException {
-  const VncAuthenticationException(super.message, {super.cause});
+  const VncAuthenticationException(
+    super.message, {
+    super.requiresUsername,
+    super.cause,
+  });
 }

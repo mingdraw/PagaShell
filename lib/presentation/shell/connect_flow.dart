@@ -346,7 +346,7 @@ Future<(Host, SshCredentials)> _resolveConnectChoice(
           )
         : await identityController.saveWithPassword(
             name: choice.identityName,
-            username: host.username,
+            username: credentials.username ?? host.username,
             password: credentials.password!,
             serviceType: host.serviceType,
             rdpDomain: host.isRdp ? host.rdpDomain : null,
@@ -392,6 +392,7 @@ class _ConnectDialog extends StatefulWidget {
 
 class _ConnectDialogState extends State<_ConnectDialog> {
   final _formKey = GlobalKey<FormState>();
+  late final TextEditingController _username;
   final _password = TextEditingController();
   final _privateKey = TextEditingController();
   final _passphrase = TextEditingController();
@@ -409,8 +410,9 @@ class _ConnectDialogState extends State<_ConnectDialog> {
   @override
   void initState() {
     super.initState();
+    _username = TextEditingController(text: widget.host.username);
     _identityName = TextEditingController(
-      text: widget.host.isVnc
+      text: widget.host.isVnc && widget.host.username.isEmpty
           ? widget.host.name
           : '${widget.host.username}@${widget.host.name}',
     );
@@ -418,6 +420,7 @@ class _ConnectDialogState extends State<_ConnectDialog> {
 
   @override
   void dispose() {
+    _username.dispose();
     _password.dispose();
     _privateKey.dispose();
     _passphrase.dispose();
@@ -446,7 +449,10 @@ class _ConnectDialogState extends State<_ConnectDialog> {
                     _privateKey.text.trim(),
                     passphrase: _passphrase.text,
                   )
-                : SshCredentials.password(_password.text),
+                : SshCredentials.password(
+                    _password.text,
+                    username: widget.host.isVnc ? _username.text.trim() : null,
+                  ),
             saveAsIdentity: _save,
             identityName: _identityName.text.trim(),
           )
@@ -532,7 +538,12 @@ class _ConnectDialogState extends State<_ConnectDialog> {
                             value: identity.id,
                             child: Text(
                               widget.host.isVnc
-                                  ? identity.name
+                                  ? (identity.username.isEmpty
+                                        ? identity.name
+                                        : '@name（@username）'.trParams({
+                                            'name': identity.name,
+                                            'username': identity.username,
+                                          }))
                                   : '@name（@username · @auth）'.trParams({
                                       'name': identity.name,
                                       'username': identity.username,
@@ -580,7 +591,21 @@ class _ConnectDialogState extends State<_ConnectDialog> {
                         privateKey: _privateKey,
                         passphrase: _passphrase,
                       )
-                    else
+                    else ...[
+                      if (widget.host.isVnc) ...[
+                        AppTextFormField(
+                          key: const ValueKey('connect-username'),
+                          controller: _username,
+                          enableSuggestions: false,
+                          autocorrect: false,
+                          smartPunctuation: false,
+                          decoration: AppInputDecoration(
+                            labelText: '用户名（可选）'.tr,
+                            hintText: 'macOS 屏幕共享填写系统用户名；标准 VNC 留空'.tr,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                      ],
                       AppTextFormField(
                         controller: _password,
                         autofocus: true,
@@ -604,6 +629,7 @@ class _ConnectDialogState extends State<_ConnectDialog> {
                           ),
                         ),
                       ),
+                    ],
                     if (widget.canRemember) ...[
                       const SizedBox(height: 4),
                       Padding(
@@ -643,7 +669,8 @@ class _ConnectDialogState extends State<_ConnectDialog> {
                     Text(
                       !widget.canRemember
                           ? '将使用所选凭证连接'.tr
-                          : widget.host.isVnc
+                          : widget.host.isVnc &&
+                                _selectedIdentity!.username.isEmpty
                           ? '将使用所选凭证连接，并记住此绑定'.tr
                           : '将以 @username 连接，并记住此绑定'.trParams({
                               'username': _selectedIdentity!.username,

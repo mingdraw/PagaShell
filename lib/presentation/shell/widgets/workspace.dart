@@ -576,7 +576,6 @@ class _SessionView extends StatelessWidget {
           key: ValueKey('rdp-${session.id}'),
           session: session.desktopSession!,
           protocolLabel: session.host.serviceType.label,
-          dynamicResolution: !session.host.isVnc,
           active: active,
           fullscreen: fullscreen?.sessionId == session.id,
           fullscreenBusy: fullscreen?.busy ?? false,

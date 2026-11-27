@@ -1343,6 +1343,7 @@ class SessionController extends GetxController {
         username: login.username ?? host.username,
         domain: login.rdpDomain ?? host.rdpDomain,
         error: failure.message,
+        requiresUsername: failure.requiresUsername,
       );
       if (!await _replaceRdpPassword(id, request)) return;
     }
@@ -1353,7 +1354,7 @@ class SessionController extends GetxController {
     RdpPasswordRequest request,
   ) async {
     if (_disposed || _find(id) == null) return false;
-    final decision = Completer<String?>();
+    final decision = Completer<({String password, String? username})?>();
     _runtimes[id]?.passwordDecision = decision;
     _update(
       id,
@@ -1363,22 +1364,26 @@ class SessionController extends GetxController {
         passwordRequest: request,
       ),
     );
-    String? password;
+    ({String password, String? username})? response;
     try {
-      password = await decision.future;
+      response = await decision.future;
     } finally {
       if (identical(_runtimes[id]?.passwordDecision, decision)) {
         _runtimes[id]?.passwordDecision = null;
       }
     }
     if (_disposed || _find(id) == null) return false;
-    if (password == null) {
+    if (response == null) {
       _update(id, (s) => s.copyWith(phase: SessionPhase.failed));
       return false;
     }
+    final nextUsername = response.username?.trim();
+    final effectiveUsername = nextUsername != null && nextUsername.isNotEmpty
+        ? nextUsername
+        : _runtimes[id]?.credentials?.username;
     _runtimes[id]?.credentials = SshCredentials.password(
-      password,
-      username: _runtimes[id]?.credentials?.username,
+      response.password,
+      username: effectiveUsername,
       rdpDomain: _runtimes[id]?.credentials?.rdpDomain,
     );
     _update(
@@ -1387,7 +1392,7 @@ class SessionController extends GetxController {
         id: s.id,
         host: s.host,
         kind: s.kind,
-        loginUsername: s.loginUsername,
+        loginUsername: effectiveUsername ?? s.loginUsername,
       ),
     );
     return true;
@@ -1397,15 +1402,21 @@ class SessionController extends GetxController {
     String id, {
     required RdpPasswordRequest request,
     String? password,
+    String? username,
   }) {
     final decision = _runtimes[id]?.passwordDecision;
     if (decision == null ||
         decision.isCompleted ||
         !identical(_find(id)?.passwordRequest, request) ||
-        (password != null && password.isEmpty)) {
+        (password != null && password.isEmpty) ||
+        (password != null &&
+            request.requiresUsername &&
+            (username ?? request.username).trim().isEmpty)) {
       return;
     }
-    decision.complete(password);
+    decision.complete(
+      password == null ? null : (password: password, username: username),
+    );
   }
 
   Future<DesktopAuthenticationException?> _connectOnce(

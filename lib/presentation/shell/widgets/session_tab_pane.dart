@@ -15,6 +15,7 @@ import '../../../application/session/session_controller.dart';
 import '../../../application/session/session_layout.dart';
 import '../../../application/settings/settings_controller.dart';
 import '../../../domain/rdp/rdp_engine.dart';
+import '../../../domain/rdp/rdp_network_stats.dart';
 import '../../ai/agent_workspace.dart';
 import '../../components/app_icon.dart';
 import '../../components/app_icon_button.dart';
@@ -500,12 +501,14 @@ class _SessionTabState extends State<_SessionTab> {
     super.dispose();
   }
 
-  String _tooltipText() {
+  String _tooltipText([RdpNetworkStats? overrideNetworkStats]) {
     final session = widget.session;
     final desktopSession = session.desktopSession;
-    final networkStats = desktopSession is RdpNetworkSession
-        ? desktopSession.latestNetworkStats
-        : null;
+    final networkStats =
+        overrideNetworkStats ??
+        (desktopSession is RdpNetworkSession
+            ? desktopSession.latestNetworkStats
+            : null);
     final title =
         '${session.title} · ${session.address} · '
         '${'@kind（@phase）'.trParams({'kind': _kindLabel, 'phase': _phaseLabel(session.kind, _groupPhase)})}';
@@ -536,6 +539,10 @@ class _SessionTabState extends State<_SessionTab> {
           render is RenderBox &&
           render.hasSize &&
           render.localToGlobal(Offset.zero).dx + 260 > screenWidth - 8;
+      final desktopSession = widget.session.desktopSession;
+      final networkSession = desktopSession is RdpNetworkSession
+          ? desktopSession
+          : null;
       final entry = OverlayEntry(
         builder: (_) => Positioned(
           left: 0,
@@ -552,7 +559,16 @@ class _SessionTabState extends State<_SessionTab> {
                 constraints: BoxConstraints(
                   maxWidth: math.max(120, screenWidth - 16),
                 ),
-                child: shadcn.TooltipContainer(child: Text(_tooltipText())),
+                child: shadcn.TooltipContainer(
+                  child: networkSession == null
+                      ? Text(_tooltipText())
+                      : StreamBuilder<RdpNetworkStats>(
+                          initialData: networkSession.latestNetworkStats,
+                          stream: networkSession.networkStats,
+                          builder: (_, snapshot) =>
+                              Text(_tooltipText(snapshot.data)),
+                        ),
+                ),
               ),
             ),
           ),

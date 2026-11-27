@@ -116,10 +116,14 @@ class _RdpCertificatePromptsState extends State<RdpCertificatePrompts> {
     _route = null;
     if (mounted && _stillPending(session)) {
       if (request != null) {
+        final credential = decision is DesktopPasswordDecision
+            ? decision
+            : null;
         widget.controller.confirmRdpPassword(
           session.id,
           request: request,
-          password: decision is String ? decision : null,
+          password: credential?.password,
+          username: credential?.username,
         );
       } else {
         widget.controller.confirmHostKey(session.id, trust: decision == true);

@@ -16,11 +16,14 @@ import 'package:pagashell/application/session/session.dart';
 import 'package:pagashell/application/session/session_controller.dart';
 import 'package:pagashell/domain/entities/host.dart';
 import 'package:pagashell/domain/rdp/rdp_engine.dart';
+import 'package:pagashell/domain/rdp/rdp_network_stats.dart';
 import 'package:pagashell/domain/ssh/ssh_engine.dart';
+import 'package:pagashell/domain/vnc/vnc_engine.dart';
 import 'package:pagashell/presentation/components/app_select_field.dart';
 import 'package:pagashell/presentation/components/app_text_form_field.dart';
 import 'package:pagashell/presentation/hosts/host_edit_dialog.dart';
 import 'package:pagashell/presentation/identities/identity_edit_dialog.dart';
+import 'package:pagashell/presentation/rdp/rdp_password_dialog.dart';
 import 'package:pagashell/presentation/shell/connect_flow.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 
@@ -98,7 +101,9 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  testWidgets('新建 VNC 默认 5900，无用户名和域，复制密码且不显示 SSH 入口', (tester) async {
+  testWidgets('新建 VNC 默认 5900，支持可选用户名（macOS）与无域，复制密码且不显示 SSH 入口', (
+    tester,
+  ) async {
     await pumpApp(tester, FakeVncEngine());
     unawaited(showHostEditDialog(tester.element(find.text('服务'))));
     await tester.pumpAndSettle();
@@ -111,7 +116,14 @@ void main() {
           .text,
       '5900',
     );
-    expect(find.byKey(const ValueKey('host-username')), findsNothing);
+    expect(find.byKey(const ValueKey('host-username')), findsOneWidget);
+    expect(
+      tester
+          .widget<AppTextFormField>(find.byKey(const ValueKey('host-username')))
+          .controller
+          .text,
+      isEmpty,
+    );
     expect(find.byKey(const ValueKey('rdp-domain')), findsNothing);
     await _capture(tester, 'vnc-service-form');
     await tester.enterText(
@@ -131,15 +143,22 @@ void main() {
     final hosts = Get.find<HostController>();
     final saved = hosts.hosts.single;
     expect(saved.isVnc, isTrue);
+    expect(saved.username, isEmpty);
     expect(saved.address, 'vnc.test:5900');
     unawaited(
       showHostEditDialog(tester.element(find.text('服务')), copyFrom: saved),
     );
     await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const ValueKey('host-username')),
+      'alice',
+    );
     await tester.tap(find.text('保存'));
     await tester.pumpAndSettle();
     final copy = hosts.hosts.singleWhere((h) => h.id != saved.id);
     expect(copy.serviceType, ServiceType.vnc);
+    expect(copy.username, 'alice');
+    expect(copy.address, 'alice@vnc.test:5900');
     expect(await hosts.passwordOf(copy.id), 'test-password');
     await tester.tap(find.text(host.name), buttons: kSecondaryMouseButton);
     await tester.pumpAndSettle();
@@ -149,13 +168,14 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('凭证可选择 SSH/RDP/VNC，VNC 只显示密码并按类型筛选', (tester) async {
+  testWidgets('凭证可选择 SSH/RDP/VNC，VNC 支持可选用户名并按类型筛选', (tester) async {
     await pumpApp(tester, FakeVncEngine());
     unawaited(showIdentityEditDialog(tester.element(find.text('凭证'))));
     await tester.pumpAndSettle();
     await tester.tap(find.widgetWithText(shadcn.RadioCard<ServiceType>, 'VNC'));
     await tester.pumpAndSettle();
-    expect(find.text('用户名'), findsNothing);
+    expect(find.byKey(const ValueKey('identity-username')), findsOneWidget);
+    expect(find.text('用户名（可选）'), findsOneWidget);
     expect(find.text('认证方式'), findsNothing);
     expect(find.widgetWithText(AppTextFormField, '密码'), findsOneWidget);
     await _capture(tester, 'vnc-credential-form');
@@ -173,6 +193,12 @@ void main() {
     expect(identities.identities.single.serviceType, ServiceType.vnc);
     expect(identities.identities.single.username, isEmpty);
     final vncIdentity = identities.identities.single;
+    await identities.saveWithPassword(
+      name: 'Mac Studio',
+      username: 'alice',
+      password: 'mac-password',
+      serviceType: ServiceType.vnc,
+    );
     await identities.saveWithPassword(
       name: 'SSH credential',
       username: 'ssh',
@@ -196,6 +222,10 @@ void main() {
     final popup = find.byType(shadcn.SelectPopup<String>);
     expect(
       find.descendant(of: popup, matching: find.text('VNC credential')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: popup, matching: find.text('Mac Studio（alice）')),
       findsOneWidget,
     );
     expect(
@@ -242,8 +272,10 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('VNC · 64 × 32'), findsOneWidget);
-    expect(find.byKey(const ValueKey('rdp-resolution-menu')), findsNothing);
-    expect(desktop.resizes, isEmpty);
+    expect(find.byKey(const ValueKey('rdp-resolution-menu')), findsOneWidget);
+    expect(find.byKey(const ValueKey('rdp-keyboard-mode')), findsOneWidget);
+    expect(find.byKey(const ValueKey('rdp-network-badge')), findsOneWidget);
+    expect(find.text('远端不支持动态分辨率，已保留当前画面'), findsNothing);
     await _capture(tester, 'vnc-desktop');
     await tester.tap(find.byKey(const ValueKey('rdp-desktop-image')));
     await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
@@ -391,5 +423,258 @@ void main() {
       throwsA(isA<SshEngineException>()),
     );
     expect(controller.sessions, isEmpty);
+  });
+
+  testWidgets('macOS 屏幕共享缺少用户名时弹窗补填用户名与密码并重连成功', (tester) async {
+    final engine = FakeVncEngine(
+      authenticationError: (credentials, _) {
+        final user = (credentials.username ?? '').trim();
+        if (user.isEmpty) {
+          return const VncAuthenticationException(
+            'macOS 屏幕共享需要使用系统用户名和密码登录。',
+            requiresUsername: true,
+          );
+        }
+        if (user != 'alice' || credentials.password != 'mac-pass') {
+          return const VncAuthenticationException(
+            'macOS 用户名或密码无效，或该用户无屏幕共享/远程管理权限，请核对后重试。',
+            requiresUsername: true,
+          );
+        }
+        return null;
+      },
+    );
+    await pumpApp(tester, engine);
+    final macHost = host.copyWith(name: 'Mac mini', hostname: 'mac.local');
+    final hosts = Get.find<HostController>();
+    await hosts.save(macHost);
+    await hosts.savePassword(macHost.id, 'old-pass');
+
+    final connecting = connectToHost(tester.element(find.text('服务')), macHost);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(find.byType(RdpPasswordDialog), findsOneWidget);
+    expect(find.text('macOS 远程桌面登录'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('desktop-retry-username')),
+      findsOneWidget,
+    );
+
+    // 未填用户名时校验阻止提交。
+    await tester.enterText(
+      find.widgetWithText(AppTextFormField, '密码'),
+      'mac-pass',
+    );
+    await tester.tap(find.text('继续连接'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.text('请输入用户名'), findsOneWidget);
+    expect(engine.attempts, hasLength(1));
+
+    // 填写 macOS 用户名和密码后继续连接成功。
+    await tester.enterText(
+      find.byKey(const ValueKey('desktop-retry-username')),
+      'alice',
+    );
+    await tester.tap(find.text('继续连接'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    await connecting;
+
+    final sessions = Get.find<SessionController>();
+    expect(sessions.sessions.single.phase, SessionPhase.ready);
+    expect(sessions.sessions.single.address, 'alice@mac.local:5900');
+    expect(engine.attempts.last.username, 'alice');
+    expect(engine.attempts.last.password, 'mac-pass');
+
+    await sessions.closeAll();
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('即时连接 VNC 对话框可填写可选 macOS 用户名并随会话/凭证保存', (tester) async {
+    final engine = FakeVncEngine();
+    await pumpApp(tester, engine);
+    final macHost = host.copyWith(name: 'Mac Studio', hostname: 'studio.local');
+    await Get.find<HostController>().save(macHost);
+
+    final connecting = connectToHost(tester.element(find.text('服务')), macHost);
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('connect-username')), findsOneWidget);
+    await tester.enterText(
+      find.byKey(const ValueKey('connect-username')),
+      'bob',
+    );
+    await tester.enterText(
+      find.widgetWithText(AppTextFormField, '密码'),
+      'studio-pass',
+    );
+    await tester.tap(find.text('连接'));
+    await tester.pump();
+    await connecting;
+
+    expect(engine.attempts.single.username, 'bob');
+    expect(engine.attempts.single.password, 'studio-pass');
+    await Get.find<SessionController>().closeAll();
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('VNC 页签标题栏和工具栏展示信号、延迟并支持画质切换', (tester) async {
+    final engine = FakeVncEngine();
+    await pumpApp(tester, engine);
+    final hosts = Get.find<HostController>();
+    await hosts.save(host);
+    await hosts.savePassword(host.id, 'test-only');
+    await connectToHost(tester.element(find.text('服务')), host);
+    await tester.pump();
+
+    final desktop = engine.created.single;
+    desktop.output.add(
+      RdpFrame(
+        width: 64,
+        height: 32,
+        rgba: Uint8List.fromList(List.filled(64 * 32 * 4, 255)),
+      ),
+    );
+    desktop.emitNetworkStats(
+      const RdpNetworkStats(
+        rttMs: 28,
+        throughputKbps: 3200,
+        bandwidthKbps: 3200,
+        packetLossPermille: 0,
+        fps: 55,
+        signalLevel: 4,
+        qualityTier: RdpQualityTier.high,
+        qualityMode: RdpQualityMode.auto,
+        transport: RdpTransportKind.tcp,
+      ),
+    );
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 100)),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey('rdp-tab-network-indicator')),
+      findsOneWidget,
+    );
+    expect(find.byKey(const ValueKey('rdp-network-badge')), findsOneWidget);
+    expect(find.text('28 ms'), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('rdp-network-badge')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+    await tester.tap(find.text('画质：流畅').last);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+
+    expect(desktop.qualityModes, [RdpQualityMode.low]);
+    expect(
+      find.byKey(const ValueKey('rdp-network-quality-tag')),
+      findsOneWidget,
+    );
+    expect(find.text('· 流畅'), findsOneWidget);
+
+    await Get.find<SessionController>().closeAll();
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('VNC 顶部工具栏支持动态分辨率、本机输入法、双向剪贴板与 macOS 原生 Command 键', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final engine = FakeVncEngine();
+    await pumpApp(tester, engine);
+    final hosts = Get.find<HostController>();
+    await hosts.save(host);
+    await hosts.savePassword(host.id, 'test-only');
+    await connectToHost(tester.element(find.text('服务')), host);
+    await tester.pump();
+
+    final desktop = engine.created.single;
+    desktop.output.add(
+      RdpFrame(
+        width: 1280,
+        height: 800,
+        rgba: Uint8List.fromList(List.filled(1280 * 800 * 4, 255)),
+      ),
+    );
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 100)),
+    );
+    await tester.pumpAndSettle();
+    // 自动探测在不支持动态分辨率的服务端（如 macOS）静默回退，不弹出错误提示。
+    await tester.pump(const Duration(milliseconds: 450));
+    await tester.pump();
+    expect(find.text('远端不支持动态分辨率，已保留当前画面'), findsNothing);
+
+    // 用户手动选择分辨率：不支持时给出提示；支持时下发并等待新尺寸帧确认。
+    await tester.tap(find.byKey(const ValueKey('rdp-resolution-menu')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+    await tester.tap(find.text('1920 × 1080').last);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.text('远端不支持动态分辨率，已保留当前画面'), findsOneWidget);
+
+    desktop.onResize = (_, _) async => true;
+    await tester.tap(find.byKey(const ValueKey('rdp-resolution-menu')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+    await tester.tap(find.text('1920 × 1080').last);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(desktop.resizes.last, (1920, 1080));
+    desktop.output.add(
+      RdpFrame(
+        width: 1920,
+        height: 1080,
+        rgba: Uint8List.fromList(List.filled(1920 * 1080 * 4, 255)),
+      ),
+    );
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 100)),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('VNC · 1920 × 1080'), findsOneWidget);
+
+    // macOS Cmd+V 保留原生 Super_L + v keysym，不会被改写为 Windows Ctrl 扫描码。
+    await tester.tap(find.byKey(const ValueKey('rdp-desktop-image')));
+    await tester.pump();
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV, character: 'v');
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+    await tester.pump();
+    expect(
+      desktop.symbols,
+      containsAllInOrder([
+        (0xffeb, true),
+        (118, true),
+        (118, false),
+        (0xffeb, false),
+      ]),
+    );
+    expect(desktop.keys, isEmpty);
+
+    // 切换本机输入法模式，菜单展示正常且不影响快捷键。
+    await tester.tap(find.byKey(const ValueKey('rdp-keyboard-mode')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+    await tester.tap(find.text('本机输入法').last);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.text('本机输入法'), findsOneWidget);
+
+    await Get.find<SessionController>().closeAll();
+    await tester.pump(const Duration(seconds: 6));
+    await tester.pumpAndSettle();
+    debugDefaultTargetPlatformOverride = null;
+    expect(tester.takeException(), isNull);
   });
 }

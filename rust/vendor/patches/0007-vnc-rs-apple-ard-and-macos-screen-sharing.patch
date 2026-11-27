@@ -1,0 +1,2493 @@
+diff --git a/src/client/auth.rs b/src/client/auth.rs
+index 9eb1eb5..d728193 100644
+--- a/src/client/auth.rs
++++ b/src/client/auth.rs
+@@ -18,6 +18,7 @@ pub(super) enum SecurityType {
+     GtkVncSasl = 20,
+     Md5Hash = 21,
+     ColinDeanXvp = 22,
++    AppleRemoteDesktop = 30,
+ }
+ 
+ impl TryFrom<u8> for SecurityType {
+@@ -36,6 +37,7 @@ impl TryFrom<u8> for SecurityType {
+             20 => Ok(Self::GtkVncSasl),
+             21 => Ok(Self::Md5Hash),
+             22 => Ok(Self::ColinDeanXvp),
++            30 => Ok(Self::AppleRemoteDesktop),
+             invalid => Err(VncError::InvalidSecurityTyep(invalid)),
+         }
+     }
+@@ -47,8 +49,23 @@ impl From<SecurityType> for u8 {
+     }
+ }
+ 
++fn is_apple_security_code(raw: u8) -> bool {
++    matches!(raw, 30 | 33 | 35 | 36)
++}
++
+ impl SecurityType {
++    #[cfg(test)]
+     pub(super) async fn read<S>(reader: &mut S, version: &VncVersion) -> Result<Vec<Self>, VncError>
++    where
++        S: AsyncRead + Unpin,
++    {
++        Ok(Self::read_offers(reader, version).await?.0)
++    }
++
++    pub(super) async fn read_offers<S>(
++        reader: &mut S,
++        version: &VncVersion,
++    ) -> Result<(Vec<Self>, bool), VncError>
+     where
+         S: AsyncRead + Unpin,
+     {
+@@ -63,7 +80,7 @@ impl SecurityType {
+                     let err_msg = crate::limits::string(reader, crate::limits::MAX_NAME).await?;
+                     return Err(VncError::General(err_msg));
+                 }
+-                Ok(vec![security_type])
++                Ok((vec![security_type], false))
+             }
+             _ => {
+                 // +--------------------------+-------------+--------------------------+
+@@ -80,14 +97,19 @@ impl SecurityType {
+                     return Err(VncError::General(err_msg));
+                 }
+                 let mut sec_types = vec![];
++                let mut saw_apple = false;
+                 for _ in 0..num {
++                    let raw = reader.read_u8().await?;
++                    if is_apple_security_code(raw) {
++                        saw_apple = true;
++                    }
+                     // Ignore unfamiliar advertised mechanisms; only choose a known one.
+-                    if let Ok(kind) = reader.read_u8().await?.try_into() {
++                    if let Ok(kind) = raw.try_into() {
+                         sec_types.push(kind);
+                     }
+                 }
+                 tracing::trace!("Server supported security type: {:?}", sec_types);
+-                Ok(sec_types)
++                Ok((sec_types, saw_apple))
+             }
+         }
+     }
+@@ -97,6 +119,7 @@ impl SecurityType {
+         S: AsyncWrite + Unpin,
+     {
+         writer.write_all(&[(*self).into()]).await?;
++        writer.flush().await?;
+         Ok(())
+     }
+ }
+@@ -165,6 +188,7 @@ impl AuthHelper {
+     {
+         let encrypted = security::des::encrypt(&self.challenge, &self.key);
+         writer.write_all(&encrypted).await?;
++        writer.flush().await?;
+         Ok(())
+     }
+ 
+diff --git a/src/client/connection/queue_tests.rs b/src/client/connection/queue_tests.rs
+index 8f47552..1ba0dd4 100644
+--- a/src/client/connection/queue_tests.rs
++++ b/src/client/connection/queue_tests.rs
+@@ -26,8 +26,8 @@ async fn decoder_error_releases_network_before_output_drains() {
+         assert_eq!(inner.output_ch.max_capacity(), 2);
+         assert_eq!(inner.output_ch.len(), 2);
+     }
+-    server.write_all(&[1]).await.unwrap(); // unsupported SetColorMapEntries
+-                                           // The decoder must release the socket even while its error cannot be queued.
++    server.write_all(&[255]).await.unwrap(); // unsupported server message
++                                             // The decoder must release the socket even while its error cannot be queued.
+     assert_eq!(
+         tokio::time::timeout(Duration::from_secs(1), server.read(&mut [0]))
+             .await
+diff --git a/src/client/connection/tests.rs b/src/client/connection/tests.rs
+index fcc2018..f2a93ec 100644
+--- a/src/client/connection/tests.rs
++++ b/src/client/connection/tests.rs
+@@ -74,7 +74,7 @@ async fn invalid_rectangles_and_lengths_are_rejected_before_payload_reads() {
+         copy,
+         zrle,
+         clipboard,
+-        vec![1],
++        vec![255],
+     ] {
+         let (mut client, mut server) = duplex(256);
+         server.write_all(&payload).await.unwrap();
+@@ -280,19 +280,31 @@ async fn full_input_queue_does_not_hold_the_client_lock_during_close() {
+     let (network_stop, network_stopped) = oneshot::channel();
+     let (decoder_stop, decoder_stopped) = oneshot::channel();
+     let desktop = Arc::new(DesktopState::default());
++    let screen = Arc::new(AtomicU32::new(pack_screen((1, 1))));
++    let pixel_format = Arc::new(std::sync::Mutex::new(PixelFormat::rgba()));
++    let closed = Arc::new(AtomicBool::new(false));
++    let stop = Arc::new(std::sync::Mutex::new(StopHandles {
++        decoding_stop: Some(decoder_stop),
++        net_conn_stop: Some(network_stop),
++    }));
+     let client = VncClient {
++        screen: Arc::clone(&screen),
++        pixel_format: Arc::clone(&pixel_format),
++        closed: Arc::clone(&closed),
++        stop: Arc::clone(&stop),
+         desktop: Arc::clone(&desktop),
+         input_ch: input_ch.clone(),
+         inner: Arc::new(Mutex::new(VncInner {
+             name: String::new(),
+-            screen: Arc::new(AtomicU32::new(pack_screen((1, 1)))),
++            screen,
++            pixel_format,
+             desktop,
+             input_ch,
+             output_ch,
+-            decoding_stop: Some(decoder_stop),
+-            net_conn_stop: Some(network_stop),
+-            closed: false,
++            stop,
++            closed,
+         })),
++        is_apple_server: false,
+     };
+     let pending = client.input(X11Event::Refresh);
+     tokio::pin!(pending);
+@@ -308,3 +320,199 @@ async fn full_input_queue_does_not_hold_the_client_lock_during_close() {
+     assert!(matches!(pending.await, Err(VncError::ClientNotRunning)));
+     assert_eq!(input.len(), INPUT_CHANNEL_SIZE - 1);
+ }
++
++#[tokio::test]
++async fn emits_frame_complete_and_coalesces_batch_inputs_without_client_lock() {
++    let (stream, mut server) = duplex(4096);
++    server.write_u16(2).await.unwrap();
++    server.write_u16(1).await.unwrap();
++    server
++        .write_all(&Vec::<u8>::from(PixelFormat::rgba()))
++        .await
++        .unwrap();
++    server.write_u32(0).await.unwrap();
++
++    let client = VncClient::new_with_options(
++        stream,
++        true,
++        Some(PixelFormat::rgba()),
++        vec![VncEncoding::Raw],
++        true,
++        false,
++        true,
++        Some(32),
++    )
++    .await
++    .unwrap();
++    // ClientInit (1) + SetEncodings (8) + initial FramebufferUpdateRequest (10).
++    let mut init = [0u8; 19];
++    server.read_exact(&mut init).await.unwrap();
++
++    // Send a 1-rect FramebufferUpdate followed by a 0-rect FramebufferUpdate.
++    let mut frame = rect_header(
++        Rect {
++            x: 0,
++            y: 0,
++            width: 1,
++            height: 1,
++        },
++        0,
++    );
++    frame.extend_from_slice(&[10, 20, 30, 255]);
++    frame.extend_from_slice(&[0, 0, 0, 0]);
++    server.write_all(&frame).await.unwrap();
++
++    assert!(matches!(
++        client.recv_event().await.unwrap(),
++        VncEvent::SetResolution(_)
++    ));
++    assert!(matches!(
++        client.recv_event().await.unwrap(),
++        VncEvent::SetPixelFormat(_)
++    ));
++    assert!(matches!(
++        client.recv_event().await.unwrap(),
++        VncEvent::RawImage(_, _)
++    ));
++    assert!(matches!(
++        client.recv_event().await.unwrap(),
++        VncEvent::FrameComplete
++    ));
++    assert!(matches!(
++        client.recv_event().await.unwrap(),
++        VncEvent::FrameComplete
++    ));
++
++    // Queue input_batch while another future is actively waiting on recv_event()
++    // (which holds self.inner.lock()).
++    let recv_client = client.clone();
++    let waiter = tokio::spawn(async move { recv_client.recv_event().await });
++    tokio::task::yield_now().await;
++
++    client
++        .input_batch([
++            X11Event::PointerEvent((1, 0, 0).into()),
++            X11Event::KeyEvent((0x0061, true).into()),
++            X11Event::KeyEvent((0x0061, false).into()),
++        ])
++        .await
++        .unwrap();
++    let mut received = [0u8; 6 + 8 + 8];
++    tokio::time::timeout(Duration::from_secs(1), server.read_exact(&mut received))
++        .await
++        .unwrap()
++        .unwrap();
++    assert_eq!(&received[..6], &[5, 0, 0, 1, 0, 0]);
++    assert_eq!(&received[6..14], &[4, 1, 0, 0, 0, 0, 0, 0x61]);
++    assert_eq!(&received[14..22], &[4, 0, 0, 0, 0, 0, 0, 0x61]);
++
++    client.close().await.unwrap();
++    assert!(matches!(
++        waiter.await.unwrap(),
++        Err(VncError::ClientNotRunning)
++    ));
++}
++
++#[tokio::test]
++async fn set_pixel_format_switches_between_32bit_and_rgb565_cleanly() {
++    let (stream, mut server) = duplex(4096);
++    server.write_u16(2).await.unwrap();
++    server.write_u16(1).await.unwrap();
++    server
++        .write_all(&Vec::<u8>::from(PixelFormat::rgba()))
++        .await
++        .unwrap();
++    server.write_u32(0).await.unwrap();
++
++    let client = VncClient::new_with_options(
++        stream,
++        true,
++        Some(PixelFormat::rgba()),
++        vec![VncEncoding::Raw, VncEncoding::CursorPseudo],
++        true,
++        false,
++        true,
++        Some(32),
++    )
++    .await
++    .unwrap();
++    // ClientInit (1) + SetEncodings (12) + initial FramebufferUpdateRequest (10).
++    let mut init = [0u8; 23];
++    server.read_exact(&mut init).await.unwrap();
++
++    // First frame in 32-bit RGBA.
++    let mut frame32 = rect_header(
++        Rect {
++            x: 0,
++            y: 0,
++            width: 2,
++            height: 1,
++        },
++        0,
++    );
++    frame32.extend_from_slice(&[255, 0, 0, 255, 0, 255, 0, 255]);
++    server.write_all(&frame32).await.unwrap();
++
++    assert!(matches!(
++        client.recv_event().await.unwrap(),
++        VncEvent::SetResolution(_)
++    ));
++    assert!(matches!(
++        client.recv_event().await.unwrap(),
++        VncEvent::SetPixelFormat(pf) if pf.bits_per_pixel == 32
++    ));
++    assert!(matches!(
++        client.recv_event().await.unwrap(),
++        VncEvent::RawImage(_, bytes) if bytes.len() == 8
++    ));
++    assert!(matches!(
++        client.recv_event().await.unwrap(),
++        VncEvent::FrameComplete
++    ));
++
++    // Switch to 16-bit RGB565 and request a full refresh.
++    client
++        .set_pixel_format(PixelFormat::rgb565())
++        .await
++        .unwrap();
++    client.input(X11Event::FullRefresh).await.unwrap();
++    let mut req = [0u8; 20 + 10];
++    server.read_exact(&mut req).await.unwrap();
++    assert_eq!(req[0], 0); // SetPixelFormat
++    assert_eq!(req[4], 16); // bits_per_pixel = 16
++    assert_eq!(&req[20..22], &[3, 0]); // FullRefresh
++
++    // Server sends 16-bit RGB565 raw rect (red = 0xF800, blue = 0x001F) + 1x1 16-bit cursor.
++    let mut frame16 = vec![0, 0, 0, 2]; // 2 rects
++    for value in [0u16, 0, 2, 1] {
++        frame16.extend_from_slice(&value.to_be_bytes());
++    }
++    frame16.extend_from_slice(&0u32.to_be_bytes()); // Raw
++    frame16.extend_from_slice(&0xF800u16.to_le_bytes());
++    frame16.extend_from_slice(&0x001Fu16.to_le_bytes());
++    for value in [0u16, 0, 1, 1] {
++        frame16.extend_from_slice(&value.to_be_bytes());
++    }
++    frame16.extend_from_slice(&u32::from(VncEncoding::CursorPseudo).to_be_bytes());
++    frame16.extend_from_slice(&0x07E0u16.to_le_bytes()); // pure green in RGB565
++    frame16.push(0x80); // opaque mask bit
++    server.write_all(&frame16).await.unwrap();
++
++    assert!(matches!(
++        client.recv_event().await.unwrap(),
++        VncEvent::SetPixelFormat(pf) if pf == PixelFormat::rgb565()
++    ));
++    assert!(matches!(
++        client.recv_event().await.unwrap(),
++        VncEvent::RawImage(_, bytes) if bytes == [0x00, 0xF8, 0x1F, 0x00]
++    ));
++    assert!(matches!(
++        client.recv_event().await.unwrap(),
++        VncEvent::SetCursor(_, bytes) if bytes == [0, 255, 0, 255]
++    ));
++    assert!(matches!(
++        client.recv_event().await.unwrap(),
++        VncEvent::FrameComplete
++    ));
++    client.close().await.unwrap();
++}
+diff --git a/src/client/connection.rs b/src/client/connection.rs
+index 38f3215..4b564b9 100644
+--- a/src/client/connection.rs
++++ b/src/client/connection.rs
+@@ -4,7 +4,7 @@ use tokio_stream::wrappers::ReceiverStream;
+ use std::{
+     future::Future,
+     sync::{
+-        atomic::{AtomicU32, Ordering},
++        atomic::{AtomicBool, AtomicU32, Ordering},
+         Arc,
+     },
+ };
+@@ -79,32 +79,97 @@ fn unpack_screen(packed: u32) -> (u16, u16) {
+     ((packed >> 16) as u16, packed as u16)
+ }
+ 
++struct StopHandles {
++    decoding_stop: Option<oneshot::Sender<()>>,
++    net_conn_stop: Option<oneshot::Sender<()>>,
++}
++
++impl StopHandles {
++    fn trigger(&mut self) {
++        if let Some(stop) = self.net_conn_stop.take() {
++            let _ = stop.send(());
++        }
++        if let Some(stop) = self.decoding_stop.take() {
++            let _ = stop.send(());
++        }
++    }
++}
++
+ struct VncInner {
+     name: String,
+     screen: Arc<AtomicU32>,
++    pixel_format: Arc<std::sync::Mutex<PixelFormat>>,
+     desktop: Arc<DesktopState>,
+     input_ch: Sender<ClientMsg>,
+     output_ch: Receiver<VncEvent>,
+-    decoding_stop: Option<oneshot::Sender<()>>,
+-    net_conn_stop: Option<oneshot::Sender<()>>,
+-    closed: bool,
++    stop: Arc<std::sync::Mutex<StopHandles>>,
++    closed: Arc<AtomicBool>,
++}
++
++fn build_input_message(
++    screen: &AtomicU32,
++    closed: &AtomicBool,
++    event: X11Event,
++) -> Result<ClientMsg, VncError> {
++    if closed.load(Ordering::Acquire) {
++        return Err(VncError::ClientNotRunning);
++    }
++    let (width, height) = unpack_screen(screen.load(Ordering::Acquire));
++    let msg = match event {
++        X11Event::Refresh => ClientMsg::FramebufferUpdateRequest(
++            Rect {
++                x: 0,
++                y: 0,
++                width,
++                height,
++            },
++            1,
++        ),
++        X11Event::FullRefresh => ClientMsg::FramebufferUpdateRequest(
++            Rect {
++                x: 0,
++                y: 0,
++                width,
++                height,
++            },
++            0, // non-incremental: server sends entire framebuffer
++        ),
++        X11Event::KeyEvent(key) => ClientMsg::KeyEvent(key.keycode, key.down),
++        X11Event::PointerEvent(mouse) => {
++            ClientMsg::PointerEvent(mouse.position_x, mouse.position_y, mouse.bottons)
++        }
++        X11Event::CopyText(text) => {
++            if text.len() > crate::limits::MAX_TEXT {
++                return Err(VncError::InvalidImageData);
++            }
++            ClientMsg::ClientCutText(text)
++        }
++    };
++    Ok(msg)
+ }
+ 
+ /// The instance of a connected vnc client
+ ///
+ impl VncInner {
++    #[allow(clippy::too_many_arguments)]
+     async fn new<S>(
+         mut stream: S,
+         shared: bool,
+         mut pixel_format: Option<PixelFormat>,
+         encodings: Vec<VncEncoding>,
++        prefer_server_true_color_32: bool,
++        emit_frame_complete: bool,
++        output_channel_capacity: Option<usize>,
+     ) -> Result<Self, VncError>
+     where
+         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+     {
+         let (conn_ch_tx, conn_ch_rx) = channel(NETWORK_CHANNEL_SIZE);
+         let (input_ch_tx, input_ch_rx) = channel(INPUT_CHANNEL_SIZE);
+-        let (output_ch_tx, output_ch_rx) = channel(OUTPUT_CHANNEL_SIZE);
++        let output_capacity = output_channel_capacity
++            .unwrap_or(OUTPUT_CHANNEL_SIZE)
++            .max(2);
++        let (output_ch_tx, output_ch_rx) = channel(output_capacity);
+         let (decoding_stop_tx, mut decoding_stop_rx) = oneshot::channel();
+         let (net_conn_stop_tx, net_conn_stop_rx) = oneshot::channel();
+ 
+@@ -112,15 +177,22 @@ impl VncInner {
+         send_client_init(&mut stream, shared).await?;
+ 
+         trace!("server init msg");
+-        let (name, (width, height)) =
+-            read_server_init(&mut stream, &mut pixel_format, &|e| async {
++        let (name, (width, height)) = read_server_init_with_options(
++            &mut stream,
++            &mut pixel_format,
++            prefer_server_true_color_32,
++            &|e| async {
+                 output_ch_tx.send(e).await?;
+                 Ok(())
+-            })
+-            .await?;
++            },
++        )
++        .await?;
+ 
+         let screen = Arc::new(AtomicU32::new(pack_screen((width, height))));
+         let decoder_screen = Arc::clone(&screen);
++        let initial_pf = *pixel_format.as_ref().unwrap();
++        let shared_pf = Arc::new(std::sync::Mutex::new(initial_pf));
++        let decoder_pf = Arc::clone(&shared_pf);
+         let desktop = Arc::new(DesktopState::default());
+         let decoder_desktop = Arc::clone(&desktop);
+         let network_desktop = Arc::clone(&desktop);
+@@ -153,15 +225,15 @@ impl VncInner {
+                 Ok(())
+             };
+ 
+-            let pf = pixel_format.as_ref().unwrap();
+-            let result = asycn_vnc_read_loop(
++            let result = asycn_vnc_read_loop_with_options(
+                 &mut conn_ch_rx,
+-                pf,
++                &decoder_pf,
+                 &output_func,
+                 &mut decoding_stop_rx,
+                 &encodings,
+                 &decoder_screen,
+                 &decoder_desktop,
++                emit_frame_complete,
+             )
+             .await;
+             // Release the network worker and fail any pending resize before waiting
+@@ -188,62 +260,26 @@ impl VncInner {
+         Ok(Self {
+             name,
+             screen,
++            pixel_format: shared_pf,
+             desktop,
+             input_ch: input_ch_tx,
+             output_ch: output_ch_rx,
+-            decoding_stop: Some(decoding_stop_tx),
+-            net_conn_stop: Some(net_conn_stop_tx),
+-            closed: false,
++            stop: Arc::new(std::sync::Mutex::new(StopHandles {
++                decoding_stop: Some(decoding_stop_tx),
++                net_conn_stop: Some(net_conn_stop_tx),
++            })),
++            closed: Arc::new(AtomicBool::new(false)),
+         })
+     }
+ 
+-    fn input_message(&self, event: X11Event) -> Result<ClientMsg, VncError> {
+-        if self.closed {
+-            Err(VncError::ClientNotRunning)
+-        } else {
+-            let (width, height) = unpack_screen(self.screen.load(Ordering::Acquire));
+-            let msg = match event {
+-                X11Event::Refresh => ClientMsg::FramebufferUpdateRequest(
+-                    Rect {
+-                        x: 0,
+-                        y: 0,
+-                        width,
+-                        height,
+-                    },
+-                    1,
+-                ),
+-                X11Event::FullRefresh => ClientMsg::FramebufferUpdateRequest(
+-                    Rect {
+-                        x: 0,
+-                        y: 0,
+-                        width,
+-                        height,
+-                    },
+-                    0, // non-incremental: server sends entire framebuffer
+-                ),
+-                X11Event::KeyEvent(key) => ClientMsg::KeyEvent(key.keycode, key.down),
+-                X11Event::PointerEvent(mouse) => {
+-                    ClientMsg::PointerEvent(mouse.position_x, mouse.position_y, mouse.bottons)
+-                }
+-                X11Event::CopyText(text) => {
+-                    if text.len() > crate::limits::MAX_TEXT {
+-                        return Err(VncError::InvalidImageData);
+-                    }
+-                    ClientMsg::ClientCutText(text)
+-                }
+-            };
+-            Ok(msg)
+-        }
+-    }
+-
+     async fn recv_event(&mut self) -> Result<VncEvent, VncError> {
+-        if self.closed {
++        if self.closed.load(Ordering::Acquire) {
+             Err(VncError::ClientNotRunning)
+         } else {
+             match self.output_ch.recv().await {
+                 Some(e) => Ok(e),
+                 None => {
+-                    self.closed = true;
++                    self.closed.store(true, Ordering::Release);
+                     Err(VncError::ClientNotRunning)
+                 }
+             }
+@@ -251,12 +287,12 @@ impl VncInner {
+     }
+ 
+     async fn poll_event(&mut self) -> Result<Option<VncEvent>, VncError> {
+-        if self.closed {
++        if self.closed.load(Ordering::Acquire) {
+             Err(VncError::ClientNotRunning)
+         } else {
+             match self.output_ch.try_recv() {
+                 Err(TryRecvError::Disconnected) => {
+-                    self.closed = true;
++                    self.closed.store(true, Ordering::Release);
+                     Err(VncError::ClientNotRunning)
+                 }
+                 Err(TryRecvError::Empty) => Ok(None),
+@@ -269,16 +305,12 @@ impl VncInner {
+     /// Stop the VNC engine and release resources
+     ///
+     fn close(&mut self) -> Result<(), VncError> {
++        self.closed.store(true, Ordering::Release);
+         self.desktop.close();
+-        if self.net_conn_stop.is_some() {
+-            let net_conn_stop: oneshot::Sender<()> = self.net_conn_stop.take().unwrap();
+-            let _ = net_conn_stop.send(());
+-        }
+-        if self.decoding_stop.is_some() {
+-            let decoding_stop = self.decoding_stop.take().unwrap();
+-            let _ = decoding_stop.send(());
+-        }
+-        self.closed = true;
++        self.stop
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .trigger();
+         Ok(())
+     }
+ }
+@@ -292,11 +324,17 @@ impl Drop for VncInner {
+ 
+ pub struct VncClient {
+     inner: Arc<Mutex<VncInner>>,
++    screen: Arc<AtomicU32>,
++    pixel_format: Arc<std::sync::Mutex<PixelFormat>>,
++    closed: Arc<AtomicBool>,
++    stop: Arc<std::sync::Mutex<StopHandles>>,
+     desktop: Arc<DesktopState>,
+     input_ch: Sender<ClientMsg>,
++    is_apple_server: bool,
+ }
+ 
+ impl VncClient {
++    #[cfg(test)]
+     pub(super) async fn new<S>(
+         stream: S,
+         shared: bool,
+@@ -306,14 +344,88 @@ impl VncClient {
+     where
+         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+     {
+-        let inner = VncInner::new(stream, shared, pixel_format, encodings).await?;
++        Self::new_with_options(
++            stream,
++            shared,
++            pixel_format,
++            encodings,
++            false,
++            false,
++            false,
++            None,
++        )
++        .await
++    }
++
++    #[allow(clippy::too_many_arguments)]
++    pub(super) async fn new_with_options<S>(
++        stream: S,
++        shared: bool,
++        pixel_format: Option<PixelFormat>,
++        encodings: Vec<VncEncoding>,
++        prefer_server_true_color_32: bool,
++        is_apple_server: bool,
++        emit_frame_complete: bool,
++        output_channel_capacity: Option<usize>,
++    ) -> Result<Self, VncError>
++    where
++        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
++    {
++        let inner = VncInner::new(
++            stream,
++            shared,
++            pixel_format,
++            encodings,
++            prefer_server_true_color_32,
++            emit_frame_complete,
++            output_channel_capacity,
++        )
++        .await?;
+         Ok(Self {
++            screen: Arc::clone(&inner.screen),
++            pixel_format: Arc::clone(&inner.pixel_format),
++            closed: Arc::clone(&inner.closed),
++            stop: Arc::clone(&inner.stop),
+             desktop: Arc::clone(&inner.desktop),
+             input_ch: inner.input_ch.clone(),
+             inner: Arc::new(Mutex::new(inner)),
++            is_apple_server,
+         })
+     }
+ 
++    /// Whether the remote VNC server identified as Apple Screen Sharing / Remote Desktop.
++    pub fn is_apple_server(&self) -> bool {
++        self.is_apple_server
++    }
++
++    /// Currently active decoder pixel format.
++    pub fn pixel_format(&self) -> PixelFormat {
++        *self
++            .pixel_format
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++    }
++
++    /// Switch the wire pixel format between updates (call only when no
++    /// FramebufferUpdate is in flight). The decoder emits
++    /// `VncEvent::SetPixelFormat` before decoding the next frame in the new format.
++    pub async fn set_pixel_format(&self, pf: PixelFormat) -> Result<(), VncError> {
++        pf.validate()?;
++        if self.closed.load(Ordering::Acquire) {
++            return Err(VncError::ClientNotRunning);
++        }
++        let permit = self.input_ch.reserve().await?;
++        if self.closed.load(Ordering::Acquire) {
++            return Err(VncError::ClientNotRunning);
++        }
++        *self
++            .pixel_format
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner) = pf;
++        permit.send(ClientMsg::SetPixelFormat(pf));
++        Ok(())
++    }
++
+     /// Last validated ExtendedDesktopSize layout; None means support is unconfirmed.
+     pub fn desktop_layout(&self) -> Option<crate::DesktopLayout> {
+         self.desktop.layout()
+@@ -337,17 +449,24 @@ impl VncClient {
+     /// Input a `X11Event` from the frontend
+     ///
+     pub async fn input(&self, event: X11Event) -> Result<(), VncError> {
+-        let sender = {
+-            let inner = self.inner.lock().await;
+-            if inner.closed {
+-                return Err(VncError::ClientNotRunning);
+-            }
+-            inner.input_ch.clone()
+-        };
+-        // Do not hold the client mutex while backpressure waits: close needs it.
+-        let permit = sender.reserve().await?;
+-        let inner = self.inner.lock().await;
+-        permit.send(inner.input_message(event)?);
++        if self.closed.load(Ordering::Acquire) {
++            return Err(VncError::ClientNotRunning);
++        }
++        // Lock-free: recv_event() holds self.inner across awaits; input must not
++        // contend with it, and close() publishes closed atomically.
++        let permit = self.input_ch.reserve().await?;
++        permit.send(build_input_message(&self.screen, &self.closed, event)?);
++        Ok(())
++    }
++
++    /// Input an ordered sequence of `X11Event`s from the frontend.
++    pub async fn input_batch<I>(&self, events: I) -> Result<(), VncError>
++    where
++        I: IntoIterator<Item = X11Event>,
++    {
++        for event in events {
++            self.input(event).await?;
++        }
+         Ok(())
+     }
+ 
+@@ -367,7 +486,13 @@ impl VncClient {
+     /// Stop the VNC engine and release resources
+     ///
+     pub async fn close(&self) -> Result<(), VncError> {
+-        self.inner.lock().await.close()
++        self.closed.store(true, Ordering::Release);
++        self.desktop.close();
++        self.stop
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .trigger();
++        Ok(())
+     }
+ }
+ 
+@@ -375,8 +500,13 @@ impl Clone for VncClient {
+     fn clone(&self) -> Self {
+         Self {
+             inner: self.inner.clone(),
++            screen: Arc::clone(&self.screen),
++            pixel_format: Arc::clone(&self.pixel_format),
++            closed: Arc::clone(&self.closed),
++            stop: Arc::clone(&self.stop),
+             desktop: Arc::clone(&self.desktop),
+             input_ch: self.input_ch.clone(),
++            is_apple_server: self.is_apple_server,
+         }
+     }
+ }
+@@ -390,11 +520,26 @@ where
+     Ok(())
+ }
+ 
++#[cfg(test)]
+ async fn read_server_init<S, F, Fut>(
+     stream: &mut S,
+     pf: &mut Option<PixelFormat>,
+     output_func: &F,
+ ) -> Result<(String, (u16, u16)), VncError>
++where
++    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
++    F: Fn(VncEvent) -> Fut,
++    Fut: Future<Output = Result<(), VncError>>,
++{
++    read_server_init_with_options(stream, pf, false, output_func).await
++}
++
++async fn read_server_init_with_options<S, F, Fut>(
++    stream: &mut S,
++    pf: &mut Option<PixelFormat>,
++    prefer_server_true_color_32: bool,
++    output_func: &F,
++) -> Result<(String, (u16, u16)), VncError>
+ where
+     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+     F: Fn(VncEvent) -> Fut,
+@@ -421,7 +566,7 @@ where
+     .await?;
+ 
+     let pixel_format = PixelFormat::read(stream).await?;
+-    if pf.is_none() {
++    if pf.is_none() || (prefer_server_true_color_32 && pixel_format.is_native_true_color_32()) {
+         output_func(VncEvent::SetPixelFormat(pixel_format)).await?;
+         let _ = pf.insert(pixel_format);
+     } else {
+@@ -431,10 +576,12 @@ where
+     let name = crate::limits::string(stream, crate::limits::MAX_NAME).await?;
+ 
+     if send_our_pf {
+-        trace!("Send customized pixel format {:#?}", pf);
+-        ClientMsg::SetPixelFormat(*pf.as_ref().unwrap())
+-            .write(stream)
+-            .await?;
++        let chosen = *pf.as_ref().unwrap();
++        trace!("Send customized pixel format {:#?}", chosen);
++        ClientMsg::SetPixelFormat(chosen).write(stream).await?;
++        if prefer_server_true_color_32 {
++            output_func(VncEvent::SetPixelFormat(chosen)).await?;
++        }
+     }
+     Ok((name, (screen_width, screen_height)))
+ }
+@@ -450,6 +597,7 @@ where
+     Ok(())
+ }
+ 
++#[cfg(test)]
+ async fn asycn_vnc_read_loop<S, F, Fut>(
+     stream: &mut S,
+     pf: &PixelFormat,
+@@ -459,6 +607,36 @@ async fn asycn_vnc_read_loop<S, F, Fut>(
+     screen: &AtomicU32,
+     desktop: &DesktopState,
+ ) -> Result<(), VncError>
++where
++    S: AsyncRead + Unpin,
++    F: Fn(VncEvent) -> Fut,
++    Fut: Future<Output = Result<(), VncError>>,
++{
++    let shared_pf = std::sync::Mutex::new(*pf);
++    asycn_vnc_read_loop_with_options(
++        stream,
++        &shared_pf,
++        output_func,
++        stop_ch,
++        encodings,
++        screen,
++        desktop,
++        false,
++    )
++    .await
++}
++
++#[allow(clippy::too_many_arguments)]
++async fn asycn_vnc_read_loop_with_options<S, F, Fut>(
++    stream: &mut S,
++    shared_pf: &std::sync::Mutex<PixelFormat>,
++    output_func: &F,
++    stop_ch: &mut oneshot::Receiver<()>,
++    encodings: &[VncEncoding],
++    screen: &AtomicU32,
++    desktop: &DesktopState,
++    emit_frame_complete: bool,
++) -> Result<(), VncError>
+ where
+     S: AsyncRead + Unpin,
+     F: Fn(VncEvent) -> Fut,
+@@ -467,17 +645,26 @@ where
+     tokio::select! {
+         biased;
+         _ = stop_ch => Ok(()),
+-        result = read_vnc_messages(stream, pf, output_func, encodings, screen, desktop) => result,
++        result = read_vnc_messages(
++            stream,
++            shared_pf,
++            output_func,
++            encodings,
++            screen,
++            desktop,
++            emit_frame_complete,
++        ) => result,
+     }
+ }
+ 
+ async fn read_vnc_messages<S, F, Fut>(
+     stream: &mut S,
+-    pf: &PixelFormat,
++    shared_pf: &std::sync::Mutex<PixelFormat>,
+     output_func: &F,
+     encodings: &[VncEncoding],
+     shared_screen: &AtomicU32,
+     desktop: &DesktopState,
++    emit_frame_complete: bool,
+ ) -> Result<(), VncError>
+ where
+     S: AsyncRead + Unpin,
+@@ -490,6 +677,9 @@ where
+     let mut trle_decoder = codec::TrleDecoder::new();
+     let mut cursor = codec::CursorDecoder::new();
+     let mut screen = unpack_screen(shared_screen.load(Ordering::Acquire));
++    let mut active_pf = *shared_pf
++        .lock()
++        .unwrap_or_else(std::sync::PoisonError::into_inner);
+ 
+     // main decoding loop
+     loop {
+@@ -497,6 +687,14 @@ where
+         trace!("Server message got: {:?}", server_msg);
+         match server_msg {
+             ServerMsg::FramebufferUpdate(rect_num) => {
++                let next_pf = *shared_pf
++                    .lock()
++                    .unwrap_or_else(std::sync::PoisonError::into_inner);
++                if next_pf != active_pf {
++                    active_pf = next_pf;
++                    output_func(VncEvent::SetPixelFormat(active_pf)).await?;
++                }
++                let pf = &active_pf;
+                 let mut updates = crate::desktop::UpdateBatch::default();
+                 let mut framebuffer_changed = false;
+                 for _ in 0..rect_num {
+@@ -592,8 +790,11 @@ where
+                     desktop.observe(&update);
+                     output_func(VncEvent::DesktopUpdate(update)).await?;
+                 }
++                if emit_frame_complete {
++                    output_func(VncEvent::FrameComplete).await?;
++                }
+             }
+-            // SetColorMapEntries,
++            ServerMsg::SetColorMapEntries => {}
+             ServerMsg::Bell => {
+                 output_func(VncEvent::Bell).await?;
+             }
+@@ -613,7 +814,8 @@ async fn async_connection_process_loop<S>(
+ where
+     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+ {
+-    let mut buffer = [0; 65535];
++    let mut buffer = vec![0u8; 131_072];
++    let mut write_buf = Vec::with_capacity(256);
+     let mut pending = 0;
+ 
+     loop {
+@@ -637,10 +839,24 @@ where
+             }
+             message = input_ch.recv() => {
+                 let Some(message) = message else { break; };
++                write_buf.clear();
++                message.encode_into(&mut write_buf)?;
++                for _ in 0..63 {
++                    match input_ch.try_recv() {
++                        Ok(next) => next.encode_into(&mut write_buf)?,
++                        Err(_) => break,
++                    }
++                }
+                 tokio::select! {
+                     biased;
+                     _ = &mut stop_ch => break,
+-                    result = message.write(&mut stream) => result?,
++                    result = async {
++                        stream.write_all(&write_buf).await?;
++                        stream.flush().await
++                    } => result?,
++                }
++                if write_buf.capacity() > 65_536 {
++                    write_buf = Vec::with_capacity(256);
+                 }
+             }
+         }
+diff --git a/src/client/connector.rs b/src/client/connector.rs
+index fddb345..a9c3ce0 100644
+--- a/src/client/connector.rs
++++ b/src/client/connector.rs
+@@ -1,6 +1,7 @@
+ use super::{
+     auth::{AuthHelper, AuthResult, SecurityType},
+     connection::VncClient,
++    security,
+ };
+ use std::future::Future;
+ use std::pin::Pin;
+@@ -31,7 +32,9 @@ where
+             match self {
+                 VncState::Handshake(mut connector) => {
+                     // Read the rfbversion informed by the server
+-                    let rfbversion = VncVersion::read(&mut connector.stream).await?;
++                    let (rfbversion, is_apple) =
++                        VncVersion::read_with_apple_flag(&mut connector.stream).await?;
++                    connector.is_apple_server = is_apple;
+                     trace!(
+                         "Our version {:?}, server version {:?}",
+                         connector.rfb_version,
+@@ -50,14 +53,21 @@ where
+                     Ok(VncState::Authenticate(connector).try_start().await?)
+                 }
+                 VncState::Authenticate(mut connector) => {
+-                    let security_types =
+-                        SecurityType::read(&mut connector.stream, &connector.rfb_version).await?;
++                    let (security_types, saw_apple) =
++                        SecurityType::read_offers(&mut connector.stream, &connector.rfb_version)
++                            .await?;
++                    connector.is_apple_server |= saw_apple;
+ 
+                     if security_types.is_empty() {
+-                        return Err(VncError::ConnectError);
++                        return Err(VncError::UnsupportedSecurityType);
+                     }
+ 
+-                    if security_types.contains(&SecurityType::None) {
++                    let username = connector.username.as_deref().map(str::trim).unwrap_or("");
++                    let has_none = security_types.contains(&SecurityType::None);
++                    let has_vnc = security_types.contains(&SecurityType::VncAuth);
++                    let has_ard = security_types.contains(&SecurityType::AppleRemoteDesktop);
++
++                    if has_none {
+                         match connector.rfb_version {
+                             VncVersion::RFB33 => {
+                                 // If the security-type is 1, for no authentication, the server does not
+@@ -79,39 +89,49 @@ where
+                                     .await?;
+                                 let result = connector.stream.read_u32().await?.try_into()?;
+                                 if let AuthResult::Failed = result {
+-                                    return Err(VncError::General(
+-                                        crate::limits::string(
+-                                            &mut connector.stream,
+-                                            crate::limits::MAX_NAME,
+-                                        )
+-                                        .await?,
+-                                    ));
++                                    let _ = crate::limits::string(
++                                        &mut connector.stream,
++                                        crate::limits::MAX_NAME,
++                                    )
++                                    .await;
++                                    return Err(VncError::WrongPassword);
+                                 }
+                             }
+                         }
+-                    } else {
+-                        // choose a auth method
+-                        if security_types.contains(&SecurityType::VncAuth) {
+-                            if connector.rfb_version != VncVersion::RFB33 {
+-                                // In the security handshake (Section 7.1.2), rather than a two-way
+-                                // negotiation, the server decides the security type and sends a single
+-                                // word:
+-
+-                                //            +--------------+--------------+---------------+
+-                                //            | No. of bytes | Type [Value] | Description   |
+-                                //            +--------------+--------------+---------------+
+-                                //            | 4            | U32          | security-type |
+-                                //            +--------------+--------------+---------------+
+-
+-                                // The security-type may only take the value 0, 1, or 2.  A value of 0
+-                                // means that the connection has failed and is followed by a string
+-                                // giving the reason, as described in Section 7.1.2.
+-                                SecurityType::write(&SecurityType::VncAuth, &mut connector.stream)
+-                                    .await?;
++                    } else if !username.is_empty() && has_ard {
++                        if connector.rfb_version != VncVersion::RFB33 {
++                            SecurityType::write(
++                                &SecurityType::AppleRemoteDesktop,
++                                &mut connector.stream,
++                            )
++                            .await?;
++                        }
++                        if connector.auth_methond.is_none() {
++                            return Err(VncError::NoPassword);
++                        }
++                        let credential = (connector.auth_methond.take().unwrap()).await?;
++                        let result = security::ard::authenticate(
++                            &mut connector.stream,
++                            username,
++                            &credential,
++                        )
++                        .await?;
++                        if let AuthResult::Failed = result {
++                            if connector.rfb_version == VncVersion::RFB38 {
++                                // macOS Screen Sharing often closes immediately after SecurityResult=1
++                                // without sending an RFB 3.8 reason string.
++                                let _ = crate::limits::string(
++                                    &mut connector.stream,
++                                    crate::limits::MAX_NAME,
++                                )
++                                .await;
+                             }
+-                        } else {
+-                            let msg = "Security type apart from Vnc Auth has not been implemented";
+-                            return Err(VncError::General(msg.to_owned()));
++                            return Err(VncError::WrongPassword);
++                        }
++                    } else if has_vnc {
++                        if connector.rfb_version != VncVersion::RFB33 {
++                            SecurityType::write(&SecurityType::VncAuth, &mut connector.stream)
++                                .await?;
+                         }
+ 
+                         // get password
+@@ -126,29 +146,32 @@ where
+                         auth.write(&mut connector.stream).await?;
+                         let result = auth.finish(&mut connector.stream).await?;
+                         if let AuthResult::Failed = result {
+-                            if connector.rfb_version != VncVersion::RFB38 {
+-                                // In VNC Authentication (Section 7.2.2), if the authentication fails,
+-                                // the server sends the SecurityResult message, but does not send an
+-                                // error message before closing the connection.
+-                                return Err(VncError::WrongPassword);
+-                            } else {
+-                                let err_msg = crate::limits::string(
++                            if connector.rfb_version == VncVersion::RFB38 {
++                                let _ = crate::limits::string(
+                                     &mut connector.stream,
+                                     crate::limits::MAX_NAME,
+                                 )
+-                                .await?;
+-                                return Err(VncError::General(err_msg));
++                                .await;
+                             }
++                            return Err(VncError::WrongPassword);
+                         }
++                    } else if has_ard {
++                        return Err(VncError::UsernameRequired);
++                    } else {
++                        return Err(VncError::UnsupportedSecurityType);
+                     }
+                     info!("auth done, client connected");
+ 
+                     Ok(VncState::Connected(
+-                        VncClient::new(
++                        VncClient::new_with_options(
+                             connector.stream,
+                             connector.allow_shared,
+                             connector.pixel_format,
+                             connector.encodings,
++                            connector.prefer_server_true_color_32,
++                            connector.is_apple_server,
++                            connector.emit_frame_complete,
++                            connector.output_channel_capacity,
+                         )
+                         .await?,
+                     ))
+@@ -175,9 +198,14 @@ where
+ {
+     stream: S,
+     auth_methond: Option<F>,
++    username: Option<String>,
+     rfb_version: VncVersion,
+     allow_shared: bool,
+     pixel_format: Option<PixelFormat>,
++    prefer_server_true_color_32: bool,
++    is_apple_server: bool,
++    emit_frame_complete: bool,
++    output_channel_capacity: Option<usize>,
+     encodings: Vec<VncEncoding>,
+ }
+ 
+@@ -217,13 +245,47 @@ where
+         Self {
+             stream,
+             auth_methond: None,
++            username: None,
+             allow_shared: true,
+             rfb_version: VncVersion::RFB38,
+             pixel_format: None,
++            prefer_server_true_color_32: false,
++            is_apple_server: false,
++            emit_frame_complete: false,
++            output_channel_capacity: None,
+             encodings: Vec::new(),
+         }
+     }
+ 
++    /// Optional username for Apple Remote Desktop (Security Type 30) authentication.
++    pub fn set_username(mut self, username: String) -> Self {
++        self.username = if username.trim().is_empty() {
++            None
++        } else {
++            Some(username)
++        };
++        self
++    }
++
++    /// Keep the server's native 32-bit 8-8-8 true-color pixel format instead of sending
++    /// `SetPixelFormat`, which avoids conversion overhead and quirks on macOS Screen Sharing.
++    pub fn prefer_server_true_color_32(mut self, prefer: bool) -> Self {
++        self.prefer_server_true_color_32 = prefer;
++        self
++    }
++
++    /// Emit [crate::VncEvent::FrameComplete] after each server FramebufferUpdate message.
++    pub fn emit_frame_complete(mut self, emit: bool) -> Self {
++        self.emit_frame_complete = emit;
++        self
++    }
++
++    /// Override the decoder event channel capacity (clamped to at least 2).
++    pub fn output_channel_capacity(mut self, capacity: usize) -> Self {
++        self.output_channel_capacity = Some(capacity.max(2));
++        self
++    }
++
+     /// An async callback which is used to query credentials if the vnc server has set
+     ///
+     /// ```no_compile
+diff --git a/src/client/messages.rs b/src/client/messages.rs
+index 54bcc03..8a573b5 100644
+--- a/src/client/messages.rs
++++ b/src/client/messages.rs
+@@ -14,99 +14,44 @@ pub(super) enum ClientMsg {
+ }
+ 
+ impl ClientMsg {
+-    pub(super) async fn write<S>(self, writer: &mut S) -> Result<(), VncError>
+-    where
+-        S: AsyncWrite + Unpin,
+-    {
++    pub(super) fn encode_into(self, payload: &mut Vec<u8>) -> Result<(), VncError> {
+         match self {
+             ClientMsg::SetPixelFormat(pf) => {
+-                // +--------------+--------------+--------------+
+-                // | No. of bytes | Type [Value] | Description  |
+-                // +--------------+--------------+--------------+
+-                // | 1            | U8 [0]       | message-type |
+-                // | 3            |              | padding      |
+-                // | 16           | PIXEL_FORMAT | pixel-format |
+-                // +--------------+--------------+--------------+
+-                let mut payload = vec![0_u8, 0, 0, 0];
++                payload.extend_from_slice(&[0_u8, 0, 0, 0]);
+                 payload.extend(<PixelFormat as Into<Vec<u8>>>::into(pf));
+-                writer.write_all(&payload).await?;
+                 Ok(())
+             }
+             ClientMsg::SetEncodings(encodings) => {
+-                //  +--------------+--------------+---------------------+
+-                // | No. of bytes | Type [Value] | Description         |
+-                // +--------------+--------------+---------------------+
+-                // | 1            | U8 [2]       | message-type        |
+-                // | 1            |              | padding             |
+-                // | 2            | U16          | number-of-encodings |
+-                // +--------------+--------------+---------------------+
+-
+-                // This is followed by number-of-encodings repetitions of the following:
+-                // +--------------+--------------+---------------+
+-                // | No. of bytes | Type [Value] | Description   |
+-                // +--------------+--------------+---------------+
+-                // | 4            | S32          | encoding-type |
+-                // +--------------+--------------+---------------+
+-                let mut payload = vec![2, 0];
++                payload.extend_from_slice(&[2, 0]);
+                 payload.extend_from_slice(&(encodings.len() as u16).to_be_bytes());
+                 for e in encodings {
+-                    payload.write_u32(e.into()).await?;
++                    payload.extend_from_slice(&u32::from(e).to_be_bytes());
+                 }
+-                writer.write_all(&payload).await?;
+                 Ok(())
+             }
+             ClientMsg::FramebufferUpdateRequest(rect, incremental) => {
+-                // +--------------+--------------+--------------+
+-                // | No. of bytes | Type [Value] | Description  |
+-                // +--------------+--------------+--------------+
+-                // | 1            | U8 [3]       | message-type |
+-                // | 1            | U8           | incremental  |
+-                // | 2            | U16          | x-position   |
+-                // | 2            | U16          | y-position   |
+-                // | 2            | U16          | width        |
+-                // | 2            | U16          | height       |
+-                // +--------------+--------------+--------------+
+-                let mut payload = vec![3, incremental];
++                payload.extend_from_slice(&[3, incremental]);
+                 payload.extend_from_slice(&rect.x.to_be_bytes());
+                 payload.extend_from_slice(&rect.y.to_be_bytes());
+                 payload.extend_from_slice(&rect.width.to_be_bytes());
+                 payload.extend_from_slice(&rect.height.to_be_bytes());
+-                writer.write_all(&payload).await?;
+                 Ok(())
+             }
+             ClientMsg::KeyEvent(keycode, down) => {
+-                // +--------------+--------------+--------------+
+-                // | No. of bytes | Type [Value] | Description  |
+-                // +--------------+--------------+--------------+
+-                // | 1            | U8 [4]       | message-type |
+-                // | 1            | U8           | down-flag    |
+-                // | 2            |              | padding      |
+-                // | 4            | U32          | key          |
+-                // +--------------+--------------+--------------+
+-                let mut payload = vec![4, down as u8, 0, 0];
+-                payload.write_u32(keycode).await?;
+-                writer.write_all(&payload).await?;
++                payload.extend_from_slice(&[4, down as u8, 0, 0]);
++                payload.extend_from_slice(&keycode.to_be_bytes());
+                 Ok(())
+             }
+             ClientMsg::PointerEvent(x, y, mask) => {
+-                // +--------------+--------------+--------------+
+-                // | No. of bytes | Type [Value] | Description  |
+-                // +--------------+--------------+--------------+
+-                // | 1            | U8 [5]       | message-type |
+-                // | 1            | U8           | button-mask  |
+-                // | 2            | U16          | x-position   |
+-                // | 2            | U16          | y-position   |
+-                // +--------------+--------------+--------------+
+-                let mut payload = vec![5, mask];
+-                payload.write_u16(x).await?;
+-                payload.write_u16(y).await?;
+-                writer.write_all(&payload).await?;
++                payload.extend_from_slice(&[5, mask]);
++                payload.extend_from_slice(&x.to_be_bytes());
++                payload.extend_from_slice(&y.to_be_bytes());
+                 Ok(())
+             }
+             #[cfg(not(target_arch = "wasm32"))]
+             ClientMsg::SetDesktopSize(layout) => {
+                 layout.validate()?;
+-                let mut payload = vec![251, 0];
++                payload.extend_from_slice(&[251, 0]);
+                 payload.extend_from_slice(&layout.width.to_be_bytes());
+                 payload.extend_from_slice(&layout.height.to_be_bytes());
+                 payload.extend_from_slice(&[layout.screens.len() as u8, 0]);
+@@ -121,32 +66,33 @@ impl ClientMsg {
+                 // Some servers release resize confirmations only with an outstanding
+                 // update request. Keep it ordered with the resize and bounded to one pixel.
+                 payload.extend_from_slice(&[3, 1, 0, 0, 0, 0, 0, 1, 0, 1]);
+-                writer.write_all(&payload).await?;
+                 Ok(())
+             }
+             ClientMsg::ClientCutText(s) => {
+-                //   +--------------+--------------+--------------+
+-                //   | No. of bytes | Type [Value] | Description  |
+-                //   +--------------+--------------+--------------+
+-                //   | 1            | U8 [6]       | message-type |
+-                //   | 3            |              | padding      |
+-                //   | 4            | U32          | length       |
+-                //   | length       | U8 array     | text         |
+-                //   +--------------+--------------+--------------+
+-                let mut payload = vec![6_u8, 0, 0, 0];
+-                payload.write_u32(s.len() as u32).await?;
+-                payload.write_all(s.as_bytes()).await?;
+-                writer.write_all(&payload).await?;
++                payload.extend_from_slice(&[6_u8, 0, 0, 0]);
++                payload.extend_from_slice(&(s.len() as u32).to_be_bytes());
++                payload.extend_from_slice(s.as_bytes());
+                 Ok(())
+             }
+         }
+     }
++
++    pub(super) async fn write<S>(self, writer: &mut S) -> Result<(), VncError>
++    where
++        S: AsyncWrite + Unpin,
++    {
++        let mut payload = Vec::with_capacity(64);
++        self.encode_into(&mut payload)?;
++        writer.write_all(&payload).await?;
++        writer.flush().await?;
++        Ok(())
++    }
+ }
+ 
+ #[derive(Debug)]
+ pub(super) enum ServerMsg {
+     FramebufferUpdate(u16),
+-    // SetColorMapEntries,
++    SetColorMapEntries,
+     Bell,
+     ServerCutText(String),
+ }
+@@ -182,7 +128,17 @@ impl ServerMsg {
+                 // | 2            | U16          | first-color      |
+                 // | 2            | U16          | number-of-colors |
+                 // +--------------+--------------+------------------+
+-                Err(VncError::WrongServerMessage)
++                let _padding = reader.read_u8().await?;
++                let _first_color = reader.read_u16().await?;
++                let num_colors = usize::from(reader.read_u16().await?);
++                let mut remaining = num_colors * 6;
++                let mut scratch = [0u8; 384];
++                while remaining > 0 {
++                    let take = remaining.min(scratch.len());
++                    reader.read_exact(&mut scratch[..take]).await?;
++                    remaining -= take;
++                }
++                Ok(ServerMsg::SetColorMapEntries)
+             }
+             2 => {
+                 // Bell
+diff --git a/rust/vendor/vnc-rs/src/client/security/ard.rs b/src/client/security/ard.rs
+new file mode 100644
+index 0000000..d98fc8d
+--- /dev/null
++++ b/src/client/security/ard.rs
+@@ -0,0 +1,332 @@
++use aes::cipher::{Array, BlockCipherEncrypt, KeyInit};
++use aes::Aes128;
++use num_bigint::BigUint;
++use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
++use zeroize::Zeroize;
++
++use crate::client::auth::AuthResult;
++use crate::VncError;
++
++const MIN_DH_KEY_LEN: usize = 16;
++const MAX_DH_KEY_LEN: usize = 1024;
++const MAX_ARD_FIELD_LEN: usize = 63;
++const ARD_CREDENTIAL_BLOCK_LEN: usize = 128;
++
++fn to_fixed_be(value: &BigUint, len: usize) -> Result<Vec<u8>, VncError> {
++    let bytes = value.to_bytes_be();
++    if bytes.len() > len {
++        return Err(VncError::ConnectError);
++    }
++    let mut out = vec![0u8; len];
++    out[len - bytes.len()..].copy_from_slice(&bytes);
++    Ok(out)
++}
++
++fn fill_random(buf: &mut [u8]) -> Result<(), VncError> {
++    getrandom::fill(buf).map_err(|_| VncError::ConnectError)
++}
++
++fn encrypt_credentials_with_dh(
++    generator: u16,
++    prime_bytes: &[u8],
++    server_pub_bytes: &[u8],
++    priv_key: &BigUint,
++    username: &str,
++    password: &str,
++    mut block: [u8; ARD_CREDENTIAL_BLOCK_LEN],
++) -> Result<(Vec<u8>, [u8; ARD_CREDENTIAL_BLOCK_LEN]), VncError> {
++    let key_len = prime_bytes.len();
++    let g = BigUint::from(generator);
++    let prime = BigUint::from_bytes_be(prime_bytes);
++    let server_pub = BigUint::from_bytes_be(server_pub_bytes);
++
++    let client_pub = g.modpow(priv_key, &prime);
++    let shared_secret = server_pub.modpow(priv_key, &prime);
++    let client_pub_bytes = to_fixed_be(&client_pub, key_len)?;
++    let mut shared_bytes = to_fixed_be(&shared_secret, key_len)?;
++
++    let mut aes_key = md5::compute(&shared_bytes).0;
++    shared_bytes.zeroize();
++
++    let u_bytes = username.as_bytes();
++    let p_bytes = password.as_bytes();
++    block[..u_bytes.len()].copy_from_slice(u_bytes);
++    block[u_bytes.len()] = 0;
++    block[64..64 + p_bytes.len()].copy_from_slice(p_bytes);
++    block[64 + p_bytes.len()] = 0;
++
++    let cipher = Aes128::new(&Array::from(aes_key));
++    aes_key.zeroize();
++    for chunk in block.chunks_exact_mut(16) {
++        let mut aes_block = Array::from(<[u8; 16]>::try_from(&chunk[..]).unwrap());
++        cipher.encrypt_block(&mut aes_block);
++        chunk.copy_from_slice(&aes_block);
++    }
++
++    Ok((client_pub_bytes, block))
++}
++
++fn compute_dh_and_encrypt(
++    generator: u16,
++    prime_bytes: &[u8],
++    server_pub_bytes: &[u8],
++    username: &str,
++    password: &str,
++) -> Result<(Vec<u8>, [u8; ARD_CREDENTIAL_BLOCK_LEN]), VncError> {
++    let key_len = prime_bytes.len();
++    if generator < 2
++        || !(MIN_DH_KEY_LEN..=MAX_DH_KEY_LEN).contains(&key_len)
++        || server_pub_bytes.len() != key_len
++    {
++        return Err(VncError::ConnectError);
++    }
++
++    let prime = BigUint::from_bytes_be(prime_bytes);
++    let server_pub = BigUint::from_bytes_be(server_pub_bytes);
++    let two = BigUint::from(2u8);
++    if prime <= two || server_pub <= BigUint::from(1u8) || server_pub >= prime {
++        return Err(VncError::ConnectError);
++    }
++
++    let range = &prime - &two;
++    let exp_len = key_len.min(64);
++    let mut priv_seed = vec![0u8; exp_len];
++    fill_random(&mut priv_seed)?;
++    let priv_key = (BigUint::from_bytes_be(&priv_seed) % range) + &two;
++    priv_seed.zeroize();
++
++    let mut block = [0u8; ARD_CREDENTIAL_BLOCK_LEN];
++    fill_random(&mut block)?;
++    encrypt_credentials_with_dh(
++        generator,
++        prime_bytes,
++        server_pub_bytes,
++        &priv_key,
++        username,
++        password,
++        block,
++    )
++}
++
++/// Performs Apple Remote Desktop (Security Type 30) Diffie-Hellman + AES-128-ECB authentication.
++pub(crate) async fn authenticate<S>(
++    stream: &mut S,
++    username: &str,
++    password: &str,
++) -> Result<AuthResult, VncError>
++where
++    S: AsyncRead + AsyncWrite + Unpin,
++{
++    if username.len() > MAX_ARD_FIELD_LEN || password.len() > MAX_ARD_FIELD_LEN {
++        return Err(VncError::CredentialTooLong);
++    }
++
++    let generator = stream.read_u16().await?;
++    let key_len = usize::from(stream.read_u16().await?);
++    if generator < 2 || !(MIN_DH_KEY_LEN..=MAX_DH_KEY_LEN).contains(&key_len) {
++        return Err(VncError::ConnectError);
++    }
++
++    let mut prime_bytes = vec![0u8; key_len];
++    stream.read_exact(&mut prime_bytes).await?;
++    let mut server_pub_bytes = vec![0u8; key_len];
++    stream.read_exact(&mut server_pub_bytes).await?;
++
++    #[cfg(not(target_arch = "wasm32"))]
++    let (client_pub_bytes, ciphertext) = {
++        let mut u = username.to_owned();
++        let mut p = password.to_owned();
++        let result = tokio::task::spawn_blocking(move || {
++            let res = compute_dh_and_encrypt(generator, &prime_bytes, &server_pub_bytes, &u, &p);
++            u.zeroize();
++            p.zeroize();
++            res
++        })
++        .await
++        .map_err(|_| VncError::ConnectError)?;
++        result?
++    };
++
++    #[cfg(target_arch = "wasm32")]
++    let (client_pub_bytes, ciphertext) = compute_dh_and_encrypt(
++        generator,
++        &prime_bytes,
++        &server_pub_bytes,
++        username,
++        password,
++    )?;
++
++    // ARD Security Type 30 wire order: 128-byte AES-128-ECB ciphertext followed by key_len client public key.
++    let mut payload = Vec::with_capacity(ARD_CREDENTIAL_BLOCK_LEN + key_len);
++    payload.extend_from_slice(&ciphertext);
++    payload.extend_from_slice(&client_pub_bytes);
++    stream.write_all(&payload).await?;
++    stream.flush().await?;
++
++    let result = stream.read_u32().await?;
++    result.try_into()
++}
++
++#[cfg(test)]
++mod tests {
++    use aes::cipher::BlockCipherDecrypt;
++
++    use super::*;
++
++    #[tokio::test]
++    async fn ard_dh_roundtrip_encrypts_credentials_with_leading_zero_padding() {
++        // Test with a prime whose high byte is 0x00 to exercise leading-zero big-endian padding.
++        let key_len = 64usize;
++        let generator: u16 = 5;
++        let mut prime_bytes = vec![0u8; key_len];
++        prime_bytes[1] = 0xFF;
++        prime_bytes[key_len - 1] = 0xFB; // Odd modulus with leading zero byte.
++        let prime = BigUint::from_bytes_be(&prime_bytes);
++        let g = BigUint::from(generator);
++        let server_priv = BigUint::from(0x1234_5678_9abc_def1_u64);
++        let server_pub = g.modpow(&server_priv, &prime);
++        let server_pub_bytes = to_fixed_be(&server_pub, key_len).unwrap();
++
++        let (mut server, mut client) = tokio::io::duplex(4096);
++        let server_task = tokio::spawn(async move {
++            server.write_u16(generator).await.unwrap();
++            server.write_u16(key_len as u16).await.unwrap();
++            server.write_all(&prime_bytes).await.unwrap();
++            server.write_all(&server_pub_bytes).await.unwrap();
++
++            let mut ciphertext = [0u8; 128];
++            server.read_exact(&mut ciphertext).await.unwrap();
++            let mut client_pub_bytes = vec![0u8; key_len];
++            server.read_exact(&mut client_pub_bytes).await.unwrap();
++
++            let client_pub = BigUint::from_bytes_be(&client_pub_bytes);
++            let shared = client_pub.modpow(&server_priv, &prime);
++            let shared_bytes = to_fixed_be(&shared, key_len).unwrap();
++            let aes_key = md5::compute(&shared_bytes).0;
++            let cipher = Aes128::new(&Array::from(aes_key));
++
++            let mut plain = ciphertext;
++            for chunk in plain.chunks_exact_mut(16) {
++                let mut block = Array::from(<[u8; 16]>::try_from(&chunk[..]).unwrap());
++                cipher.decrypt_block(&mut block);
++                chunk.copy_from_slice(&block);
++            }
++
++            let user_nul = plain[..64].iter().position(|&b| b == 0).unwrap();
++            let pass_nul = plain[64..128].iter().position(|&b| b == 0).unwrap();
++            assert_eq!(&plain[..user_nul], b"alice");
++            assert_eq!(&plain[64..64 + pass_nul], b"mac-secret-pass");
++
++            server.write_u32(0).await.unwrap();
++        });
++
++        let result = authenticate(&mut client, "alice", "mac-secret-pass")
++            .await
++            .unwrap();
++        assert!(matches!(result, AuthResult::Ok));
++        server_task.await.unwrap();
++    }
++
++    #[tokio::test]
++    async fn ard_rejects_oversized_credentials_and_invalid_dh_lengths() {
++        let (_, mut client) = tokio::io::duplex(64);
++        let long = "a".repeat(64);
++        assert!(matches!(
++            authenticate(&mut client, &long, "pw").await,
++            Err(VncError::CredentialTooLong)
++        ));
++        assert!(matches!(
++            authenticate(&mut client, "user", &long).await,
++            Err(VncError::CredentialTooLong)
++        ));
++
++        let (mut server, mut client) = tokio::io::duplex(64);
++        server.write_u16(2).await.unwrap();
++        server.write_u16(2048).await.unwrap(); // Exceeds MAX_DH_KEY_LEN.
++        assert!(matches!(
++            authenticate(&mut client, "user", "pw").await,
++            Err(VncError::ConnectError)
++        ));
++    }
++
++    fn decode_hex(hex: &str) -> Vec<u8> {
++        (0..hex.len())
++            .step_by(2)
++            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
++            .collect()
++    }
++
++    #[test]
++    fn ard_crypto_matches_openssl_and_nist_reference_vectors() {
++        // RFC 1321 MD5("abc")
++        assert_eq!(
++            md5::compute(b"abc").0.as_slice(),
++            decode_hex("900150983cd24fb0d6963f7d28e17f72").as_slice()
++        );
++
++        // NIST FIPS-197 Appendix B AES-128-ECB
++        let key: [u8; 16] = decode_hex("2b7e151628aed2a6abf7158809cf4f3c")
++            .try_into()
++            .unwrap();
++        let mut nist_block = Array::from(
++            <[u8; 16]>::try_from(decode_hex("3243f6a8885a308d313198a2e0370734")).unwrap(),
++        );
++        Aes128::new(&Array::from(key)).encrypt_block(&mut nist_block);
++        assert_eq!(
++            nist_block.as_slice(),
++            decode_hex("3925841d02dc09fbdc118597196a0b32").as_slice()
++        );
++
++        // Independent OpenSSL + Python RFC 2409 Oakley Group 2 DH + MD5 + AES-128-ECB vector
++        let prime = decode_hex(concat!(
++            "ffffffffffffffffc90fdaa22168c234c4c6628b80dc1cd1",
++            "29024e088a67cc74020bbea63b139b22514a08798e3404dd",
++            "ef9519b3cd3a431b302b0a6df25f14374fe1356d6d51c245",
++            "e485b576625e7ec6f44c42e9a637ed6b0bff5cb6f406b7ed",
++            "ee386bfb5a899fa5ae9f24117c4b1fe649286651ece65381",
++            "ffffffffffffffff"
++        ));
++        let server_pub = decode_hex(concat!(
++            "1a362ff95ab70d019414d0b918ee445bc1fe102da2ea1bd98e96a6f8c49cc0b1",
++            "069ba26a11d9c1244c8b3725d8e6a442604282ef3ffcd0c7be8a3117beaafa38",
++            "74f4999f889b3d11e6368f8a0df5e41e442f7535ba4356cbde7b4e3cd45c5d97",
++            "23faaff3d1c568ff324b821fb5012b82b5c2b3983f34db878a217cbecfbf6145"
++        ));
++        let client_priv = BigUint::from_bytes_be(&decode_hex(
++            "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543211",
++        ));
++        let mut pad = [0u8; ARD_CREDENTIAL_BLOCK_LEN];
++        for (i, byte) in pad.iter_mut().enumerate() {
++            *byte = i as u8;
++        }
++        let (client_pub, ct) = encrypt_credentials_with_dh(
++            2,
++            &prime,
++            &server_pub,
++            &client_priv,
++            "zhongxuming",
++            "Secret#123!",
++            pad,
++        )
++        .unwrap();
++        assert_eq!(
++            client_pub,
++            decode_hex(concat!(
++                "0c6ef932511646bd62b342c7738fe559f496852557a139889fef8212c8f87620",
++                "7d0dd5239a5f04580c0702222167d3c2f64c428ec82ddaaa388c917ba58019d3",
++                "111c12c726f01e22adb5f5d5c155504198fde4932a38a16b1439fac0c10b6b6e",
++                "3fe9bd8a0e084a935737795c8fac340fef43d456a8dff67c8f3da5c13e88a44c"
++            ))
++        );
++        assert_eq!(
++            ct.as_slice(),
++            decode_hex(concat!(
++                "1bf9fa632bf7cf138bafcd7945bbdc6891997c3743445433a901959203c1dc13",
++                "6d165b87d51e3fd182d53a1914124c26460466fe5dc1237b5f93bb80c8b7e134",
++                "4175bdb9ffcd7cafe06131f7825a37257075a4262eeff22efcd5e6134850330f",
++                "dcf9aa43ac9a17cf107616da930b3c8bcd8686955f027f263d79b9b61e3a5e7c"
++            ))
++            .as_slice()
++        );
++    }
++}
+diff --git a/src/client/security/mod.rs b/src/client/security/mod.rs
+index e9d49ee..8f7ddab 100644
+--- a/src/client/security/mod.rs
++++ b/src/client/security/mod.rs
+@@ -1 +1,2 @@
++pub(crate) mod ard;
+ pub(crate) mod des;
+diff --git a/src/codec/cursor.rs b/src/codec/cursor.rs
+index 727dab1..17fa5b1 100644
+--- a/src/codec/cursor.rs
++++ b/src/codec/cursor.rs
+@@ -30,7 +30,9 @@ impl Decoder {
+         if rect.width == 0 || rect.height == 0 {
+             return output_func(VncEvent::SetCursor(*rect, Vec::new())).await;
+         }
+-        if format.bits_per_pixel != 32 || format.true_color_flag == 0 {
++        if format.true_color_flag == 0
++            || (format.bits_per_pixel != 32 && format.bits_per_pixel != 16)
++        {
+             return Err(VncError::WrongPixelFormat);
+         }
+         let _hotx = rect.x;
+@@ -47,6 +49,42 @@ impl Decoder {
+         input.read_exact(&mut pixels).await?;
+         let mut mask = initialized_vec(mask_length);
+         input.read_exact(&mut mask).await?;
++
++        if format.bits_per_pixel == 16 {
++            let mut image = initialized_vec(w as usize * h as usize * 4);
++            let r_max = u32::from(format.red_max);
++            let g_max = u32::from(format.green_max);
++            let b_max = u32::from(format.blue_max);
++            let mut src_idx = 0;
++            let mut dst_idx = 0;
++            for y in 0..h as usize {
++                for x in 0..w as usize {
++                    let mask_idx = y * (w as usize).div_ceil(8) + (x / 8);
++                    let alpha = if (mask[mask_idx] << (x % 8)) & 0x80 > 0 {
++                        255
++                    } else {
++                        0
++                    };
++                    let raw = if format.big_endian_flag != 0 {
++                        u16::from_be_bytes([pixels[src_idx], pixels[src_idx + 1]])
++                    } else {
++                        u16::from_le_bytes([pixels[src_idx], pixels[src_idx + 1]])
++                    };
++                    let r = ((u32::from(raw) >> format.red_shift) & r_max) * 255 + r_max / 2;
++                    let g = ((u32::from(raw) >> format.green_shift) & g_max) * 255 + g_max / 2;
++                    let b = ((u32::from(raw) >> format.blue_shift) & b_max) * 255 + b_max / 2;
++                    image[dst_idx] = (r / r_max) as u8;
++                    image[dst_idx + 1] = (g / g_max) as u8;
++                    image[dst_idx + 2] = (b / b_max) as u8;
++                    image[dst_idx + 3] = alpha;
++                    src_idx += 2;
++                    dst_idx += 4;
++                }
++            }
++            output_func(VncEvent::SetCursor(*rect, image)).await?;
++            return Ok(());
++        }
++
+         let mut image = initialized_vec(pixels_length);
+         let mut pix_idx = 0;
+ 
+diff --git a/src/codec/zlib.rs b/src/codec/zlib.rs
+index a8a780c..3adae4c 100644
+--- a/src/codec/zlib.rs
++++ b/src/codec/zlib.rs
+@@ -25,22 +25,69 @@ DEALINGS IN THE SOFTWARE.
+ 
+ use std::io::{Read, Result};
+ 
++const DECOMPRESS_BUF_LEN: usize = 32 * 1024;
++
+ pub struct ZlibReader<'a> {
+     decompressor: flate2::Decompress,
+     input: &'a [u8],
++    buf: Vec<u8>,
++    pos: usize,
++    len: usize,
+ }
+ 
+ impl<'a> ZlibReader<'a> {
+     pub fn new(decompressor: flate2::Decompress, input: &'a [u8]) -> ZlibReader<'a> {
++        Self::with_buffer(decompressor, input, vec![0u8; DECOMPRESS_BUF_LEN])
++    }
++
++    pub fn with_buffer(
++        decompressor: flate2::Decompress,
++        input: &'a [u8],
++        mut buf: Vec<u8>,
++    ) -> ZlibReader<'a> {
++        if buf.len() < DECOMPRESS_BUF_LEN {
++            buf.resize(DECOMPRESS_BUF_LEN, 0);
++        }
+         ZlibReader {
+             decompressor,
+             input,
++            buf,
++            pos: 0,
++            len: 0,
+         }
+     }
+ 
+-    pub fn into_inner(self) -> Result<flate2::Decompress> {
+-        if self.input.is_empty() {
+-            Ok(self.decompressor)
++    pub fn into_parts(mut self) -> Result<(flate2::Decompress, Vec<u8>)> {
++        // Consume any zero-output sync-flush trailer left in the compressed input.
++        let mut scratch = [0u8; 64];
++        while !self.input.is_empty() {
++            let in_before = self.decompressor.total_in();
++            let out_before = self.decompressor.total_out();
++            let status = self
++                .decompressor
++                .decompress(self.input, &mut scratch, flate2::FlushDecompress::None)
++                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
++            let consumed = (self.decompressor.total_in() - in_before) as usize;
++            let produced = (self.decompressor.total_out() - out_before) as usize;
++            self.input = &self.input[consumed..];
++            if produced > 0 {
++                return Err(std::io::Error::new(
++                    std::io::ErrorKind::InvalidData,
++                    "leftover zlib byte data",
++                ));
++            }
++            if matches!(status, flate2::Status::StreamEnd) {
++                return Err(std::io::Error::new(
++                    std::io::ErrorKind::InvalidData,
++                    "zlib stream end",
++                ));
++            }
++            if consumed == 0 {
++                break;
++            }
++        }
++        if self.input.is_empty() && self.pos == self.len {
++            Ok((self.decompressor, self.buf))
+         } else {
+             Err(std::io::Error::new(
+                 std::io::ErrorKind::InvalidData,
+@@ -49,32 +96,87 @@ impl<'a> ZlibReader<'a> {
+         }
+     }
+ 
++    pub fn into_inner(self) -> Result<flate2::Decompress> {
++        Ok(self.into_parts()?.0)
++    }
++
++    fn refill(&mut self) -> std::io::Result<usize> {
++        self.pos = 0;
++        self.len = 0;
++        loop {
++            if self.input.is_empty() {
++                return Ok(0);
++            }
++            let in_before = self.decompressor.total_in();
++            let out_before = self.decompressor.total_out();
++            let result = self.decompressor.decompress(
++                self.input,
++                &mut self.buf,
++                flate2::FlushDecompress::None,
++            );
++            let consumed = (self.decompressor.total_in() - in_before) as usize;
++            let produced = (self.decompressor.total_out() - out_before) as usize;
++            self.input = &self.input[consumed..];
++            match result {
++                Ok(flate2::Status::Ok) => {
++                    if produced > 0 {
++                        self.len = produced;
++                        return Ok(produced);
++                    }
++                    if consumed == 0 {
++                        return Ok(0);
++                    }
++                }
++                Ok(flate2::Status::BufError) => return Ok(0),
++                Err(error) => {
++                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
++                }
++                Ok(flate2::Status::StreamEnd) => {
++                    return Err(std::io::Error::new(
++                        std::io::ErrorKind::InvalidData,
++                        "zlib stream end",
++                    ))
++                }
++            }
++        }
++    }
++
++    #[inline]
+     pub fn read_u8(&mut self) -> std::io::Result<u8> {
+-        let mut buf = [0; 1];
+-        self.read_exact(&mut buf)?;
+-        Ok(buf[0])
++        if self.pos == self.len && self.refill()? == 0 {
++            return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
++        }
++        let byte = self.buf[self.pos];
++        self.pos += 1;
++        Ok(byte)
++    }
++
++    #[inline]
++    pub fn read_bytes(&mut self, mut output: &mut [u8]) -> std::io::Result<()> {
++        while !output.is_empty() {
++            if self.pos == self.len && self.refill()? == 0 {
++                return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
++            }
++            let take = (self.len - self.pos).min(output.len());
++            output[..take].copy_from_slice(&self.buf[self.pos..self.pos + take]);
++            self.pos += take;
++            output = &mut output[take..];
++        }
++        Ok(())
+     }
+ }
+ 
+ impl Read for ZlibReader<'_> {
+     fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+-        let in_before = self.decompressor.total_in();
+-        let out_before = self.decompressor.total_out();
+-        let result =
+-            self.decompressor
+-                .decompress(self.input, output, flate2::FlushDecompress::None);
+-        let consumed = (self.decompressor.total_in() - in_before) as usize;
+-        let produced = (self.decompressor.total_out() - out_before) as usize;
+-
+-        self.input = &self.input[consumed..];
+-        match result {
+-            Ok(flate2::Status::Ok) => Ok(produced),
+-            Ok(flate2::Status::BufError) => Ok(0),
+-            Err(error) => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+-            Ok(flate2::Status::StreamEnd) => Err(std::io::Error::new(
+-                std::io::ErrorKind::InvalidData,
+-                "zlib stream end",
+-            )),
++        if output.is_empty() {
++            return Ok(0);
++        }
++        if self.pos == self.len && self.refill()? == 0 {
++            return Ok(0);
+         }
++        let take = (self.len - self.pos).min(output.len());
++        output[..take].copy_from_slice(&self.buf[self.pos..self.pos + take]);
++        self.pos += take;
++        Ok(take)
+     }
+ }
+diff --git a/src/codec/zrle/tests.rs b/src/codec/zrle/tests.rs
+index 5bd6e66..d8b1236 100644
+--- a/src/codec/zrle/tests.rs
++++ b/src/codec/zrle/tests.rs
+@@ -87,3 +87,52 @@ async fn valid_modes_and_persistent_compression_preserve_pixels() {
+         assert_eq!(pixels, expected);
+     }
+ }
++
++#[tokio::test]
++async fn multi_tile_zrle_rect_coalesces_into_single_raw_image_with_exact_layout() {
++    let mut compressor = flate2::Compress::new(flate2::Compression::fast(), true);
++    let mut decoder = Decoder::new();
++    // 100x70 spans 2x2 tiles: (64x64), (36x64), (64x6), (36x6), each solid-filled.
++    let tile_colors = [[10u8, 20, 30], [40, 50, 60], [70, 80, 90], [100, 110, 120]];
++    let mut raw_zrle = Vec::new();
++    for color in tile_colors {
++        raw_zrle.push(1); // solid fill
++        raw_zrle.extend_from_slice(&color);
++    }
++    let packet = compress(&mut compressor, &raw_zrle);
++    let mut input = packet.as_slice();
++    let output = Mutex::new(Vec::new());
++    decoder
++        .decode(
++            &PixelFormat::rgba(),
++            &Rect {
++                x: 8,
++                y: 4,
++                width: 100,
++                height: 70,
++            },
++            &mut input,
++            &|event| {
++                output.lock().unwrap().push(event);
++                async { Ok(()) }
++            },
++        )
++        .await
++        .unwrap();
++    let events = output.into_inner().unwrap();
++    assert_eq!(events.len(), 1);
++    let VncEvent::RawImage(rect, pixels) = &events[0] else {
++        panic!("expected coalesced RawImage");
++    };
++    assert_eq!((rect.x, rect.y, rect.width, rect.height), (8, 4, 100, 70));
++    assert_eq!(pixels.len(), 100 * 70 * 4);
++    let at = |x: usize, y: usize| &pixels[(y * 100 + x) * 4..(y * 100 + x) * 4 + 4];
++    assert_eq!(at(0, 0), &[10, 20, 30, 255]);
++    assert_eq!(at(63, 63), &[10, 20, 30, 255]);
++    assert_eq!(at(64, 0), &[40, 50, 60, 255]);
++    assert_eq!(at(99, 63), &[40, 50, 60, 255]);
++    assert_eq!(at(0, 64), &[70, 80, 90, 255]);
++    assert_eq!(at(63, 69), &[70, 80, 90, 255]);
++    assert_eq!(at(64, 64), &[100, 110, 120, 255]);
++    assert_eq!(at(99, 69), &[100, 110, 120, 255]);
++}
+diff --git a/src/codec/zrle.rs b/src/codec/zrle.rs
+index 4744bfc..f5b805c 100644
+--- a/src/codec/zrle.rs
++++ b/src/codec/zrle.rs
+@@ -3,8 +3,9 @@ use std::future::Future;
+ use tokio::io::{AsyncRead, AsyncReadExt};
+ use tracing::error;
+ 
+-use super::{initialized_vec, zlib::ZlibReader};
++use super::zlib::ZlibReader;
+ 
++#[inline]
+ fn read_run_length(reader: &mut ZlibReader, remaining: usize) -> Result<usize, VncError> {
+     let mut run_length_part;
+     let mut run_length = 1;
+@@ -21,22 +22,18 @@ fn read_run_length(reader: &mut ZlibReader, remaining: usize) -> Result<usize, V
+     Ok(run_length)
+ }
+ 
+-fn copy_true_color(
++#[inline]
++fn read_true_color(
+     reader: &mut ZlibReader,
+-    pixels: &mut Vec<u8>,
+     pad: bool,
+     compressed_bpp: usize,
+-    bpp: usize,
+-) -> Result<(), VncError> {
++) -> Result<[u8; 4], VncError> {
+     let mut buf = [255; 4];
+-    std::io::Read::read_exact(
+-        reader,
+-        &mut buf[pad as usize..pad as usize + compressed_bpp],
+-    )?;
+-    pixels.extend_from_slice(&buf[..bpp]);
+-    Ok(())
++    reader.read_bytes(&mut buf[pad as usize..pad as usize + compressed_bpp])?;
++    Ok(buf)
+ }
+ 
++#[inline]
+ fn copy_indexed(
+     palette: &[u8],
+     pixels: &mut Vec<u8>,
+@@ -53,12 +50,20 @@ fn copy_indexed(
+ 
+ pub struct Decoder {
+     decompressor: Option<flate2::Decompress>,
++    zlib_data: Vec<u8>,
++    zlib_buf: Vec<u8>,
++    palette: Vec<u8>,
++    tile_pixels: Vec<u8>,
+ }
+ 
+ impl Decoder {
+     pub fn new() -> Self {
+         Self {
+             decompressor: Some(flate2::Decompress::new(true)),
++            zlib_data: Vec::new(),
++            zlib_buf: Vec::new(),
++            palette: Vec::with_capacity(128 * 4),
++            tile_pixels: Vec::with_capacity(64 * 64 * 4),
+         }
+     }
+ 
+@@ -80,10 +85,11 @@ impl Decoder {
+         if data_len > crate::limits::MAX_COMPRESSED {
+             return Err(VncError::InvalidImageData);
+         }
+-        let mut zlib_data = initialized_vec(data_len);
+-        input.read_exact(&mut zlib_data).await?;
++        self.zlib_data.resize(data_len, 0);
++        input.read_exact(&mut self.zlib_data).await?;
+         let decompressor = self.decompressor.take().ok_or(VncError::InvalidImageData)?;
+-        let mut reader = ZlibReader::new(decompressor, &zlib_data);
++        let zlib_buf = std::mem::take(&mut self.zlib_buf);
++        let mut reader = ZlibReader::with_buffer(decompressor, &self.zlib_data, zlib_buf);
+ 
+         let bpp = format.bits_per_pixel as usize / 8;
+         let pixel_mask = if format.true_color_flag != 0 {
+@@ -99,13 +105,13 @@ impl Decoder {
+                 if pixel_mask & 0x000000ff == 0 {
+                     // rgb at the most significant bits
+                     // if format.big_endian_flag is set
+-                    // then decompressed data is excepted to be [rgb.0, rgb.1, rgb.2, alpha]
++                    // then decompressed data is expected to be [rgb.0, rgb.1, rgb.2, alpha]
+                     // otherwise the decompressed data should be [alpha, rgb.0, rgb.1, rgb.2]
+                     (3, format.big_endian_flag == 0)
+                 } else if pixel_mask & 0xff000000 == 0 {
+                     // rgb at the least significant bits
+                     // if format.big_endian_flag is set
+-                    // then decompressed data should be [alpha, rgb.0, rgb.1, rgb.2]
++                    // then decompressed data is expected to be [alpha, rgb.0, rgb.1, rgb.2]
+                     // otherwise the decompressed data should be [rgb.0, rgb.1, rgb.2, alpha]
+                     (3, format.big_endian_flag > 0)
+                 } else {
+@@ -114,57 +120,45 @@ impl Decoder {
+             } else {
+                 (bpp, false)
+             };
+-        let mut palette = Vec::with_capacity(128 * bpp);
+ 
+-        let mut y = 0;
++        let rect_w = usize::from(rect.width);
++        let rect_h = usize::from(rect.height);
++        let rect_stride = rect_w * bpp;
++        let mut rect_pixels = vec![0u8; rect_stride * rect_h];
++
++        let mut y = 0u16;
+         while y < rect.height {
+-            let height = if y + 64 > rect.height {
+-                rect.height - y
+-            } else {
+-                64
+-            };
+-            let mut x = 0;
++            let height = (rect.height - y).min(64);
++            let mut x = 0u16;
+             while x < rect.width {
+-                let width = if x + 64 > rect.width {
+-                    rect.width - x
+-                } else {
+-                    64
+-                };
+-                let pixel_count = height as usize * width as usize;
++                let width = (rect.width - x).min(64);
++                let pixel_count = usize::from(height) * usize::from(width);
+ 
+                 let control = reader.read_u8()?;
+                 let is_rle = control & 0x80 > 0;
+                 let palette_size = control & 0x7f;
+-                palette.clear();
++                self.palette.clear();
+ 
+                 for _ in 0..palette_size {
+-                    copy_true_color(
+-                        &mut reader,
+-                        &mut palette,
+-                        alpha_at_first,
+-                        compressed_bpp,
+-                        bpp,
+-                    )?
++                    let px = read_true_color(&mut reader, alpha_at_first, compressed_bpp)?;
++                    self.palette.extend_from_slice(&px[..bpp]);
+                 }
+ 
+-                let mut pixels = Vec::with_capacity(pixel_count * bpp);
++                self.tile_pixels.clear();
++                self.tile_pixels.reserve(pixel_count * bpp);
+                 match (is_rle, palette_size) {
+                     (false, 0) => {
+                         // True Color pixels
+                         for _ in 0..pixel_count {
+-                            copy_true_color(
+-                                &mut reader,
+-                                &mut pixels,
+-                                alpha_at_first,
+-                                compressed_bpp,
+-                                bpp,
+-                            )?
++                            let px = read_true_color(&mut reader, alpha_at_first, compressed_bpp)?;
++                            self.tile_pixels.extend_from_slice(&px[..bpp]);
+                         }
+                     }
+                     (false, 1) => {
+                         // Color fill
++                        let color = self.palette.get(..bpp).ok_or(VncError::InvalidImageData)?;
+                         for _ in 0..pixel_count {
+-                            copy_indexed(&palette, &mut pixels, bpp, 0)?
++                            self.tile_pixels.extend_from_slice(color);
+                         }
+                     }
+                     (false, 2..=16) => {
+@@ -178,7 +172,7 @@ impl Decoder {
+                         let mut encoded = reader.read_u8()?;
+                         let mask = (1 << bits_per_index) - 1;
+ 
+-                        for y in 0..height {
++                        for row in 0..height {
+                             let mut shift = 8 - bits_per_index;
+                             for _ in 0..width {
+                                 if shift < 0 {
+@@ -187,10 +181,10 @@ impl Decoder {
+                                 }
+                                 let idx = (encoded >> shift) & mask;
+ 
+-                                copy_indexed(&palette, &mut pixels, bpp, idx)?;
++                                copy_indexed(&self.palette, &mut self.tile_pixels, bpp, idx)?;
+                                 shift -= bits_per_index;
+                             }
+-                            if shift < 8 - bits_per_index && y < height - 1 {
++                            if shift < 8 - bits_per_index && row < height - 1 {
+                                 encoded = reader.read_u8()?;
+                             }
+                         }
+@@ -198,19 +192,11 @@ impl Decoder {
+                     (true, 0) => {
+                         // True Color RLE
+                         let mut count = 0;
+-                        let mut pixel = Vec::new();
+                         while count < pixel_count {
+-                            pixel.clear();
+-                            copy_true_color(
+-                                &mut reader,
+-                                &mut pixel,
+-                                alpha_at_first,
+-                                compressed_bpp,
+-                                bpp,
+-                            )?;
++                            let px = read_true_color(&mut reader, alpha_at_first, compressed_bpp)?;
+                             let run_length = read_run_length(&mut reader, pixel_count - count)?;
+                             for _ in 0..run_length {
+-                                pixels.extend(&pixel)
++                                self.tile_pixels.extend_from_slice(&px[..bpp]);
+                             }
+                             count += run_length;
+                         }
+@@ -227,33 +213,40 @@ impl Decoder {
+                             } else {
+                                 1
+                             };
++                            let start = usize::from(index) * bpp;
++                            let color = self
++                                .palette
++                                .get(start..start + bpp)
++                                .ok_or(VncError::InvalidImageData)?;
+                             for _ in 0..run_length {
+-                                copy_indexed(&palette, &mut pixels, bpp, index)?;
++                                self.tile_pixels.extend_from_slice(color);
+                             }
+                             count += run_length;
+                         }
+                     }
+-                    (x, y) => {
+-                        error!("ZRLE subencoding error {:?}", (x, y));
++                    (rle, pal) => {
++                        error!("ZRLE subencoding error {:?}", (rle, pal));
+                         return Err(VncError::InvalidImageData);
+                     }
+                 }
+-                output_func(VncEvent::RawImage(
+-                    Rect {
+-                        x: rect.x + x,
+-                        y: rect.y + y,
+-                        width,
+-                        height,
+-                    },
+-                    pixels,
+-                ))
+-                .await?;
++
++                let tile_stride = usize::from(width) * bpp;
++                let dst_x_off = usize::from(x) * bpp;
++                for row in 0..usize::from(height) {
++                    let src_start = row * tile_stride;
++                    let dst_start = (usize::from(y) + row) * rect_stride + dst_x_off;
++                    rect_pixels[dst_start..dst_start + tile_stride]
++                        .copy_from_slice(&self.tile_pixels[src_start..src_start + tile_stride]);
++                }
+                 x += width;
+             }
+             y += height;
+         }
+ 
+-        self.decompressor = Some(reader.into_inner()?);
++        let (decompressor, zlib_buf) = reader.into_parts()?;
++        self.decompressor = Some(decompressor);
++        self.zlib_buf = zlib_buf;
++        output_func(VncEvent::RawImage(*rect, rect_pixels)).await?;
+ 
+         Ok(())
+     }
+diff --git a/src/config.rs b/src/config.rs
+index a40f3ae..8dccbc9 100644
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -63,12 +63,24 @@ impl From<[u8; 12]> for VncVersion {
+         match &version {
+             b"RFB 003.003\n" => VncVersion::RFB33,
+             b"RFB 003.007\n" => VncVersion::RFB37,
+-            b"RFB 003.008\n" => VncVersion::RFB38,
++            b"RFB 003.008\n" | b"RFB 003.889\n" => VncVersion::RFB38,
+             // https://www.rfc-editor.org/rfc/rfc6143#section-7.1.1
+-            //  Other version numbers are reported by some servers and clients,
+-            //  but should be interpreted as 3.3 since they do not implement the
+-            //  different handshake in 3.7 or 3.8.
+-            _ => VncVersion::RFB33,
++            // Legacy minor versions (e.g. 3.4-3.6) downgrade to 3.3, while Apple
++            // Screen Sharing (3.889) and future major versions (> 3) negotiate 3.8.
++            _ => {
++                if version.starts_with(b"RFB ")
++                    && version[7] == b'.'
++                    && version[11] == b'\n'
++                    && std::str::from_utf8(&version[4..7])
++                        .ok()
++                        .and_then(|major| major.parse::<u16>().ok())
++                        .is_some_and(|major| major > 3)
++                {
++                    VncVersion::RFB38
++                } else {
++                    VncVersion::RFB33
++                }
++            }
+         }
+     }
+ }
+@@ -84,13 +96,14 @@ impl From<VncVersion> for &[u8; 12] {
+ }
+ 
+ impl VncVersion {
+-    pub(crate) async fn read<S>(reader: &mut S) -> Result<Self, VncError>
++    pub(crate) async fn read_with_apple_flag<S>(reader: &mut S) -> Result<(Self, bool), VncError>
+     where
+         S: AsyncRead + Unpin,
+     {
+         let mut buffer = [0_u8; 12];
+         reader.read_exact(&mut buffer).await?;
+-        Ok(buffer.into())
++        let is_apple = &buffer == b"RFB 003.889\n";
++        Ok((buffer.into(), is_apple))
+     }
+ 
+     pub(crate) async fn write<S>(self, writer: &mut S) -> Result<(), VncError>
+@@ -100,6 +113,7 @@ impl VncVersion {
+         writer
+             .write_all(&<VncVersion as Into<&[u8; 12]>>::into(self)[..])
+             .await?;
++        writer.flush().await?;
+         Ok(())
+     }
+ }
+@@ -123,7 +137,7 @@ impl VncVersion {
+ /// | 3            |              | padding         |
+ /// +--------------+--------------+-----------------+
+ /// ```
+-#[derive(Debug, Clone, Copy)]
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub struct PixelFormat {
+     /// the number of bits used for each pixel value on the wire
+     ///
+@@ -291,6 +305,39 @@ impl PixelFormat {
+         }
+     }
+ 
++    /// 16-bit little-endian RGB565 true-color pixel format for low-bandwidth links.
++    pub fn rgb565() -> PixelFormat {
++        Self {
++            bits_per_pixel: 16,
++            depth: 16,
++            big_endian_flag: 0,
++            true_color_flag: 1,
++            red_max: 31,
++            green_max: 63,
++            blue_max: 31,
++            red_shift: 11,
++            green_shift: 5,
++            blue_shift: 0,
++            _padding_1: 0,
++            _padding_2: 0,
++            _padding_3: 0,
++        }
++    }
++
++    /// Returns true if this pixel format is a byte-aligned 32-bit 8-8-8 true-color layout
++    /// (e.g. little-endian BGRA/RGBA or big-endian xRGB/RGBx used by macOS Screen Sharing).
++    pub fn is_native_true_color_32(&self) -> bool {
++        self.bits_per_pixel == 32
++            && self.true_color_flag == 1
++            && self.red_max == 255
++            && self.green_max == 255
++            && self.blue_max == 255
++            && self.red_shift % 8 == 0
++            && self.green_shift % 8 == 0
++            && self.blue_shift % 8 == 0
++            && self.validate().is_ok()
++    }
++
+     pub(crate) async fn read<S>(reader: &mut S) -> Result<Self, VncError>
+     where
+         S: AsyncRead + Unpin,
+diff --git a/src/error.rs b/src/error.rs
+index d57aacf..e25fb7b 100644
+--- a/src/error.rs
++++ b/src/error.rs
+@@ -5,6 +5,12 @@ use thiserror::Error;
+ pub enum VncError {
+     #[error("Auth is required but no password provided")]
+     NoPassword,
++    #[error("Username is required for Apple Remote Desktop authentication")]
++    UsernameRequired,
++    #[error("Apple Remote Desktop credentials exceed maximum length")]
++    CredentialTooLong,
++    #[error("Unsupported VNC security types")]
++    UnsupportedSecurityType,
+     #[error("No VNC encoding selected")]
+     NoEncoding,
+     #[error("Unknow VNC security type: {0}")]
+diff --git a/src/event.rs b/src/event.rs
+index fdc0e5a..96493f5 100644
+--- a/src/event.rs
++++ b/src/event.rs
+@@ -59,6 +59,9 @@ pub enum VncEvent {
+     /// Raw image data in the order followed by informed PixelFormat
+     ///
+     RawImage(Rect, ImageData),
++    /// Emitted once all rectangles in a server `FramebufferUpdate` have been decoded
++    /// (when enabled via `VncConnector::emit_frame_complete`).
++    FrameComplete,
+     /// Copy image data from the second rect to the first
+     ///
+     Copy(DstRect, SrcRect),
+diff --git a/src/limits.rs b/src/limits.rs
+index ad81d58..27c1f35 100644
+--- a/src/limits.rs
++++ b/src/limits.rs
+@@ -1,7 +1,7 @@
+ use crate::{Rect, VncError};
+ use tokio::io::{AsyncRead, AsyncReadExt};
+ 
+-pub(crate) const MAX_PIXELS: usize = 8_294_400;
++pub(crate) const MAX_PIXELS: usize = 24_000_000;
+ pub(crate) const MAX_DIMENSION: u16 = 8192;
+ pub(crate) const MAX_COMPRESSED: usize = 64 * 1024 * 1024;
+ pub(crate) const MAX_TEXT: usize = 1024 * 1024;
+@@ -39,5 +39,8 @@ pub(crate) async fn string<S: AsyncRead + Unpin>(
+     }
+     let mut bytes = vec![0; length];
+     reader.read_exact(&mut bytes).await?;
+-    Ok(String::from_utf8_lossy(&bytes).into_owned())
++    match String::from_utf8(bytes) {
++        Ok(text) => Ok(text),
++        Err(err) => Ok(err.into_bytes().into_iter().map(char::from).collect()),
++    }
+ }

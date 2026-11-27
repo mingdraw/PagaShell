@@ -311,11 +311,36 @@ void main() {
     );
     final tooltip = rdpNetworkTooltip(stats);
     expect(tooltip, contains('Fair signal · UDP'));
-    expect(tooltip, contains('Latency: 130 ms'));
-    expect(tooltip, contains('Loss: 1.8%'));
+    expect(tooltip, contains('Latency: 130 ms · Loss: 1.8%'));
+    expect(tooltip, contains('Speed: 1.50 Mbps / 2.00 Mbps'));
+    expect(tooltip, isNot(contains('Frame rate')));
+    expect(tooltip, isNot(contains('30 FPS')));
     expect(
       tooltip,
       contains('Quality: Balanced (Auto-adapted for stable FPS)'),
     );
+
+    // Idle screen displays clear Idle state + peak bandwidth without FPS.
+    const idleWithPeak = RdpNetworkStats(
+      rttMs: 12,
+      throughputKbps: 0,
+      bandwidthKbps: 14500,
+      packetLossPermille: 0,
+      fps: 0,
+      signalLevel: 4,
+      qualityTier: RdpQualityTier.high,
+      qualityMode: RdpQualityMode.auto,
+      transport: RdpTransportKind.tcp,
+    );
+    final enIdle = rdpNetworkTooltip(idleWithPeak);
+    expect(enIdle, contains('Latency: 12 ms · Loss: 0.0%'));
+    expect(enIdle, contains('Speed: Idle (peak 14.5 Mbps)'));
+    expect(enIdle, isNot(contains('Frame rate')));
+
+    Get.locale = const Locale('zh', 'CN');
+    final zhIdle = rdpNetworkTooltip(idleWithPeak);
+    expect(zhIdle, contains('延迟：12 ms · 丢包：0.0%'));
+    expect(zhIdle, contains('速率：空闲（峰值 14.5 Mbps）'));
+    expect(zhIdle, isNot(contains('帧率')));
   });
 }

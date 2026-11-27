@@ -17,7 +17,7 @@ class _SessionRuntime {
   SshGateway? gateway;
   Completer<void>? connectionCancel;
   Completer<bool>? hostKeyDecision;
-  Completer<String?>? passwordDecision;
+  Completer<({String password, String? username})?>? passwordDecision;
   StreamSubscription<Object?>? outputSubscription;
   Future<void>? shellCleanup;
   Future<SshEngineSession>? fileTransferReconnect;

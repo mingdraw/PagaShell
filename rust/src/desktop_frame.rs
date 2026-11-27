@@ -1,9 +1,19 @@
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use ironrdp::pdu::geometry::InclusiveRectangle;
 use ironrdp::session::image::DecodedImage;
 use ironrdp_egfx::gpu::GpuPresentedFrame;
 use tokio::sync::oneshot;
 
 use crate::api::desktop::{DesktopCursor, DesktopFrame, DesktopTile};
+
+static NEXT_SESSION_ID: AtomicU32 = AtomicU32::new(1);
+
+/// Allocate a session identifier shared across RDP and VNC so native texture
+/// registries and desktop workers never collide.
+pub(crate) fn reserve_desktop_session_id() -> u32 {
+    NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 pub(crate) const TILE_SIZE: u16 = 128;
 // Sample neighboring framebuffer pixels in a one-pixel gutter. Bilinear
@@ -143,14 +153,14 @@ impl FrameEncoder {
         resized
     }
 
-    pub fn snapshot_rgba(
+    pub fn snapshot_opaque_rgba(
         &mut self,
         width: u16,
         height: u16,
         pixels: &[u8],
         after: u32,
     ) -> DesktopFrame {
-        self.snapshot_pixels(width, height, pixels, after, false)
+        self.snapshot_pixels(width, height, pixels, after, true)
     }
 
     fn snapshot_pixels(

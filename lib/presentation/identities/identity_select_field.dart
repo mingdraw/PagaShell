@@ -118,7 +118,7 @@ class _IdentityLabel extends StatelessWidget {
       const SizedBox(width: 6),
       Expanded(
         child: Text(
-          identity.serviceType == ServiceType.vnc
+          identity.serviceType == ServiceType.vnc && identity.username.isEmpty
               ? identity.name
               : '@name（@username）'.trParams({
                   'name': identity.name,

@@ -112,14 +112,17 @@ String rdpTransportLabel(RdpTransportKind transport) => switch (transport) {
 };
 
 String rdpNetworkTooltip(RdpNetworkStats? stats) {
-  if (stats == null) return '正在测量 RDP 网络延迟…'.tr;
+  if (stats == null) return '正在测量网络延迟…'.tr;
   final bandwidth = stats.formattedBandwidth;
-  final speedText =
-      bandwidth != null &&
-          stats.bandwidthKbps != null &&
-          stats.bandwidthKbps! > stats.throughputKbps
-      ? '${stats.formattedThroughput} / $bandwidth'
-      : stats.formattedThroughput;
+  final speedText = stats.throughputKbps == 0
+      ? (bandwidth != null
+            ? '空闲（峰值 @speed）'.trParams({'speed': bandwidth})
+            : '空闲'.tr)
+      : (bandwidth != null &&
+                stats.bandwidthKbps != null &&
+                stats.bandwidthKbps! > stats.throughputKbps
+            ? '${stats.formattedThroughput} / $bandwidth'
+            : stats.formattedThroughput);
   final qualityNote = stats.isAutoAdapted
       ? '自动降质稳帧'.tr
       : rdpQualityModeLabel(stats.qualityMode);
@@ -128,14 +131,11 @@ String rdpNetworkTooltip(RdpNetworkStats? stats) {
       'signal': rdpSignalLabel(stats.signalLevel),
       'transport': rdpTransportLabel(stats.transport),
     }),
-    '延迟：@latency · 速率：@speed'.trParams({
+    '延迟：@latency · 丢包：@loss'.trParams({
       'latency': stats.formattedLatency,
-      'speed': speedText,
-    }),
-    '丢包：@loss · 帧率：@fps FPS'.trParams({
       'loss': stats.formattedPacketLoss,
-      'fps': '${stats.fps}',
     }),
+    '速率：@speed'.trParams({'speed': speedText}),
     '画质：@tier（@mode）'.trParams({
       'tier': rdpQualityTierLabel(stats.qualityTier),
       'mode': qualityNote,

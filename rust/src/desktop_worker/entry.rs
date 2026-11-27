@@ -104,18 +104,20 @@ where
             version,
             host,
             port,
+            username,
             password,
             page_gateway,
         } if version == VERSION => {
             connect_vnc(
                 &mut output,
                 first.id,
-                vnc::connect(host, port, password, None, page_gateway),
+                vnc::connect(host, port, username, password, None, page_gateway),
             )
             .await?
         }
         Request::VncConnectTunnel {
             version,
+            username,
             password,
             tunnel_handle,
         } if version == VERSION => match accept_tunnel(tunnel_handle) {
@@ -123,7 +125,7 @@ where
                 connect_vnc(
                     &mut output,
                     first.id,
-                    vnc::connect_transport(password, desktop::Transport::Pipe(pipe)),
+                    vnc::connect_transport(username, password, desktop::Transport::Pipe(pipe)),
                 )
                 .await?
             }
@@ -385,6 +387,9 @@ async fn invoke(
         ) => {
             vnc::input(session_id, kind, code, flags, x, y, text).await?;
         }
+        (SessionKind::Vnc(session_id), Request::VncInputBatch(events)) => {
+            vnc::input_batch(session_id, events).await?;
+        }
         (SessionKind::Rdp(session_id), Request::InputBatch(events)) => {
             desktop::input_batch(session_id, events).await?;
         }
@@ -393,28 +398,49 @@ async fn invoke(
                 desktop::resize(session_id, width, height).await?,
             ));
         }
+        (SessionKind::Vnc(session_id), Request::Resize { width, height }) => {
+            return Ok(Reply::Resize(vnc::resize(session_id, width, height).await?));
+        }
         (SessionKind::Rdp(session_id), Request::NetworkStats) => {
             return Ok(Reply::NetworkStats(
                 desktop::network_stats(session_id).await?,
             ));
         }
+        (SessionKind::Vnc(session_id), Request::NetworkStats) => {
+            return Ok(Reply::NetworkStats(vnc::network_stats(session_id).await?));
+        }
         (SessionKind::Rdp(session_id), Request::SetQualityMode { mode }) => {
             desktop::set_quality_mode(session_id, mode).await?;
+        }
+        (SessionKind::Vnc(session_id), Request::SetQualityMode { mode }) => {
+            vnc::set_quality_mode(session_id, mode).await?;
         }
         (SessionKind::Rdp(session_id), Request::ClipboardActive { active, directory }) => {
             desktop::clipboard_active(session_id, active, directory).await?;
         }
+        (SessionKind::Vnc(session_id), Request::ClipboardActive { active, .. }) => {
+            vnc::clipboard_active(session_id, active).await?;
+        }
         (SessionKind::Rdp(session_id), Request::ClipboardUpdate { text, files }) => {
             desktop::clipboard_update(session_id, text, files).await?;
+        }
+        (SessionKind::Vnc(session_id), Request::ClipboardUpdate { text, .. }) => {
+            vnc::clipboard_update(session_id, text).await?;
         }
         (SessionKind::Rdp(session_id), Request::ClipboardEvent { after }) => {
             return Ok(Reply::Clipboard(
                 desktop::clipboard_event(session_id, after).await?,
             ));
         }
+        (SessionKind::Vnc(session_id), Request::ClipboardEvent { after }) => {
+            return Ok(Reply::Clipboard(
+                vnc::clipboard_event(session_id, after).await?,
+            ));
+        }
         (SessionKind::Rdp(session_id), Request::ClipboardCancel) => {
             desktop::clipboard_cancel(session_id).await?;
         }
+        (SessionKind::Vnc(_), Request::ClipboardCancel) => {}
         (SessionKind::Rdp(session_id), Request::Probe) => desktop::probe(session_id).await?,
         (SessionKind::Vnc(session_id), Request::Probe) => vnc::probe(session_id).await?,
         _ => bail!("桌面会话进程状态无效"),

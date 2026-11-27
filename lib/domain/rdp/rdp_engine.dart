@@ -129,10 +129,16 @@ abstract interface class RdpNetworkSession implements RdpEngineSession {
   Future<void> setQualityMode(RdpQualityMode mode);
 }
 
-/// Windows 拒绝了可重新输入的密码凭据；账号状态或协议错误不属于此类。
+/// 远程桌面拒绝了可重新输入的凭据；账号状态或协议错误不属于此类。
 class DesktopAuthenticationException extends SshEngineException {
-  const DesktopAuthenticationException(String message, {Object? cause})
-    : super(message, cause);
+  const DesktopAuthenticationException(
+    String message, {
+    this.requiresUsername = false,
+    Object? cause,
+  }) : super(message, cause);
+
+  /// 远端要求输入用户名与密码（例如 macOS 屏幕共享 ARD 认证）。
+  final bool requiresUsername;
 }
 
 class RdpAuthenticationException extends DesktopAuthenticationException {

@@ -183,9 +183,7 @@ class _IdentityEditDialogState extends State<_IdentityEditDialog> {
       _error = null;
     });
     final controller = Get.find<IdentityController>();
-    final username = _serviceType == ServiceType.vnc
-        ? ''
-        : _username.text.trim();
+    final username = _username.text.trim();
     final name = _name.text.trim();
     final displayName = name.isEmpty ? username : name;
 
@@ -254,11 +252,14 @@ class _IdentityEditDialogState extends State<_IdentityEditDialog> {
                   autofocus: true,
                   validator: (value) {
                     final name = (value ?? '').trim();
-                    if (_serviceType == ServiceType.vnc && name.isEmpty) {
+                    final username = _username.text.trim();
+                    if (_serviceType == ServiceType.vnc &&
+                        name.isEmpty &&
+                        username.isEmpty) {
                       return '必填'.tr;
                     }
                     return Get.find<IdentityController>().isNameTaken(
-                          name.isEmpty ? _username.text.trim() : name,
+                          name.isEmpty ? username : name,
                           folderId: _folderId,
                           excludeId: widget.identity?.id,
                         )
@@ -268,7 +269,7 @@ class _IdentityEditDialogState extends State<_IdentityEditDialog> {
                   decoration: AppInputDecoration(
                     labelText: '名称'.tr,
                     hintText: _serviceType == ServiceType.vnc
-                        ? null
+                        ? '填写用户名时可留空'.tr
                         : '留空则使用用户名'.tr,
                   ),
                 ),
@@ -303,16 +304,21 @@ class _IdentityEditDialogState extends State<_IdentityEditDialog> {
                         },
                 ),
                 const SizedBox(height: 12),
-                if (_serviceType != ServiceType.vnc) ...[
-                  AppTextFormField(
-                    key: const ValueKey('identity-username'),
-                    controller: _username,
-                    enabled: !_saving,
-                    decoration: AppInputDecoration(labelText: '用户名'.tr),
-                    validator: _required,
+                AppTextFormField(
+                  key: const ValueKey('identity-username'),
+                  controller: _username,
+                  enabled: !_saving,
+                  decoration: AppInputDecoration(
+                    labelText:
+                        (_serviceType == ServiceType.vnc ? '用户名（可选）' : '用户名')
+                            .tr,
+                    hintText: _serviceType == ServiceType.vnc
+                        ? 'macOS 屏幕共享填写系统用户名；标准 VNC 留空'.tr
+                        : null,
                   ),
-                  const SizedBox(height: 12),
-                ],
+                  validator: _serviceType == ServiceType.vnc ? null : _required,
+                ),
+                const SizedBox(height: 12),
                 if (_serviceType == ServiceType.rdp) ...[
                   AppTextFormField(
                     key: const ValueKey('identity-rdp-domain'),

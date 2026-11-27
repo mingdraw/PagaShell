@@ -324,7 +324,7 @@ class _HostEditDialogState extends State<HostEditDialog> {
         hostname: _hostname.text.trim(),
         port: int.parse(_port.text.trim()),
         username: _isVnc
-            ? ''
+            ? username
             : username.isEmpty
             ? _serviceType.defaultUsername
             : username,
@@ -634,7 +634,7 @@ class _HostEditDialogState extends State<HostEditDialog> {
                     items: [
                       AppSelectOption(
                         value: _AuthMode.password,
-                        child: Text((_isVnc ? '密码' : '账号密码').tr),
+                        child: Text('账号密码'.tr),
                       ),
                       AppSelectOption(
                         value: _AuthMode.identity,
@@ -660,12 +660,17 @@ class _HostEditDialogState extends State<HostEditDialog> {
                   const SizedBox(height: 12),
                 ],
                 if (_isPage || _mode == _AuthMode.password) ...[
-                  if (!_isPage && !_isVnc) ...[
+                  if (!_isPage) ...[
                     AppTextFormField(
                       key: const ValueKey('host-username'),
                       controller: _username,
-                      decoration: AppInputDecoration(labelText: '用户名'.tr),
-                      validator: _required,
+                      decoration: AppInputDecoration(
+                        labelText: (_isVnc ? '用户名（可选）' : '用户名').tr,
+                        hintText: _isVnc
+                            ? 'macOS 屏幕共享填写系统用户名；标准 VNC 留空'.tr
+                            : null,
+                      ),
+                      validator: _isVnc ? null : _required,
                     ),
                     const SizedBox(height: 12),
                   ],

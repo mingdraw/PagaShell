@@ -525,6 +525,7 @@ class RustVncEngine implements VncEngine {
         ) as _RustEngineSession;
       }
       checkCancelled();
+      final username = (credentials.username ?? host.username).trim();
       final pageGateway = gateway?.host.gatewayType == GatewayType.page
           ? _pageSettings(gateway!)
           : null;
@@ -536,6 +537,7 @@ class RustVncEngine implements VncEngine {
           sessionId: id,
           host: host.hostname,
           port: host.port,
+          username: username,
           password: credentials.password ?? '',
           sshGatewayId: sshGateway?._sessionId,
           pageGateway: pageGateway,
@@ -544,6 +546,7 @@ class RustVncEngine implements VncEngine {
         id = await vnc.vncConnect(
           host: host.hostname,
           port: host.port,
+          username: username,
           password: credentials.password ?? '',
           sshGatewayId: sshGateway?._sessionId,
           pageGateway: pageGateway,
@@ -553,6 +556,20 @@ class RustVncEngine implements VncEngine {
       success = true;
       return _RustVncDesktopSession(id, sshGateway);
     } on AnyhowException catch (e) {
+      if (e.message.contains('VNC_ARD_USERNAME_REQUIRED')) {
+        throw VncAuthenticationException(
+          'macOS 屏幕共享需要使用系统用户名和密码登录。',
+          requiresUsername: true,
+          cause: e,
+        );
+      }
+      if (e.message.contains('VNC_ARD_AUTH_FAILED')) {
+        throw VncAuthenticationException(
+          'macOS 用户名或密码无效，或该用户无屏幕共享/远程管理权限，请核对后重试。',
+          requiresUsername: true,
+          cause: e,
+        );
+      }
       if (e.message.contains('VNC_AUTH_FAILED')) {
         throw VncAuthenticationException('VNC 服务器未接受密码，请重新输入。', cause: e);
       }
@@ -577,17 +594,137 @@ Future<Map<String, int>?> _windowsRdpKeyboardState() async {
 }
 
 class _RustRdpDesktopSession extends _RustDesktopSession
-    implements
-        RdpClipboardSession,
-        RdpBatchInputSession,
-        RdpKeyboardSyncSession,
-        RdpNetworkSession {
+    implements RdpBatchInputSession, RdpKeyboardSyncSession {
   _RustRdpDesktopSession(
     super.id,
     super.gateway, {
     super.preAttachedTexture = false,
   });
 
+  @override
+  Future<void> synchronizeKeyboard(int toggleFlags) async {
+    final state = await _windowsRdpKeyboardState();
+    await _input(kind: 3, flags: state?['toggleFlags'] ?? toggleFlags);
+  }
+
+  @override
+  Future<void> inputBatch(List<RdpInputEvent> events) async {
+    if (_closed) return;
+    try {
+      await desktop.desktopInputBatch(
+        sessionId: id,
+        events: [
+          for (final event in events)
+            switch (event) {
+              RdpKeyInput() => desktop.DesktopInputEvent(
+                pointer: false,
+                code: event.scanCode,
+                flags: (event.down ? 0 : 1) | (event.extended ? 2 : 0),
+                x: 0,
+                y: 0,
+              ),
+              RdpPointerInput() => desktop.DesktopInputEvent(
+                pointer: true,
+                code: event.wheel,
+                flags: event.flags,
+                x: event.x,
+                y: event.y,
+              ),
+            },
+        ],
+      );
+    } on AnyhowException catch (error) {
+      throw SshEngineException(error.message.split('\n').first, error);
+    }
+  }
+}
+
+class _RustVncDesktopSession extends _RustDesktopSession
+    implements VncEngineSession, RdpBatchInputSession {
+  _RustVncDesktopSession(super.id, super.gateway) : super(isVnc: true);
+
+  @override
+  Future<void> keySymbol(int keysym, {required bool down}) =>
+      _input(code: keysym, flags: down ? 0 : 1);
+
+  @override
+  Future<void> inputBatch(List<RdpInputEvent> events) async {
+    if (_closed) return;
+    try {
+      await vnc.vncInputBatch(
+        sessionId: id,
+        events: [
+          for (final event in events)
+            switch (event) {
+              RdpKeyInput() => vnc.VncInputEvent(
+                pointer: false,
+                code: event.scanCode,
+                flags: event.down ? 0 : 1,
+                x: 0,
+                y: 0,
+              ),
+              RdpPointerInput() => vnc.VncInputEvent(
+                pointer: true,
+                code: event.wheel,
+                flags: event.flags,
+                x: event.x,
+                y: event.y,
+              ),
+            },
+        ],
+      );
+    } on AnyhowException catch (error) {
+      throw SshEngineException(error.message.split('\n').first, error);
+    }
+  }
+}
+
+class _RustDesktopSession
+    implements RdpEngineSession, RdpNetworkSession, RdpClipboardSession {
+  _RustDesktopSession(
+    this.id,
+    this.gateway, {
+    this.isVnc = false,
+    bool preAttachedTexture = false,
+  }) {
+    if (preAttachedTexture) {
+      _textureRegistration = Future<bool>.value(true);
+    }
+  }
+  static const _textureEnabled = bool.fromEnvironment('PAGASHELL_RDP_GPU');
+  static const _textureChannel = MethodChannel('pagashell/rdpTexture');
+
+  static bool get shouldUseTexture =>
+      (_textureEnabled || Platform.environment['PAGASHELL_RDP_GPU'] == '1') &&
+      (Platform.isWindows || Platform.isMacOS || Platform.isLinux);
+
+  static Future<bool> attachTextureForSession(int sessionId) async {
+    try {
+      return await _textureChannel.invokeMethod<bool>('attach', sessionId) ??
+          false;
+    } on PlatformException {
+      return false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
+
+  static Future<void> detachTextureForSession(int sessionId) async {
+    try {
+      await _textureChannel.invokeMethod<void>('detach', sessionId);
+    } on PlatformException {
+      // The runner also unregisters textures when its window closes.
+    } on MissingPluginException {
+      // The engine may already have been torn down.
+    }
+  }
+
+  final int id;
+  final _RustEngineSession? gateway;
+  final bool isVnc;
+  bool _closed = false;
+  Future<void>? _closing;
+  Future<bool>? _textureRegistration;
   RdpNetworkStats? _latestNetworkStats;
   StreamController<RdpNetworkStats>? _networkController;
   Timer? _networkTimer;
@@ -641,7 +778,9 @@ class _RustRdpDesktopSession extends _RustDesktopSession
     }
     _networkPolling = true;
     try {
-      final raw = await desktop.desktopNetworkStats(sessionId: id);
+      final raw = await (isVnc
+          ? vnc.vncNetworkStats
+          : desktop.desktopNetworkStats)(sessionId: id);
       if (_closed || controller.isClosed) return;
       final stats = _mapNetworkStats(raw);
       if (_latestNetworkStats != stats) {
@@ -659,177 +798,15 @@ class _RustRdpDesktopSession extends _RustDesktopSession
   Future<void> setQualityMode(RdpQualityMode mode) async {
     if (_closed) return;
     try {
-      await desktop.desktopSetQualityMode(sessionId: id, mode: mode.wireValue);
+      await (isVnc ? vnc.vncSetQualityMode : desktop.desktopSetQualityMode)(
+        sessionId: id,
+        mode: mode.wireValue,
+      );
       await _pollNetworkStats();
     } on AnyhowException catch (error) {
       throw SshEngineException(error.message.split('\n').first, error);
     }
   }
-
-  @override
-  Future<void> close() async {
-    _networkTimer?.cancel();
-    _networkTimer = null;
-    if (_networkController != null && !_networkController!.isClosed) {
-      unawaited(_networkController!.close());
-    }
-    _networkController = null;
-    await super.close();
-  }
-
-  @override
-  Future<void> synchronizeKeyboard(int toggleFlags) async {
-    final state = await _windowsRdpKeyboardState();
-    await _input(kind: 3, flags: state?['toggleFlags'] ?? toggleFlags);
-  }
-
-  @override
-  Future<void> inputBatch(List<RdpInputEvent> events) async {
-    if (_closed) return;
-    try {
-      await desktop.desktopInputBatch(
-        sessionId: id,
-        events: [
-          for (final event in events)
-            switch (event) {
-              RdpKeyInput() => desktop.DesktopInputEvent(
-                pointer: false,
-                code: event.scanCode,
-                flags: (event.down ? 0 : 1) | (event.extended ? 2 : 0),
-                x: 0,
-                y: 0,
-              ),
-              RdpPointerInput() => desktop.DesktopInputEvent(
-                pointer: true,
-                code: event.wheel,
-                flags: event.flags,
-                x: event.x,
-                y: event.y,
-              ),
-            },
-        ],
-      );
-    } on AnyhowException catch (error) {
-      throw SshEngineException(error.message.split('\n').first, error);
-    }
-  }
-
-  @override
-  Stream<RdpClipboardEvent> get clipboardEvents async* {
-    var sequence = 0;
-    while (!_closed) {
-      try {
-        final event = await desktop.desktopClipboardEvent(
-          sessionId: id,
-          afterSequence: sequence,
-        );
-        if (_closed) return;
-        if (event == null) continue;
-        sequence = event.sequence;
-        yield RdpClipboardEvent(
-          kind: RdpClipboardEventKind.values[event.kind],
-          content: ClipboardContent(text: event.text, files: event.files),
-          transferred: event.transferred.toInt(),
-          total: event.total.toInt(),
-          error: event.error,
-        );
-      } on AnyhowException {
-        if (_closed) return;
-        throw const SshEngineException('RDP 剪贴板已断开，请重新连接');
-      }
-    }
-  }
-
-  @override
-  Future<void> setClipboardActive(bool active) async {
-    if (_closed) return;
-    final directory = active
-        ? path.join((await getTemporaryDirectory()).path, 'rdp-clipboard')
-        : '';
-    await desktop.desktopClipboardActive(
-      sessionId: id,
-      active: active,
-      cacheDirectory: directory,
-    );
-  }
-
-  @override
-  Future<void> updateClipboard(ClipboardContent content) async {
-    if (_closed) return;
-    try {
-      await desktop.desktopClipboardUpdate(
-        sessionId: id,
-        text: content.text,
-        files: content.files,
-      );
-    } on AnyhowException catch (error) {
-      throw SshEngineException(error.message.split('\n').first);
-    }
-  }
-
-  @override
-  Future<void> cancelClipboardTransfer() async {
-    if (!_closed) await desktop.desktopClipboardCancel(sessionId: id);
-  }
-}
-
-class _RustVncDesktopSession extends _RustDesktopSession
-    implements VncEngineSession {
-  _RustVncDesktopSession(super.id, super.gateway) : super(isVnc: true);
-
-  @override
-  Future<void> keySymbol(int keysym, {required bool down}) =>
-      _input(code: keysym, flags: down ? 0 : 1);
-
-  @override
-  Future<bool> resize(int width, int height) async => false;
-}
-
-class _RustDesktopSession implements RdpEngineSession {
-  _RustDesktopSession(
-    this.id,
-    this.gateway, {
-    this.isVnc = false,
-    bool preAttachedTexture = false,
-  }) {
-    if (preAttachedTexture) {
-      _textureRegistration = Future<bool>.value(true);
-    }
-  }
-  static const _textureEnabled = bool.fromEnvironment('PAGASHELL_RDP_GPU');
-  static const _textureChannel = MethodChannel('pagashell/rdpTexture');
-
-  static bool get shouldUseTexture =>
-      (_textureEnabled || Platform.environment['PAGASHELL_RDP_GPU'] == '1') &&
-      (Platform.isWindows || Platform.isMacOS || Platform.isLinux);
-
-  static Future<bool> attachTextureForSession(int sessionId) async {
-    try {
-      return await _textureChannel.invokeMethod<bool>('attach', sessionId) ??
-          false;
-    } on PlatformException {
-      return false;
-    } on MissingPluginException {
-      return false;
-    }
-  }
-
-  static Future<void> detachTextureForSession(int sessionId) async {
-    try {
-      await _textureChannel.invokeMethod<void>('detach', sessionId);
-    } on PlatformException {
-      // The runner also unregisters textures when its window closes.
-    } on MissingPluginException {
-      // The engine may already have been torn down.
-    }
-  }
-
-  final int id;
-  final _RustEngineSession? gateway;
-  final bool isVnc;
-  bool _closed = false;
-  Future<void>? _closing;
-  Future<bool>? _textureRegistration;
 
   Future<bool> _attachTexture() => attachTextureForSession(id);
 
@@ -850,11 +827,7 @@ class _RustDesktopSession implements RdpEngineSession {
       if (pumping || controller.isClosed) return;
       pumping = true;
       try {
-        if ((_textureEnabled ||
-                Platform.environment['PAGASHELL_RDP_GPU'] == '1') &&
-            !isVnc &&
-            !_closed &&
-            (Platform.isWindows || Platform.isMacOS || Platform.isLinux)) {
+        if (shouldUseTexture && !_closed) {
           await (_textureRegistration ??= _attachTexture());
         }
         // An async* stream only suspends at yield. When the frame RPC times
@@ -903,7 +876,7 @@ class _RustDesktopSession implements RdpEngineSession {
                     ),
             ),
           );
-          if (!isVnc && frame.textureId == null) {
+          if (frame.textureId == null) {
             // Native upload already failed and Rust sent a fresh CPU frame.
             // The old backing textures can be released after this delivery.
             unawaited(_detachTexture());
@@ -967,9 +940,11 @@ class _RustDesktopSession implements RdpEngineSession {
   Future<void> text(String text) => _input(kind: 2, text: text);
   @override
   Future<bool> resize(int width, int height) async {
-    if (_closed) throw const SshEngineException('RDP 会话已关闭');
+    if (_closed) {
+      throw SshEngineException(isVnc ? 'VNC 会话已关闭' : 'RDP 会话已关闭');
+    }
     try {
-      return await desktop.desktopResize(
+      return await (isVnc ? vnc.vncResize : desktop.desktopResize)(
         sessionId: id,
         width: width,
         height: height,
@@ -980,8 +955,87 @@ class _RustDesktopSession implements RdpEngineSession {
   }
 
   @override
+  Stream<RdpClipboardEvent> get clipboardEvents async* {
+    var sequence = 0;
+    while (!_closed) {
+      try {
+        final event =
+            await (isVnc
+                ? vnc.vncClipboardEvent
+                : desktop.desktopClipboardEvent)(
+              sessionId: id,
+              afterSequence: sequence,
+            );
+        if (_closed) return;
+        if (event == null) continue;
+        sequence = event.sequence;
+        yield RdpClipboardEvent(
+          kind: RdpClipboardEventKind.values[event.kind],
+          content: ClipboardContent(text: event.text, files: event.files),
+          transferred: event.transferred.toInt(),
+          total: event.total.toInt(),
+          error: event.error,
+        );
+      } on AnyhowException {
+        if (_closed) return;
+        throw SshEngineException(
+          isVnc ? 'VNC 剪贴板已断开，请重新连接' : 'RDP 剪贴板已断开，请重新连接',
+        );
+      }
+    }
+  }
+
+  @override
+  Future<void> setClipboardActive(bool active) async {
+    if (_closed) return;
+    if (isVnc) {
+      await vnc.vncClipboardActive(sessionId: id, active: active);
+      return;
+    }
+    final directory = active
+        ? path.join((await getTemporaryDirectory()).path, 'rdp-clipboard')
+        : '';
+    await desktop.desktopClipboardActive(
+      sessionId: id,
+      active: active,
+      cacheDirectory: directory,
+    );
+  }
+
+  @override
+  Future<void> updateClipboard(ClipboardContent content) async {
+    if (_closed) return;
+    try {
+      if (isVnc) {
+        await vnc.vncClipboardUpdate(sessionId: id, text: content.text);
+        return;
+      }
+      await desktop.desktopClipboardUpdate(
+        sessionId: id,
+        text: content.text,
+        files: content.files,
+      );
+    } on AnyhowException catch (error) {
+      throw SshEngineException(error.message.split('\n').first);
+    }
+  }
+
+  @override
+  Future<void> cancelClipboardTransfer() async {
+    if (!_closed && !isVnc) {
+      await desktop.desktopClipboardCancel(sessionId: id);
+    }
+  }
+
+  @override
   Future<void> close() => _closing ??= () async {
     _closed = true;
+    _networkTimer?.cancel();
+    _networkTimer = null;
+    if (_networkController != null && !_networkController!.isClosed) {
+      unawaited(_networkController!.close());
+    }
+    _networkController = null;
     try {
       await (isVnc ? vnc.vncDisconnect : desktop.desktopDisconnect)(
         sessionId: id,

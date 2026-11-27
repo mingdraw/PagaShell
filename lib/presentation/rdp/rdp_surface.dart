@@ -92,7 +92,7 @@ class RdpSurface extends ChangeNotifier {
     if (_disposed) return;
     if (frame.width < 1 ||
         frame.height < 1 ||
-        frame.width * frame.height > 16777216 ||
+        frame.width * frame.height > 24000000 ||
         frame.patchWidth < 0 ||
         frame.patchHeight < 0 ||
         frame.rgba.length != frame.patchWidth * frame.patchHeight * 4) {

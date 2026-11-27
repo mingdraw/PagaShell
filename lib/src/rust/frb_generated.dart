@@ -76,7 +76,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0';
 
   @override
-  int get rustContentHash => 1574743848;
+  int get rustContentHash => -1257197508;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -464,9 +464,25 @@ abstract class RustLibApi extends BaseApi {
     required RemoteWriteRequest request,
   });
 
+  Future<void> crateApiVncVncClipboardActive({
+    required int sessionId,
+    required bool active,
+  });
+
+  Future<DesktopClipboardEvent?> crateApiVncVncClipboardEvent({
+    required int sessionId,
+    required int afterSequence,
+  });
+
+  Future<void> crateApiVncVncClipboardUpdate({
+    required int sessionId,
+    String? text,
+  });
+
   Future<int> crateApiVncVncConnect({
     required String host,
     required int port,
+    required String username,
     required String password,
     int? sshGatewayId,
     PageGateway? pageGateway,
@@ -489,10 +505,31 @@ abstract class RustLibApi extends BaseApi {
     required String text,
   });
 
+  Future<void> crateApiVncVncInputBatch({
+    required int sessionId,
+    required List<VncInputEvent> events,
+  });
+
+  Future<DesktopNetworkStats> crateApiVncVncNetworkStats({
+    required int sessionId,
+  });
+
+  Future<bool> crateApiVncVncResize({
+    required int sessionId,
+    required int width,
+    required int height,
+  });
+
+  Future<void> crateApiVncVncSetQualityMode({
+    required int sessionId,
+    required int mode,
+  });
+
   Future<void> crateApiVncVncWorkerConnect({
     required int sessionId,
     required String host,
     required int port,
+    required String username,
     required String password,
     int? sshGatewayId,
     PageGateway? pageGateway,
@@ -3242,9 +3279,115 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<void> crateApiVncVncClipboardActive({
+    required int sessionId,
+    required bool active,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_32(sessionId, serializer);
+          sse_encode_bool(active, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 75,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiVncVncClipboardActiveConstMeta,
+        argValues: [sessionId, active],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiVncVncClipboardActiveConstMeta =>
+      const TaskConstMeta(
+        debugName: "vnc_clipboard_active",
+        argNames: ["sessionId", "active"],
+      );
+
+  @override
+  Future<DesktopClipboardEvent?> crateApiVncVncClipboardEvent({
+    required int sessionId,
+    required int afterSequence,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_32(sessionId, serializer);
+          sse_encode_u_32(afterSequence, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 76,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_opt_box_autoadd_desktop_clipboard_event,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiVncVncClipboardEventConstMeta,
+        argValues: [sessionId, afterSequence],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiVncVncClipboardEventConstMeta =>
+      const TaskConstMeta(
+        debugName: "vnc_clipboard_event",
+        argNames: ["sessionId", "afterSequence"],
+      );
+
+  @override
+  Future<void> crateApiVncVncClipboardUpdate({
+    required int sessionId,
+    String? text,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_32(sessionId, serializer);
+          sse_encode_opt_String(text, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 77,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiVncVncClipboardUpdateConstMeta,
+        argValues: [sessionId, text],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiVncVncClipboardUpdateConstMeta =>
+      const TaskConstMeta(
+        debugName: "vnc_clipboard_update",
+        argNames: ["sessionId", "text"],
+      );
+
+  @override
   Future<int> crateApiVncVncConnect({
     required String host,
     required int port,
+    required String username,
     required String password,
     int? sshGatewayId,
     PageGateway? pageGateway,
@@ -3255,13 +3398,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(host, serializer);
           sse_encode_u_16(port, serializer);
+          sse_encode_String(username, serializer);
           sse_encode_String(password, serializer);
           sse_encode_opt_box_autoadd_u_32(sshGatewayId, serializer);
           sse_encode_opt_box_autoadd_page_gateway(pageGateway, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 75,
+            funcId: 78,
             port: port_,
           );
         },
@@ -3270,7 +3414,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_AnyhowException,
         ),
         constMeta: kCrateApiVncVncConnectConstMeta,
-        argValues: [host, port, password, sshGatewayId, pageGateway],
+        argValues: [host, port, username, password, sshGatewayId, pageGateway],
         apiImpl: this,
       ),
     );
@@ -3278,7 +3422,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   TaskConstMeta get kCrateApiVncVncConnectConstMeta => const TaskConstMeta(
     debugName: "vnc_connect",
-    argNames: ["host", "port", "password", "sshGatewayId", "pageGateway"],
+    argNames: [
+      "host",
+      "port",
+      "username",
+      "password",
+      "sshGatewayId",
+      "pageGateway",
+    ],
   );
 
   @override
@@ -3291,7 +3442,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 76,
+            funcId: 79,
             port: port_,
           );
         },
@@ -3328,7 +3479,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 77,
+            funcId: 80,
             port: port_,
           );
         },
@@ -3373,7 +3524,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 78,
+            funcId: 81,
             port: port_,
           );
         },
@@ -3394,10 +3545,148 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   );
 
   @override
+  Future<void> crateApiVncVncInputBatch({
+    required int sessionId,
+    required List<VncInputEvent> events,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_32(sessionId, serializer);
+          sse_encode_list_vnc_input_event(events, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 82,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiVncVncInputBatchConstMeta,
+        argValues: [sessionId, events],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiVncVncInputBatchConstMeta => const TaskConstMeta(
+    debugName: "vnc_input_batch",
+    argNames: ["sessionId", "events"],
+  );
+
+  @override
+  Future<DesktopNetworkStats> crateApiVncVncNetworkStats({
+    required int sessionId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_32(sessionId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 83,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_desktop_network_stats,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiVncVncNetworkStatsConstMeta,
+        argValues: [sessionId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiVncVncNetworkStatsConstMeta => const TaskConstMeta(
+    debugName: "vnc_network_stats",
+    argNames: ["sessionId"],
+  );
+
+  @override
+  Future<bool> crateApiVncVncResize({
+    required int sessionId,
+    required int width,
+    required int height,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_32(sessionId, serializer);
+          sse_encode_u_16(width, serializer);
+          sse_encode_u_16(height, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 84,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bool,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiVncVncResizeConstMeta,
+        argValues: [sessionId, width, height],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiVncVncResizeConstMeta => const TaskConstMeta(
+    debugName: "vnc_resize",
+    argNames: ["sessionId", "width", "height"],
+  );
+
+  @override
+  Future<void> crateApiVncVncSetQualityMode({
+    required int sessionId,
+    required int mode,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_32(sessionId, serializer);
+          sse_encode_u_8(mode, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 85,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiVncVncSetQualityModeConstMeta,
+        argValues: [sessionId, mode],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiVncVncSetQualityModeConstMeta =>
+      const TaskConstMeta(
+        debugName: "vnc_set_quality_mode",
+        argNames: ["sessionId", "mode"],
+      );
+
+  @override
   Future<void> crateApiVncVncWorkerConnect({
     required int sessionId,
     required String host,
     required int port,
+    required String username,
     required String password,
     int? sshGatewayId,
     PageGateway? pageGateway,
@@ -3409,13 +3698,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sse_encode_u_32(sessionId, serializer);
           sse_encode_String(host, serializer);
           sse_encode_u_16(port, serializer);
+          sse_encode_String(username, serializer);
           sse_encode_String(password, serializer);
           sse_encode_opt_box_autoadd_u_32(sshGatewayId, serializer);
           sse_encode_opt_box_autoadd_page_gateway(pageGateway, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 79,
+            funcId: 86,
             port: port_,
           );
         },
@@ -3424,7 +3714,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_AnyhowException,
         ),
         constMeta: kCrateApiVncVncWorkerConnectConstMeta,
-        argValues: [sessionId, host, port, password, sshGatewayId, pageGateway],
+        argValues: [
+          sessionId,
+          host,
+          port,
+          username,
+          password,
+          sshGatewayId,
+          pageGateway,
+        ],
         apiImpl: this,
       ),
     );
@@ -3437,6 +3735,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           "sessionId",
           "host",
           "port",
+          "username",
           "password",
           "sshGatewayId",
           "pageGateway",
@@ -3452,7 +3751,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 80,
+            funcId: 87,
             port: port_,
           );
         },
@@ -3901,6 +4200,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<VncInputEvent> dco_decode_list_vnc_input_event(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_vnc_input_event).toList();
+  }
+
+  @protected
   String? dco_decode_opt_String(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_String(raw);
@@ -4202,6 +4507,21 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   void dco_decode_unit(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return;
+  }
+
+  @protected
+  VncInputEvent dco_decode_vnc_input_event(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 5)
+      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    return VncInputEvent(
+      pointer: dco_decode_bool(arr[0]),
+      code: dco_decode_u_32(arr[1]),
+      flags: dco_decode_u_16(arr[2]),
+      x: dco_decode_u_16(arr[3]),
+      y: dco_decode_u_16(arr[4]),
+    );
   }
 
   @protected
@@ -4769,6 +5089,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<VncInputEvent> sse_decode_list_vnc_input_event(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <VncInputEvent>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_vnc_input_event(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
   String? sse_decode_opt_String(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
 
@@ -5147,6 +5481,23 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   @protected
   void sse_decode_unit(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
+  }
+
+  @protected
+  VncInputEvent sse_decode_vnc_input_event(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_pointer = sse_decode_bool(deserializer);
+    var var_code = sse_decode_u_32(deserializer);
+    var var_flags = sse_decode_u_16(deserializer);
+    var var_x = sse_decode_u_16(deserializer);
+    var var_y = sse_decode_u_16(deserializer);
+    return VncInputEvent(
+      pointer: var_pointer,
+      code: var_code,
+      flags: var_flags,
+      x: var_x,
+      y: var_y,
+    );
   }
 
   @protected
@@ -5712,6 +6063,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_list_vnc_input_event(
+    List<VncInputEvent> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_vnc_input_event(item, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_opt_String(String? self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
 
@@ -6018,5 +6381,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   @protected
   void sse_encode_unit(void self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
+  }
+
+  @protected
+  void sse_encode_vnc_input_event(
+    VncInputEvent self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_bool(self.pointer, serializer);
+    sse_encode_u_32(self.code, serializer);
+    sse_encode_u_16(self.flags, serializer);
+    sse_encode_u_16(self.x, serializer);
+    sse_encode_u_16(self.y, serializer);
   }
 }

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
@@ -109,11 +109,10 @@ type Framed = TokioFramed<SessionStream>;
 type Writer = TokioFramed<WriteHalf<SessionStream>>;
 const TIMEOUT: Duration = Duration::from_secs(30);
 const REDRAW_INTERVAL: Duration = Duration::from_secs(2);
-static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 static SESSIONS: LazyLock<Mutex<HashMap<u32, Arc<Desktop>>>> = LazyLock::new(Default::default);
 
 pub(crate) fn reserve_session_id() -> u32 {
-    NEXT_ID.fetch_add(1, Ordering::Relaxed)
+    crate::desktop_frame::reserve_desktop_session_id()
 }
 
 struct Pending {
@@ -1211,8 +1210,12 @@ async fn run_stage(
     let mut clipboard_commands = clipboard.receiver();
     let mut clipboard_tick = tokio::time::interval(Duration::from_secs(5));
     clipboard_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut network_tick = tokio::time::interval(Duration::from_secs(1));
+    let mut network_tick = tokio::time::interval_at(
+        Instant::now() + Duration::from_secs(1),
+        Duration::from_secs(1),
+    );
     network_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut published_first_frame = false;
     let soft_sync = result.multitransport_soft_sync();
     let initial_network = result.network_characteristics;
     let activation_factory = result.activation_factory;
@@ -1404,6 +1407,10 @@ async fn run_stage(
                         if request.reply.send(delivery).is_ok() {
                             flow.delivered(sequence);
                             tracker.record_frame_delivered();
+                            if !published_first_frame {
+                                published_first_frame = true;
+                                network_stats.send_replace(tracker.snapshot());
+                            }
                         }
                     }
                     continue;
@@ -2555,7 +2562,7 @@ mod tests {
             resizes,
             resize_receiver: Mutex::new(Some(resize_receiver)),
         });
-        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let id = reserve_session_id();
         SESSIONS.lock().await.insert(id, entry.clone());
         (id, entry)
     }

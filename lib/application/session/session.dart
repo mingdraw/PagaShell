@@ -192,10 +192,12 @@ class RdpPasswordRequest {
     required this.username,
     required this.domain,
     required this.error,
+    this.requiresUsername = false,
   });
 
   final Host host;
   final String username;
   final String domain;
   final String error;
+  final bool requiresUsername;
 }
