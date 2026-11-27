@@ -22,7 +22,8 @@ use super::{
     wire::{Reply, Request, MAX_FRAME_BYTES, VERSION},
 };
 use crate::api::desktop::{
-    DesktopClipboardEvent, DesktopFrame, DesktopHandshake, DesktopInputEvent, DesktopWorkerStarted,
+    DesktopClipboardEvent, DesktopFrame, DesktopHandshake, DesktopInputEvent, DesktopNetworkStats,
+    DesktopWorkerStarted,
 };
 use crate::api::page::PageGateway;
 
@@ -510,6 +511,17 @@ impl Worker {
             Reply::Resize(sent) => Ok(sent),
             _ => Err(self.protocol_error()),
         }
+    }
+
+    pub(crate) async fn network_stats(&self) -> Result<DesktopNetworkStats> {
+        match self.call(Request::NetworkStats, COMMAND_TIMEOUT).await? {
+            Reply::NetworkStats(stats) => Ok(stats),
+            _ => Err(self.protocol_error()),
+        }
+    }
+
+    pub(crate) async fn set_quality_mode(&self, mode: u8) -> Result<()> {
+        self.done(Request::SetQualityMode { mode }).await
     }
 
     pub(crate) async fn clipboard_active(&self, active: bool, directory: String) -> Result<()> {

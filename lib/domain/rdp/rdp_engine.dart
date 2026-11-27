@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import '../entities/host.dart';
 import '../ssh/host_key.dart';
 import '../ssh/ssh_engine.dart';
+import 'rdp_network_stats.dart';
 
 abstract interface class RdpEngine {
   Future<RdpEngineSession> connectDesktop(
@@ -120,6 +121,12 @@ abstract interface class RdpBatchInputSession implements RdpEngineSession {
 
 abstract interface class RdpKeyboardSyncSession implements RdpEngineSession {
   Future<void> synchronizeKeyboard(int toggleFlags);
+}
+
+abstract interface class RdpNetworkSession implements RdpEngineSession {
+  RdpNetworkStats? get latestNetworkStats;
+  Stream<RdpNetworkStats> get networkStats;
+  Future<void> setQualityMode(RdpQualityMode mode);
 }
 
 /// Windows 拒绝了可重新输入的密码凭据；账号状态或协议错误不属于此类。

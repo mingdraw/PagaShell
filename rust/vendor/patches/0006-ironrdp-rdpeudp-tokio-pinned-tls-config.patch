@@ -1,3 +1,246 @@
+--- a/crates/ironrdp-rdpeudp-tokio/src/driver.rs
++++ b/crates/ironrdp-rdpeudp-tokio/src/driver.rs
+@@ -15,6 +15,7 @@
+ use core::pin::Pin;
+ use core::task::{Context, Poll};
+ use std::io;
++use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+ use std::sync::{Arc, Mutex};
+ 
+ use ironrdp_rdpeudp::pdu::{V1Datagram, V1Flags};
+@@ -25,7 +26,47 @@
+ 
+ use crate::error::{DriverError, DriverErrorExt as _, DriverErrorKind};
+ use crate::stream::SharedIo;
++use crate::transport::UdpTransportStats;
+ 
++/// Lock-free transport telemetry updated by [`Driver`] and read via
++/// [`crate::UdpTransport::stats`].
++#[derive(Debug, Default)]
++pub(crate) struct AtomicUdpStats {
++    /// Encoded as `0 => None`, `v => Some(v - 1)`.
++    srtt_ms: AtomicU32,
++    rto_ms: AtomicU32,
++    packets_sent: AtomicU64,
++    packets_retransmitted: AtomicU64,
++    packets_received: AtomicU64,
++    recv_gaps: AtomicBool,
++}
++
++impl AtomicUdpStats {
++    pub(crate) fn snapshot(&self) -> UdpTransportStats {
++        UdpTransportStats {
++            srtt_ms: self.srtt_ms.load(Ordering::Relaxed).checked_sub(1),
++            rto_ms: self.rto_ms.load(Ordering::Relaxed),
++            packets_sent: self.packets_sent.load(Ordering::Relaxed),
++            packets_retransmitted: self.packets_retransmitted.load(Ordering::Relaxed),
++            packets_received: self.packets_received.load(Ordering::Relaxed),
++            recv_gaps: self.recv_gaps.load(Ordering::Relaxed),
++        }
++    }
++
++    fn store(&self, stats: UdpTransportStats) {
++        let encoded_srtt = stats
++            .srtt_ms
++            .map_or(0, |ms| ms.saturating_add(1));
++        self.srtt_ms.store(encoded_srtt, Ordering::Relaxed);
++        self.rto_ms.store(stats.rto_ms, Ordering::Relaxed);
++        self.packets_sent.store(stats.packets_sent, Ordering::Relaxed);
++        self.packets_retransmitted
++            .store(stats.packets_retransmitted, Ordering::Relaxed);
++        self.packets_received.store(stats.packets_received, Ordering::Relaxed);
++        self.recv_gaps.store(stats.recv_gaps, Ordering::Relaxed);
++    }
++}
++
+ pub(crate) trait DatagramIo: Send + Sync + 'static {
+     fn local_addr(&self) -> Option<SocketAddr>;
+     fn peer_addr(&self) -> Option<SocketAddr>;
+@@ -96,15 +137,30 @@
+     /// dropped or treated as a fatal error.
+     pending_write: Option<Vec<u8>>,
+     stream_released: bool,
++    stats: Arc<AtomicUdpStats>,
++    v2_packets_sent: u64,
++    v2_packets_retransmitted: u64,
++    v2_packets_received: u64,
+ }
+ 
+ impl<S: DatagramIo> Driver<S> {
++    #[cfg(test)]
+     pub(crate) fn new(
+         socket: S,
+         conn: RdpeudpConnection,
+         shared: Arc<Mutex<SharedIo>>,
+         connected_notify: Arc<Notify>,
+     ) -> Self {
++        Self::with_stats(socket, conn, shared, connected_notify, Arc::new(AtomicUdpStats::default()))
++    }
++
++    pub(crate) fn with_stats(
++        socket: S,
++        conn: RdpeudpConnection,
++        shared: Arc<Mutex<SharedIo>>,
++        connected_notify: Arc<Notify>,
++        stats: Arc<AtomicUdpStats>,
++    ) -> Self {
+         Self {
+             socket,
+             conn,
+@@ -115,6 +171,10 @@
+             clock: Clock::new(),
+             pending_write: None,
+             stream_released: false,
++            stats,
++            v2_packets_sent: 0,
++            v2_packets_retransmitted: 0,
++            v2_packets_received: 0,
+         }
+     }
+ 
+@@ -167,7 +227,7 @@
+ 
+     async fn run_to_completion(&mut self) -> Result<(), DriverError> {
+         // Send any initial transmits (the SYN packet for client-side connections)
+-        self.drain_transmits().await?;
++        self.drain_transmits(false).await?;
+ 
+         loop {
+             let timeout = self
+@@ -203,7 +263,11 @@
+ 
+                     // handle_datagram takes &mut [u8] for in-place prefix byte swap
+                     match self.conn.handle_datagram(&mut self.recv_buf[..n], now) {
+-                        Ok(()) => {}
++                        Ok(()) => {
++                            if self.conn.is_established() {
++                                self.v2_packets_received = self.v2_packets_received.saturating_add(1);
++                            }
++                        }
+                         // One datagram the state machine cannot make sense of
+                         // is not grounds for tearing down the connection. UDP
+                         // delivers whatever arrives at the socket, including
+@@ -219,8 +283,9 @@
+                         Err(error) => return Err(DriverError::rdpeudp("handle datagram", error)),
+                     }
+ 
+-                    self.drain_transmits().await?;
++                    self.drain_transmits(false).await?;
+                     self.drain_events();
++                    self.sync_stats();
+                 }
+ 
+                 // Branch 2: TLS layer has data to send. Guarded off while a
+@@ -255,7 +320,8 @@
+                     if !data.is_empty() {
+                         trace!(len = data.len(), "Took outbound data from the write buffer");
+                         if self.queue_write(data)? {
+-                            self.drain_transmits().await?;
++                            self.drain_transmits(false).await?;
++                            self.sync_stats();
+                         }
+                     }
+                 }
+@@ -268,8 +334,9 @@
+                     if self.conn.is_closed() {
+                         debug!("RDP-UDP connection closed by timeout");
+                     }
+-                    self.drain_transmits().await?;
++                    self.drain_transmits(true).await?;
+                     self.drain_events();
++                    self.sync_stats();
+                 }
+             }
+ 
+@@ -304,13 +371,14 @@
+     }
+ 
+     /// Send all pending transmits to the UDP socket.
+-    async fn drain_transmits(&mut self) -> Result<(), DriverError> {
++    async fn drain_transmits(&mut self, from_timeout: bool) -> Result<(), DriverError> {
+         let now = self.clock.now();
+         while let Some(transmit) = self.conn.poll_transmit(now) {
+             // `RdpeudpConnection` never hands back a V1Datagram once
+             // established (only prefix-framed V2 packets), so there is
+             // nothing to check on the data path.
+-            let bytes = if self.conn.is_established() {
++            let established = self.conn.is_established();
++            let bytes = if established {
+                 transmit.contents
+             } else {
+                 pad_handshake_datagram(transmit.contents)
+@@ -320,11 +388,48 @@
+                 .send(&bytes)
+                 .await
+                 .map_err(|error| DriverError::socket("send datagram", error))?;
++            if established {
++                self.v2_packets_sent = self.v2_packets_sent.saturating_add(1);
++                if from_timeout && bytes.len() > 40 {
++                    self.v2_packets_retransmitted = self.v2_packets_retransmitted.saturating_add(1);
++                }
++            }
+             trace!(len = bytes.len(), "Sent datagram");
+         }
+         Ok(())
+     }
+ 
++    fn sync_stats(&self) {
++        let srtt_ms = self
++            .conn
++            .srtt()
++            .map(|d| u32::try_from(d.as_millis()).unwrap_or(u32::MAX));
++        let rto_ms = u32::try_from(self.conn.rto().as_millis()).unwrap_or(u32::MAX);
++        let snapshot = if let Some(v1) = self.conn.v1_stats() {
++            UdpTransportStats {
++                srtt_ms: v1
++                    .srtt_ms
++                    .map(|ms| u32::try_from(ms).unwrap_or(u32::MAX))
++                    .or(srtt_ms),
++                rto_ms: u32::try_from(v1.rto_ms).unwrap_or(rto_ms),
++                packets_sent: v1.data_out,
++                packets_retransmitted: v1.retransmits,
++                packets_received: v1.datagrams_in,
++                recv_gaps: v1.recv_has_gaps,
++            }
++        } else {
++            UdpTransportStats {
++                srtt_ms,
++                rto_ms,
++                packets_sent: self.v2_packets_sent,
++                packets_retransmitted: self.v2_packets_retransmitted,
++                packets_received: self.v2_packets_received,
++                recv_gaps: false,
++            }
++        };
++        self.stats.store(snapshot);
++    }
++
+     /// Hand `data` to the connection's send queue, or hold it in
+     /// `pending_write` to retry if the queue is at its backpressure limit.
+     ///
+@@ -364,7 +469,8 @@
+ 
+         trace!(len = data.len(), "Retrying held write");
+         if self.queue_write(data)? {
+-            self.drain_transmits().await?;
++            self.drain_transmits(false).await?;
++            self.sync_stats();
+         }
+ 
+         Ok(())
+--- a/crates/ironrdp-rdpeudp-tokio/src/lib.rs
++++ b/crates/ironrdp-rdpeudp-tokio/src/lib.rs
+@@ -23,8 +23,8 @@
+ };
+ pub use self::multitransport::MultitransportBootstrap;
+ pub use self::transport::{
+-    TunnelMessage, UdpAcceptConfig, UdpTlsConfig, UdpTransport, UdpTransportConfig, UdpTransportSender, accept_udp,
+-    connect_udp, connect_udp_with_socket,
++    TunnelMessage, UdpAcceptConfig, UdpTlsConfig, UdpTransport, UdpTransportConfig, UdpTransportSender,
++    UdpTransportStats, accept_udp, connect_udp, connect_udp_with_socket,
+ };
+ 
+ #[cfg(test)]
 --- a/crates/ironrdp-rdpeudp-tokio/src/tls.rs
 +++ b/crates/ironrdp-rdpeudp-tokio/src/tls.rs
 @@ -75,7 +75,7 @@
@@ -11,7 +254,14 @@
      config: tokio_rustls::rustls::ClientConfig,
 --- a/crates/ironrdp-rdpeudp-tokio/src/transport.rs
 +++ b/crates/ironrdp-rdpeudp-tokio/src/transport.rs
-@@ -34,7 +34,7 @@
+@@ -28,13 +28,13 @@
+ use tokio::task::JoinHandle;
+ use tracing::{debug, info, trace, warn};
+ 
+-use crate::driver::{DatagramIo, Driver};
++use crate::driver::{AtomicUdpStats, DatagramIo, Driver};
+ use crate::error::{
+     DriverError, DriverErrorExt as _, DriverErrorKind, UdpTransportError, UdpTransportErrorExt as _,
      UdpTransportErrorKind,
  };
  use crate::stream::{RdpeudpStream, SharedIo};
@@ -38,7 +288,84 @@
          }
      }
  }
-@@ -620,16 +624,20 @@
+@@ -296,6 +300,23 @@
+     }
+ }
+ 
++/// Snapshot of RDPEUDP transport latency and packet retransmission counters.
++#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
++pub struct UdpTransportStats {
++    /// Smoothed round-trip time in milliseconds, when measured.
++    pub srtt_ms: Option<u32>,
++    /// Current retransmission timeout in milliseconds.
++    pub rto_ms: u32,
++    /// Established data packets transmitted.
++    pub packets_sent: u64,
++    /// Established data packets retransmitted after loss/timeout.
++    pub packets_retransmitted: u64,
++    /// Established datagrams received.
++    pub packets_received: u64,
++    /// Whether the receive window currently observes missing packet gaps.
++    pub recv_gaps: bool,
++}
++
+ /// Handle to an established UDP transport.
+ ///
+ /// Provides bidirectional higher-layer data (DVC frames) over the
+@@ -315,6 +336,9 @@
+     /// driver (via `write_waker`) and the read pump (via `read_waker`).
+     shared: Arc<Mutex<SharedIo>>,
+ 
++    /// Lock-free telemetry snapshot updated by the UDP driver task.
++    stats: Arc<AtomicUdpStats>,
++
+     /// Handle to the UDP driver task (RDPEUDP2 I/O loop).
+     driver_handle: AbortOnDrop<Result<(), DriverError>>,
+ 
+@@ -453,6 +477,11 @@
+         !self.driver_handle.is_finished()
+     }
+ 
++    /// Snapshot of current RDPEUDP smoothed RTT and retransmission statistics.
++    pub fn stats(&self) -> UdpTransportStats {
++        self.stats.snapshot()
++    }
++
+     /// Create a `UdpTransport` from raw channels, without background tasks.
+     ///
+     /// For unit tests that exercise the channel-based API (FramedRead,
+@@ -463,6 +492,7 @@
+             data_rx,
+             data_tx,
+             shared: Arc::new(Mutex::new(SharedIo::new())),
++            stats: Arc::new(AtomicUdpStats::default()),
+             driver_handle: AbortOnDrop::new(tokio::spawn(async { Ok(()) })),
+             pump_handle: AbortOnDrop::new(tokio::spawn(async { Ok(()) })),
+             write_pump_handle: AbortOnDrop::new(tokio::spawn(async { Ok(()) })),
+@@ -579,6 +609,7 @@
+     // Phase 2: Create the sans-I/O connection and shared I/O bridge
+     let shared = Arc::new(Mutex::new(SharedIo::new()));
+     let connected_notify = Arc::new(Notify::new());
++    let stats = Arc::new(AtomicUdpStats::default());
+ 
+     let mut connection_config = config.connection_config;
+     connection_config.cookie_hash = Some(cookie_hash(&config.tunnel_config));
+@@ -586,7 +617,13 @@
+     let conn = RdpeudpConnection::connect(connection_config, Clock::new().now()).map_err(|error| {
+         UdpTransportError::handshake("connect UDP", DriverError::rdpeudp("build RDP-UDP connection", error))
+     })?;
+-    let driver = Driver::new(socket, conn, Arc::clone(&shared), Arc::clone(&connected_notify));
++    let driver = Driver::with_stats(
++        socket,
++        conn,
++        Arc::clone(&shared),
++        Arc::clone(&connected_notify),
++        Arc::clone(&stats),
++    );
+ 
+     // Spawn the driver task (it immediately sends the SYN packet)
+     // Guarded from here on, so the TLS and tunnel steps below abort the driver
+@@ -620,16 +657,20 @@
  
      // Phase 3: TLS handshake over the RDPEUDP2 stream
      let rdpeudp_stream = RdpeudpStream::new(Arc::clone(&shared));
@@ -69,3 +396,36 @@
      .await
      .map_err(|_| {
          debug!(timeout = ?config.tls_timeout, "TLS handshake timed out");
+@@ -681,6 +722,7 @@
+         data_rx: incoming_rx,
+         data_tx: outgoing_tx,
+         shared,
++        stats,
+         driver_handle,
+         pump_handle,
+         write_pump_handle,
+@@ -846,8 +888,15 @@
+     // Phase 3: Start the driver (it picks up the SYN+ACK from poll_transmit)
+     let shared = Arc::new(Mutex::new(SharedIo::new()));
+     let connected_notify = Arc::new(Notify::new());
++    let stats = Arc::new(AtomicUdpStats::default());
+ 
+-    let driver = Driver::new(socket, conn, Arc::clone(&shared), Arc::clone(&connected_notify));
++    let driver = Driver::with_stats(
++        socket,
++        conn,
++        Arc::clone(&shared),
++        Arc::clone(&connected_notify),
++        Arc::clone(&stats),
++    );
+     // Guarded from here on, so the TLS and tunnel steps below abort the driver
+     // if they fail rather than detaching it.
+     let mut driver_handle = AbortOnDrop::new(tokio::spawn(async move { driver.run().await }));
+@@ -911,6 +960,7 @@
+         data_rx: incoming_rx,
+         data_tx: outgoing_tx,
+         shared,
++        stats,
+         driver_handle,
+         pump_handle,
+         write_pump_handle,

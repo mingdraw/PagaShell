@@ -213,7 +213,67 @@
      /// Keep the bitmap cache across sessions in `store` ([MS-RDPEGFX] [3.3.1.5]).
      ///
      /// Once the server confirms capabilities, the client offers the stored entries in a
-@@ -644,15 +770,19 @@
+@@ -638,21 +764,79 @@
+         Some(pdu)
+     }
+ 
++    /// Request an in-channel protocol reset on V10.3–V10.7 with updated quality
++    /// capability flags (`AVC_THIN_CLIENT` and `SMALL_CACHE`).
++    ///
++    /// Keeps the confirmed capability version unchanged per [MS-RDPEGFX 3.3.5.19]
++    /// and returns `None` when the requested flags already match or the channel
++    /// cannot perform an in-channel reset.
++    #[must_use]
++    pub fn request_quality_reset(&mut self, thin_client: bool, small_cache: bool) -> Option<GfxPdu> {
++        if !self.is_active() {
++            return None;
++        }
++        let current = self.negotiated_caps.as_ref()?;
++        let updated = match *current {
++            CapabilitySet::V10_3 { mut flags } => {
++                flags.set(CapabilitiesV103Flags::AVC_THIN_CLIENT, thin_client);
++                CapabilitySet::V10_3 { flags }
++            }
++            CapabilitySet::V10_4 { mut flags } => {
++                flags.set(CapabilitiesV104Flags::AVC_THIN_CLIENT, thin_client);
++                flags.set(CapabilitiesV104Flags::SMALL_CACHE, small_cache);
++                CapabilitySet::V10_4 { flags }
++            }
++            CapabilitySet::V10_5 { mut flags } => {
++                flags.set(CapabilitiesV104Flags::AVC_THIN_CLIENT, thin_client);
++                flags.set(CapabilitiesV104Flags::SMALL_CACHE, small_cache);
++                CapabilitySet::V10_5 { flags }
++            }
++            CapabilitySet::V10_6 { mut flags } => {
++                flags.set(CapabilitiesV104Flags::AVC_THIN_CLIENT, thin_client);
++                flags.set(CapabilitiesV104Flags::SMALL_CACHE, small_cache);
++                CapabilitySet::V10_6 { flags }
++            }
++            CapabilitySet::V10_6Err { mut flags } => {
++                flags.set(CapabilitiesV104Flags::AVC_THIN_CLIENT, thin_client);
++                flags.set(CapabilitiesV104Flags::SMALL_CACHE, small_cache);
++                CapabilitySet::V10_6Err { flags }
++            }
++            CapabilitySet::V10_7 { mut flags } => {
++                flags.set(CapabilitiesV107Flags::AVC_THIN_CLIENT, thin_client);
++                flags.set(CapabilitiesV107Flags::SMALL_CACHE, small_cache);
++                CapabilitySet::V10_7 { flags }
++            }
++            _ => return None,
++        };
++        if &updated == current {
++            return None;
++        }
++        let pdu = GfxPdu::CapabilitiesAdvertise(CapabilitiesAdvertisePdu::from_typed(core::slice::from_ref(&updated)));
++        self.state = ClientState::Resetting;
++        self.save_persistent_cache();
++        self.restart_channel_state();
++        Some(pdu)
++    }
++
+     /// Forgets everything a new capability exchange starts over: surfaces, caches, codec
+     /// contexts and the frame count.
+     fn restart_channel_state(&mut self) {
          self.surfaces.clear();
          // The compositor reset below drops their budget charge with everything else.
          self.avc444_frames.clear();
@@ -233,7 +293,7 @@
          // Windows restarts its sent-frame count and rejects ACK counts greater than that value.
          self.total_frames_decoded = 0;
      }
-@@ -690,9 +820,28 @@
+@@ -690,9 +874,28 @@
      /// ready to blit into a framebuffer. Each call empties the queue.
      #[must_use]
      pub fn drain_output(&mut self) -> Vec<OutputUpdate> {
@@ -262,7 +322,7 @@
      /// Take the RemoteApp window regions that changed in completed frames.
      ///
      /// Surfaces the server maps to a RAIL window with `MapSurfaceToWindow` or
-@@ -718,6 +867,9 @@
+@@ -718,6 +921,9 @@
      // ========================================================================
  
      fn process_messages(&mut self, payload: &[u8]) -> PduResult<Vec<DvcMessage>> {
@@ -272,7 +332,7 @@
          self.decompressed_buffer.clear();
          self.decompressed_buffer.shrink_to(MAX_DECOMPRESSED_BUFFER_CAPACITY);
          self.decompressor
-@@ -730,20 +882,25 @@
+@@ -730,20 +936,25 @@
              let mut cursor = ReadCursor::new(self.decompressed_buffer.as_slice());
              while !cursor.is_empty() {
                  let pdu: GfxPdu = decode_cursor(&mut cursor).map_err(|e| decode_err!(e))?;
@@ -301,7 +361,7 @@
          // MS-RDPEGFX 3.3.5.19 ignores all pre-confirmation server messages, including ResetGraphics.
          if self.state == ClientState::Resetting && !matches!(pdu, GfxPdu::CapabilitiesConfirm(_)) {
              return Ok(Vec::new());
-@@ -785,13 +942,19 @@
+@@ -785,13 +996,19 @@
                  self.handle_wire_to_surface2(pdu)?;
                  Ok(vec![])
              }
@@ -324,7 +384,7 @@
                  self.handler.on_solid_fill(&pdu);
                  Ok(vec![])
              }
-@@ -801,12 +964,23 @@
+@@ -801,12 +1018,23 @@
                      dst = pdu.destination_surface_id,
                      "SurfaceToSurface"
                  );
@@ -354,7 +414,7 @@
                  self.handler.on_surface_to_surface(&pdu);
                  Ok(vec![])
              }
-@@ -818,8 +992,12 @@
+@@ -818,8 +1046,12 @@
                      cache_slot = pdu.cache_slot,
                      "SurfaceToCache"
                  );
@@ -369,7 +429,7 @@
                  self.handler.on_surface_to_cache(&pdu);
                  Ok(vec![])
              }
-@@ -829,14 +1007,33 @@
+@@ -829,14 +1061,33 @@
                      surface_id = pdu.surface_id,
                      "CacheToSurface"
                  );
@@ -407,7 +467,7 @@
                  self.handler.on_evict_cache_entry(&pdu);
                  Ok(vec![])
              }
-@@ -964,7 +1161,15 @@
+@@ -964,7 +1215,15 @@
          self.surfaces.clear();
          // The compositor reset below recomputes its budget without them.
          self.avc444_frames.clear();
@@ -423,7 +483,7 @@
          self.pending_output_reset = output_size;
  
          // Reset frame tracking state so subsequent FrameAcknowledge PDUs
-@@ -1018,7 +1223,14 @@
+@@ -1018,7 +1277,14 @@
          debug!(surface_id, width, height, ?pixel_format, "Surface created");
          self.end_h264_stream(surface_id);
          self.release_avc444_frame(surface_id);
@@ -439,7 +499,7 @@
          self.handler.on_surface_created(&surface);
          self.surfaces.insert(surface_id, surface);
      }
-@@ -1028,7 +1240,11 @@
+@@ -1028,7 +1294,11 @@
          self.end_h264_stream(surface_id);
          self.release_avc444_frame(surface_id);
          if self.surfaces.remove(&surface_id).is_some() {
@@ -452,7 +512,7 @@
              debug!(surface_id, "Surface deleted");
              self.handler.on_surface_deleted(surface_id);
          } else {
-@@ -1095,7 +1311,14 @@
+@@ -1095,7 +1365,14 @@
              surface.is_mapped = true;
              surface.output_origin_x = origin_x;
              surface.output_origin_y = origin_y;
@@ -468,7 +528,7 @@
              debug!(surface_id, origin_x, origin_y, "Surface mapped to output");
              self.handler.on_surface_mapped(surface_id, origin_x, origin_y);
          } else {
-@@ -1112,6 +1335,9 @@
+@@ -1112,6 +1389,9 @@
      ) {
          if let Some(surface) = self.surfaces.get_mut(&surface_id) {
              surface.is_mapped = true;
@@ -478,7 +538,7 @@
              self.compositor
                  .map_surface_to_window(surface_id, window_id, mapped, target);
              debug!(surface_id, window_id, ?mapped, ?target, "Surface mapped to window");
-@@ -1125,13 +1351,23 @@
+@@ -1125,13 +1405,23 @@
              surface.is_mapped = true;
              surface.output_origin_x = pdu.output_origin_x;
              surface.output_origin_y = pdu.output_origin_y;
@@ -509,7 +569,7 @@
              debug!(
                  surface_id = pdu.surface_id,
                  origin_x = pdu.output_origin_x,
-@@ -1224,7 +1460,7 @@
+@@ -1224,7 +1514,7 @@
              .ok_or_else(|| pdu_other_err!("unknown surface in WireToSurface2"))?;
          let (surface_width, surface_height) = (surface.width, surface.height);
          // A surface the compositor refused paints nothing, so it keeps no Progressive tile state either.
@@ -518,7 +578,7 @@
              trace!(
                  surface_id = pdu.surface_id,
                  "WireToSurface2 for a surface without pixels -- not decoded"
-@@ -1233,82 +1469,78 @@
+@@ -1233,82 +1523,78 @@
              return Ok(());
          }
  
@@ -666,7 +726,7 @@
  
          Ok(())
      }
-@@ -1335,38 +1567,98 @@
+@@ -1335,38 +1621,98 @@
      }
  
      fn decode_avc420(&mut self, surface_id: u16, dest_rect: &ExclusiveRectangle, bitmap_data: &[u8]) -> PduResult<()> {
@@ -780,7 +840,7 @@
                  )),
              ));
          }
-@@ -1383,21 +1675,37 @@
+@@ -1383,21 +1729,37 @@
          // `regionRects` and blitted a single bounding-box block copied from the
          // frame origin (0, 0), so partial updates drew pixels from the top-left
          // corner and overwrote the gaps between regions.
@@ -829,7 +889,7 @@
              let update = BitmapUpdate {
                  surface_id,
                  destination_rectangle,
-@@ -1414,8 +1722,10 @@
+@@ -1414,8 +1776,10 @@
              // No region metadata: fall back to the single bounding-box update,
              // copying from the frame origin. This matches the pre-#2042 behavior
              // for streams that legitimately omit regionRects.
@@ -842,7 +902,7 @@
              return Ok(());
          }
  
-@@ -1423,8 +1733,8 @@
+@@ -1423,8 +1787,8 @@
              // Clip the region to the surface and the decoded frame so a
              // malformed or over-large rect cannot read out of bounds or paint
              // outside the surface.
@@ -853,7 +913,7 @@
              let clip_right = region.right.min(surface_bounds.0).min(frame_w);
              let clip_bottom = region.bottom.min(surface_bounds.1).min(frame_h);
              if region.left >= clip_right || region.top >= clip_bottom {
-@@ -1458,9 +1768,11 @@
+@@ -1458,9 +1822,11 @@
  
              // Copy pixels (x, y) -> (x, y): the source in the decoded frame is the
              // region's own top-left, not the frame origin.
@@ -867,7 +927,7 @@
          Ok(())
      }
  
-@@ -1493,9 +1805,80 @@
+@@ -1493,9 +1859,80 @@
              _ => (Some(&stream.stream1), stream.stream2.as_ref()),
          };
          // The caller forwards AVC444 to the handler unless a YUV decoder is present.
@@ -948,7 +1008,7 @@
          // UNTESTED: that the decoder returns each view for its own sub-stream. Both sub-streams
          // are one H.264 stream (MS-RDPEGFX 2.2.4.5), and a decoder that delays pictures would
          // pair a main view with the previous auxiliary view; the tests use a decoder that cannot
-@@ -1528,9 +1911,10 @@
+@@ -1528,9 +1965,10 @@
          let frame = match self.avc444_frames.entry(surface_id) {
              Entry::Occupied(entry) => entry.into_mut(),
              Entry::Vacant(entry) => {
@@ -962,7 +1022,7 @@
                  {
                      return Err(pdu_other_err!("AVC444 picture exceeds the compositor budget"));
                  }
-@@ -1545,6 +1929,7 @@
+@@ -1545,6 +1983,7 @@
          }
  
          let mut painted = BTreeSet::new();
@@ -970,7 +1030,7 @@
          for rect in main
              .into_iter()
              .chain(auxiliary)
-@@ -1562,11 +1947,21 @@
+@@ -1562,11 +2001,21 @@
              if !fresh {
                  continue;
              }
@@ -994,7 +1054,7 @@
                  height: clipped.bottom - clipped.top,
                  destination_rectangle: clipped,
              };
-@@ -1574,6 +1969,9 @@
+@@ -1574,6 +2023,9 @@
                  .apply_bitmap(surface_id, &update.destination_rectangle, &update.data);
              self.handler.on_bitmap_updated(&update);
          }
@@ -1004,7 +1064,7 @@
          Ok(())
      }
  
-@@ -1583,30 +1981,57 @@
+@@ -1583,30 +2035,57 @@
          dest_rect: &ExclusiveRectangle,
          bitmap_data: &[u8],
      ) -> PduResult<()> {
@@ -1069,7 +1129,7 @@
          Ok(())
      }
  
-@@ -1641,6 +2066,14 @@
+@@ -1641,6 +2120,14 @@
          // `ALPHACODEC_BITMAP_STREAM` ([MS-RDPEGFX] 2.2.4.3), so a Planar command
          // contributes color only and the pixels are opaque.
          let rgba = convert_rgb24_to_rgba(&rgb24);
@@ -1084,7 +1144,7 @@
  
          let update = BitmapUpdate {
              surface_id,
-@@ -1774,6 +2207,7 @@
+@@ -1774,6 +2261,7 @@
                      .decode(tile, &tile_set.quants, tile_set.entropy_algorithm)
                      .map_err(|e| pdu_other_err!("RemoteFX tile decode", source: e))?;
  
@@ -1092,7 +1152,7 @@
                  for rectangle in visible {
                      let destination_rectangle = ExclusiveRectangle {
                          left: rectangle.left,
-@@ -1793,6 +2227,20 @@
+@@ -1793,6 +2281,20 @@
                          right: local_edge(destination_rectangle.right, tile_left),
                          bottom: local_edge(destination_rectangle.bottom, tile_top),
                      };
@@ -1113,7 +1173,7 @@
                      let update = BitmapUpdate {
                          surface_id,
                          width: destination_rectangle.right - destination_rectangle.left,
-@@ -1805,6 +2253,9 @@
+@@ -1805,6 +2307,9 @@
                          .apply_bitmap(surface_id, &update.destination_rectangle, &update.data);
                      self.handler.on_bitmap_updated(&update);
                  }
@@ -1123,7 +1183,7 @@
              }
          }
  
-@@ -1818,9 +2269,10 @@
+@@ -1818,9 +2323,10 @@
      /// [MS-RDPEGFX]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpegfx/da5c75f9-cd99-450c-98c4-014a496942b0
      /// [3.3.5.1]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpegfx/3fdfcd8d-ec4f-4b7a-8e0d-0385a840ec81
      fn decode_alpha(&mut self, surface_id: u16, dest_rect: &ExclusiveRectangle, bitmap_data: &[u8]) -> PduResult<()> {
@@ -1135,7 +1195,7 @@
              .map_err(|e| pdu_other_err!("Alpha decode", source: e))?;
  
          // The handler receives the whole clipped destination after every Alpha command,
-@@ -1828,6 +2280,10 @@
+@@ -1828,6 +2334,10 @@
          // complete RGBA pixels, which an alpha-only update would break; if that cost matters,
          // change the handler contract rather than shrinking this update.
          if let Some((destination_rectangle, data)) = composited {
@@ -1146,7 +1206,7 @@
              let update = BitmapUpdate {
                  surface_id,
                  width: destination_rectangle.right - destination_rectangle.left,
-@@ -2026,6 +2482,20 @@
+@@ -2026,6 +2536,20 @@
          // the convention so that handlers get a uniform pixel format.
          // Uncompressed wire format is 32-bit LE (0xAARRGGBB → bytes [B, G, R, A]).
          let rgba_data = convert_uncompressed_to_rgba(&pdu.bitmap_data);
@@ -1167,7 +1227,7 @@
  
          let update = BitmapUpdate {
              surface_id: pdu.surface_id,
-@@ -2042,28 +2512,49 @@
+@@ -2042,28 +2566,49 @@
      }
  
      #[expect(clippy::as_conversions, reason = "Box<GfxPdu> to Box<dyn DvcEncode> coercion")]
@@ -1226,7 +1286,7 @@
      }
  }
  
-@@ -2106,7 +2597,11 @@
+@@ -2106,7 +2651,11 @@
                  avc444, "No advertisable EGFX capability set; falling back to V8"
              );
              caps.push(CapabilitySet::V8 {
@@ -1239,7 +1299,7 @@
              });
          }
  
-@@ -2168,15 +2663,6 @@
+@@ -2168,15 +2717,6 @@
      dst
  }
  
@@ -1255,7 +1315,7 @@
  /// Convert uncompressed 32bpp little-endian pixels to RGBA8888
  ///
  /// The wire format for uncompressed graphics is 0xAARRGGBB in a 32-bit
-@@ -2741,24 +3227,6 @@
+@@ -2741,24 +3281,6 @@
      }
  
      #[test]
@@ -1280,7 +1340,7 @@
      fn convert_uncompressed_bgrx_to_rgba() {
          // Wire format: [B, G, R, A] per pixel (0xAARRGGBB little-endian)
          let wire_pixels = vec![
-@@ -3981,7 +4449,7 @@
+@@ -3981,7 +4503,7 @@
      fn frame_ack_queue_depth_is_not_a_frame_count() {
          let mut handler = GraphicsPipelineClient::new(Box::new(TestHandler), None);
          handler.total_frames_decoded = 3;

@@ -4,7 +4,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::api::desktop::{
-    DesktopClipboardEvent, DesktopFrame, DesktopHandshake, DesktopInputEvent,
+    DesktopClipboardEvent, DesktopFrame, DesktopHandshake, DesktopInputEvent, DesktopNetworkStats,
 };
 
 pub(super) const VERSION: u32 = 1;
@@ -99,6 +99,10 @@ pub(super) enum Request {
         width: u16,
         height: u16,
     },
+    NetworkStats,
+    SetQualityMode {
+        mode: u8,
+    },
     ClipboardActive {
         active: bool,
         directory: String,
@@ -126,6 +130,7 @@ pub(super) enum Reply {
     },
     NeedFrameSpace(u32),
     Resize(bool),
+    NetworkStats(DesktopNetworkStats),
     Clipboard(Option<DesktopClipboardEvent>),
     Error(String),
 }
@@ -357,5 +362,61 @@ mod tests {
         };
         assert_eq!((frame.sequence, frame.width, frame.height), (5, 1920, 1080));
         assert_eq!((surface.handle, surface.generation), (0xDEAD_BEEF, 3));
+    }
+
+    #[tokio::test]
+    async fn network_stats_and_quality_mode_round_trip_over_pipe() {
+        let (mut writer, mut reader) = tokio::io::duplex(2048);
+        write(
+            &mut writer,
+            Packet {
+                id: 11,
+                body: Request::NetworkStats,
+            },
+        )
+        .await
+        .unwrap();
+        write(
+            &mut writer,
+            Packet {
+                id: 12,
+                body: Request::SetQualityMode { mode: 2 },
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            read::<Request>(&mut reader).await.unwrap().body,
+            Request::NetworkStats
+        ));
+        assert!(matches!(
+            read::<Request>(&mut reader).await.unwrap().body,
+            Request::SetQualityMode { mode: 2 }
+        ));
+
+        let expected = DesktopNetworkStats {
+            rtt_ms: Some(42),
+            throughput_kbps: 2400,
+            bandwidth_kbps: Some(12000),
+            packet_loss_permille: Some(5),
+            fps: 58,
+            signal_level: 4,
+            quality_tier: 1,
+            quality_mode: 0,
+            transport_kind: 1,
+        };
+        write(
+            &mut writer,
+            Packet {
+                id: 11,
+                body: Reply::NetworkStats(expected),
+            },
+        )
+        .await
+        .unwrap();
+        let Reply::NetworkStats(actual) = read::<Reply>(&mut reader).await.unwrap().body else {
+            panic!("expected NetworkStats reply");
+        };
+        assert_eq!(actual, expected);
     }
 }

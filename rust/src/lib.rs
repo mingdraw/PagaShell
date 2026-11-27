@@ -8,6 +8,7 @@ mod desktop_frame_flow;
 #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 mod desktop_h264;
 mod desktop_input;
+mod desktop_network;
 #[cfg(any(windows, target_os = "macos", target_os = "linux", test))]
 mod desktop_texture;
 mod desktop_transport;

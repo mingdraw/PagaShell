@@ -28,7 +28,7 @@ use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, trace, warn};
 
-use crate::driver::{DatagramIo, Driver};
+use crate::driver::{AtomicUdpStats, DatagramIo, Driver};
 use crate::error::{
     DriverError, DriverErrorExt as _, DriverErrorKind, UdpTransportError, UdpTransportErrorExt as _,
     UdpTransportErrorKind,
@@ -300,6 +300,23 @@ impl UdpTransportSender {
     }
 }
 
+/// Snapshot of RDPEUDP transport latency and packet retransmission counters.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UdpTransportStats {
+    /// Smoothed round-trip time in milliseconds, when measured.
+    pub srtt_ms: Option<u32>,
+    /// Current retransmission timeout in milliseconds.
+    pub rto_ms: u32,
+    /// Established data packets transmitted.
+    pub packets_sent: u64,
+    /// Established data packets retransmitted after loss/timeout.
+    pub packets_retransmitted: u64,
+    /// Established datagrams received.
+    pub packets_received: u64,
+    /// Whether the receive window currently observes missing packet gaps.
+    pub recv_gaps: bool,
+}
+
 /// Handle to an established UDP transport.
 ///
 /// Provides bidirectional higher-layer data (DVC frames) over the
@@ -318,6 +335,9 @@ pub struct UdpTransport {
     /// Held here so `shutdown()` can signal closure to both the
     /// driver (via `write_waker`) and the read pump (via `read_waker`).
     shared: Arc<Mutex<SharedIo>>,
+
+    /// Lock-free telemetry snapshot updated by the UDP driver task.
+    stats: Arc<AtomicUdpStats>,
 
     /// Handle to the UDP driver task (RDPEUDP2 I/O loop).
     driver_handle: AbortOnDrop<Result<(), DriverError>>,
@@ -457,6 +477,11 @@ impl UdpTransport {
         !self.driver_handle.is_finished()
     }
 
+    /// Snapshot of current RDPEUDP smoothed RTT and retransmission statistics.
+    pub fn stats(&self) -> UdpTransportStats {
+        self.stats.snapshot()
+    }
+
     /// Create a `UdpTransport` from raw channels, without background tasks.
     ///
     /// For unit tests that exercise the channel-based API (FramedRead,
@@ -467,6 +492,7 @@ impl UdpTransport {
             data_rx,
             data_tx,
             shared: Arc::new(Mutex::new(SharedIo::new())),
+            stats: Arc::new(AtomicUdpStats::default()),
             driver_handle: AbortOnDrop::new(tokio::spawn(async { Ok(()) })),
             pump_handle: AbortOnDrop::new(tokio::spawn(async { Ok(()) })),
             write_pump_handle: AbortOnDrop::new(tokio::spawn(async { Ok(()) })),
@@ -583,6 +609,7 @@ pub(crate) async fn connect_udp_with_datagram_io<S: DatagramIo>(
     // Phase 2: Create the sans-I/O connection and shared I/O bridge
     let shared = Arc::new(Mutex::new(SharedIo::new()));
     let connected_notify = Arc::new(Notify::new());
+    let stats = Arc::new(AtomicUdpStats::default());
 
     let mut connection_config = config.connection_config;
     connection_config.cookie_hash = Some(cookie_hash(&config.tunnel_config));
@@ -590,7 +617,13 @@ pub(crate) async fn connect_udp_with_datagram_io<S: DatagramIo>(
     let conn = RdpeudpConnection::connect(connection_config, Clock::new().now()).map_err(|error| {
         UdpTransportError::handshake("connect UDP", DriverError::rdpeudp("build RDP-UDP connection", error))
     })?;
-    let driver = Driver::new(socket, conn, Arc::clone(&shared), Arc::clone(&connected_notify));
+    let driver = Driver::with_stats(
+        socket,
+        conn,
+        Arc::clone(&shared),
+        Arc::clone(&connected_notify),
+        Arc::clone(&stats),
+    );
 
     // Spawn the driver task (it immediately sends the SYN packet)
     // Guarded from here on, so the TLS and tunnel steps below abort the driver
@@ -689,6 +722,7 @@ pub(crate) async fn connect_udp_with_datagram_io<S: DatagramIo>(
         data_rx: incoming_rx,
         data_tx: outgoing_tx,
         shared,
+        stats,
         driver_handle,
         pump_handle,
         write_pump_handle,
@@ -854,8 +888,15 @@ async fn accept_udp_after_initial_datagram<S: DatagramIo>(
     // Phase 3: Start the driver (it picks up the SYN+ACK from poll_transmit)
     let shared = Arc::new(Mutex::new(SharedIo::new()));
     let connected_notify = Arc::new(Notify::new());
+    let stats = Arc::new(AtomicUdpStats::default());
 
-    let driver = Driver::new(socket, conn, Arc::clone(&shared), Arc::clone(&connected_notify));
+    let driver = Driver::with_stats(
+        socket,
+        conn,
+        Arc::clone(&shared),
+        Arc::clone(&connected_notify),
+        Arc::clone(&stats),
+    );
     // Guarded from here on, so the TLS and tunnel steps below abort the driver
     // if they fail rather than detaching it.
     let mut driver_handle = AbortOnDrop::new(tokio::spawn(async move { driver.run().await }));
@@ -919,6 +960,7 @@ async fn accept_udp_after_initial_datagram<S: DatagramIo>(
         data_rx: incoming_rx,
         data_tx: outgoing_tx,
         shared,
+        stats,
         driver_handle,
         pump_handle,
         write_pump_handle,

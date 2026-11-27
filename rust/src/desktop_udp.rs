@@ -6,11 +6,19 @@ use std::time::Duration;
 
 use anyhow::Result;
 use ironrdp::connector::MultitransportResult;
+use ironrdp::core::{decode, encode_vec};
 use ironrdp::pdu::gcc::MultiTransportFlags;
+use ironrdp::pdu::rdp::autodetect::{
+    AutoDetectReqPdu, AutoDetectRequest, AutoDetectResponse, AutoDetectRspPdu,
+    BW_RESULTS_CONTINUOUS, BW_START_RELIABLE_UDP, BW_STOP_RELIABLE_UDP,
+};
 use ironrdp::pdu::rdp::multitransport::{
     MultitransportRequestPdu, MultitransportResponsePdu, RequestedProtocol,
 };
-use ironrdp_rdpeudp_tokio::{MultitransportBootstrap, UdpTlsConfig, UdpTransport};
+use ironrdp_rdpemt::{SubHeaderType, TunnelSubHeader};
+use ironrdp_rdpeudp_tokio::{
+    MultitransportBootstrap, TunnelMessage, UdpTlsConfig, UdpTransport, UdpTransportStats,
+};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, Error, SignatureScheme};
@@ -32,6 +40,7 @@ struct Candidate {
 pub(crate) struct Sideband {
     candidate: Option<Candidate>,
     pub transport: Option<UdpTransport>,
+    bw_window: Option<(std::time::Instant, u32)>,
 }
 
 impl Sideband {
@@ -56,6 +65,7 @@ impl Sideband {
         Ok(Self {
             candidate: Some(Candidate { peer, host, tls }),
             transport: None,
+            bw_window: None,
         })
     }
 
@@ -89,11 +99,100 @@ impl Sideband {
         abort
     }
 
-    pub async fn recv(&mut self) -> Option<Vec<u8>> {
+    pub async fn recv(&mut self) -> Option<TunnelMessage> {
         match self.transport.as_mut() {
-            Some(transport) => transport.recv().await,
+            Some(transport) => transport.recv_message().await,
             None => std::future::pending().await,
         }
+    }
+
+    pub fn stats(&self) -> Option<UdpTransportStats> {
+        self.transport.as_ref().map(UdpTransport::stats)
+    }
+
+    /// Processes MS-RDPEMT continuous Auto-Detect sub-headers riding on a reliable
+    /// UDP Tunnel Data PDU, answering RTT and bandwidth probes and returning any
+    /// server-reported network characteristics `(base_rtt_ms, avg_rtt_ms, bw_kbps)`.
+    pub async fn handle_autodetect_subheaders(
+        &mut self,
+        payload_len: usize,
+        sub_headers: &[TunnelSubHeader],
+    ) -> Vec<(Option<u32>, u32, Option<u32>)> {
+        if let Some((_, bytes)) = self.bw_window.as_mut() {
+            *bytes = bytes.saturating_add(u32::try_from(payload_len).unwrap_or(u32::MAX));
+        }
+        let mut characteristics = Vec::new();
+        let mut responses = Vec::new();
+        let now = std::time::Instant::now();
+        for header in sub_headers {
+            if header.sub_header_type != SubHeaderType::AutoDetectRequest {
+                continue;
+            }
+            let Ok(req) = decode::<AutoDetectReqPdu>(&header.data) else {
+                continue;
+            };
+            match req.request {
+                AutoDetectRequest::RttRequest {
+                    sequence_number, ..
+                } => {
+                    responses.push(AutoDetectResponse::RttResponse { sequence_number });
+                }
+                AutoDetectRequest::BandwidthMeasureStart {
+                    request_type: BW_START_RELIABLE_UDP,
+                    ..
+                } => {
+                    self.bw_window = Some((now, 0));
+                }
+                AutoDetectRequest::BandwidthMeasureStop {
+                    sequence_number,
+                    request_type: BW_STOP_RELIABLE_UDP,
+                    ..
+                } => {
+                    let (time_delta_ms, byte_count) = match self.bw_window.take() {
+                        Some((started, bytes)) => (
+                            u32::try_from(now.saturating_duration_since(started).as_millis())
+                                .unwrap_or(u32::MAX)
+                                .max(1),
+                            bytes,
+                        ),
+                        None => (1, 0),
+                    };
+                    responses.push(AutoDetectResponse::BandwidthMeasureResults {
+                        sequence_number,
+                        response_type: BW_RESULTS_CONTINUOUS,
+                        time_delta_ms,
+                        byte_count,
+                    });
+                }
+                AutoDetectRequest::NetworkCharacteristicsResult {
+                    base_rtt_ms,
+                    bandwidth_kbps,
+                    average_rtt_ms,
+                    ..
+                } => {
+                    characteristics.push((base_rtt_ms, average_rtt_ms, bandwidth_kbps));
+                }
+                _ => {}
+            }
+        }
+        if !responses.is_empty() {
+            if let Some(transport) = self.transport.as_ref() {
+                for response in responses {
+                    if let Ok(encoded) = encode_vec(&AutoDetectRspPdu::new(response)) {
+                        let _ = transport
+                            .send_message(TunnelMessage {
+                                sub_headers: vec![TunnelSubHeader {
+                                    sub_header_type: SubHeaderType::AutoDetectResponse,
+                                    data: encoded,
+                                }],
+                                data: Vec::new(),
+                            })
+                            .await;
+                    }
+                }
+            }
+        }
+        characteristics
     }
 }
 
@@ -248,7 +347,7 @@ mod tests {
         ));
         tokio::time::timeout(UDP_TIMEOUT, async {
             server.send(vec![1, 2, 3]).await.unwrap();
-            assert_eq!(client.recv().await.unwrap(), [1, 2, 3]);
+            assert_eq!(client.recv().await.unwrap().data, [1, 2, 3]);
             client
                 .transport
                 .as_ref()

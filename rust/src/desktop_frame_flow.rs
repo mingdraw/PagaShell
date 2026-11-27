@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use ironrdp::dvc::{encode_dvc_messages, DvcMessage, DvcMessageBatch};
 use ironrdp::svc::ChannelFlags;
-use ironrdp_egfx::pdu::{FrameAcknowledgePdu, GfxPdu};
+use ironrdp_egfx::pdu::{FrameAcknowledgePdu, GfxPdu, QueueDepth};
 use tokio::time::Instant;
 
 // Let the viewer pace delivery, while making progress on a hidden tab, a static
@@ -11,23 +11,56 @@ use tokio::time::Instant;
 const ACK_LIMIT: usize = 8;
 const ACK_WAIT: Duration = Duration::from_millis(24);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FrameFlowConfig {
+    pub ack_wait: Duration,
+    pub ack_limit: usize,
+    /// Optional congestion hint injected into `QueueDepth` when frames pile up
+    /// under adaptive quality degradation so the server eases bitrate/QP.
+    pub congestion_hint_bytes: u32,
+}
+
+impl Default for FrameFlowConfig {
+    fn default() -> Self {
+        Self {
+            ack_wait: ACK_WAIT,
+            ack_limit: ACK_LIMIT,
+            congestion_hint_bytes: 0,
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct FrameFlow {
     queue: VecDeque<(FrameAcknowledgePdu, Instant)>,
     channel: Option<u32>,
     delivered: Option<(u32, usize)>,
     consumed: usize,
+    config: FrameFlowConfig,
 }
 
 impl FrameFlow {
+    pub fn set_config(&mut self, config: FrameFlowConfig) {
+        self.config = FrameFlowConfig {
+            ack_wait: config.ack_wait.max(Duration::from_millis(8)),
+            ack_limit: config.ack_limit.max(1),
+            congestion_hint_bytes: config.congestion_hint_bytes,
+        };
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.queue.len()
+    }
+
     pub fn enqueue(&mut self, channel: u32, acks: Vec<FrameAcknowledgePdu>, now: Instant) {
         if acks.is_empty() {
             return;
         }
         debug_assert!(self.queue.is_empty() || self.channel == Some(channel));
         self.channel = Some(channel);
+        let deadline = now + self.config.ack_wait;
         self.queue
-            .extend(acks.into_iter().map(|ack| (ack, now + ACK_WAIT)));
+            .extend(acks.into_iter().map(|ack| (ack, deadline)));
     }
 
     pub fn delivered(&mut self, sequence: u32) {
@@ -52,7 +85,7 @@ impl FrameFlow {
         now: Instant,
         flush: bool,
     ) -> anyhow::Result<Option<DvcMessageBatch>> {
-        let len = if flush || self.queue.len() >= ACK_LIMIT {
+        let len = if flush || self.queue.len() >= self.config.ack_limit {
             self.queue.len()
         } else {
             self.consumed.max(
@@ -65,6 +98,8 @@ impl FrameFlow {
         if len == 0 {
             return Ok(None);
         }
+        let backlog = self.queue.len();
+        let congestion_hint = self.config.congestion_hint_bytes;
         self.consumed = self.consumed.saturating_sub(len);
         if let Some((_, count)) = self.delivered.as_mut() {
             *count = count.saturating_sub(len);
@@ -72,7 +107,19 @@ impl FrameFlow {
         let messages = self
             .queue
             .drain(..len)
-            .map(|(ack, _)| Box::new(GfxPdu::FrameAcknowledge(ack)) as DvcMessage)
+            .map(|(mut ack, _)| {
+                if congestion_hint > 0 && backlog > 1 {
+                    let current = match ack.queue_depth {
+                        QueueDepth::AvailableBytes(bytes) => bytes,
+                        QueueDepth::Unavailable => 0,
+                        QueueDepth::Suspend => u32::MAX,
+                    };
+                    if current != u32::MAX {
+                        ack.queue_depth = QueueDepth::AvailableBytes(current.max(congestion_hint));
+                    }
+                }
+                Box::new(GfxPdu::FrameAcknowledge(ack)) as DvcMessage
+            })
             .collect();
         let channel = self.channel.expect("a queued ACK always has a channel");
         let messages = encode_dvc_messages(channel, messages, ChannelFlags::empty())?;

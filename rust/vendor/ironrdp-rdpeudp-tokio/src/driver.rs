@@ -15,6 +15,7 @@ use core::net::SocketAddr;
 use core::pin::Pin;
 use core::task::{Context, Poll};
 use std::io;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ironrdp_rdpeudp::pdu::{V1Datagram, V1Flags};
@@ -25,6 +26,46 @@ use tracing::{debug, info, trace};
 
 use crate::error::{DriverError, DriverErrorExt as _, DriverErrorKind};
 use crate::stream::SharedIo;
+use crate::transport::UdpTransportStats;
+
+/// Lock-free transport telemetry updated by [`Driver`] and read via
+/// [`crate::UdpTransport::stats`].
+#[derive(Debug, Default)]
+pub(crate) struct AtomicUdpStats {
+    /// Encoded as `0 => None`, `v => Some(v - 1)`.
+    srtt_ms: AtomicU32,
+    rto_ms: AtomicU32,
+    packets_sent: AtomicU64,
+    packets_retransmitted: AtomicU64,
+    packets_received: AtomicU64,
+    recv_gaps: AtomicBool,
+}
+
+impl AtomicUdpStats {
+    pub(crate) fn snapshot(&self) -> UdpTransportStats {
+        UdpTransportStats {
+            srtt_ms: self.srtt_ms.load(Ordering::Relaxed).checked_sub(1),
+            rto_ms: self.rto_ms.load(Ordering::Relaxed),
+            packets_sent: self.packets_sent.load(Ordering::Relaxed),
+            packets_retransmitted: self.packets_retransmitted.load(Ordering::Relaxed),
+            packets_received: self.packets_received.load(Ordering::Relaxed),
+            recv_gaps: self.recv_gaps.load(Ordering::Relaxed),
+        }
+    }
+
+    fn store(&self, stats: UdpTransportStats) {
+        let encoded_srtt = stats
+            .srtt_ms
+            .map_or(0, |ms| ms.saturating_add(1));
+        self.srtt_ms.store(encoded_srtt, Ordering::Relaxed);
+        self.rto_ms.store(stats.rto_ms, Ordering::Relaxed);
+        self.packets_sent.store(stats.packets_sent, Ordering::Relaxed);
+        self.packets_retransmitted
+            .store(stats.packets_retransmitted, Ordering::Relaxed);
+        self.packets_received.store(stats.packets_received, Ordering::Relaxed);
+        self.recv_gaps.store(stats.recv_gaps, Ordering::Relaxed);
+    }
+}
 
 pub(crate) trait DatagramIo: Send + Sync + 'static {
     fn local_addr(&self) -> Option<SocketAddr>;
@@ -96,14 +137,29 @@ pub(crate) struct Driver<S: DatagramIo> {
     /// dropped or treated as a fatal error.
     pending_write: Option<Vec<u8>>,
     stream_released: bool,
+    stats: Arc<AtomicUdpStats>,
+    v2_packets_sent: u64,
+    v2_packets_retransmitted: u64,
+    v2_packets_received: u64,
 }
 
 impl<S: DatagramIo> Driver<S> {
+    #[cfg(test)]
     pub(crate) fn new(
         socket: S,
         conn: RdpeudpConnection,
         shared: Arc<Mutex<SharedIo>>,
         connected_notify: Arc<Notify>,
+    ) -> Self {
+        Self::with_stats(socket, conn, shared, connected_notify, Arc::new(AtomicUdpStats::default()))
+    }
+
+    pub(crate) fn with_stats(
+        socket: S,
+        conn: RdpeudpConnection,
+        shared: Arc<Mutex<SharedIo>>,
+        connected_notify: Arc<Notify>,
+        stats: Arc<AtomicUdpStats>,
     ) -> Self {
         Self {
             socket,
@@ -115,6 +171,10 @@ impl<S: DatagramIo> Driver<S> {
             clock: Clock::new(),
             pending_write: None,
             stream_released: false,
+            stats,
+            v2_packets_sent: 0,
+            v2_packets_retransmitted: 0,
+            v2_packets_received: 0,
         }
     }
 
@@ -167,7 +227,7 @@ impl<S: DatagramIo> Driver<S> {
 
     async fn run_to_completion(&mut self) -> Result<(), DriverError> {
         // Send any initial transmits (the SYN packet for client-side connections)
-        self.drain_transmits().await?;
+        self.drain_transmits(false).await?;
 
         loop {
             let timeout = self
@@ -203,7 +263,11 @@ impl<S: DatagramIo> Driver<S> {
 
                     // handle_datagram takes &mut [u8] for in-place prefix byte swap
                     match self.conn.handle_datagram(&mut self.recv_buf[..n], now) {
-                        Ok(()) => {}
+                        Ok(()) => {
+                            if self.conn.is_established() {
+                                self.v2_packets_received = self.v2_packets_received.saturating_add(1);
+                            }
+                        }
                         // One datagram the state machine cannot make sense of
                         // is not grounds for tearing down the connection. UDP
                         // delivers whatever arrives at the socket, including
@@ -219,8 +283,9 @@ impl<S: DatagramIo> Driver<S> {
                         Err(error) => return Err(DriverError::rdpeudp("handle datagram", error)),
                     }
 
-                    self.drain_transmits().await?;
+                    self.drain_transmits(false).await?;
                     self.drain_events();
+                    self.sync_stats();
                 }
 
                 // Branch 2: TLS layer has data to send. Guarded off while a
@@ -255,7 +320,8 @@ impl<S: DatagramIo> Driver<S> {
                     if !data.is_empty() {
                         trace!(len = data.len(), "Took outbound data from the write buffer");
                         if self.queue_write(data)? {
-                            self.drain_transmits().await?;
+                            self.drain_transmits(false).await?;
+                            self.sync_stats();
                         }
                     }
                 }
@@ -268,8 +334,9 @@ impl<S: DatagramIo> Driver<S> {
                     if self.conn.is_closed() {
                         debug!("RDP-UDP connection closed by timeout");
                     }
-                    self.drain_transmits().await?;
+                    self.drain_transmits(true).await?;
                     self.drain_events();
+                    self.sync_stats();
                 }
             }
 
@@ -304,13 +371,14 @@ impl<S: DatagramIo> Driver<S> {
     }
 
     /// Send all pending transmits to the UDP socket.
-    async fn drain_transmits(&mut self) -> Result<(), DriverError> {
+    async fn drain_transmits(&mut self, from_timeout: bool) -> Result<(), DriverError> {
         let now = self.clock.now();
         while let Some(transmit) = self.conn.poll_transmit(now) {
             // `RdpeudpConnection` never hands back a V1Datagram once
             // established (only prefix-framed V2 packets), so there is
             // nothing to check on the data path.
-            let bytes = if self.conn.is_established() {
+            let established = self.conn.is_established();
+            let bytes = if established {
                 transmit.contents
             } else {
                 pad_handshake_datagram(transmit.contents)
@@ -320,9 +388,46 @@ impl<S: DatagramIo> Driver<S> {
                 .send(&bytes)
                 .await
                 .map_err(|error| DriverError::socket("send datagram", error))?;
+            if established {
+                self.v2_packets_sent = self.v2_packets_sent.saturating_add(1);
+                if from_timeout && bytes.len() > 40 {
+                    self.v2_packets_retransmitted = self.v2_packets_retransmitted.saturating_add(1);
+                }
+            }
             trace!(len = bytes.len(), "Sent datagram");
         }
         Ok(())
+    }
+
+    fn sync_stats(&self) {
+        let srtt_ms = self
+            .conn
+            .srtt()
+            .map(|d| u32::try_from(d.as_millis()).unwrap_or(u32::MAX));
+        let rto_ms = u32::try_from(self.conn.rto().as_millis()).unwrap_or(u32::MAX);
+        let snapshot = if let Some(v1) = self.conn.v1_stats() {
+            UdpTransportStats {
+                srtt_ms: v1
+                    .srtt_ms
+                    .map(|ms| u32::try_from(ms).unwrap_or(u32::MAX))
+                    .or(srtt_ms),
+                rto_ms: u32::try_from(v1.rto_ms).unwrap_or(rto_ms),
+                packets_sent: v1.data_out,
+                packets_retransmitted: v1.retransmits,
+                packets_received: v1.datagrams_in,
+                recv_gaps: v1.recv_has_gaps,
+            }
+        } else {
+            UdpTransportStats {
+                srtt_ms,
+                rto_ms,
+                packets_sent: self.v2_packets_sent,
+                packets_retransmitted: self.v2_packets_retransmitted,
+                packets_received: self.v2_packets_received,
+                recv_gaps: false,
+            }
+        };
+        self.stats.store(snapshot);
     }
 
     /// Hand `data` to the connection's send queue, or hold it in
@@ -364,7 +469,8 @@ impl<S: DatagramIo> Driver<S> {
 
         trace!(len = data.len(), "Retrying held write");
         if self.queue_write(data)? {
-            self.drain_transmits().await?;
+            self.drain_transmits(false).await?;
+            self.sync_stats();
         }
 
         Ok(())

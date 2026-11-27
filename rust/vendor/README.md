@@ -28,6 +28,8 @@ future IronRDP rebases:
      `GpuCompositor`) and `H264Decoder::decode_hw` hooks so hardware-decoded
      AVC420 / AVC444 / AVC444v2 and mixed EGFX surface commands can composite
      directly on the GPU with automatic CPU fallback.
+   - Adds `GraphicsPipelineClient::request_quality_reset` for in-channel
+     V10.3–V10.7 `AVC_THIN_CLIENT` / `SMALL_CACHE` adaptive quality switching.
 3. `0003-ironrdp-egfx-native-hw-decoders-and-gpu-compositors.patch`
    - Hardware H.264 decoders: Media Foundation + D3D11 (Windows), VideoToolbox
      (macOS), and runtime-loaded FFmpeg VA-API (Linux).
@@ -55,6 +57,8 @@ future IronRDP rebases:
    - Allows supplying a complete client `rustls::ClientConfig` so PagaShell pins
      the UDP multitransport TLS handshake to the verified primary TCP leaf
      certificate.
+   - Exposes lock-free `UdpTransport::stats()` (`UdpTransportStats`) for real-time
+     smoothed RTT and packet retransmission telemetry.
 
 ## Testing & rebasing
 

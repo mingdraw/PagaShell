@@ -9,7 +9,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `action_name`, `append_validated_rule`, `backend_name`, `firewall_add_command`, `firewall_delete_command`, `firewall_read_command`, `firewall_service_command`, `is_nft_ident`, `map_mutate_exit`, `protocol_name`, `service_action_name`, `validate_comment`, `validate_existing_raw`, `validate_port`, `validate_rule_spec`, `validate_source`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ValidatedRule`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// 读取当前 Linux 主机防火墙状态、端口规则及监听端口关联进程。
 Future<String> sshReadFirewall({required int sessionId}) =>

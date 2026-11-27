@@ -14,12 +14,14 @@ import '../../../application/session/session.dart';
 import '../../../application/session/session_controller.dart';
 import '../../../application/session/session_layout.dart';
 import '../../../application/settings/settings_controller.dart';
+import '../../../domain/rdp/rdp_engine.dart';
 import '../../ai/agent_workspace.dart';
 import '../../components/app_icon.dart';
 import '../../components/app_icon_button.dart';
 import '../../components/app_menu.dart';
 import '../../hosts/host_edit_dialog.dart';
 import '../../navigation/app_notice.dart';
+import '../../rdp/rdp_network_indicator.dart';
 import '../../theme/app_theme.dart';
 import '../connect_flow.dart';
 import '../session_close_confirmation.dart';
@@ -500,12 +502,23 @@ class _SessionTabState extends State<_SessionTab> {
 
   String _tooltipText() {
     final session = widget.session;
+    final desktopSession = session.desktopSession;
+    final networkStats = desktopSession is RdpNetworkSession
+        ? desktopSession.latestNetworkStats
+        : null;
     final title =
         '${session.title} · ${session.address} · '
         '${'@kind（@phase）'.trParams({'kind': _kindLabel, 'phase': _phaseLabel(session.kind, _groupPhase)})}';
-    if (widget.tabSessions.length < 2) return title;
+    final networkLine =
+        session.phase == SessionPhase.ready && networkStats != null
+        ? rdpNetworkTooltip(networkStats)
+        : null;
+    if (widget.tabSessions.length < 2) {
+      return networkLine == null ? title : '$title\n$networkLine';
+    }
     return [
       title,
+      ?networkLine,
       for (final pane in widget.tabSessions)
         '${pane.title} · ${pane.address} · ${_phaseLabel(pane.kind, pane.phase)}',
     ].join('\n');
@@ -704,9 +717,15 @@ class _SessionTabState extends State<_SessionTab> {
               onExit: (_) => _hideTooltip(),
               child: CompositedTransformTarget(
                 link: _layerLink,
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 140),
-                  child: Text(
+                child: () {
+                  final desktopSession = session.desktopSession;
+                  final networkSession =
+                      session.kind == SessionKind.remoteDesktop &&
+                          session.phase == SessionPhase.ready &&
+                          desktopSession is RdpNetworkSession
+                      ? desktopSession
+                      : null;
+                  final label = Text(
                     tab.sessionIds.length > 1
                         ? '${session.title} · ${tab.sessionIds.length}'
                         : session.title,
@@ -716,8 +735,24 @@ class _SessionTabState extends State<_SessionTab> {
                           ? colors.foreground
                           : colors.mutedForeground,
                     ),
-                  ),
-                ),
+                  );
+                  if (networkSession == null) {
+                    return ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 140),
+                      child: label,
+                    );
+                  }
+                  return ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 196),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Flexible(child: label),
+                        RdpTabNetworkIndicator(session: networkSession),
+                      ],
+                    ),
+                  );
+                }(),
               ),
             ),
           ),

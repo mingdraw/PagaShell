@@ -12,6 +12,7 @@ import 'package:shadcn_flutter/shadcn_flutter.dart' as shadcn;
 import '../../application/rdp/rdp_clipboard_controller.dart';
 import '../../domain/rdp/rdp_clipboard.dart';
 import '../../domain/rdp/rdp_engine.dart';
+import '../../domain/rdp/rdp_network_stats.dart';
 import '../../domain/rdp/rdp_resolution.dart';
 import '../../domain/ssh/ssh_engine.dart';
 import '../../domain/vnc/vnc_engine.dart';
@@ -27,6 +28,7 @@ import '../vnc/vnc_keyboard.dart';
 import 'rdp_fullscreen_toolbar.dart';
 import 'rdp_input_queue.dart';
 import 'rdp_local_text_input.dart';
+import 'rdp_network_indicator.dart';
 import 'rdp_surface.dart';
 import 'rdp_windows_cursor.dart';
 import 'rdp_windows_keyboard.dart';
@@ -66,6 +68,8 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
   final _clipboardShortcutKeys = <PhysicalKeyboardKey>{};
   RdpClipboardController? _clipboard;
   StreamSubscription<void>? _frames;
+  StreamSubscription<RdpNetworkStats>? _networkSub;
+  RdpNetworkStats? _networkStats;
   final _surface = RdpSurface();
   final _cursorPosition = ValueNotifier<Offset?>(null);
   ui.Image? _cursorImage;
@@ -91,9 +95,6 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
   int _resizeSerial = 0;
   Timer? _resizeDebounce;
   Timer? _resizeConfirmation;
-  final _horizontalScroll = ScrollController();
-  final _verticalScroll = ScrollController();
-  bool _originalSize = false;
   bool _typingText = false;
   bool _useLocalIme = false;
   late final RdpLocalTextInput _localTextInput;
@@ -138,6 +139,7 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
       )..setForeground(_appResumed);
       _syncClipboard();
     }
+    _bindNetworkStats();
     if (widget.active) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _focus.requestFocus();
@@ -392,6 +394,43 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     }
   }
 
+  void _bindNetworkStats() {
+    unawaited(_networkSub?.cancel());
+    _networkSub = null;
+    final session = widget.session;
+    if (session is! RdpNetworkSession) {
+      _networkStats = null;
+      _surface.setLowQuality(false);
+      return;
+    }
+    _networkStats = session.latestNetworkStats;
+    _surface.setLowQuality(_networkStats?.qualityTier == RdpQualityTier.low);
+    _networkSub = session.networkStats.listen((stats) {
+      if (!mounted) return;
+      _surface.setLowQuality(stats.qualityTier == RdpQualityTier.low);
+      if (_networkStats != stats) {
+        setState(() => _networkStats = stats);
+      }
+    });
+  }
+
+  void _selectQualityMode(RdpQualityMode mode) {
+    final session = widget.session;
+    if (session is! RdpNetworkSession || _failed) return;
+    unawaited(() async {
+      try {
+        await session.setQualityMode(mode);
+      } on Object catch (error) {
+        if (mounted && widget.active) {
+          AppNotice.error(
+            error is SshEngineException ? error.message : '无法切换 RDP 画质模式，请重试',
+          );
+        }
+      }
+    }());
+    _focus.requestFocus();
+  }
+
   void _syncClipboard() {
     _clipboard?.setActive(widget.active && _clipboardAvailable);
     _clipboard?.setForeground(_appResumed);
@@ -411,6 +450,9 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
   @override
   void didUpdateWidget(RdpDesktopPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (!identical(widget.session, oldWidget.session)) {
+      _bindNetworkStats();
+    }
     _syncFrames();
     _syncClipboard();
     if (widget.active && !oldWidget.active) {
@@ -677,7 +719,6 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
   void _scroll(PointerSignalEvent event) {
     if (!widget.active || event is! PointerScrollEvent) return;
     GestureBinding.instance.pointerSignalResolver.register(event, (resolved) {
-      if (_originalSize && _panOriginalSize(event.scrollDelta)) return;
       _flushMove();
       _wheelPosition = event.localPosition;
       _wheelDeltaY += event.scrollDelta.dy;
@@ -686,24 +727,9 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     });
   }
 
-  bool _panOriginalSize(Offset delta) {
-    final dx = _horizontalScroll.hasClients ? _horizontalScroll.position : null;
-    final dy = _verticalScroll.hasClients ? _verticalScroll.position : null;
-    final horizontal = dx != null && dx.maxScrollExtent > 0;
-    final vertical = dy != null && dy.maxScrollExtent > 0;
-    if (horizontal && delta.dx != 0) dx.pointerScroll(delta.dx);
-    if (vertical && delta.dy != 0) {
-      dy.pointerScroll(delta.dy);
-    } else if (horizontal && delta.dx == 0 && delta.dy != 0) {
-      dx.pointerScroll(delta.dy);
-    }
-    return horizontal || vertical;
-  }
-
   void _scheduleAutomaticResize() {
     _resizeDebounce?.cancel();
     if (!widget.dynamicResolution ||
-        _originalSize ||
         _resolution != null ||
         _viewport == null ||
         _viewport!.matchesAligned(
@@ -718,7 +744,6 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     _resizeDebounce = Timer(const Duration(milliseconds: 350), () {
       if (mounted &&
           widget.active &&
-          !_originalSize &&
           _resolution == null &&
           _viewport != null) {
         unawaited(_resize(_viewport!));
@@ -736,7 +761,7 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
           );
     _resizeDebounce?.cancel();
     setState(() => _resolution = resolution);
-    final target = resolution ?? (_originalSize ? null : _viewport);
+    final target = resolution ?? _viewport;
     if (target != null) unawaited(_resize(target));
     _focus.requestFocus();
   }
@@ -919,6 +944,14 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
             : '${widget.protocolLabel} · ${image.width} × ${image.height}',
         overflow: TextOverflow.ellipsis,
       ),
+      if (widget.session is RdpNetworkSession)
+        RdpNetworkBadge(
+          stats: _networkStats,
+          compact: widget.fullscreen,
+          enabled: widget.active && !_failed,
+          onSelectQualityMode: _selectQualityMode,
+          onMenuVisibilityChanged: _menuVisibilityChanged,
+        ),
       if (widget.dynamicResolution)
         AppMenuButton<String>(
           key: const ValueKey('rdp-resolution-menu'),
@@ -956,34 +989,6 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
             ],
           ),
         ),
-      AppMenuButton<bool>(
-        key: const ValueKey('rdp-scale-menu'),
-        enabled: image.hasImage,
-        semanticLabel: '画面缩放'.tr,
-        tooltip: (_originalSize ? '1:1 原尺寸' : '适应窗口').tr,
-        selectedValue: _originalSize,
-        items: [(false, '适应窗口'.tr), (true, '1:1 原尺寸'.tr)],
-        onSelected: (original) {
-          if (_originalSize != original) {
-            _release();
-            setState(() => _originalSize = original);
-            _scheduleAutomaticResize();
-          }
-          _focus.requestFocus();
-        },
-        onMenuVisibilityChanged: _menuVisibilityChanged,
-        icon: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (_originalSize)
-              const Text('1:1')
-            else
-              const AppIcon(AppIcons.maximize, size: 16),
-            const SizedBox(width: 4),
-            const AppIcon(AppIcons.chevronDown, size: 14),
-          ],
-        ),
-      ),
       if (widget.session is! VncEngineSession)
         AppMenuButton<bool>(
           key: const ValueKey('rdp-keyboard-mode'),
@@ -1038,55 +1043,6 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     ];
   }
 
-  Widget _desktopViewport(
-    BuildContext context,
-    BoxConstraints size,
-    Widget desktop,
-  ) {
-    final fitted = FittedBox(fit: BoxFit.contain, child: desktop);
-    if (!_originalSize) return fitted;
-    final width = _surface.width.toDouble();
-    final height = _surface.height.toDouble();
-    final contentWidth = math.max(width, size.maxWidth);
-    final contentHeight = math.max(height, size.maxHeight);
-    return RawScrollbar(
-      controller: _verticalScroll,
-      thumbVisibility: true,
-      thickness: 6,
-      thumbColor: const Color(0xbdadb5c2),
-      notificationPredicate: (notice) => notice.metrics.axis == Axis.vertical,
-      child: RawScrollbar(
-        controller: _horizontalScroll,
-        thumbVisibility: true,
-        thickness: 6,
-        thumbColor: const Color(0xbdadb5c2),
-        notificationPredicate: (notice) =>
-            notice.metrics.axis == Axis.horizontal,
-        child: SingleChildScrollView(
-          key: const ValueKey('rdp-horizontal-scroll'),
-          controller: _horizontalScroll,
-          primary: false,
-          scrollDirection: Axis.horizontal,
-          child: SizedBox(
-            width: contentWidth,
-            height: size.maxHeight,
-            child: SingleChildScrollView(
-              key: const ValueKey('rdp-vertical-scroll'),
-              controller: _verticalScroll,
-              primary: false,
-              child: SizedBox(
-                height: contentHeight,
-                child: Center(
-                  child: SizedBox(width: width, height: height, child: fitted),
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
@@ -1099,12 +1055,11 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
     _focus.removeListener(_focusChanged);
     _focus.dispose();
     unawaited(_frames?.cancel());
+    unawaited(_networkSub?.cancel());
     _surface.dispose();
     _cursorImage?.dispose();
     _nativeCursor?.release();
     _cursorPosition.dispose();
-    _horizontalScroll.dispose();
-    _verticalScroll.dispose();
     super.dispose();
   }
 
@@ -1156,10 +1111,9 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
                                   ],
                                 ),
                               )
-                            : _desktopViewport(
-                                context,
-                                constraints,
-                                SizedBox(
+                            : FittedBox(
+                                fit: BoxFit.contain,
+                                child: SizedBox(
                                   width: image.width.toDouble(),
                                   height: image.height.toDouble(),
                                   child: Listener(
@@ -1194,7 +1148,15 @@ class _RdpDesktopPanelState extends State<RdpDesktopPanel>
                                                       textureId:
                                                           image.textureId!,
                                                       filterQuality:
-                                                          ui.FilterQuality.low,
+                                                          _networkStats
+                                                                  ?.qualityTier ==
+                                                              RdpQualityTier.low
+                                                          ? ui
+                                                                .FilterQuality
+                                                                .none
+                                                          : ui
+                                                                .FilterQuality
+                                                                .low,
                                                     )
                                                   : CustomPaint(
                                                       key: const ValueKey(

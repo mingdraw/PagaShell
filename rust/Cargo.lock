@@ -3079,6 +3079,7 @@ dependencies = [
  "ironrdp-rdpemt",
  "ironrdp-rdpeudp-tokio",
  "ironrdp-tokio",
+ "libc",
  "openh264",
  "rcgen",
  "russh",

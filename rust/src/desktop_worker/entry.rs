@@ -393,6 +393,14 @@ async fn invoke(
                 desktop::resize(session_id, width, height).await?,
             ));
         }
+        (SessionKind::Rdp(session_id), Request::NetworkStats) => {
+            return Ok(Reply::NetworkStats(
+                desktop::network_stats(session_id).await?,
+            ));
+        }
+        (SessionKind::Rdp(session_id), Request::SetQualityMode { mode }) => {
+            desktop::set_quality_mode(session_id, mode).await?;
+        }
         (SessionKind::Rdp(session_id), Request::ClipboardActive { active, directory }) => {
             desktop::clipboard_active(session_id, active, directory).await?;
         }

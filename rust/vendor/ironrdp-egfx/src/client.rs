@@ -764,6 +764,60 @@ impl GraphicsPipelineClient {
         Some(pdu)
     }
 
+    /// Request an in-channel protocol reset on V10.3–V10.7 with updated quality
+    /// capability flags (`AVC_THIN_CLIENT` and `SMALL_CACHE`).
+    ///
+    /// Keeps the confirmed capability version unchanged per [MS-RDPEGFX 3.3.5.19]
+    /// and returns `None` when the requested flags already match or the channel
+    /// cannot perform an in-channel reset.
+    #[must_use]
+    pub fn request_quality_reset(&mut self, thin_client: bool, small_cache: bool) -> Option<GfxPdu> {
+        if !self.is_active() {
+            return None;
+        }
+        let current = self.negotiated_caps.as_ref()?;
+        let updated = match *current {
+            CapabilitySet::V10_3 { mut flags } => {
+                flags.set(CapabilitiesV103Flags::AVC_THIN_CLIENT, thin_client);
+                CapabilitySet::V10_3 { flags }
+            }
+            CapabilitySet::V10_4 { mut flags } => {
+                flags.set(CapabilitiesV104Flags::AVC_THIN_CLIENT, thin_client);
+                flags.set(CapabilitiesV104Flags::SMALL_CACHE, small_cache);
+                CapabilitySet::V10_4 { flags }
+            }
+            CapabilitySet::V10_5 { mut flags } => {
+                flags.set(CapabilitiesV104Flags::AVC_THIN_CLIENT, thin_client);
+                flags.set(CapabilitiesV104Flags::SMALL_CACHE, small_cache);
+                CapabilitySet::V10_5 { flags }
+            }
+            CapabilitySet::V10_6 { mut flags } => {
+                flags.set(CapabilitiesV104Flags::AVC_THIN_CLIENT, thin_client);
+                flags.set(CapabilitiesV104Flags::SMALL_CACHE, small_cache);
+                CapabilitySet::V10_6 { flags }
+            }
+            CapabilitySet::V10_6Err { mut flags } => {
+                flags.set(CapabilitiesV104Flags::AVC_THIN_CLIENT, thin_client);
+                flags.set(CapabilitiesV104Flags::SMALL_CACHE, small_cache);
+                CapabilitySet::V10_6Err { flags }
+            }
+            CapabilitySet::V10_7 { mut flags } => {
+                flags.set(CapabilitiesV107Flags::AVC_THIN_CLIENT, thin_client);
+                flags.set(CapabilitiesV107Flags::SMALL_CACHE, small_cache);
+                CapabilitySet::V10_7 { flags }
+            }
+            _ => return None,
+        };
+        if &updated == current {
+            return None;
+        }
+        let pdu = GfxPdu::CapabilitiesAdvertise(CapabilitiesAdvertisePdu::from_typed(core::slice::from_ref(&updated)));
+        self.state = ClientState::Resetting;
+        self.save_persistent_cache();
+        self.restart_channel_state();
+        Some(pdu)
+    }
+
     /// Forgets everything a new capability exchange starts over: surfaces, caches, codec
     /// contexts and the frame count.
     fn restart_channel_state(&mut self) {

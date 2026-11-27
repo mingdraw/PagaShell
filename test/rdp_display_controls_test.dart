@@ -236,6 +236,7 @@ void main() {
       'auto',
     );
     expect(find.text('自适应窗口'), findsOneWidget);
+    expect(find.byKey(const ValueKey('rdp-scale-menu')), findsNothing);
     expect(find.text('Ctrl+Alt+Del'), findsOneWidget);
     expect(find.byKey(_enterKey), findsOneWidget);
     expect(session.resizes, isEmpty);
@@ -318,48 +319,6 @@ void main() {
     await mouse.removePointer();
     await sessions.closeAll();
     await tester.pumpAndSettle();
-  });
-
-  testWidgets('Retina 原尺寸可用滚轮双轴平移，点击仍指向正确远端像素', (tester) async {
-    final session = await _panel(tester);
-    tester.view.physicalSize = const Size(1000, 700);
-    tester.view.devicePixelRatio = 2;
-    await tester.pump();
-    await tester.tap(find.byKey(const ValueKey('rdp-scale-menu')));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 200));
-    await tester.tap(find.text('1:1 原尺寸'));
-    await tester.pumpAndSettle();
-
-    final horizontal = tester
-        .widget<SingleChildScrollView>(
-          find.byKey(const ValueKey('rdp-horizontal-scroll')),
-        )
-        .controller!;
-    final vertical = tester
-        .widget<SingleChildScrollView>(
-          find.byKey(const ValueKey('rdp-vertical-scroll')),
-        )
-        .controller!;
-    expect(horizontal.position.maxScrollExtent, 780);
-    expect(vertical.position.maxScrollExtent, greaterThan(75));
-    final viewport = tester.getTopLeft(
-      find.byKey(const ValueKey('rdp-horizontal-scroll')),
-    );
-    final point = viewport + const Offset(30, 30);
-    tester.binding.handlePointerEvent(
-      PointerScrollEvent(position: point, scrollDelta: const Offset(120, 75)),
-    );
-    await tester.pump();
-    expect(horizontal.offset, 120);
-    expect(vertical.offset, 75);
-    await tester.tapAt(point, kind: PointerDeviceKind.mouse);
-    await tester.pump(const Duration(seconds: 1));
-    expect(session.pointers, contains((150, 105, 0x9000, 0)));
-    expect(session.pointers.where((event) => event.$4 != 0), isEmpty);
-    expect(session.resizes, isEmpty);
-    await tester.pumpWidget(const SizedBox.shrink());
-    await session.close();
   });
 
   testWidgets('剪贴板文本可键入，换行文本在明确确认后才发送', (tester) async {

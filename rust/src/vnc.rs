@@ -211,7 +211,10 @@ pub(crate) async fn connect(
                 .await
                 .context("VNC TCP 连接失败")?;
             stream.set_nodelay(true)?;
-            Ok(Transport::Direct(stream))
+            Ok(Transport::Direct {
+                stream,
+                probe: std::sync::Arc::new(crate::desktop_network::TcpInfoSampler::default()),
+            })
         }
     })
     .await

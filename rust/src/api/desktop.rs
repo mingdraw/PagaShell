@@ -104,6 +104,30 @@ pub struct DesktopCursor {
     pub rgba: Vec<u8>,
 }
 
+/// Real-time RDP network telemetry and adaptive quality status.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(any(windows, test), derive(serde::Serialize, serde::Deserialize))]
+pub struct DesktopNetworkStats {
+    /// Smoothed round-trip latency in milliseconds, when measured.
+    pub rtt_ms: Option<u32>,
+    /// Live receive throughput in kilobits per second.
+    pub throughput_kbps: u32,
+    /// Estimated link bandwidth in kilobits per second, when known.
+    pub bandwidth_kbps: Option<u32>,
+    /// Packet loss / retransmission ratio in permille (0..=1000 => 0.0%..=100.0%).
+    pub packet_loss_permille: Option<u16>,
+    /// Recent delivered frame rate (frames per second).
+    pub fps: u16,
+    /// Signal bars: 0 = measuring, 1 = poor, 2 = fair, 3 = good, 4 = excellent.
+    pub signal_level: u8,
+    /// Active visual quality tier: 0 = High, 1 = Balanced, 2 = Low.
+    pub quality_tier: u8,
+    /// Quality selection mode: 0 = Auto, 1 = High, 2 = Balanced, 3 = Low.
+    pub quality_mode: u8,
+    /// Active transport kind: 0 = TCP, 1 = UDP, 2 = Tunnel/Gateway.
+    pub transport_kind: u8,
+}
+
 pub struct DesktopWorkerStarted {
     pub session_id: u32,
     pub process_id: u32,
@@ -303,6 +327,18 @@ pub async fn desktop_input_batch(session_id: u32, events: Vec<DesktopInputEvent>
 pub async fn desktop_resize(session_id: u32, width: u16, height: u16) -> Result<bool> {
     route_worker!(session_id, resize(width, height));
     crate::desktop::resize(session_id, width, height).await
+}
+
+/// Returns the latest RDP network latency, speed, packet loss, and adaptive quality snapshot.
+pub async fn desktop_network_stats(session_id: u32) -> Result<DesktopNetworkStats> {
+    route_worker!(session_id, network_stats());
+    crate::desktop::network_stats(session_id).await
+}
+
+/// Selects the RDP adaptive quality policy: 0 = Auto, 1 = High, 2 = Balanced, 3 = Low.
+pub async fn desktop_set_quality_mode(session_id: u32, mode: u8) -> Result<()> {
+    route_worker!(session_id, set_quality_mode(mode));
+    crate::desktop::set_quality_mode(session_id, mode).await
 }
 
 pub async fn desktop_disconnect(session_id: u32) -> Result<()> {

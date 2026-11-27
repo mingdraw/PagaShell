@@ -122,6 +122,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DesktopInputEvent dco_decode_desktop_input_event(dynamic raw);
 
   @protected
+  DesktopNetworkStats dco_decode_desktop_network_stats(dynamic raw);
+
+  @protected
   DesktopTile dco_decode_desktop_tile(dynamic raw);
 
   @protected
@@ -397,6 +400,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DesktopInputEvent sse_decode_desktop_input_event(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  DesktopNetworkStats sse_decode_desktop_network_stats(
     SseDeserializer deserializer,
   );
 
@@ -739,6 +747,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_desktop_input_event(
     DesktopInputEvent self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_desktop_network_stats(
+    DesktopNetworkStats self,
     SseSerializer serializer,
   );
 

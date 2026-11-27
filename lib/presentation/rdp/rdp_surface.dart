@@ -81,6 +81,13 @@ class RdpSurface extends ChangeNotifier {
       _atlases.fold(0, (sum, atlas) => sum + atlas.pixels);
   bool get hasImage => width > 0;
 
+  void setLowQuality(bool low) {
+    final target = low ? ui.FilterQuality.none : ui.FilterQuality.low;
+    if (_paint.filterQuality == target) return;
+    _paint.filterQuality = target;
+    if (!_disposed && hasImage) notifyListeners();
+  }
+
   Future<void> apply(RdpFrame frame) async {
     if (_disposed) return;
     if (frame.width < 1 ||

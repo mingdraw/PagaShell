@@ -25,6 +25,7 @@ ironrdp = { git = "https://github.com/Devolutions/IronRDP", rev = "85e88c2424d8c
 ironrdp-tokio = { git = "https://github.com/Devolutions/IronRDP", rev = "85e88c2424d8c36407f81540cc1f3cf8d3436a7d" }
 ironrdp-egfx = { git = "https://github.com/Devolutions/IronRDP", rev = "85e88c2424d8c36407f81540cc1f3cf8d3436a7d", features = ["openh264-bundled"] }
 ironrdp-cliprdr = { git = "https://github.com/Devolutions/IronRDP", rev = "85e88c2424d8c36407f81540cc1f3cf8d3436a7d" }
+ironrdp-rdpemt = { git = "https://github.com/Devolutions/IronRDP", rev = "85e88c2424d8c36407f81540cc1f3cf8d3436a7d" }
 ironrdp-rdpeudp-tokio = { path = "vendor/ironrdp-rdpeudp-tokio" }
 tempfile = "3"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
@@ -52,18 +53,22 @@ ironrdp-egfx-native = { path = "vendor/ironrdp-egfx-native" }
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_Media",
+    "Win32_Networking_WinSock",
     "Win32_Security",
     "Win32_Storage_FileSystem",
+    "Win32_System_IO",
     "Win32_System_JobObjects",
     "Win32_System_Memory",
     "Win32_System_Threading",
 ] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 ironrdp-egfx-native = { path = "vendor/ironrdp-egfx-native" }
 
 [dev-dependencies]
-ironrdp-rdpemt = { git = "https://github.com/Devolutions/IronRDP", rev = "85e88c2424d8c36407f81540cc1f3cf8d3436a7d" }
 openh264 = "0.9.9"
 rcgen = "0.14"
 tokio = { version = "1.53.1", features = ["test-util"] }

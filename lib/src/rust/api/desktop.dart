@@ -9,7 +9,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 import 'page.dart';
 
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `clone`, `clone`, `clone`, `eq`, `fmt`, `fmt`
 
 Future<void> desktopClipboardActive({
   required int sessionId,
@@ -169,6 +169,21 @@ Future<bool> desktopResize({
   sessionId: sessionId,
   width: width,
   height: height,
+);
+
+/// Returns the latest RDP network latency, speed, packet loss, and adaptive quality snapshot.
+Future<DesktopNetworkStats> desktopNetworkStats({required int sessionId}) =>
+    RustLib.instance.api.crateApiDesktopDesktopNetworkStats(
+      sessionId: sessionId,
+    );
+
+/// Selects the RDP adaptive quality policy: 0 = Auto, 1 = High, 2 = Balanced, 3 = Low.
+Future<void> desktopSetQualityMode({
+  required int sessionId,
+  required int mode,
+}) => RustLib.instance.api.crateApiDesktopDesktopSetQualityMode(
+  sessionId: sessionId,
+  mode: mode,
 );
 
 Future<void> desktopDisconnect({required int sessionId}) =>
@@ -373,6 +388,78 @@ class DesktopInputEvent {
           flags == other.flags &&
           x == other.x &&
           y == other.y;
+}
+
+/// Real-time RDP network telemetry and adaptive quality status.
+class DesktopNetworkStats {
+  /// Smoothed round-trip latency in milliseconds, when measured.
+  final int? rttMs;
+
+  /// Live receive throughput in kilobits per second.
+  final int throughputKbps;
+
+  /// Estimated link bandwidth in kilobits per second, when known.
+  final int? bandwidthKbps;
+
+  /// Packet loss / retransmission ratio in permille (0..=1000 => 0.0%..=100.0%).
+  final int? packetLossPermille;
+
+  /// Recent delivered frame rate (frames per second).
+  final int fps;
+
+  /// Signal bars: 0 = measuring, 1 = poor, 2 = fair, 3 = good, 4 = excellent.
+  final int signalLevel;
+
+  /// Active visual quality tier: 0 = High, 1 = Balanced, 2 = Low.
+  final int qualityTier;
+
+  /// Quality selection mode: 0 = Auto, 1 = High, 2 = Balanced, 3 = Low.
+  final int qualityMode;
+
+  /// Active transport kind: 0 = TCP, 1 = UDP, 2 = Tunnel/Gateway.
+  final int transportKind;
+
+  const DesktopNetworkStats({
+    this.rttMs,
+    required this.throughputKbps,
+    this.bandwidthKbps,
+    this.packetLossPermille,
+    required this.fps,
+    required this.signalLevel,
+    required this.qualityTier,
+    required this.qualityMode,
+    required this.transportKind,
+  });
+
+  static Future<DesktopNetworkStats> default_() =>
+      RustLib.instance.api.crateApiDesktopDesktopNetworkStatsDefault();
+
+  @override
+  int get hashCode =>
+      rttMs.hashCode ^
+      throughputKbps.hashCode ^
+      bandwidthKbps.hashCode ^
+      packetLossPermille.hashCode ^
+      fps.hashCode ^
+      signalLevel.hashCode ^
+      qualityTier.hashCode ^
+      qualityMode.hashCode ^
+      transportKind.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DesktopNetworkStats &&
+          runtimeType == other.runtimeType &&
+          rttMs == other.rttMs &&
+          throughputKbps == other.throughputKbps &&
+          bandwidthKbps == other.bandwidthKbps &&
+          packetLossPermille == other.packetLossPermille &&
+          fps == other.fps &&
+          signalLevel == other.signalLevel &&
+          qualityTier == other.qualityTier &&
+          qualityMode == other.qualityMode &&
+          transportKind == other.transportKind;
 }
 
 class DesktopTile {

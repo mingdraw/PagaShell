@@ -7,11 +7,17 @@ use std::time::Duration;
 
 #[cfg(test)]
 use crate::api::desktop::DesktopFrame;
-use crate::api::desktop::{DesktopCursor, DesktopHandshake, DesktopInputEvent};
+use crate::api::desktop::{
+    DesktopCursor, DesktopHandshake, DesktopInputEvent, DesktopNetworkStats,
+};
 use crate::desktop_clipboard::{Clipboard, Command as ClipboardCommand};
 use crate::desktop_display::{DisplayControl, ResizeRequest};
 use crate::desktop_frame::{FrameDelivery, FrameEncoder, FrameRequest};
 use crate::desktop_frame_flow::FrameFlow;
+use crate::desktop_network::{
+    DesktopNetworkTracker, QualityTier, TcpInfoSampler, QUALITY_MODE_AUTO, QUALITY_MODE_LOW,
+    TRANSPORT_TCP, TRANSPORT_TUNNEL, TRANSPORT_UDP,
+};
 use crate::desktop_transport::{Packet, PacketReader};
 use crate::desktop_udp::Sideband;
 use anyhow::{anyhow, bail, Context, Result};
@@ -20,6 +26,7 @@ use ironrdp::core::WriteBuf;
 use ironrdp::dvc::{pdu::SoftSyncTunnelType, DrdynvcClient, DvcMessageBatch};
 use ironrdp::pdu::input::fast_path::{FastPathInputEvent, KeyboardFlags, SynchronizeFlags};
 use ironrdp::pdu::input::mouse::{MousePdu, PointerFlags};
+use ironrdp::pdu::rdp::autodetect::AutoDetectRequest;
 use ironrdp::session::{ActiveStage, ActiveStageBuilder, ActiveStageOutput};
 use ironrdp_egfx::client::{BitmapUpdate, GraphicsPipelineClient, GraphicsPipelineHandler};
 use ironrdp_egfx::decode::{H264Decoder, OpenH264Decoder};
@@ -34,7 +41,10 @@ use tokio_rustls::{client::TlsStream, rustls, TlsConnector};
 use x509_cert::der::Decode;
 
 pub(crate) enum Transport {
-    Direct(TcpStream),
+    Direct {
+        stream: TcpStream,
+        probe: Arc<TcpInfoSampler>,
+    },
     Ssh(russh::ChannelStream<russh::client::Msg>),
     Page(Box<crate::page::PageStream>),
     #[cfg(windows)]
@@ -47,7 +57,10 @@ impl AsyncRead for Transport {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
         match self.get_mut() {
-            Self::Direct(s) => Pin::new(s).poll_read(cx, buf),
+            Self::Direct { stream, probe } => {
+                probe.maybe_sample(stream);
+                Pin::new(stream).poll_read(cx, buf)
+            }
             Self::Ssh(s) => Pin::new(s).poll_read(cx, buf),
             Self::Page(s) => Pin::new(s).poll_read(cx, buf),
             #[cfg(windows)]
@@ -62,7 +75,10 @@ impl AsyncWrite for Transport {
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
         match self.get_mut() {
-            Self::Direct(s) => Pin::new(s).poll_write(cx, buf),
+            Self::Direct { stream, probe } => {
+                probe.maybe_sample(stream);
+                Pin::new(stream).poll_write(cx, buf)
+            }
             Self::Ssh(s) => Pin::new(s).poll_write(cx, buf),
             Self::Page(s) => Pin::new(s).poll_write(cx, buf),
             #[cfg(windows)]
@@ -71,7 +87,7 @@ impl AsyncWrite for Transport {
     }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
         match self.get_mut() {
-            Self::Direct(s) => Pin::new(s).poll_flush(cx),
+            Self::Direct { stream, .. } => Pin::new(stream).poll_flush(cx),
             Self::Ssh(s) => Pin::new(s).poll_flush(cx),
             Self::Page(s) => Pin::new(s).poll_flush(cx),
             #[cfg(windows)]
@@ -80,7 +96,7 @@ impl AsyncWrite for Transport {
     }
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
         match self.get_mut() {
-            Self::Direct(s) => Pin::new(s).poll_shutdown(cx),
+            Self::Direct { stream, .. } => Pin::new(stream).poll_shutdown(cx),
             Self::Ssh(s) => Pin::new(s).poll_shutdown(cx),
             Self::Page(s) => Pin::new(s).poll_shutdown(cx),
             #[cfg(windows)]
@@ -110,6 +126,9 @@ struct Pending {
     clipboard: Clipboard,
     graphics: GraphicsEvents,
     udp: Sideband,
+    tcp_probe: Option<Arc<TcpInfoSampler>>,
+    transport_kind: u8,
+    handshake_rtt: Option<Duration>,
 }
 
 struct SessionChannels {
@@ -117,12 +136,17 @@ struct SessionChannels {
     clipboard: Clipboard,
     graphics: GraphicsEvents,
     udp: Sideband,
+    tcp_probe: Option<Arc<TcpInfoSampler>>,
+    transport_kind: u8,
+    handshake_rtt: Option<Duration>,
 }
 struct Desktop {
     fingerprint: String,
     pending: Mutex<Option<Pending>>,
     cancel: watch::Sender<bool>,
     gpu_disable: watch::Sender<bool>,
+    network_stats: watch::Sender<DesktopNetworkStats>,
+    quality_mode: watch::Sender<u8>,
     commands: mpsc::Sender<Vec<FastPathInputEvent>>,
     receiver: Mutex<Option<mpsc::Receiver<Vec<FastPathInputEvent>>>>,
     frames: mpsc::Sender<FrameRequest>,
@@ -338,7 +362,10 @@ pub(crate) async fn prepare_with_page(
                 .await
                 .context("RDP TCP 连接失败")?;
             tcp.set_nodelay(true)?;
-            Transport::Direct(tcp)
+            Transport::Direct {
+                stream: tcp,
+                probe: Arc::new(TcpInfoSampler::default()),
+            }
         };
         Ok((host, stream))
     })
@@ -357,13 +384,15 @@ async fn prepare_inner(
 ) -> Result<DesktopHandshake> {
     let pending = tokio::time::timeout_at(deadline, async {
         let (host, stream) = open_stream.await?;
-        let udp_peer = match &stream {
-            Transport::Direct(tcp)
-                if std::env::var_os("PAGASHELL_RDP_UDP").as_deref() == Some("1".as_ref()) =>
-            {
-                tcp.peer_addr().ok()
-            }
-            _ => None,
+        let (udp_peer, tcp_probe, transport_kind) = match &stream {
+            Transport::Direct { stream: tcp, probe } => (
+                (std::env::var_os("PAGASHELL_RDP_UDP").as_deref() == Some("1".as_ref()))
+                    .then(|| tcp.peer_addr().ok())
+                    .flatten(),
+                Some(Arc::clone(probe)),
+                TRANSPORT_TCP,
+            ),
+            _ => (None, None, TRANSPORT_TUNNEL),
         };
         let mut config = crate::rdp::config();
         if udp_peer.is_some() {
@@ -402,9 +431,11 @@ async fn prepare_inner(
                 .with_dynamic_channel(display.client()),
         );
         let mut framed = TokioFramed::new(stream);
+        let negotiation_started = Instant::now();
         let upgrade = ironrdp_tokio::connect_begin(&mut framed, &mut connector)
             .await
             .context("RDP 安全协议协商失败")?;
+        let handshake_rtt = Some(negotiation_started.elapsed());
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let verifier = Arc::new(crate::rdp::FingerprintVerifier::new(provider.clone()));
         let mut tls_config = rustls::ClientConfig::builder_with_provider(provider.clone())
@@ -458,6 +489,9 @@ async fn prepare_inner(
                 clipboard,
                 graphics,
                 udp,
+                tcp_probe,
+                transport_kind,
+                handshake_rtt,
             },
             fingerprint,
             verifier.certificate_error(),
@@ -472,11 +506,15 @@ async fn prepare_inner(
     let (resizes, resize_receiver) = mpsc::channel(4);
     let fingerprint = pending.1;
     let clipboard = pending.0.clipboard.clone();
+    let initial_stats =
+        DesktopNetworkTracker::new(pending.0.transport_kind, pending.0.handshake_rtt).snapshot();
     let entry = Arc::new(Desktop {
         fingerprint: fingerprint.clone(),
         pending: Mutex::new(Some(pending.0)),
         cancel: watch::channel(false).0,
         gpu_disable: watch::channel(false).0,
+        network_stats: watch::channel(initial_stats).0,
+        quality_mode: watch::channel(QUALITY_MODE_AUTO).0,
         commands,
         receiver: Mutex::new(Some(receiver)),
         frames,
@@ -561,6 +599,9 @@ pub(crate) async fn authenticate_with_gpu(
             clipboard,
             graphics,
             mut udp,
+            tcp_probe,
+            transport_kind,
+            handshake_rtt,
         } = pending;
         connector.config.credentials = Credentials::UsernamePassword { username, password };
         connector.config.domain = (!domain.is_empty()).then_some(domain);
@@ -574,13 +615,33 @@ pub(crate) async fn authenticate_with_gpu(
             &mut udp,
         )
         .await?;
-        Ok::<_, anyhow::Error>((result, framed, display, clipboard, graphics, udp))
+        Ok::<_, anyhow::Error>((
+            result,
+            framed,
+            display,
+            clipboard,
+            graphics,
+            udp,
+            tcp_probe,
+            transport_kind,
+            handshake_rtt,
+        ))
     };
     let result = tokio::select! { biased;
         _ = cancel.changed() => Err(anyhow!("连接已取消")),
         result = task => result,
     };
-    let (result, framed, display, clipboard, graphics, udp) = match result {
+    let (
+        result,
+        framed,
+        display,
+        clipboard,
+        graphics,
+        udp,
+        tcp_probe,
+        transport_kind,
+        handshake_rtt,
+    ) = match result {
         Ok(value) => value,
         Err(error) => {
             disconnect(id).await;
@@ -605,6 +666,8 @@ pub(crate) async fn authenticate_with_gpu(
         .await
         .take()
         .context("RDP 会话已关闭")?;
+    let network_stats = entry.network_stats.clone();
+    let quality_mode = entry.quality_mode.subscribe();
     start_session(
         entry,
         run(
@@ -613,17 +676,37 @@ pub(crate) async fn authenticate_with_gpu(
             commands,
             cancel,
             gpu_disable,
+            network_stats,
+            quality_mode,
             requests,
             SessionChannels {
                 display,
                 clipboard,
                 graphics,
                 udp,
+                tcp_probe,
+                transport_kind,
+                handshake_rtt,
             },
             resizes,
             gpu_adapter_luid,
         ),
     );
+    Ok(())
+}
+
+pub(crate) async fn network_stats(id: u32) -> Result<DesktopNetworkStats> {
+    let entry = session(id).await?;
+    let stats = *entry.network_stats.borrow();
+    Ok(stats)
+}
+
+pub(crate) async fn set_quality_mode(id: u32, mode: u8) -> Result<()> {
+    if mode > QUALITY_MODE_LOW {
+        bail!("无效的 RDP 画质模式");
+    }
+    let entry = session(id).await?;
+    entry.quality_mode.send_replace(mode);
     Ok(())
 }
 
@@ -917,6 +1000,8 @@ async fn run(
     commands: mpsc::Receiver<Vec<FastPathInputEvent>>,
     cancel: watch::Receiver<bool>,
     gpu_disable: watch::Receiver<bool>,
+    network_stats: watch::Sender<DesktopNetworkStats>,
+    quality_mode: watch::Receiver<u8>,
     requests: mpsc::Receiver<FrameRequest>,
     channels: SessionChannels,
     resizes: mpsc::Receiver<ResizeRequest>,
@@ -942,6 +1027,8 @@ async fn run(
             &writer,
             cancel,
             gpu_disable,
+            network_stats,
+            quality_mode,
             requests,
             channels,
             resizes,
@@ -1045,6 +1132,40 @@ async fn request_gpu_fallback(
     Ok(())
 }
 
+async fn apply_egfx_quality_reset(
+    stage: &mut ActiveStage,
+    writer: &Mutex<Writer>,
+    udp: &Sideband,
+    encoder: &mut FrameEncoder,
+    image: &ironrdp::session::image::DecodedImage,
+    tier: QualityTier,
+) -> Result<bool> {
+    let (thin_client, small_cache) = tier.egfx_flags();
+    let reset_batch = stage
+        .get_dvc_mut::<GraphicsPipelineClient>()
+        .and_then(|mut channel| {
+            let channel_id = channel.channel_id();
+            let pdu = channel
+                .processor_mut()
+                .request_quality_reset(thin_client, small_cache)?;
+            let messages = ironrdp::dvc::encode_dvc_messages(
+                channel_id,
+                vec![Box::new(pdu) as ironrdp::dvc::DvcMessage],
+                ironrdp::svc::ChannelFlags::empty(),
+            )
+            .ok()?;
+            DvcMessageBatch::try_new(channel_id, messages).ok()
+        });
+    let Some(batch) = reset_batch else {
+        return Ok(false);
+    };
+    send_dvc(stage, writer, udp, batch, false)
+        .await
+        .context("RDP 画质自适应协商发送失败")?;
+    encoder.invalidate(image.width(), image.height());
+    Ok(true)
+}
+
 #[cfg(windows)]
 struct RdpTimerResolution(bool);
 
@@ -1071,6 +1192,8 @@ async fn run_stage(
     writer: &Mutex<Writer>,
     mut cancel: watch::Receiver<bool>,
     mut gpu_disable: watch::Receiver<bool>,
+    network_stats: watch::Sender<DesktopNetworkStats>,
+    mut quality_mode: watch::Receiver<u8>,
     mut requests: mpsc::Receiver<FrameRequest>,
     channels: SessionChannels,
     mut resizes: mpsc::Receiver<ResizeRequest>,
@@ -1081,11 +1204,17 @@ async fn run_stage(
         clipboard,
         graphics,
         mut udp,
+        tcp_probe,
+        transport_kind,
+        handshake_rtt,
     } = channels;
     let mut clipboard_commands = clipboard.receiver();
     let mut clipboard_tick = tokio::time::interval(Duration::from_secs(5));
     clipboard_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut network_tick = tokio::time::interval(Duration::from_secs(1));
+    network_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let soft_sync = result.multitransport_soft_sync();
+    let initial_network = result.network_characteristics;
     let activation_factory = result.activation_factory;
     let mut image = crate::rdp::new_image(result.desktop_size)?;
     let mut recovery =
@@ -1105,6 +1234,21 @@ async fn run_stage(
     if udp.transport.is_some() {
         stage.enable_reliable_udp_dvc_tunnel()?;
     }
+    let mut tracker = DesktopNetworkTracker::new(
+        if stage.reliable_udp_dvc_tunnel_in_use() {
+            TRANSPORT_UDP
+        } else {
+            transport_kind
+        },
+        handshake_rtt,
+    );
+    if let Some(nc) = initial_network {
+        tracker.observe_auto_detect(nc.base_rtt_ms, nc.average_rtt_ms, nc.bandwidth_kbps);
+    }
+    if let Some(sample) = tcp_probe.as_deref().and_then(TcpInfoSampler::latest) {
+        tracker.observe_tcp_sample(sample);
+    }
+    network_stats.send_replace(tracker.snapshot());
     let mut encoder = FrameEncoder::new(image.width(), image.height());
     let mut availability = FrameAvailability::default();
     let mut waiting: VecDeque<FrameRequest> = VecDeque::new();
@@ -1169,6 +1313,63 @@ async fn run_stage(
                     }
                 }
                 _ = clipboard_tick.tick() => clipboard.timeouts(&mut stage),
+                _ = quality_mode.changed() => {
+                    let mode = *quality_mode.borrow_and_update();
+                    let now = Instant::now();
+                    let outcome = tracker.set_quality_mode(mode, now, availability.ready);
+                    flow.set_config(outcome.flow_config);
+                    network_stats.send_replace(outcome.stats);
+                    if let Some(target_tier) = outcome.egfx_reset_target {
+                        if apply_egfx_quality_reset(
+                            &mut stage,
+                            writer,
+                            &udp,
+                            &mut encoder,
+                            &image,
+                            target_tier,
+                        )
+                        .await?
+                        {
+                            pending_gpu_frame = None;
+                        }
+                        tracker.mark_egfx_applied(target_tier, now);
+                    }
+                    continue;
+                }
+                _ = network_tick.tick() => {
+                    let now = Instant::now();
+                    tracker.set_transport_kind(if stage.reliable_udp_dvc_tunnel_in_use() {
+                        TRANSPORT_UDP
+                    } else {
+                        transport_kind
+                    });
+                    if let Some(sample) = tcp_probe.as_deref().and_then(TcpInfoSampler::latest) {
+                        tracker.observe_tcp_sample(sample);
+                    }
+                    if let Some(udp_stats) = udp.stats() {
+                        tracker.observe_udp_stats(udp_stats);
+                    }
+                    tracker.observe_egfx_drops(recovery.egfx_drops);
+                    let outcome = tracker.tick(now, availability.ready, flow.pending_count());
+                    flow.set_config(outcome.flow_config);
+                    network_stats.send_replace(outcome.stats);
+                    if let Some(target_tier) = outcome.egfx_reset_target {
+                        if apply_egfx_quality_reset(
+                            &mut stage,
+                            writer,
+                            &udp,
+                            &mut encoder,
+                            &image,
+                            target_tier,
+                        )
+                        .await?
+                        {
+                            pending_gpu_frame = None;
+                        }
+                        tracker.mark_egfx_applied(target_tier, now);
+                    }
+                    continue;
+                }
                 request = resizes.recv(), if pending_resize.is_none() => {
                     let Some(request) = request else { break; };
                     pending_resize = Some(request);
@@ -1202,6 +1403,7 @@ async fn run_stage(
                         let sequence = delivery.frame.sequence;
                         if request.reply.send(delivery).is_ok() {
                             flow.delivered(sequence);
+                            tracker.record_frame_delivered();
                         }
                     }
                     continue;
@@ -1230,27 +1432,39 @@ async fn run_stage(
                 }
                 packet = reader.read() => {
                     let Packet { action, bytes, received_at } = packet.context("RDP 数据接收失败")?;
+                    tracker.record_rx_bytes(bytes.len());
                     let ack_started = Instant::now();
                     let outputs = diagnostics.process(|| stage.process(&mut image, action, &bytes, received_at))?;
                     transitions = graphics.track(&mut stage, &mut flow, &mut recovery, ack_started);
                     outputs
                 }
                 packet = udp.recv() => {
-                    let Some(packet) = packet else {
+                    let Some(message) = packet else {
                         if stage.reliable_udp_dvc_tunnel_in_use() {
                             bail!("RDP UDP 通道已断开，请重新连接");
                         }
                         udp.transport = None;
                         stage.disable_reliable_udp_dvc_tunnel()?;
+                        tracker.set_transport_kind(transport_kind);
                         continue;
                     };
+                    tracker.record_rx_bytes(message.data.len());
+                    if !message.sub_headers.is_empty() {
+                        let characteristics = udp
+                            .handle_autodetect_subheaders(message.data.len(), &message.sub_headers)
+                            .await;
+                        for (base_rtt, avg_rtt, bw) in characteristics {
+                            tracker.observe_auto_detect(base_rtt, avg_rtt, bw);
+                            network_stats.send_replace(tracker.snapshot());
+                        }
+                    }
                     // An RDPEMT datagram can carry only tunnel metadata.
-                    if packet.is_empty() {
+                    if message.data.is_empty() {
                         continue;
                     }
                     let ack_started = Instant::now();
                     let (batch, outputs) = diagnostics.process(|| {
-                        stage.process_dvc_tunnel(&mut image, SoftSyncTunnelType::RELIABLE_UDP, &packet)
+                        stage.process_dvc_tunnel(&mut image, SoftSyncTunnelType::RELIABLE_UDP, &message.data)
                     })?;
                     send_dvc(&mut stage, writer, &udp, batch, true).await?;
                     transitions = graphics.track(&mut stage, &mut flow, &mut recovery, ack_started);
@@ -1412,7 +1626,20 @@ async fn run_stage(
                     }
                     if matches!(outcome, connector::MultitransportResult::Success) {
                         stage.enable_reliable_udp_dvc_tunnel()?;
+                        tracker.set_transport_kind(TRANSPORT_UDP);
+                        network_stats.send_replace(tracker.snapshot());
                     }
+                }
+                ActiveStageOutput::AutoDetect(
+                    AutoDetectRequest::NetworkCharacteristicsResult {
+                        base_rtt_ms,
+                        bandwidth_kbps,
+                        average_rtt_ms,
+                        ..
+                    },
+                ) => {
+                    tracker.observe_auto_detect(base_rtt_ms, average_rtt_ms, bandwidth_kbps);
+                    network_stats.send_replace(tracker.snapshot());
                 }
                 _ => {}
             }
@@ -1673,6 +1900,39 @@ mod tests {
         assert!(avc444.codec_capabilities().avc444);
         assert_eq!(avc444.dropped_updates(), 0);
         assert_eq!(avc444.drain_output()[0].data.len(), 64 * 64 * 4);
+
+        // Adaptive quality renegotiates V10.7 flags in-channel: High -> Balanced -> Low -> High.
+        let reset_balanced = avc444.request_quality_reset(true, false).unwrap();
+        let GfxPdu::CapabilitiesAdvertise(adv_balanced) = reset_balanced else {
+            panic!("expected CapabilitiesAdvertise");
+        };
+        assert_eq!(adv_balanced.0.len(), 1);
+        assert_eq!(adv_balanced.0[0].version, CapabilityVersion::V10_7);
+        send_egfx(
+            &mut avc444,
+            [GfxPdu::CapabilitiesConfirm(CapabilitiesConfirmPdu(
+                adv_balanced.0[0].clone(),
+            ))],
+        );
+        assert!(avc444.is_active());
+        assert!(avc444.codec_capabilities().thin_client);
+        assert!(!avc444.codec_capabilities().small_cache);
+        // Same flags must be a no-op.
+        assert!(avc444.request_quality_reset(true, false).is_none());
+
+        let reset_low = avc444.request_quality_reset(true, true).unwrap();
+        let GfxPdu::CapabilitiesAdvertise(adv_low) = reset_low else {
+            panic!("expected CapabilitiesAdvertise");
+        };
+        send_egfx(
+            &mut avc444,
+            [GfxPdu::CapabilitiesConfirm(CapabilitiesConfirmPdu(
+                adv_low.0[0].clone(),
+            ))],
+        );
+        assert!(avc444.is_active());
+        assert!(avc444.codec_capabilities().thin_client);
+        assert!(avc444.codec_capabilities().small_cache);
 
         let mut fallback = GraphicsPipelineClient::new(Box::<GraphicsEvents>::default(), None);
         let advertised = fallback.start(1).unwrap();
@@ -2285,6 +2545,8 @@ mod tests {
             pending: Mutex::new(None),
             cancel: watch::channel(false).0,
             gpu_disable: watch::channel(false).0,
+            network_stats: watch::channel(DesktopNetworkStats::default()).0,
+            quality_mode: watch::channel(QUALITY_MODE_AUTO).0,
             commands,
             receiver: Mutex::new(Some(receiver)),
             frames,

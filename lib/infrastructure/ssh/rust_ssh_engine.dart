@@ -17,6 +17,7 @@ import '../../domain/entities/small_text_file.dart';
 import '../../domain/proxy/dynamic_proxy_engine.dart';
 import '../../domain/rdp/rdp_clipboard.dart';
 import '../../domain/rdp/rdp_engine.dart';
+import '../../domain/rdp/rdp_network_stats.dart';
 import '../../domain/ssh/agent_ops.dart';
 import '../../domain/ssh/docker_manager.dart';
 import '../../domain/ssh/firewall.dart';
@@ -579,12 +580,102 @@ class _RustRdpDesktopSession extends _RustDesktopSession
     implements
         RdpClipboardSession,
         RdpBatchInputSession,
-        RdpKeyboardSyncSession {
+        RdpKeyboardSyncSession,
+        RdpNetworkSession {
   _RustRdpDesktopSession(
     super.id,
     super.gateway, {
     super.preAttachedTexture = false,
   });
+
+  RdpNetworkStats? _latestNetworkStats;
+  StreamController<RdpNetworkStats>? _networkController;
+  Timer? _networkTimer;
+  bool _networkPolling = false;
+
+  static RdpNetworkStats _mapNetworkStats(desktop.DesktopNetworkStats raw) =>
+      RdpNetworkStats(
+        rttMs: raw.rttMs,
+        throughputKbps: raw.throughputKbps,
+        bandwidthKbps: raw.bandwidthKbps,
+        packetLossPermille: raw.packetLossPermille,
+        fps: raw.fps,
+        signalLevel: raw.signalLevel,
+        qualityTier: RdpQualityTier.fromWire(raw.qualityTier),
+        qualityMode: RdpQualityMode.fromWire(raw.qualityMode),
+        transport: RdpTransportKind.fromWire(raw.transportKind),
+      );
+
+  @override
+  RdpNetworkStats? get latestNetworkStats => _latestNetworkStats;
+
+  @override
+  Stream<RdpNetworkStats> get networkStats {
+    _networkController ??= StreamController<RdpNetworkStats>.broadcast(
+      onListen: _startNetworkPolling,
+      onCancel: _stopNetworkPolling,
+    );
+    return _networkController!.stream;
+  }
+
+  void _startNetworkPolling() {
+    if (_closed || _networkTimer != null) return;
+    unawaited(_pollNetworkStats());
+    _networkTimer = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) => unawaited(_pollNetworkStats()),
+    );
+  }
+
+  void _stopNetworkPolling() {
+    if (_networkController?.hasListener ?? false) return;
+    _networkTimer?.cancel();
+    _networkTimer = null;
+  }
+
+  Future<void> _pollNetworkStats() async {
+    if (_closed || _networkPolling) return;
+    final controller = _networkController;
+    if (controller == null || controller.isClosed || !controller.hasListener) {
+      return;
+    }
+    _networkPolling = true;
+    try {
+      final raw = await desktop.desktopNetworkStats(sessionId: id);
+      if (_closed || controller.isClosed) return;
+      final stats = _mapNetworkStats(raw);
+      if (_latestNetworkStats != stats) {
+        _latestNetworkStats = stats;
+        controller.add(stats);
+      }
+    } on Object {
+      // Transient IPC/shutdown errors are handled by the primary frame stream.
+    } finally {
+      _networkPolling = false;
+    }
+  }
+
+  @override
+  Future<void> setQualityMode(RdpQualityMode mode) async {
+    if (_closed) return;
+    try {
+      await desktop.desktopSetQualityMode(sessionId: id, mode: mode.wireValue);
+      await _pollNetworkStats();
+    } on AnyhowException catch (error) {
+      throw SshEngineException(error.message.split('\n').first, error);
+    }
+  }
+
+  @override
+  Future<void> close() async {
+    _networkTimer?.cancel();
+    _networkTimer = null;
+    if (_networkController != null && !_networkController!.isClosed) {
+      unawaited(_networkController!.close());
+    }
+    _networkController = null;
+    await super.close();
+  }
 
   @override
   Future<void> synchronizeKeyboard(int toggleFlags) async {
